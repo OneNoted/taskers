@@ -28,13 +28,17 @@ use taskers_control::{
     ControlCommand, InMemoryController, bind_socket, default_socket_path, serve,
 };
 use taskers_domain::{
-    AppModel, AttentionState, DEFAULT_WORKSPACE_WINDOW_GAP, DEFAULT_WORKSPACE_WINDOW_HEIGHT,
-    DEFAULT_WORKSPACE_WINDOW_WIDTH, Direction, KEYBOARD_RESIZE_STEP, LayoutNode,
-    MIN_WORKSPACE_WINDOW_HEIGHT, PaneMetadataPatch, PaneRecord, SignalEvent, SignalKind,
-    WindowFrame, Workspace, WorkspaceViewport, WorkspaceWindowId,
+    ActivityItem, AppModel, AttentionState, DEFAULT_WORKSPACE_WINDOW_GAP,
+    DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, Direction,
+    KEYBOARD_RESIZE_STEP, LayoutNode, MIN_WORKSPACE_WINDOW_HEIGHT, PaneKind, PaneMetadataPatch,
+    PaneRecord, SignalEvent, SignalKind, SurfaceId, SurfaceRecord, WindowFrame, Workspace,
+    WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceViewport, WorkspaceWindowId,
 };
 use taskers_ghostty::{
     BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, SurfaceDescriptor, TerminalBackend,
+};
+use taskers_runtime::{
+    ShellLaunchSpec, default_shell_program, install_shell_integration, validate_shell_program,
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -47,6 +51,10 @@ struct Cli {
     session: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     demo: bool,
+    #[arg(long, default_value_t = false, conflicts_with = "raw_shell")]
+    clean_shell: bool,
+    #[arg(long, default_value_t = false, conflicts_with = "clean_shell")]
+    raw_shell: bool,
 }
 
 struct StartupContext {
@@ -55,16 +63,19 @@ struct StartupContext {
     config_path: PathBuf,
     app_config: AppConfig,
     ghostty_host: Option<GhosttyHost>,
+    shell_launch: ShellLaunchSpec,
     startup_toast: Option<String>,
 }
 
 struct UiHandle {
     app_state: AppState,
     backend_choice: BackendChoice,
+    application: adw::Application,
     window: adw::ApplicationWindow,
     overlay: adw::ToastOverlay,
     ghostty_host: Option<GhosttyHost>,
-    ghostty_surfaces: RefCell<HashMap<taskers_domain::PaneId, Widget>>,
+    shell_launch: ShellLaunchSpec,
+    ghostty_surfaces: RefCell<HashMap<SurfaceId, Widget>>,
     shell: RefCell<Option<ShellWidgets>>,
     pane_cards: RefCell<HashMap<taskers_domain::PaneId, PaneCardWidgets>>,
     settings: RefCell<AppConfig>,
@@ -75,6 +86,7 @@ struct UiHandle {
     pending_viewport: RefCell<Option<(taskers_domain::WorkspaceId, WorkspaceViewport)>>,
     pending_viewport_source: RefCell<Option<glib::SourceId>>,
     pending_focus_source: RefCell<Option<glib::SourceId>>,
+    desktop_notifications: RefCell<HashSet<String>>,
     overview_mode: Cell<bool>,
 }
 
@@ -87,6 +99,8 @@ struct ShellWidgets {
     btn_window_down: Button,
     btn_split_right: Button,
     btn_split_down: Button,
+    activity_list: GtkBox,
+    activity_empty: Label,
     layout_scroll: ScrolledWindow,
     layout_host: Fixed,
 }
@@ -96,6 +110,7 @@ struct PaneCardWidgets {
     root: GtkBox,
     title: Label,
     status_dot: Label,
+    surface_tabs: GtkBox,
     terminal_host: GtkBox,
     focus_target: Widget,
 }
@@ -147,16 +162,20 @@ impl UiHandle {
         backend_choice: BackendChoice,
         config_path: PathBuf,
         app_config: AppConfig,
+        application: adw::Application,
         window: adw::ApplicationWindow,
         overlay: adw::ToastOverlay,
         ghostty_host: Option<GhosttyHost>,
+        shell_launch: ShellLaunchSpec,
     ) -> Rc<Self> {
         Rc::new(Self {
             app_state,
             backend_choice,
+            application,
             window,
             overlay,
             ghostty_host,
+            shell_launch,
             ghostty_surfaces: RefCell::new(HashMap::new()),
             shell: RefCell::new(None),
             pane_cards: RefCell::new(HashMap::new()),
@@ -168,6 +187,7 @@ impl UiHandle {
             pending_viewport: RefCell::new(None),
             pending_viewport_source: RefCell::new(None),
             pending_focus_source: RefCell::new(None),
+            desktop_notifications: RefCell::new(HashSet::new()),
             overview_mode: Cell::new(false),
         })
     }
@@ -297,6 +317,30 @@ impl UiHandle {
         Ok(next_label)
     }
 
+    fn save_settings(&self, next_settings: AppConfig) -> Result<(), String> {
+        settings_store::save_config(&self.config_path, &next_settings)
+            .map_err(|error| format!("failed to save settings: {error}"))?;
+        *self.settings.borrow_mut() = next_settings;
+        Ok(())
+    }
+
+    fn set_shell_program(self: &Rc<Self>, shell_program: Option<String>) -> Result<(), String> {
+        let normalized = shell_program.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        validate_shell_program(normalized.as_deref())
+            .map_err(|error| format!("invalid shell program: {error}"))?;
+
+        let mut next_settings = self.settings.borrow().clone();
+        next_settings.shell.program = normalized;
+        self.save_settings(next_settings)
+    }
+
     fn present_shortcut_capture_dialog(self: &Rc<Self>, action: ShortcutAction, label: &Label) {
         let dialog = gtk::Dialog::with_buttons(
             Some(action.label()),
@@ -422,6 +466,77 @@ impl UiHandle {
         sep.add_css_class("context-separator");
         content.append(&sep);
 
+        let shell_row = GtkBox::new(Orientation::Horizontal, 12);
+        let shell_details = GtkBox::new(Orientation::Vertical, 4);
+        shell_details.set_hexpand(true);
+
+        let shell_title = Label::new(Some("Shell program"));
+        shell_title.set_xalign(0.0);
+        shell_title.add_css_class("pane-title");
+        shell_details.append(&shell_title);
+
+        let system_shell = default_shell_program();
+        let shell_detail = Label::new(Some(&format!(
+            "Optional shell override for new panes. Leave empty to use the system login shell (currently {}). Relaunch Taskers after changing this.",
+            system_shell.display()
+        )));
+        shell_detail.set_xalign(0.0);
+        shell_detail.set_wrap(true);
+        shell_detail.add_css_class("dim-label");
+        shell_details.append(&shell_detail);
+        shell_row.append(&shell_details);
+
+        let shell_entry = Entry::new();
+        shell_entry.set_hexpand(true);
+        shell_entry.set_width_chars(24);
+        shell_entry.set_placeholder_text(Some("System default login shell"));
+        if let Some(program) = self.settings.borrow().shell.program.as_deref() {
+            shell_entry.set_text(program);
+        }
+        let activate_ui = Rc::clone(self);
+        shell_entry.connect_activate(move |entry| {
+            let text = entry.text().to_string();
+            if let Err(error) = activate_ui.set_shell_program(Some(text.clone())) {
+                activate_ui.toast(&error);
+                return;
+            }
+            let normalized = text.trim().to_string();
+            entry.set_text(&normalized);
+            activate_ui.toast("Shell setting saved. Relaunch Taskers to apply.");
+        });
+        let focus_ui = Rc::clone(self);
+        shell_entry.connect_notify_local(Some("has-focus"), move |entry, _| {
+            if entry.has_focus() {
+                return;
+            }
+
+            let text = entry.text().to_string();
+            if let Err(error) = focus_ui.set_shell_program(Some(text.clone())) {
+                focus_ui.toast(&error);
+                return;
+            }
+            entry.set_text(text.trim());
+        });
+        shell_row.append(&shell_entry);
+
+        let reset_shell = Button::with_label("Use system");
+        let reset_ui = Rc::clone(self);
+        let reset_entry = shell_entry.clone();
+        reset_shell.connect_clicked(move |_| {
+            if let Err(error) = reset_ui.set_shell_program(None) {
+                reset_ui.toast(&error);
+                return;
+            }
+            reset_entry.set_text("");
+            reset_ui.toast("Shell setting cleared. Relaunch Taskers to apply.");
+        });
+        shell_row.append(&reset_shell);
+        content.append(&shell_row);
+
+        let sep = Separator::new(Orientation::Horizontal);
+        sep.add_css_class("context-separator");
+        content.append(&sep);
+
         // ── Keyboard shortcuts ──
         let intro = Label::new(Some(
             "Keyboard shortcuts. Directional navigation and resize chords stay fixed.",
@@ -480,8 +595,8 @@ impl UiHandle {
         dialog.present();
     }
 
-    fn send_input(self: &Rc<Self>, pane_id: taskers_domain::PaneId, input: String) {
-        if let Err(error) = self.app_state.runtime().send_input(pane_id, &input) {
+    fn send_input(self: &Rc<Self>, surface_id: SurfaceId, input: String) {
+        if let Err(error) = self.app_state.runtime().send_input(surface_id, &input) {
             self.toast(&error.to_string());
         }
     }
@@ -501,17 +616,29 @@ impl UiHandle {
             return None;
         }
 
-        if let Some(widget) = self.ghostty_surfaces.borrow().get(&pane.id) {
+        let surface = pane.active_surface()?;
+
+        if let Some(widget) = self.ghostty_surfaces.borrow().get(&surface.id) {
             detach_widget(widget);
             return Some(widget.clone());
         }
 
         let host = self.ghostty_host.as_ref()?;
+        let mut env = self.shell_launch.env.clone();
+        env.insert("TASKERS_PANE_ID".into(), pane.id.to_string());
+        env.insert("TASKERS_WORKSPACE_ID".into(), workspace_id.to_string());
+        env.insert("TASKERS_SURFACE_ID".into(), surface.id.to_string());
         let widget = match host.create_surface(&SurfaceDescriptor {
             cols: 120,
             rows: 40,
-            cwd: pane.metadata.cwd.clone(),
-            title: pane.metadata.title.clone(),
+            cwd: surface.metadata.cwd.clone(),
+            title: surface.metadata.title.clone(),
+            command_argv: self
+                .shell_launch
+                .program_and_args()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            env,
         }) {
             Ok(widget) => widget,
             Err(error) => {
@@ -523,10 +650,10 @@ impl UiHandle {
         widget.set_hexpand(true);
         widget.set_vexpand(true);
         widget.add_css_class("terminal-output");
-        connect_ghostty_widget(self, workspace_id, pane.id, &widget);
+        connect_ghostty_widget(self, workspace_id, pane.id, surface.id, &widget);
         self.ghostty_surfaces
             .borrow_mut()
-            .insert(pane.id, widget.clone());
+            .insert(surface.id, widget.clone());
         Some(widget)
     }
 
@@ -545,14 +672,22 @@ impl UiHandle {
     }
 
     fn cleanup_stale_panes(&self, model: &AppModel) {
-        let live: HashSet<taskers_domain::PaneId> = model
+        let live: HashSet<SurfaceId> = model
             .workspaces
             .values()
-            .flat_map(|ws| ws.panes.keys().copied())
+            .flat_map(|ws| {
+                ws.panes
+                    .values()
+                    .flat_map(|pane| pane.surface_ids())
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        self.pane_cards
-            .borrow_mut()
-            .retain(|id, _| live.contains(id));
+        self.pane_cards.borrow_mut().retain(|id, _| {
+            model
+                .workspaces
+                .values()
+                .any(|workspace| workspace.panes.contains_key(id))
+        });
         self.ghostty_surfaces
             .borrow_mut()
             .retain(|id, _| live.contains(id));
@@ -567,7 +702,69 @@ impl UiHandle {
             .expect("shell scaffold should exist before render");
         update_sidebar(self, &shell, model);
         update_toolbar(&shell, model, self.overview_mode.get());
+        update_activity_panel(self, &shell, model);
         update_layout(self, &shell, model);
+        self.sync_desktop_notifications(model);
+        if model.active_workspace().is_some() && !self.overview_mode.get() {
+            self.queue_focus_active_pane_input(model);
+        }
+    }
+
+    fn sync_desktop_notifications(&self, model: &AppModel) {
+        let items = model.activity_items();
+        let active_keys = items
+            .iter()
+            .map(activity_notification_key)
+            .collect::<HashSet<_>>();
+
+        let mut delivered = self.desktop_notifications.borrow_mut();
+        let stale = delivered
+            .iter()
+            .filter(|key| !active_keys.contains(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in stale {
+            self.application.withdraw_notification(&key);
+            delivered.remove(&key);
+        }
+
+        for item in items {
+            let key = activity_notification_key(&item);
+            if delivered.contains(&key) {
+                continue;
+            }
+
+            let (workspace_label, pane_title) = model
+                .workspaces
+                .get(&item.workspace_id)
+                .map(|workspace| {
+                    let title = workspace
+                        .panes
+                        .get(&item.pane_id)
+                        .and_then(|pane| {
+                            pane.surfaces
+                                .get(&item.surface_id)
+                                .or_else(|| pane.active_surface())
+                                .map(display_surface_title)
+                        })
+                        .unwrap_or_else(|| "Terminal pane".into());
+                    (workspace.label.clone(), title)
+                })
+                .unwrap_or_else(|| ("Workspace".into(), "Terminal pane".into()));
+
+            let notification_title =
+                format!("{} in {}", activity_kind_label(&item.kind), workspace_label);
+            let notification = gtk::gio::Notification::new(&notification_title);
+            notification.set_body(Some(&format!("{pane_title}: {}", item.message)));
+            notification.set_priority(match item.state {
+                AttentionState::Error => gtk::gio::NotificationPriority::Urgent,
+                AttentionState::WaitingInput => gtk::gio::NotificationPriority::High,
+                _ => gtk::gio::NotificationPriority::Normal,
+            });
+            self.application
+                .send_notification(Some(&key), &notification);
+            delivered.insert(key);
+        }
     }
 
     fn queue_viewport_persist(
@@ -607,6 +804,27 @@ impl UiHandle {
             });
         });
         *self.pending_viewport_source.borrow_mut() = Some(source);
+    }
+
+    fn persist_viewport_now(
+        self: &Rc<Self>,
+        workspace_id: taskers_domain::WorkspaceId,
+        viewport: WorkspaceViewport,
+    ) {
+        let current_viewport = self
+            .app_state
+            .snapshot_model()
+            .workspaces
+            .get(&workspace_id)
+            .map(|workspace| workspace.viewport.clone());
+        if current_viewport.as_ref() == Some(&viewport) {
+            return;
+        }
+
+        self.dispatch(ControlCommand::SetWorkspaceViewport {
+            workspace_id,
+            viewport,
+        });
     }
 
     fn queue_active_workspace_viewport_persist(self: &Rc<Self>) {
@@ -697,29 +915,32 @@ impl UiHandle {
         let Some(path) = std::env::var_os("TASKERS_UI_INTEGRITY_PATH").map(PathBuf::from) else {
             return;
         };
+        let live_layout_host = self
+            .shell
+            .borrow()
+            .as_ref()
+            .map(|shell| shell.layout_host.clone().upcast::<Widget>());
 
         let (cached_pane_card_ids, attached_pane_card_ids) = {
             let pane_cards = self.pane_cards.borrow();
             (
                 sorted_id_strings(pane_cards.keys().copied()),
-                sorted_id_strings(
-                    pane_cards
-                        .iter()
-                        .filter_map(|(id, card)| card.root.parent().is_some().then_some(*id)),
-                ),
+                sorted_id_strings(pane_cards.iter().filter_map(|(id, card)| {
+                    live_layout_host.as_ref().and_then(|layout_host| {
+                        widget_is_descendant_of(card.root.upcast_ref(), layout_host).then_some(*id)
+                    })
+                })),
             )
         };
 
         let (cached_ghostty_surface_ids, attached_ghostty_surface_ids) = {
             let ghostty_surfaces = self.ghostty_surfaces.borrow();
-            let pane_cards = self.pane_cards.borrow();
             (
                 sorted_id_strings(ghostty_surfaces.keys().copied()),
                 sorted_id_strings(ghostty_surfaces.iter().filter_map(|(id, widget)| {
-                    let in_live_layout = pane_cards
-                        .get(id)
-                        .is_some_and(|card| card.root.parent().is_some());
-                    (in_live_layout && widget.parent().is_some()).then_some(*id)
+                    live_layout_host.as_ref().and_then(|layout_host| {
+                        widget_is_descendant_of(widget, layout_host).then_some(*id)
+                    })
                 })),
             )
         };
@@ -773,13 +994,15 @@ impl UiHandle {
             self.pane_cards
                 .borrow()
                 .get(&workspace.active_pane)
-                .is_some_and(|card| card.focus_target.has_focus())
+                .is_some_and(|card| widget_contains_window_focus(&self.window, &card.focus_target))
         });
         let active_pane_card_has_focus = model.active_workspace().is_some_and(|workspace| {
             self.pane_cards
                 .borrow()
                 .get(&workspace.active_pane)
-                .is_some_and(|card| card.root.has_focus())
+                .is_some_and(|card| {
+                    widget_contains_window_focus(&self.window, card.root.upcast_ref())
+                })
         });
 
         let all_live_pane_ids = sorted_id_strings(
@@ -953,8 +1176,9 @@ impl UiHandle {
 
         let status_dot = Label::new(Some("\u{25cf}"));
         status_dot.add_css_class("status-dot");
-        status_dot.add_css_class(&attention_dot_class(pane.attention));
-        status_dot.set_tooltip_text(Some(pane.attention.label()));
+        let pane_attention = pane.active_attention();
+        status_dot.add_css_class(&attention_dot_class(pane_attention));
+        status_dot.set_tooltip_text(Some(pane_attention.label()));
         header.append(&status_dot);
 
         let close_button = Button::with_label("\u{00d7}");
@@ -1045,6 +1269,10 @@ impl UiHandle {
 
         root.append(&header);
 
+        let surface_tabs = GtkBox::new(Orientation::Horizontal, 4);
+        surface_tabs.add_css_class("surface-tabs");
+        root.append(&surface_tabs);
+
         let terminal_host = GtkBox::new(Orientation::Vertical, 0);
         terminal_host.set_hexpand(true);
         terminal_host.set_vexpand(true);
@@ -1066,17 +1294,16 @@ impl UiHandle {
             root,
             title,
             status_dot,
+            surface_tabs,
             terminal_host,
         };
 
         configure_pane_card_layout(&card);
         animate_pane_slide_in(self, card.root.upcast_ref());
-        let focus_target = initialize_terminal_body(self, workspace_id, pane, &card);
-        let card = PaneCardWidgets {
-            focus_target,
-            ..card
-        };
+        let card = PaneCardWidgets { ..card };
         self.pane_cards.borrow_mut().insert(pane.id, card.clone());
+        sync_surface_tabs(self, workspace_id, pane, &card);
+        refresh_terminal_body(self, workspace_id, pane, &card);
         card
     }
 
@@ -1087,14 +1314,15 @@ impl UiHandle {
         pane: &PaneRecord,
     ) {
         let card = self.pane_card(workspace_id, pane);
-        let snapshot = self.app_state.runtime().snapshot(pane.id);
+        let snapshot = pane
+            .active_surface()
+            .and_then(|surface| self.app_state.runtime().snapshot(surface.id));
 
         let display_title = pane
-            .metadata
-            .title
-            .as_deref()
-            .unwrap_or("Unnamed terminal pane");
-        card.title.set_text(display_title);
+            .active_surface()
+            .map(display_surface_title)
+            .unwrap_or_else(|| "Unnamed terminal pane".into());
+        card.title.set_text(&display_title);
         card.title
             .set_tooltip_text(Some(&format_pane_meta(pane, snapshot.as_ref())));
 
@@ -1113,10 +1341,13 @@ impl UiHandle {
         ] {
             card.status_dot.remove_css_class(cls);
         }
+        let pane_attention = pane.active_attention();
         card.status_dot
-            .add_css_class(&attention_dot_class(pane.attention));
+            .add_css_class(&attention_dot_class(pane_attention));
         card.status_dot
-            .set_tooltip_text(Some(pane.attention.label()));
+            .set_tooltip_text(Some(pane_attention.label()));
+        sync_surface_tabs(self, workspace_id, pane, &card);
+        refresh_terminal_body(self, workspace_id, pane, &card);
     }
 
     fn try_focus_pane_input(
@@ -1144,7 +1375,13 @@ impl UiHandle {
         target.set_focusable(true);
         gtk::prelude::RootExt::set_focus(&self.window, Some(&target));
 
-        let focused = if let Some(surface) = self.ghostty_surfaces.borrow().get(&pane_id).cloned() {
+        let focused_surface_id = snapshot
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface().map(|surface| surface.id));
+        let focused = if let Some(surface) = focused_surface_id
+            .and_then(|surface_id| self.ghostty_surfaces.borrow().get(&surface_id).cloned())
+        {
             self.ghostty_host
                 .as_ref()
                 .is_some_and(|host| host.focus_surface(&surface).is_ok())
@@ -1155,7 +1392,7 @@ impl UiHandle {
             let _ = target.grab_focus();
         }
 
-        target.has_focus() || target.is_focus()
+        widget_contains_window_focus(&self.window, &target)
     }
 
     fn queue_focus_active_pane_input(self: &Rc<Self>, model: &AppModel) {
@@ -1225,7 +1462,9 @@ impl UiHandle {
 
 fn main() -> gtk::glib::ExitCode {
     let cli = Cli::parse();
-    let run_non_unique = cli.socket.is_some()
+    let shell_mode_non_unique = cli.clean_shell || cli.raw_shell;
+    let run_non_unique = shell_mode_non_unique
+        || cli.socket.is_some()
         || cli.session.is_some()
         || std::env::var_os("TASKERS_NON_UNIQUE").is_some();
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
@@ -1234,6 +1473,17 @@ fn main() -> gtk::glib::ExitCode {
         .unwrap_or_else(session_store::default_session_path);
     let config_path = settings_store::default_config_path();
     let probe = DefaultBackend::probe(BackendChoice::Auto);
+    if cli.clean_shell {
+        unsafe {
+            std::env::set_var("TASKERS_SHELL_PROFILE", "clean");
+        }
+    }
+    if cli.raw_shell {
+        unsafe {
+            std::env::set_var("TASKERS_SHELL_PROFILE", "clean");
+            std::env::set_var("TASKERS_DISABLE_SHELL_INTEGRATION", "1");
+        }
+    }
     let initial_model = match session_store::load_or_bootstrap(&session_path, cli.demo) {
         Ok(model) => model,
         Err(error) => {
@@ -1258,9 +1508,36 @@ fn main() -> gtk::glib::ExitCode {
             AppConfig::default()
         }
     };
-    let (backend_choice, _backend_note, ghostty_host, startup_toast) =
+    let (mut shell_launch, shell_integration_toast) =
+        match install_shell_integration(app_config.shell.program.as_deref()) {
+            Ok(integration) => (integration.launch_spec(), None),
+            Err(error) => (
+                ShellLaunchSpec::fallback(),
+                Some(format!("Shell integration unavailable: {error}")),
+            ),
+        };
+    shell_launch
+        .env
+        .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
+    let (backend_choice, _backend_note, ghostty_host, backend_toast) =
         initialize_terminal_backend(&probe);
-    let app_state = match AppState::new(initial_model, session_path, backend_choice) {
+    let startup_toast = merge_startup_toasts(
+        merge_startup_toasts(
+            shell_integration_toast,
+            cli.clean_shell
+                .then(|| "Using clean shell startup".to_string()),
+        ),
+        merge_startup_toasts(
+            cli.raw_shell.then(|| "Using raw shell startup".to_string()),
+            backend_toast,
+        ),
+    );
+    let app_state = match AppState::new(
+        initial_model,
+        session_path,
+        backend_choice,
+        shell_launch.clone(),
+    ) {
         Ok(state) => state,
         Err(error) => {
             eprintln!("failed to initialize app state: {error}");
@@ -1275,6 +1552,7 @@ fn main() -> gtk::glib::ExitCode {
         config_path,
         app_config,
         ghostty_host,
+        shell_launch,
         startup_toast,
     };
 
@@ -1339,9 +1617,11 @@ fn build_ui(
         startup.backend_choice,
         startup.config_path,
         startup.app_config,
+        app.clone(),
         window.clone(),
         overlay,
         startup.ghostty_host,
+        startup.shell_launch,
     );
     connect_navigation_shortcuts(&ui);
     ui.refresh(true);
@@ -1389,6 +1669,15 @@ fn initialize_terminal_backend(
             let toast = format!("Ghostty backend unavailable: {error}");
             (BackendChoice::Mock, note, None, Some(toast))
         }
+    }
+}
+
+fn merge_startup_toasts(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}\n{second}")),
+        (Some(first), None) => Some(first),
+        (None, Some(second)) => Some(second),
+        (None, None) => None,
     }
 }
 
@@ -1580,6 +1869,12 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     shell.set_start_child(Some(&sidebar_scroll));
     shell.set_resize_start_child(false);
 
+    // --- Main content split ---
+    let content_split = Paned::builder()
+        .orientation(Orientation::Horizontal)
+        .wide_handle(false)
+        .build();
+
     // --- Main column ---
     let main_column = GtkBox::new(Orientation::Vertical, 0);
 
@@ -1712,7 +2007,45 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
 
     main_column.append(&layout_scroll);
 
-    shell.set_end_child(Some(&main_column));
+    content_split.set_start_child(Some(&main_column));
+    content_split.set_resize_start_child(true);
+    content_split.set_shrink_start_child(false);
+
+    // --- Attention column ---
+    let attention_panel = GtkBox::new(Orientation::Vertical, 8);
+    attention_panel.add_css_class("attention-panel");
+    attention_panel.set_margin_start(8);
+    attention_panel.set_margin_end(8);
+    attention_panel.set_margin_top(8);
+    attention_panel.set_margin_bottom(8);
+
+    let attention_header = GtkBox::new(Orientation::Horizontal, 8);
+    let attention_label = Label::new(Some("Attention"));
+    attention_label.add_css_class("sidebar-heading");
+    attention_label.set_xalign(0.0);
+    attention_label.set_hexpand(true);
+    attention_header.append(&attention_label);
+    attention_panel.append(&attention_header);
+
+    let activity_empty = Label::new(Some("No panes need attention."));
+    activity_empty.add_css_class("dim-label");
+    activity_empty.set_wrap(true);
+    activity_empty.set_xalign(0.0);
+    attention_panel.append(&activity_empty);
+
+    let activity_list = GtkBox::new(Orientation::Vertical, 4);
+    activity_list.set_vexpand(true);
+    attention_panel.append(&activity_list);
+
+    let attention_scroll = ScrolledWindow::new();
+    attention_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    attention_scroll.set_size_request(280, -1);
+    attention_scroll.set_child(Some(&attention_panel));
+    content_split.set_end_child(Some(&attention_scroll));
+    content_split.set_resize_end_child(false);
+    content_split.set_shrink_end_child(false);
+
+    shell.set_end_child(Some(&content_split));
 
     ShellWidgets {
         root: shell,
@@ -1722,6 +2055,8 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
         btn_window_down,
         btn_split_right,
         btn_split_down,
+        activity_list,
+        activity_empty,
         layout_scroll,
         layout_host,
     }
@@ -1739,8 +2074,18 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             button.add_css_class("workspace-button");
             button.set_hexpand(true);
 
-            let row = GtkBox::new(Orientation::Horizontal, 6);
+            let row = GtkBox::new(Orientation::Horizontal, 8);
             row.add_css_class("workspace-item");
+            if summary.display_attention != AttentionState::Normal {
+                row.add_css_class("workspace-item-has-attention");
+                row.add_css_class(&format!(
+                    "workspace-item-state-{}",
+                    attention_state_slug(summary.display_attention)
+                ));
+            }
+            if summary.unread_count > 0 {
+                row.add_css_class("workspace-item-has-unread");
+            }
             row.set_margin_start(6);
             row.set_margin_end(4);
             row.set_margin_top(3);
@@ -1750,22 +2095,39 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                 row.add_css_class("workspace-item-active");
             }
 
-            let dot = Label::new(Some("\u{25cf}"));
-            dot.add_css_class("status-dot");
-            dot.add_css_class(&attention_dot_class(summary.highest_attention));
-            row.append(&dot);
+            row.append(&build_workspace_status_widget(&summary));
+
+            let text = GtkBox::new(Orientation::Vertical, 2);
+            text.set_hexpand(true);
 
             let label = Label::new(Some(&summary.label));
             label.add_css_class("workspace-label");
             label.set_xalign(0.0);
             label.set_hexpand(true);
-            row.append(&label);
+            text.append(&label);
 
-            let pane_count: usize = summary.counts_by_attention.values().sum();
-            if pane_count > 1 {
-                let count_label = Label::new(Some(&format!("{pane_count}")));
-                count_label.add_css_class("pane-count");
-                row.append(&count_label);
+            if let Some(subtitle_text) = workspace_subtitle(&summary) {
+                let subtitle = Label::new(Some(&subtitle_text));
+                subtitle.add_css_class("workspace-subtitle");
+                subtitle.set_xalign(0.0);
+                subtitle.set_hexpand(true);
+                subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                text.append(&subtitle);
+            }
+
+            row.append(&text);
+
+            if let Some(badge_text) = workspace_badge_text(&summary) {
+                let badge = Label::new(Some(&badge_text));
+                badge.add_css_class("workspace-pill");
+                badge.add_css_class(&format!(
+                    "workspace-pill-state-{}",
+                    attention_state_slug(summary.display_attention)
+                ));
+                if summary.unread_count > 0 {
+                    badge.add_css_class("workspace-pill-unread");
+                }
+                row.append(&badge);
             }
 
             button.set_child(Some(&row));
@@ -1872,6 +2234,154 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     }
 }
 
+fn workspace_subtitle(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
+    if let Some(agent_summary) = workspace_agent_subtitle(summary) {
+        return Some(agent_summary);
+    }
+
+    if let Some(message) = summary.latest_notification.as_ref()
+        && !message.is_empty()
+    {
+        return Some(message.clone());
+    }
+
+    if summary.display_attention != AttentionState::Normal {
+        return Some(format_workspace_attention(summary));
+    }
+
+    summary.repo_hint.clone()
+}
+
+fn workspace_badge_text(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
+    if summary.unread_count > 0 {
+        Some(summary.unread_count.to_string())
+    } else if summary.agent_summaries.is_empty()
+        && summary.display_attention != AttentionState::Normal
+    {
+        Some(summary.display_attention.label().to_string())
+    } else {
+        None
+    }
+}
+
+fn build_workspace_status_widget(summary: &taskers_domain::WorkspaceSummary) -> Widget {
+    if summary.agent_summaries.is_empty() {
+        let dot = Label::new(Some("\u{25cf}"));
+        dot.add_css_class("status-dot");
+        dot.add_css_class(&attention_dot_class(summary.display_attention));
+        dot.set_valign(Align::Center);
+        dot.upcast()
+    } else {
+        let strip = GtkBox::new(Orientation::Horizontal, 4);
+        strip.add_css_class("workspace-agent-strip");
+        strip.set_valign(Align::Center);
+
+        for agent in summary.agent_summaries.iter().take(6) {
+            let chip = Label::new(Some(&workspace_agent_chip_label(agent)));
+            chip.add_css_class("workspace-agent-chip");
+            chip.add_css_class(workspace_agent_state_class(agent.state));
+            chip.set_tooltip_text(Some(&workspace_agent_tooltip(agent)));
+            strip.append(&chip);
+        }
+
+        if summary.agent_summaries.len() > 6 {
+            let overflow = Label::new(Some(&format!("+{}", summary.agent_summaries.len() - 6)));
+            overflow.add_css_class("workspace-agent-overflow");
+            strip.append(&overflow);
+        }
+
+        strip.upcast()
+    }
+}
+
+fn workspace_agent_subtitle(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
+    if summary.agent_summaries.is_empty() {
+        return None;
+    }
+
+    let waiting = summary
+        .agent_summaries
+        .iter()
+        .filter(|agent| agent.state == WorkspaceAgentState::Waiting)
+        .count();
+    let working = summary
+        .agent_summaries
+        .iter()
+        .filter(|agent| agent.state == WorkspaceAgentState::Working)
+        .count();
+    let inactive = summary
+        .agent_summaries
+        .iter()
+        .filter(|agent| agent.state == WorkspaceAgentState::Inactive)
+        .count();
+
+    let mut parts = Vec::new();
+    if waiting > 0 {
+        parts.push(format!("{waiting} waiting"));
+    }
+    if working > 0 {
+        parts.push(format!("{working} working"));
+    }
+    if inactive > 0 {
+        parts.push(format!("{inactive} inactive"));
+    }
+
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+fn workspace_agent_chip_label(agent: &WorkspaceAgentSummary) -> String {
+    let kind = agent.agent_kind.trim();
+    match kind {
+        "codex" => "CX".into(),
+        "claude" => "CL".into(),
+        "opencode" => "OC".into(),
+        "aider" => "AI".into(),
+        other => other
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .take(2)
+            .collect::<String>()
+            .to_uppercase(),
+    }
+}
+
+fn workspace_agent_tooltip(agent: &WorkspaceAgentSummary) -> String {
+    let title = agent
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| humanize_agent_kind(&agent.agent_kind));
+    format!("{title}  |  {}", agent.state.label())
+}
+
+fn workspace_agent_state_class(state: WorkspaceAgentState) -> &'static str {
+    match state {
+        WorkspaceAgentState::Working => "workspace-agent-chip-working",
+        WorkspaceAgentState::Waiting => "workspace-agent-chip-waiting",
+        WorkspaceAgentState::Inactive => "workspace-agent-chip-inactive",
+    }
+}
+
+fn format_workspace_attention(summary: &taskers_domain::WorkspaceSummary) -> String {
+    let count = summary
+        .counts_by_attention
+        .get(&summary.display_attention)
+        .copied()
+        .filter(|count| *count > 0)
+        .unwrap_or(summary.unread_count.max(1));
+    let noun = if count == 1 { "tab" } else { "tabs" };
+
+    match summary.display_attention {
+        AttentionState::Normal => "Idle".into(),
+        AttentionState::Busy => format!("{count} {noun} busy"),
+        AttentionState::Completed => format!("{count} {noun} completed"),
+        AttentionState::WaitingInput => format!("{count} {noun} waiting"),
+        AttentionState::Error => format!("{count} {noun} errored"),
+    }
+}
+
 fn update_toolbar(shell: &ShellWidgets, model: &AppModel, overview_mode: bool) {
     if let Some(workspace) = model.active_workspace() {
         let label = if overview_mode {
@@ -1890,6 +2400,179 @@ fn update_toolbar(shell: &ShellWidgets, model: &AppModel, overview_mode: bool) {
         shell.btn_window_down.set_sensitive(false);
         shell.btn_split_right.set_sensitive(false);
         shell.btn_split_down.set_sensitive(false);
+    }
+}
+
+fn update_activity_panel(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
+    clear_box(&shell.activity_list);
+
+    let items = model.activity_items();
+    shell.activity_empty.set_visible(items.is_empty());
+
+    for item in items {
+        shell
+            .activity_list
+            .append(&build_activity_row(ui, model, &item));
+    }
+}
+
+fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) -> Widget {
+    let outer = GtkBox::new(Orientation::Horizontal, 6);
+
+    let button = Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("activity-item-button");
+    button.set_focusable(false);
+    button.set_hexpand(true);
+
+    let row = GtkBox::new(Orientation::Vertical, 4);
+    row.add_css_class("activity-item");
+    row.set_margin_start(8);
+    row.set_margin_end(8);
+    row.set_margin_top(8);
+    row.set_margin_bottom(8);
+
+    let heading = GtkBox::new(Orientation::Horizontal, 6);
+    let dot = Label::new(Some("\u{25cf}"));
+    dot.add_css_class("status-dot");
+    dot.add_css_class(&attention_dot_class(item.state));
+    heading.append(&dot);
+
+    let title = model
+        .workspaces
+        .get(&item.workspace_id)
+        .and_then(|workspace| workspace.panes.get(&item.pane_id))
+        .and_then(|pane| {
+            pane.surfaces
+                .get(&item.surface_id)
+                .or_else(|| pane.active_surface())
+                .map(display_surface_title)
+        })
+        .unwrap_or_else(|| "Terminal pane".into());
+    let title_label = Label::new(Some(&title));
+    title_label.add_css_class("pane-title");
+    title_label.set_xalign(0.0);
+    title_label.set_hexpand(true);
+    heading.append(&title_label);
+
+    let time_label = Label::new(Some(&item.created_at.time().to_string()));
+    time_label.add_css_class("dim-label");
+    time_label.add_css_class("activity-time");
+    heading.append(&time_label);
+    row.append(&heading);
+
+    let workspace_label = model
+        .workspaces
+        .get(&item.workspace_id)
+        .map(|workspace| workspace.label.clone())
+        .unwrap_or_else(|| "Workspace".into());
+    let meta_label = Label::new(Some(&format!(
+        "{}  |  {}",
+        workspace_label,
+        activity_kind_label(&item.kind)
+    )));
+    meta_label.add_css_class("dim-label");
+    meta_label.set_xalign(0.0);
+    row.append(&meta_label);
+
+    let message = Label::new(Some(&item.message));
+    message.set_wrap(true);
+    message.set_xalign(0.0);
+    row.append(&message);
+
+    button.set_child(Some(&row));
+
+    let click_ui = Rc::clone(ui);
+    let workspace_id = item.workspace_id;
+    let workspace_window_id = item.workspace_window_id;
+    let pane_id = item.pane_id;
+    let surface_id = item.surface_id;
+    button.connect_clicked(move |_| {
+        focus_activity_target(
+            &click_ui,
+            workspace_id,
+            workspace_window_id,
+            pane_id,
+            surface_id,
+        );
+    });
+
+    outer.append(&button);
+
+    let done_button = Button::with_label("Done");
+    done_button.add_css_class("activity-dismiss");
+    done_button.set_valign(Align::Center);
+    done_button.set_tooltip_text(Some("Mark this item addressed"));
+    let done_ui = Rc::clone(ui);
+    let done_workspace_id = item.workspace_id;
+    let done_pane_id = item.pane_id;
+    let done_surface_id = item.surface_id;
+    done_button.connect_clicked(move |_| {
+        done_ui.dispatch(ControlCommand::MarkSurfaceCompleted {
+            workspace_id: done_workspace_id,
+            pane_id: done_pane_id,
+            surface_id: done_surface_id,
+        });
+    });
+    outer.append(&done_button);
+
+    outer.upcast()
+}
+
+fn focus_activity_target(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_window_id: Option<WorkspaceWindowId>,
+    pane_id: taskers_domain::PaneId,
+    surface_id: SurfaceId,
+) {
+    let model = ui.app_state.snapshot_model();
+    if model.active_workspace_id() != Some(workspace_id) {
+        ui.dispatch(ControlCommand::SwitchWorkspace {
+            window_id: None,
+            workspace_id,
+        });
+    }
+
+    focus_workspace_surface(ui, workspace_id, workspace_window_id, pane_id, surface_id);
+}
+
+fn focus_workspace_surface(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_window_id: Option<WorkspaceWindowId>,
+    pane_id: taskers_domain::PaneId,
+    surface_id: SurfaceId,
+) {
+    let model = ui.app_state.snapshot_model();
+    let Some(workspace) = model.workspaces.get(&workspace_id) else {
+        return;
+    };
+
+    if let Some(workspace_window_id) =
+        workspace_window_id.filter(|window_id| workspace.windows.contains_key(window_id))
+    {
+        ui.dispatch(ControlCommand::FocusWorkspaceWindow {
+            workspace_id,
+            workspace_window_id,
+        });
+    }
+
+    let Some(pane) = workspace.panes.get(&pane_id) else {
+        return;
+    };
+
+    if pane.surfaces.contains_key(&surface_id) {
+        ui.dispatch(ControlCommand::FocusSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+    } else {
+        ui.dispatch(ControlCommand::FocusPane {
+            workspace_id,
+            pane_id,
+        });
     }
 }
 
@@ -1983,7 +2666,7 @@ fn animate_window_slide_in(
     final_y: f64,
     display_frame: WindowFrame,
 ) {
-    if !ui.settings.borrow().animations_enabled {
+    if !ui.settings.borrow().animations_enabled || ui.backend_choice == BackendChoice::Ghostty {
         return;
     }
 
@@ -2039,7 +2722,7 @@ fn animate_window_slide_in(
 
 /// Animate a pane card sliding in from the right.
 fn animate_pane_slide_in(ui: &UiHandle, widget: &Widget) {
-    if !ui.settings.borrow().animations_enabled {
+    if !ui.settings.borrow().animations_enabled || ui.backend_choice == BackendChoice::Ghostty {
         return;
     }
 
@@ -2199,8 +2882,7 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                 }
                 if should_reveal {
                     sync_ui.reveal_active_window(&shell, active_workspace);
-                    sync_ui
-                        .queue_viewport_persist(workspace_id, current_workspace_viewport(&shell));
+                    sync_ui.persist_viewport_now(workspace_id, current_workspace_viewport(&shell));
                 }
             });
         }
@@ -2678,32 +3360,127 @@ fn initialize_terminal_body(
     let initial_output = ui
         .app_state
         .runtime()
-        .snapshot(pane.id)
+        .snapshot(
+            pane.active_surface()
+                .map(|surface| surface.id)
+                .unwrap_or_else(SurfaceId::new),
+        )
         .map(|snapshot| snapshot.output)
         .unwrap_or_default();
     buffer.set_text(&initial_output);
     scroller.set_child(Some(&terminal_output));
-    bind_output_updates(ui, pane.id, terminal_output);
+    if let Some(surface_id) = pane.active_surface().map(|surface| surface.id) {
+        bind_output_updates(ui, surface_id, terminal_output);
+    }
     root.append(&scroller);
 
     let entry = Entry::new();
     entry.add_css_class("terminal-entry");
     entry.set_placeholder_text(Some("Type shell input and press Enter"));
     let input_ui = Rc::clone(ui);
-    let pane_id = pane.id;
+    let surface_id = pane
+        .active_surface()
+        .map(|surface| surface.id)
+        .unwrap_or_else(SurfaceId::new);
     entry.connect_activate(move |entry| {
         let text = entry.text();
         if text.is_empty() {
             return;
         }
 
-        input_ui.send_input(pane_id, format!("{text}\n"));
+        input_ui.send_input(surface_id, format!("{text}\n"));
         entry.set_text("");
     });
     root.append(&entry);
 
     card.terminal_host.append(&root);
     entry.upcast()
+}
+
+fn refresh_terminal_body(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane: &PaneRecord,
+    card: &PaneCardWidgets,
+) {
+    clear_box(&card.terminal_host);
+    let _ = initialize_terminal_body(ui, workspace_id, pane, card);
+}
+
+fn sync_surface_tabs(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane: &PaneRecord,
+    card: &PaneCardWidgets,
+) {
+    clear_box(&card.surface_tabs);
+
+    for surface in pane.surfaces.values() {
+        let tab = GtkBox::new(Orientation::Horizontal, 4);
+        tab.add_css_class("surface-tab");
+        if surface.attention != AttentionState::Normal {
+            tab.add_css_class("surface-tab-has-attention");
+            tab.add_css_class(&format!(
+                "surface-tab-state-{}",
+                attention_state_slug(surface.attention)
+            ));
+        }
+        if surface.id == pane.active_surface {
+            tab.add_css_class("surface-tab-active");
+        }
+
+        let dot = Label::new(Some("\u{25cf}"));
+        dot.add_css_class("status-dot");
+        dot.add_css_class(&attention_dot_class(surface.attention));
+        dot.set_tooltip_text(Some(surface.attention.label()));
+        tab.append(&dot);
+
+        let label = Button::with_label(&display_surface_title(surface));
+        label.add_css_class("flat");
+        label.add_css_class("surface-tab-label");
+        let focus_ui = Rc::clone(ui);
+        let pane_id = pane.id;
+        let surface_id = surface.id;
+        label.connect_clicked(move |_| {
+            focus_ui.dispatch(ControlCommand::FocusSurface {
+                workspace_id,
+                pane_id,
+                surface_id,
+            });
+        });
+        tab.append(&label);
+
+        let close = Button::with_label("\u{00d7}");
+        close.add_css_class("flat");
+        close.add_css_class("surface-tab-close");
+        let close_ui = Rc::clone(ui);
+        let close_pane_id = pane.id;
+        let close_surface_id = surface.id;
+        close.connect_clicked(move |_| {
+            close_ui.dispatch(ControlCommand::CloseSurface {
+                workspace_id,
+                pane_id: close_pane_id,
+                surface_id: close_surface_id,
+            });
+        });
+        tab.append(&close);
+
+        card.surface_tabs.append(&tab);
+    }
+
+    let add = Button::with_label("+");
+    add.add_css_class("flat");
+    add.add_css_class("surface-tab-add");
+    let add_ui = Rc::clone(ui);
+    let pane_id = pane.id;
+    add.connect_clicked(move |_| {
+        add_ui.dispatch(ControlCommand::CreateSurface {
+            workspace_id,
+            pane_id,
+            kind: PaneKind::Terminal,
+        });
+    });
+    card.surface_tabs.append(&add);
 }
 
 fn clear_box(container: &GtkBox) {
@@ -2715,6 +3492,84 @@ fn clear_box(container: &GtkBox) {
 fn clear_fixed(container: &Fixed) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
+    }
+}
+
+fn activity_notification_key(item: &ActivityItem) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        item.workspace_id, item.pane_id, item.surface_id, item.created_at, item.message
+    )
+}
+
+fn activity_kind_label(kind: &SignalKind) -> &'static str {
+    match kind {
+        SignalKind::Metadata => "Updated",
+        SignalKind::Started => "Started",
+        SignalKind::Progress => "Working",
+        SignalKind::Completed => "Completed",
+        SignalKind::WaitingInput => "Waiting",
+        SignalKind::Error => "Error",
+        SignalKind::Notification => "Notification",
+    }
+}
+
+fn widget_contains_window_focus(window: &adw::ApplicationWindow, target: &Widget) -> bool {
+    let mut current = gtk::prelude::GtkWindowExt::focus(window);
+    while let Some(widget) = current {
+        if widget == *target {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
+}
+
+fn widget_is_descendant_of(widget: &Widget, ancestor: &Widget) -> bool {
+    let mut current = Some(widget.clone());
+    while let Some(node) = current {
+        if node == *ancestor {
+            return true;
+        }
+        current = node.parent();
+    }
+    false
+}
+
+fn display_surface_title(surface: &SurfaceRecord) -> String {
+    if let Some(title) = surface
+        .metadata
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        return title.to_string();
+    }
+
+    if let Some(agent) = surface.metadata.agent_kind.as_deref() {
+        return humanize_agent_kind(agent);
+    }
+
+    match surface.kind {
+        PaneKind::Terminal => "Terminal".into(),
+        PaneKind::Browser => "Browser".into(),
+    }
+}
+
+fn humanize_agent_kind(agent: &str) -> String {
+    match agent {
+        "codex" => "Codex".into(),
+        "claude" => "Claude".into(),
+        "opencode" => "OpenCode".into(),
+        "aider" => "Aider".into(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => "Terminal".into(),
+            }
+        }
     }
 }
 
@@ -2970,14 +3825,24 @@ fn attention_dot_class(state: AttentionState) -> String {
     }
 }
 
-fn bind_output_updates(ui: &Rc<UiHandle>, pane_id: taskers_domain::PaneId, text_view: TextView) {
+fn attention_state_slug(state: AttentionState) -> &'static str {
+    match state {
+        AttentionState::Normal => "normal",
+        AttentionState::Busy => "busy",
+        AttentionState::Completed => "completed",
+        AttentionState::WaitingInput => "waiting",
+        AttentionState::Error => "error",
+    }
+}
+
+fn bind_output_updates(ui: &Rc<UiHandle>, surface_id: SurfaceId, text_view: TextView) {
     let runtime = ui.app_state.runtime();
     let buffer = text_view.buffer();
     let last_seen = Rc::new(RefCell::new(String::new()));
     let last_seen_for_timer = Rc::clone(&last_seen);
 
     gtk::glib::timeout_add_local(Duration::from_millis(150), move || {
-        let Some(snapshot) = runtime.snapshot(pane_id) else {
+        let Some(snapshot) = runtime.snapshot(surface_id) else {
             return gtk::glib::ControlFlow::Continue;
         };
 
@@ -2996,6 +3861,7 @@ fn connect_ghostty_widget(
     ui: &Rc<UiHandle>,
     workspace_id: taskers_domain::WorkspaceId,
     pane_id: taskers_domain::PaneId,
+    surface_id: SurfaceId,
     widget: &Widget,
 ) {
     widget.set_focusable(true);
@@ -3020,20 +3886,24 @@ fn connect_ghostty_widget(
             .workspaces
             .values()
             .find_map(|workspace| workspace.panes.get(&pane_id))
-            .and_then(|pane| pane.metadata.title.clone());
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .and_then(|surface| surface.metadata.title.clone());
         if current == title {
             return;
         }
-        title_ui.dispatch(ControlCommand::UpdatePaneMetadata {
-            pane_id,
-            patch: PaneMetadataPatch {
-                title,
-                cwd: None,
-                repo_name: None,
-                git_branch: None,
-                ports: None,
-                agent_kind: None,
-            },
+        let deferred_ui = Rc::clone(&title_ui);
+        glib::idle_add_local_once(move || {
+            deferred_ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+                surface_id,
+                patch: PaneMetadataPatch {
+                    title,
+                    cwd: None,
+                    repo_name: None,
+                    git_branch: None,
+                    ports: None,
+                    agent_kind: None,
+                },
+            });
         });
     });
 
@@ -3048,34 +3918,53 @@ fn connect_ghostty_widget(
             .workspaces
             .values()
             .find_map(|workspace| workspace.panes.get(&pane_id))
-            .and_then(|pane| pane.metadata.cwd.clone());
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .and_then(|surface| surface.metadata.cwd.clone());
         if current == cwd {
             return;
         }
-        pwd_ui.dispatch(ControlCommand::UpdatePaneMetadata {
-            pane_id,
-            patch: PaneMetadataPatch {
-                title: None,
-                cwd,
-                repo_name: None,
-                git_branch: None,
-                ports: None,
-                agent_kind: None,
-            },
+        let deferred_ui = Rc::clone(&pwd_ui);
+        glib::idle_add_local_once(move || {
+            deferred_ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+                surface_id,
+                patch: PaneMetadataPatch {
+                    title: None,
+                    cwd,
+                    repo_name: None,
+                    git_branch: None,
+                    ports: None,
+                    agent_kind: None,
+                },
+            });
         });
     });
 
     let bell_ui = Rc::clone(ui);
     widget.connect_notify_local(Some("bell-ringing"), move |widget, _| {
         if widget.property::<bool>("bell-ringing") {
-            bell_ui.dispatch(ControlCommand::EmitSignal {
-                workspace_id,
-                pane_id,
-                event: SignalEvent::new(
-                    "ghostty",
-                    SignalKind::Notification,
-                    Some("Terminal requested attention".into()),
-                ),
+            let model = bell_ui.app_state.snapshot_model();
+            let active_pane_has_focus = model.active_workspace().is_some_and(|workspace| {
+                workspace.id == workspace_id
+                    && workspace.active_pane == pane_id
+                    && bell_ui.window.is_active()
+                    && widget_contains_window_focus(&bell_ui.window, widget)
+            });
+            if active_pane_has_focus {
+                return;
+            }
+
+            let deferred_ui = Rc::clone(&bell_ui);
+            glib::idle_add_local_once(move || {
+                deferred_ui.dispatch(ControlCommand::EmitSignal {
+                    workspace_id,
+                    pane_id,
+                    surface_id: Some(surface_id),
+                    event: SignalEvent::new(
+                        "ghostty",
+                        SignalKind::Notification,
+                        Some("Terminal requested attention".into()),
+                    ),
+                });
             });
         }
     });
@@ -3083,9 +3972,13 @@ fn connect_ghostty_widget(
     let exit_ui = Rc::clone(ui);
     widget.connect_notify_local(Some("child-exited"), move |widget, _| {
         if widget.property::<bool>("child-exited") {
-            exit_ui.dispatch(ControlCommand::ClosePane {
-                workspace_id,
-                pane_id,
+            let deferred_ui = Rc::clone(&exit_ui);
+            glib::idle_add_local_once(move || {
+                deferred_ui.dispatch(ControlCommand::CloseSurface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                });
             });
         }
     });
@@ -3129,13 +4022,21 @@ fn detach_widget(widget: &Widget) {
 }
 
 fn format_pane_meta(pane: &PaneRecord, snapshot: Option<&PaneRuntimeSnapshot>) -> String {
-    let cwd = pane.metadata.cwd.as_deref().unwrap_or("cwd unknown");
-    let branch = pane.metadata.git_branch.as_deref().unwrap_or("no branch");
-    let agent = pane.metadata.agent_kind.as_deref().unwrap_or("shell");
-    let ports = if pane.metadata.ports.is_empty() {
+    let metadata = pane.active_metadata();
+    let cwd = metadata
+        .and_then(|meta| meta.cwd.as_deref())
+        .unwrap_or("cwd unknown");
+    let branch = metadata
+        .and_then(|meta| meta.git_branch.as_deref())
+        .unwrap_or("no branch");
+    let agent = metadata
+        .and_then(|meta| meta.agent_kind.as_deref())
+        .unwrap_or("shell");
+    let ports = if metadata.is_none_or(|meta| meta.ports.is_empty()) {
         "no ports".into()
     } else {
-        pane.metadata
+        metadata
+            .expect("metadata exists when ports are present")
             .ports
             .iter()
             .map(u16::to_string)
@@ -3286,13 +4187,122 @@ fn install_css() {
             font-size: 0.82rem;
         }
 
-        .pane-count {
-            background: rgba(255,255,255,0.06);
-            color: #52525b;
+        .workspace-subtitle {
+            color: #71717a;
+            font-size: 0.72rem;
+        }
+
+        .workspace-agent-strip {
+            margin-right: 4px;
+        }
+
+        .workspace-agent-chip {
+            border-radius: 999px;
+            padding: 2px 6px;
+            min-width: 24px;
+            font-size: 0.62rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        }
+
+        .workspace-agent-chip-working {
+            background: rgba(34,197,94,0.16);
+            color: #bbf7d0;
+        }
+
+        .workspace-agent-chip-waiting {
+            background: rgba(245,158,11,0.18);
+            color: #fde68a;
+        }
+
+        .workspace-agent-chip-inactive {
+            background: rgba(239,68,68,0.16);
+            color: #fecaca;
+        }
+
+        .workspace-agent-overflow {
+            color: #71717a;
+            font-size: 0.68rem;
+            font-weight: 600;
+        }
+
+        .workspace-pill {
+            background: rgba(255,255,255,0.05);
+            color: #d4d4d8;
             font-size: 0.7rem;
-            border-radius: 4px;
-            padding: 1px 5px;
+            font-weight: 600;
+            border-radius: 999px;
+            padding: 2px 7px;
             min-height: 0;
+        }
+
+        .workspace-pill-unread {
+            background: rgba(255,255,255,0.08);
+            color: #fafafa;
+        }
+
+        .workspace-pill-state-busy {
+            background: rgba(99,102,241,0.15);
+            color: #c7d2fe;
+        }
+
+        .workspace-pill-state-completed {
+            background: rgba(34,197,94,0.16);
+            color: #bbf7d0;
+        }
+
+        .workspace-pill-state-waiting {
+            background: rgba(245,158,11,0.17);
+            color: #fde68a;
+        }
+
+        .workspace-pill-state-error {
+            background: rgba(239,68,68,0.16);
+            color: #fecaca;
+        }
+
+        .workspace-item-has-attention {
+            border-left-color: rgba(255,255,255,0.16);
+        }
+
+        .workspace-item-state-busy {
+            background: rgba(99,102,241,0.06);
+            border-left-color: rgba(99,102,241,0.45);
+        }
+
+        .workspace-item-state-completed {
+            background: rgba(34,197,94,0.06);
+            border-left-color: rgba(34,197,94,0.45);
+        }
+
+        .workspace-item-state-waiting {
+            background: rgba(245,158,11,0.08);
+            border-left-color: rgba(245,158,11,0.55);
+        }
+
+        .workspace-item-state-error {
+            background: rgba(239,68,68,0.08);
+            border-left-color: rgba(239,68,68,0.55);
+        }
+
+        .workspace-item-has-unread .workspace-label {
+            color: #fafafa;
+        }
+
+        .workspace-item-active.workspace-item-state-busy {
+            background: rgba(99,102,241,0.14);
+        }
+
+        .workspace-item-active.workspace-item-state-completed {
+            background: rgba(34,197,94,0.12);
+        }
+
+        .workspace-item-active.workspace-item-state-waiting {
+            background: rgba(245,158,11,0.14);
+        }
+
+        .workspace-item-active.workspace-item-state-error {
+            background: rgba(239,68,68,0.14);
         }
 
         .workspace-close {
@@ -3377,6 +4387,50 @@ fn install_css() {
             color: #d4d4d8;
         }
 
+        /* ── Attention panel ── */
+
+        .attention-panel {
+            background: #09090b;
+            border-left: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .activity-item-button {
+            padding: 0;
+        }
+
+        .activity-item {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 8px;
+            transition: background 120ms ease, border-color 120ms ease;
+        }
+
+        .activity-item-button:hover .activity-item {
+            background: rgba(99,102,241,0.08);
+            border-color: rgba(99,102,241,0.16);
+        }
+
+        .activity-dismiss {
+            background: rgba(34,197,94,0.12);
+            color: #bbf7d0;
+            border: 1px solid rgba(34,197,94,0.24);
+            border-radius: 8px;
+            padding: 4px 10px;
+            font-size: 0.72rem;
+            font-weight: 600;
+            min-height: 0;
+            transition: background 120ms ease, border-color 120ms ease;
+        }
+
+        .activity-dismiss:hover {
+            background: rgba(34,197,94,0.18);
+            border-color: rgba(34,197,94,0.34);
+        }
+
+        .activity-time {
+            font-size: 0.72rem;
+        }
+
         /* ── Workspace windows ── */
 
         .workspace-window {
@@ -3454,6 +4508,73 @@ fn install_css() {
         .pane-meta {
             color: #52525b;
             font-size: 0.75rem;
+        }
+
+        .surface-tabs {
+            margin: 4px 8px 6px;
+        }
+
+        .surface-tab {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 8px;
+            padding: 2px 6px;
+            transition: background 120ms ease, border-color 120ms ease;
+        }
+
+        .surface-tab-active {
+            background: rgba(99,102,241,0.14);
+            border-color: rgba(99,102,241,0.35);
+        }
+
+        .surface-tab-has-attention.surface-tab-state-busy {
+            background: rgba(99,102,241,0.08);
+            border-color: rgba(99,102,241,0.22);
+        }
+
+        .surface-tab-has-attention.surface-tab-state-completed {
+            background: rgba(34,197,94,0.08);
+            border-color: rgba(34,197,94,0.22);
+        }
+
+        .surface-tab-has-attention.surface-tab-state-waiting {
+            background: rgba(245,158,11,0.10);
+            border-color: rgba(245,158,11,0.28);
+        }
+
+        .surface-tab-has-attention.surface-tab-state-error {
+            background: rgba(239,68,68,0.10);
+            border-color: rgba(239,68,68,0.28);
+        }
+
+        .surface-tab-label,
+        .surface-tab-close,
+        .surface-tab-add {
+            min-height: 0;
+            padding: 0;
+        }
+
+        .surface-tab-label {
+            color: #a1a1aa;
+            font-size: 0.74rem;
+        }
+
+        .surface-tab-active .surface-tab-label {
+            color: #fafafa;
+        }
+
+        .surface-tab-close,
+        .surface-tab-add {
+            color: #71717a;
+            border-radius: 4px;
+            min-width: 18px;
+            min-height: 18px;
+        }
+
+        .surface-tab-close:hover,
+        .surface-tab-add:hover {
+            background: rgba(255,255,255,0.06);
+            color: #d4d4d8;
         }
 
         /* ── Status dots ── */

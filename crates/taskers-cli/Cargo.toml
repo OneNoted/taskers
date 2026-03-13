@@ -1,7 +1,11 @@
 [package]
 name = "taskers-cli"
+description = "CLI for querying and controlling the local taskers app."
 edition.workspace = true
+homepage.workspace = true
 license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
 version.workspace = true
 
 [[bin]]
@@ -14,5 +18,5 @@ clap.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
-taskers-control = { path = "../taskers-control" }
-taskers-domain = { path = "../taskers-domain" }
+taskers-control = { version = "0.1.0", path = "../taskers-control" }
+taskers-domain = { version = "0.1.0", path = "../taskers-domain" }

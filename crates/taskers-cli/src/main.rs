@@ -12,8 +12,8 @@ use taskers_control::{
     default_socket_path, serve,
 };
 use taskers_domain::{
-    AppModel, Direction, KEYBOARD_RESIZE_STEP, PaneId, PaneMetadataPatch, SignalEvent, SignalKind,
-    SplitAxis, WorkspaceId,
+    AppModel, Direction, KEYBOARD_RESIZE_STEP, PaneId, PaneKind, PaneMetadataPatch, SignalEvent,
+    SignalKind, SplitAxis, SurfaceId, WorkspaceId,
 };
 use time::OffsetDateTime;
 
@@ -49,9 +49,39 @@ enum Command {
         #[arg(long)]
         pane: PaneId,
         #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long)]
         kind: CliSignalKind,
         #[arg(long)]
         message: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        agent_active: Option<bool>,
+    },
+    Notify {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
     },
     Workspace {
         #[command(subcommand)]
@@ -60,6 +90,10 @@ enum Command {
     Pane {
         #[command(subcommand)]
         command: PaneCommand,
+    },
+    Surface {
+        #[command(subcommand)]
+        command: SurfaceCommand,
     },
 }
 
@@ -183,8 +217,51 @@ enum PaneCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum SurfaceCommand {
+    New {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long)]
+        pane: PaneId,
+    },
+    Focus {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long)]
+        pane: PaneId,
+        #[arg(long)]
+        surface: SurfaceId,
+    },
+    Complete {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long)]
+        pane: PaneId,
+        #[arg(long)]
+        surface: SurfaceId,
+    },
+    Close {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long)]
+        pane: PaneId,
+        #[arg(long)]
+        surface: SurfaceId,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliSignalKind {
+    Metadata,
     Started,
     Progress,
     Completed,
@@ -210,6 +287,7 @@ enum CliDirection {
 impl From<CliSignalKind> for SignalKind {
     fn from(value: CliSignalKind) -> Self {
         match value {
+            CliSignalKind::Metadata => SignalKind::Metadata,
             CliSignalKind::Started => SignalKind::Started,
             CliSignalKind::Progress => SignalKind::Progress,
             CliSignalKind::Completed => SignalKind::Completed,
@@ -249,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
             install_app(skip_build)?;
         }
         Command::Serve { socket, demo } => {
-            let socket = socket.unwrap_or_else(default_socket_path);
+            let socket = resolve_socket_path(socket);
             let listener = bind_socket(&socket)
                 .with_context(|| format!("failed to bind socket at {}", socket.display()))?;
             let initial_model = if demo {
@@ -264,7 +342,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Query {
             query: QueryCommand::Status { socket },
         } => {
-            let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+            let client = ControlClient::new(resolve_socket_path(socket));
             let response = client
                 .send(ControlCommand::QueryStatus {
                     query: ControlQuery::All,
@@ -276,18 +354,96 @@ async fn main() -> anyhow::Result<()> {
             socket,
             workspace,
             pane,
+            surface,
             kind,
             message,
+            title,
+            cwd,
+            repo,
+            branch,
+            agent,
+            agent_active,
         } => {
-            let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+            let client = ControlClient::new(resolve_socket_path(socket));
+            let metadata = if title.is_some()
+                || cwd.is_some()
+                || repo.is_some()
+                || branch.is_some()
+                || agent.is_some()
+                || agent_active.is_some()
+            {
+                Some(taskers_domain::SignalPaneMetadata {
+                    title,
+                    cwd,
+                    repo_name: repo,
+                    git_branch: branch,
+                    ports: Vec::new(),
+                    agent_kind: agent,
+                    agent_active,
+                })
+            } else {
+                None
+            };
             let response = client
                 .send(ControlCommand::EmitSignal {
                     workspace_id: workspace,
                     pane_id: pane,
+                    surface_id: surface,
                     event: SignalEvent {
                         source: "taskers-cli".into(),
                         kind: kind.into(),
                         message,
+                        metadata,
+                        timestamp: OffsetDateTime::now_utc(),
+                    },
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Command::Notify {
+            socket,
+            workspace,
+            pane,
+            surface,
+            title,
+            body,
+            agent,
+        } => {
+            let workspace_id = workspace
+                .or_else(env_workspace_id)
+                .context("missing workspace id; pass --workspace or run from inside Taskers")?;
+            let pane_id = pane
+                .or_else(env_pane_id)
+                .context("missing pane id; pass --pane or run from inside Taskers")?;
+            let surface_id = surface.or_else(env_surface_id);
+            let client = ControlClient::new(resolve_socket_path(socket));
+            let normalized_title = title.trim();
+            let normalized_body = body
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            let message = normalized_body.unwrap_or_else(|| normalized_title.to_string());
+            let inferred_agent = agent.or_else(|| infer_agent_kind(normalized_title));
+            let metadata = Some(taskers_domain::SignalPaneMetadata {
+                title: Some(normalized_title.to_string()),
+                cwd: None,
+                repo_name: None,
+                git_branch: None,
+                ports: Vec::new(),
+                agent_kind: inferred_agent,
+                agent_active: None,
+            });
+            let response = client
+                .send(ControlCommand::EmitSignal {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                    event: SignalEvent {
+                        source: format!("notify:{normalized_title}"),
+                        kind: SignalKind::Notification,
+                        message: Some(message),
+                        metadata,
                         timestamp: OffsetDateTime::now_utc(),
                     },
                 })
@@ -296,14 +452,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Workspace { command } => match command {
             WorkspaceCommand::New { socket, label } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::CreateWorkspace { label })
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             WorkspaceCommand::Switch { socket, workspace } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::SwitchWorkspace {
                         window_id: None,
@@ -317,7 +473,7 @@ async fn main() -> anyhow::Result<()> {
                 workspace,
                 label,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::RenameWorkspace {
                         workspace_id: workspace,
@@ -327,7 +483,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
             WorkspaceCommand::Close { socket, workspace } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::CloseWorkspace {
                         workspace_id: workspace,
@@ -342,7 +498,7 @@ async fn main() -> anyhow::Result<()> {
                 workspace,
                 direction,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::CreateWorkspaceWindow {
                         workspace_id: workspace,
@@ -357,7 +513,7 @@ async fn main() -> anyhow::Result<()> {
                 pane,
                 axis,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::SplitPane {
                         workspace_id: workspace,
@@ -372,7 +528,7 @@ async fn main() -> anyhow::Result<()> {
                 workspace,
                 pane,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::FocusPane {
                         workspace_id: workspace,
@@ -386,7 +542,7 @@ async fn main() -> anyhow::Result<()> {
                 workspace,
                 direction,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::FocusPaneDirection {
                         workspace_id: workspace,
@@ -401,7 +557,7 @@ async fn main() -> anyhow::Result<()> {
                 direction,
                 amount,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::ResizeActiveWindow {
                         workspace_id: workspace,
@@ -417,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
                 direction,
                 amount,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::ResizeActivePaneSplit {
                         workspace_id: workspace,
@@ -432,7 +588,7 @@ async fn main() -> anyhow::Result<()> {
                 workspace,
                 pane,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::ClosePane {
                         workspace_id: workspace,
@@ -450,7 +606,7 @@ async fn main() -> anyhow::Result<()> {
                 branch,
                 agent,
             } => {
-                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::UpdatePaneMetadata {
                         pane_id: pane,
@@ -467,9 +623,109 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
         },
+        Command::Surface { command } => match command {
+            SurfaceCommand::New {
+                socket,
+                workspace,
+                pane,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = client
+                    .send(ControlCommand::CreateSurface {
+                        workspace_id: workspace,
+                        pane_id: pane,
+                        kind: PaneKind::Terminal,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            SurfaceCommand::Focus {
+                socket,
+                workspace,
+                pane,
+                surface,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = client
+                    .send(ControlCommand::FocusSurface {
+                        workspace_id: workspace,
+                        pane_id: pane,
+                        surface_id: surface,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            SurfaceCommand::Complete {
+                socket,
+                workspace,
+                pane,
+                surface,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = client
+                    .send(ControlCommand::MarkSurfaceCompleted {
+                        workspace_id: workspace,
+                        pane_id: pane,
+                        surface_id: surface,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            SurfaceCommand::Close {
+                socket,
+                workspace,
+                pane,
+                surface,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = client
+                    .send(ControlCommand::CloseSurface {
+                        workspace_id: workspace,
+                        pane_id: pane,
+                        surface_id: surface,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+        },
     }
 
     Ok(())
+}
+
+fn env_workspace_id() -> Option<WorkspaceId> {
+    env::var("TASKERS_WORKSPACE_ID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+}
+
+fn env_pane_id() -> Option<PaneId> {
+    env::var("TASKERS_PANE_ID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+}
+
+fn env_surface_id() -> Option<SurfaceId> {
+    env::var("TASKERS_SURFACE_ID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+}
+
+fn resolve_socket_path(socket: Option<PathBuf>) -> PathBuf {
+    socket
+        .or_else(|| env::var_os("TASKERS_SOCKET").map(PathBuf::from))
+        .unwrap_or_else(default_socket_path)
+}
+
+fn infer_agent_kind(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "codex" => Some("codex".into()),
+        "claude" | "claude code" | "claude-code" => Some("claude".into()),
+        "opencode" => Some("opencode".into()),
+        "aider" => Some("aider".into()),
+        _ => None,
+    }
 }
 
 fn install_app(skip_build: bool) -> anyhow::Result<()> {
@@ -479,21 +735,27 @@ fn install_app(skip_build: bool) -> anyhow::Result<()> {
         .context("failed to resolve workspace root")?;
     let cargo_bin_dir = cargo_bin_dir()?;
     let app_binary = cargo_bin_dir.join("taskers");
+    let cli_binary = cargo_bin_dir.join("taskersctl");
 
     if !skip_build {
-        let status = ProcessCommand::new("cargo")
-            .arg("install")
-            .arg("--path")
-            .arg("crates/taskers-app")
-            .arg("--bin")
-            .arg("taskers")
-            .arg("--force")
-            .arg("--locked")
-            .current_dir(&workspace_root)
-            .status()
-            .context("failed to invoke cargo install for taskers")?;
-        if !status.success() {
-            anyhow::bail!("cargo install for taskers exited with status {status}");
+        for (path, bin_name) in [
+            ("crates/taskers-app", "taskers"),
+            ("crates/taskers-cli", "taskersctl"),
+        ] {
+            let status = ProcessCommand::new("cargo")
+                .arg("install")
+                .arg("--path")
+                .arg(path)
+                .arg("--bin")
+                .arg(bin_name)
+                .arg("--force")
+                .arg("--locked")
+                .current_dir(&workspace_root)
+                .status()
+                .with_context(|| format!("failed to invoke cargo install for {bin_name}"))?;
+            if !status.success() {
+                anyhow::bail!("cargo install for {bin_name} exited with status {status}");
+            }
         }
     }
 
@@ -503,6 +765,22 @@ fn install_app(skip_build: bool) -> anyhow::Result<()> {
             app_binary.display()
         );
     }
+    if !cli_binary.exists() {
+        anyhow::bail!(
+            "expected installed binary at {}, but it was not found",
+            cli_binary.display()
+        );
+    }
+
+    let launcher_binary = install_launcher_binary(&app_binary, "taskers")?;
+    let control_binary = install_launcher_binary(&cli_binary, "taskersctl")?;
+    let codex_notify_script = install_executable_asset(
+        "taskers-codex-notify",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/taskers-codex-notify.sh"
+        )),
+    )?;
 
     let xdg_data_home = xdg_data_home()?;
     let applications_dir = xdg_data_home.join("applications");
@@ -526,9 +804,9 @@ fn install_app(skip_build: bool) -> anyhow::Result<()> {
 
     let desktop_template = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/taskers.desktop.in"
+        "/assets/taskers.desktop.in"
     ));
-    let desktop_entry = desktop_template.replace("{{EXEC}}", &desktop_exec(&app_binary));
+    let desktop_entry = desktop_template.replace("{{EXEC}}", &desktop_exec(&launcher_binary));
     let desktop_path = applications_dir.join("dev.taskers.app.desktop");
     std::fs::write(&desktop_path, desktop_entry)
         .with_context(|| format!("failed to write {}", desktop_path.display()))?;
@@ -536,10 +814,7 @@ fn install_app(skip_build: bool) -> anyhow::Result<()> {
     let icon_path = icons_dir.join("taskers.svg");
     std::fs::write(
         &icon_path,
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/taskers.svg"
-        )),
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/taskers.svg")),
     )
     .with_context(|| format!("failed to write {}", icon_path.display()))?;
 
@@ -547,6 +822,9 @@ fn install_app(skip_build: bool) -> anyhow::Result<()> {
 
     println!("Installed taskers");
     println!("Binary: {}", app_binary.display());
+    println!("Launcher binary: {}", launcher_binary.display());
+    println!("Control binary: {}", control_binary.display());
+    println!("Codex notify helper: {}", codex_notify_script.display());
     println!("Desktop entry: {}", desktop_path.display());
     println!("Icon: {}", icon_path.display());
     println!("Ghostty resources: {}", ghostty_bundle_dir.display());
@@ -576,6 +854,17 @@ fn cargo_bin_dir() -> anyhow::Result<PathBuf> {
     Ok(home.join(".cargo").join("bin"))
 }
 
+fn xdg_bin_dir() -> anyhow::Result<PathBuf> {
+    if let Some(path) = env::var_os("XDG_BIN_HOME").map(PathBuf::from) {
+        return Ok(path);
+    }
+
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set and XDG_BIN_HOME is unavailable")?;
+    Ok(home.join(".local").join("bin"))
+}
+
 fn xdg_data_home() -> anyhow::Result<PathBuf> {
     if let Some(path) = env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
         return Ok(path);
@@ -590,6 +879,69 @@ fn xdg_data_home() -> anyhow::Result<PathBuf> {
 fn desktop_exec(path: &Path) -> String {
     let raw = path.display().to_string();
     raw.replace('\\', "\\\\").replace(' ', "\\ ")
+}
+
+fn install_launcher_binary(app_binary: &Path, target_name: &str) -> anyhow::Result<PathBuf> {
+    let bin_dir = xdg_bin_dir()?;
+    std::fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+    let launcher_binary = bin_dir.join(target_name);
+
+    if launcher_binary == app_binary {
+        return Ok(launcher_binary);
+    }
+
+    if launcher_binary.symlink_metadata().is_ok() {
+        std::fs::remove_file(&launcher_binary)
+            .with_context(|| format!("failed to remove {}", launcher_binary.display()))?;
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(app_binary, &launcher_binary).with_context(|| {
+            format!(
+                "failed to symlink {} -> {}",
+                launcher_binary.display(),
+                app_binary.display()
+            )
+        })?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(app_binary, &launcher_binary).with_context(|| {
+            format!(
+                "failed to copy {} -> {}",
+                app_binary.display(),
+                launcher_binary.display()
+            )
+        })?;
+    }
+
+    Ok(launcher_binary)
+}
+
+fn install_executable_asset(target_name: &str, content: &str) -> anyhow::Result<PathBuf> {
+    let bin_dir = xdg_bin_dir()?;
+    std::fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+    let target_path = bin_dir.join(target_name);
+    std::fs::write(&target_path, content)
+        .with_context(|| format!("failed to write {}", target_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(&target_path)
+            .with_context(|| format!("failed to stat {}", target_path.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&target_path, permissions)
+            .with_context(|| format!("failed to chmod {}", target_path.display()))?;
+    }
+
+    Ok(target_path)
 }
 
 fn refresh_desktop_indexes(applications_dir: &Path) {
@@ -642,6 +994,20 @@ fn install_ghostty_runtime(
         .with_context(|| format!("failed to copy locale files to {}", locale_dir.display()))?;
     copy_directory(&staging_dir.join("share").join("terminfo"), terminfo_dir)
         .with_context(|| format!("failed to copy terminfo to {}", terminfo_dir.display()))?;
+    let embedded_terminfo_dir = resources_dir
+        .parent()
+        .map(|path| path.join("terminfo"))
+        .ok_or_else(|| anyhow::anyhow!("ghostty resources dir has no parent"))?;
+    copy_directory(
+        &staging_dir.join("share").join("terminfo"),
+        &embedded_terminfo_dir,
+    )
+    .with_context(|| {
+        format!(
+            "failed to copy embedded terminfo to {}",
+            embedded_terminfo_dir.display()
+        )
+    })?;
 
     Ok(())
 }

@@ -28,6 +28,17 @@ impl CommandSpec {
             rows: 40,
         }
     }
+
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            cols: 120,
+            rows: 40,
+        }
+    }
 }
 
 pub struct PtySession {

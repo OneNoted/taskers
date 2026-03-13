@@ -1,7 +1,11 @@
 [package]
-name = "taskers-app"
+name = "taskers"
+description = "Agent-first terminal workspace app with a Niri-like tiling model."
 edition.workspace = true
+homepage.workspace = true
 license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
 version.workspace = true
 
 [[bin]]
@@ -15,11 +19,11 @@ clap.workspace = true
 gtk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-taskers-runtime = { path = "../taskers-runtime" }
+taskers-runtime = { version = "0.1.0", path = "../taskers-runtime" }
 tokio.workspace = true
-taskers-control = { path = "../taskers-control" }
-taskers-domain = { path = "../taskers-domain" }
-taskers-ghostty = { path = "../taskers-ghostty" }
+taskers-control = { version = "0.1.0", path = "../taskers-control" }
+taskers-domain = { version = "0.1.0", path = "../taskers-domain" }
+taskers-ghostty = { version = "0.1.0", path = "../taskers-ghostty" }
 time.workspace = true
 
 [dev-dependencies]

@@ -1,7 +1,11 @@
 [package]
 name = "taskers-domain"
+description = "Domain model for taskers workspaces, panes, and layout state."
 edition.workspace = true
+homepage.workspace = true
 license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
 version.workspace = true
 
 [dependencies]

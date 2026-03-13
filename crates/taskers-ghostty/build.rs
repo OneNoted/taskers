@@ -26,6 +26,12 @@ fn main() {
         .expect("workspace root")
         .to_path_buf();
     let vendor_dir = workspace_root.join("vendor").join("ghostty");
+    if !vendor_dir.exists() {
+        println!(
+            "cargo:warning=vendored Ghostty source tree not found; building without the Ghostty bridge"
+        );
+        return;
+    }
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
     let install_dir = out_dir.join("ghostty-bridge");
 

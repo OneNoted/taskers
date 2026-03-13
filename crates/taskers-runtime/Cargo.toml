@@ -1,10 +1,16 @@
 [package]
 name = "taskers-runtime"
+description = "PTY runtime and OSC signal parsing for taskers."
 edition.workspace = true
+homepage.workspace = true
 license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
 version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+libc.workspace = true
 portable-pty.workspace = true
-taskers-domain = { path = "../taskers-domain" }
+taskers-domain = { version = "0.1.0", path = "../taskers-domain" }

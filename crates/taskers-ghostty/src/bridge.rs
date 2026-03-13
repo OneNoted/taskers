@@ -1,11 +1,20 @@
 use std::{
-    ffi::{CString, c_char, c_int, c_void},
+    ffi::{CString, c_char},
     path::PathBuf,
+};
+
+#[cfg(taskers_ghostty_bridge)]
+use std::{
+    ffi::{c_int, c_void},
     ptr::NonNull,
 };
 
+use gtk::Widget;
+#[cfg(taskers_ghostty_bridge)]
+use gtk::glib::translate::from_glib_full;
+#[cfg(taskers_ghostty_bridge)]
 use gtk::prelude::ObjectType;
-use gtk::{Widget, glib::translate::from_glib_full};
+#[cfg(taskers_ghostty_bridge)]
 use libloading::Library;
 use thiserror::Error;
 
@@ -99,6 +108,30 @@ impl GhosttyHost {
                 .as_deref()
                 .map(|value| CString::new(value).map_err(|_| GhosttyError::InvalidString("title")))
                 .transpose()?;
+            let command_argv = descriptor
+                .command_argv
+                .iter()
+                .map(|value| {
+                    CString::new(value.as_str())
+                        .map_err(|_| GhosttyError::InvalidString("command_argv"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let command_argv_ptrs = command_argv
+                .iter()
+                .map(|value| value.as_ptr())
+                .collect::<Vec<_>>();
+            let env_entries = descriptor
+                .env
+                .iter()
+                .map(|(key, value)| {
+                    CString::new(format!("{key}={value}"))
+                        .map_err(|_| GhosttyError::InvalidString("env"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let env_entry_ptrs = env_entries
+                .iter()
+                .map(|value| value.as_ptr())
+                .collect::<Vec<_>>();
 
             let options = taskers_ghostty_surface_options_s {
                 working_directory: cwd
@@ -107,6 +140,18 @@ impl GhosttyHost {
                 title: title
                     .as_ref()
                     .map_or(std::ptr::null(), |value| value.as_ptr()),
+                command_argv: if command_argv_ptrs.is_empty() {
+                    std::ptr::null()
+                } else {
+                    command_argv_ptrs.as_ptr()
+                },
+                command_argc: command_argv_ptrs.len(),
+                env_entries: if env_entry_ptrs.is_empty() {
+                    std::ptr::null()
+                } else {
+                    env_entry_ptrs.as_ptr()
+                },
+                env_count: env_entry_ptrs.len(),
             };
 
             let widget = (self.bridge.surface_new)(self.raw.as_ptr(), &options);
@@ -306,4 +351,8 @@ struct taskers_ghostty_host_t {
 struct taskers_ghostty_surface_options_s {
     working_directory: *const c_char,
     title: *const c_char,
+    command_argv: *const *const c_char,
+    command_argc: usize,
+    env_entries: *const *const c_char,
+    env_count: usize,
 }

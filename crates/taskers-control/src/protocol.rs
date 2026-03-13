@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use taskers_domain::{
-    AppModel, Direction, PaneId, PaneMetadataPatch, PersistedSession, SignalEvent, SplitAxis,
-    WindowFrame, WindowId, WorkspaceId, WorkspaceViewport, WorkspaceWindowId,
+    AppModel, Direction, PaneId, PaneKind, PaneMetadataPatch, PersistedSession, SignalEvent,
+    SplitAxis, SurfaceId, WindowFrame, WindowId, WorkspaceId, WorkspaceViewport, WorkspaceWindowId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +66,30 @@ pub enum ControlCommand {
         pane_id: PaneId,
         patch: PaneMetadataPatch,
     },
+    UpdateSurfaceMetadata {
+        surface_id: SurfaceId,
+        patch: PaneMetadataPatch,
+    },
+    CreateSurface {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        kind: PaneKind,
+    },
+    FocusSurface {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    MarkSurfaceCompleted {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    CloseSurface {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
     SetWorkspaceViewport {
         workspace_id: WorkspaceId,
         viewport: WorkspaceViewport,
@@ -80,6 +104,7 @@ pub enum ControlCommand {
     EmitSignal {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
+        surface_id: Option<SurfaceId>,
         event: SignalEvent,
     },
     QueryStatus {
@@ -107,6 +132,9 @@ pub enum ControlResponse {
     },
     PaneSplit {
         pane_id: PaneId,
+    },
+    SurfaceCreated {
+        surface_id: SurfaceId,
     },
     WorkspaceWindowCreated {
         pane_id: PaneId,

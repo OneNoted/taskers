@@ -45,6 +45,8 @@ impl ShortcutAction {
 pub struct AppConfig {
     #[serde(default)]
     pub keybindings: KeybindingConfig,
+    #[serde(default)]
+    pub shell: ShellConfig,
     #[serde(default = "default_animations_enabled")]
     pub animations_enabled: bool,
 }
@@ -53,9 +55,16 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             keybindings: KeybindingConfig::default(),
+            shell: ShellConfig::default(),
             animations_enabled: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellConfig {
+    #[serde(default)]
+    pub program: Option<String>,
 }
 
 fn default_animations_enabled() -> bool {

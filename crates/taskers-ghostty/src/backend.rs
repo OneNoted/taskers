@@ -1,5 +1,6 @@
 use crate::bridge::{runtime_bridge_path, runtime_resources_dir};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +33,10 @@ pub struct SurfaceDescriptor {
     pub rows: u16,
     pub cwd: Option<String>,
     pub title: Option<String>,
+    #[serde(default)]
+    pub command_argv: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Error)]

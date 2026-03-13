@@ -43,4 +43,5 @@ define_id!(WindowId);
 define_id!(WorkspaceId);
 define_id!(WorkspaceWindowId);
 define_id!(PaneId);
+define_id!(SurfaceId);
 define_id!(SessionId);

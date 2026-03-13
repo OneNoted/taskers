@@ -1,7 +1,11 @@
 [package]
 name = "taskers-control"
+description = "Control protocol and local socket transport for taskers."
 edition.workspace = true
+homepage.workspace = true
 license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
 version.workspace = true
 
 [dependencies]
@@ -11,7 +15,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-taskers-domain = { path = "../taskers-domain" }
+taskers-domain = { version = "0.1.0", path = "../taskers-domain" }
 
 [dev-dependencies]
 tempfile.workspace = true

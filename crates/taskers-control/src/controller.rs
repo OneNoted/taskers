@@ -146,6 +146,50 @@ impl InMemoryController {
                     message: "pane metadata updated".into(),
                 })
             }
+            ControlCommand::UpdateSurfaceMetadata { surface_id, patch } => {
+                model.update_surface_metadata(surface_id, patch)?;
+                Ok(ControlResponse::Ack {
+                    message: "surface metadata updated".into(),
+                })
+            }
+            ControlCommand::CreateSurface {
+                workspace_id,
+                pane_id,
+                kind,
+            } => {
+                let surface_id = model.create_surface(workspace_id, pane_id, kind)?;
+                Ok(ControlResponse::SurfaceCreated { surface_id })
+            }
+            ControlCommand::FocusSurface {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                model.focus_surface(workspace_id, pane_id, surface_id)?;
+                Ok(ControlResponse::Ack {
+                    message: "surface focused".into(),
+                })
+            }
+            ControlCommand::MarkSurfaceCompleted {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                model.mark_surface_completed(workspace_id, pane_id, surface_id)?;
+                Ok(ControlResponse::Ack {
+                    message: "surface marked completed".into(),
+                })
+            }
+            ControlCommand::CloseSurface {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                model.close_surface(workspace_id, pane_id, surface_id)?;
+                Ok(ControlResponse::Ack {
+                    message: "surface closed".into(),
+                })
+            }
             ControlCommand::SetWorkspaceViewport {
                 workspace_id,
                 viewport,
@@ -173,9 +217,14 @@ impl InMemoryController {
             ControlCommand::EmitSignal {
                 workspace_id,
                 pane_id,
+                surface_id,
                 event,
             } => {
-                model.apply_signal(workspace_id, pane_id, event)?;
+                if let Some(surface_id) = surface_id {
+                    model.apply_surface_signal(workspace_id, pane_id, surface_id, event)?;
+                } else {
+                    model.apply_signal(workspace_id, pane_id, event)?;
+                }
                 Ok(ControlResponse::Ack {
                     message: "signal applied".into(),
                 })

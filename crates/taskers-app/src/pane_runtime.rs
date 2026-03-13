@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, InMemoryController};
-use taskers_domain::{AppModel, PaneId, PaneKind, PaneMetadataPatch, WorkspaceId};
-use taskers_runtime::{CommandSpec, PtySession, SignalStreamParser};
+use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
+use taskers_runtime::{CommandSpec, PtySession, ShellLaunchSpec, SignalStreamParser};
 
 const MAX_OUTPUT_CHARS: usize = 24_000;
 
@@ -22,11 +22,12 @@ pub struct PaneRuntimeSnapshot {
 pub struct RuntimeManager {
     enabled: bool,
     controller: InMemoryController,
+    shell_launch: ShellLaunchSpec,
     inner: Arc<Mutex<RuntimeManagerInner>>,
 }
 
 struct RuntimeManagerInner {
-    panes: HashMap<PaneId, PaneRuntime>,
+    surfaces: HashMap<SurfaceId, PaneRuntime>,
 }
 
 struct PaneRuntime {
@@ -36,12 +37,17 @@ struct PaneRuntime {
 }
 
 impl RuntimeManager {
-    pub fn new(controller: InMemoryController, enabled: bool) -> Self {
+    pub fn new(
+        controller: InMemoryController,
+        enabled: bool,
+        shell_launch: ShellLaunchSpec,
+    ) -> Self {
         Self {
             enabled,
             controller,
+            shell_launch,
             inner: Arc::new(Mutex::new(RuntimeManagerInner {
-                panes: HashMap::new(),
+                surfaces: HashMap::new(),
             })),
         }
     }
@@ -51,49 +57,62 @@ impl RuntimeManager {
             return Ok(());
         }
 
-        let model_pane_ids: std::collections::HashSet<PaneId> = model
+        let model_surface_ids: std::collections::HashSet<SurfaceId> = model
             .workspaces
             .values()
-            .flat_map(|ws| ws.panes.keys().copied())
+            .flat_map(|ws| {
+                ws.panes
+                    .values()
+                    .flat_map(|pane| pane.surface_ids())
+                    .collect::<Vec<_>>()
+            })
             .collect();
 
         {
             let mut inner = self.inner.lock().expect("runtime manager mutex poisoned");
-            inner.panes.retain(|id, _| model_pane_ids.contains(id));
+            inner
+                .surfaces
+                .retain(|id, _| model_surface_ids.contains(id));
         }
 
         for (workspace_id, workspace) in &model.workspaces {
             for pane in workspace.panes.values() {
-                if pane.kind != PaneKind::Terminal {
-                    continue;
-                }
+                for surface in pane.surfaces.values() {
+                    if surface.kind != PaneKind::Terminal {
+                        continue;
+                    }
 
-                let mut inner = self.inner.lock().expect("runtime manager mutex poisoned");
-                if inner.panes.contains_key(&pane.id) {
-                    continue;
-                }
+                    let mut inner = self.inner.lock().expect("runtime manager mutex poisoned");
+                    if inner.surfaces.contains_key(&surface.id) {
+                        continue;
+                    }
 
-                let runtime = spawn_pane_runtime(
-                    self.controller.clone(),
-                    *workspace_id,
-                    pane.id,
-                    pane.metadata.cwd.as_deref().map(PathBuf::from),
-                )
-                .with_context(|| format!("failed to spawn shell runtime for pane {}", pane.id))?;
-                inner.panes.insert(pane.id, runtime);
+                    let runtime = spawn_surface_runtime(
+                        self.controller.clone(),
+                        self.shell_launch.clone(),
+                        *workspace_id,
+                        pane.id,
+                        surface.id,
+                        surface.metadata.cwd.as_deref().map(PathBuf::from),
+                    )
+                    .with_context(|| {
+                        format!("failed to spawn shell runtime for surface {}", surface.id)
+                    })?;
+                    inner.surfaces.insert(surface.id, runtime);
+                }
             }
         }
 
         Ok(())
     }
 
-    pub fn snapshot(&self, pane_id: PaneId) -> Option<PaneRuntimeSnapshot> {
+    pub fn snapshot(&self, surface_id: SurfaceId) -> Option<PaneRuntimeSnapshot> {
         if !self.enabled {
             return None;
         }
 
         let inner = self.inner.lock().expect("runtime manager mutex poisoned");
-        let runtime = inner.panes.get(&pane_id)?;
+        let runtime = inner.surfaces.get(&surface_id)?;
         let output = runtime
             .output
             .lock()
@@ -106,41 +125,49 @@ impl RuntimeManager {
         })
     }
 
-    pub fn send_input(&self, pane_id: PaneId, input: &str) -> Result<()> {
+    pub fn send_input(&self, surface_id: SurfaceId, input: &str) -> Result<()> {
         if !self.enabled {
-            return Err(anyhow!("pane {pane_id} is using the Ghostty backend"));
+            return Err(anyhow!("surface {surface_id} is using the Ghostty backend"));
         }
 
         let session = {
             let inner = self.inner.lock().expect("runtime manager mutex poisoned");
             inner
-                .panes
-                .get(&pane_id)
+                .surfaces
+                .get(&surface_id)
                 .map(|runtime| Arc::clone(&runtime.session))
-                .ok_or_else(|| anyhow!("pane {pane_id} has no live runtime"))?
+                .ok_or_else(|| anyhow!("surface {surface_id} has no live runtime"))?
         };
 
         let mut session = session.lock().expect("pty session mutex poisoned");
         session
             .write_all(input.as_bytes())
-            .with_context(|| format!("failed to send input to pane {pane_id}"))?;
+            .with_context(|| format!("failed to send input to surface {surface_id}"))?;
         Ok(())
     }
 }
 
-fn spawn_pane_runtime(
+fn spawn_surface_runtime(
     controller: InMemoryController,
+    shell_launch: ShellLaunchSpec,
     workspace_id: WorkspaceId,
     pane_id: PaneId,
+    surface_id: SurfaceId,
     cwd: Option<PathBuf>,
 ) -> Result<PaneRuntime> {
-    let mut spec = CommandSpec::shell();
+    let mut spec = CommandSpec::new(shell_launch.program.display().to_string());
+    spec.args = shell_launch.args;
     spec.cwd = cwd;
-    spec.env.insert("TERM".into(), "xterm-256color".into());
+    spec.env.extend(shell_launch.env);
+    spec.env
+        .entry("TERM".into())
+        .or_insert_with(|| "xterm-256color".into());
     spec.env
         .insert("TASKERS_PANE_ID".into(), pane_id.to_string());
     spec.env
         .insert("TASKERS_WORKSPACE_ID".into(), workspace_id.to_string());
+    spec.env
+        .insert("TASKERS_SURFACE_ID".into(), surface_id.to_string());
 
     let spawned = PtySession::spawn(&spec)?;
     let process_id = spawned.session.process_id();
@@ -156,9 +183,10 @@ fn spawn_pane_runtime(
         loop {
             match reader.read_into(&mut buffer) {
                 Ok(0) => {
-                    let _ = controller.handle(ControlCommand::ClosePane {
+                    let _ = controller.handle(ControlCommand::CloseSurface {
                         workspace_id,
                         pane_id,
+                        surface_id,
                     });
                     break;
                 }
@@ -173,28 +201,16 @@ fn spawn_pane_runtime(
                         let _ = controller.handle(ControlCommand::EmitSignal {
                             workspace_id,
                             pane_id,
+                            surface_id: Some(surface_id),
                             event: signal.clone().into_event("pty"),
                         });
-
-                        if let Some(title) = signal.title {
-                            let _ = controller.handle(ControlCommand::UpdatePaneMetadata {
-                                pane_id,
-                                patch: PaneMetadataPatch {
-                                    title: Some(title),
-                                    cwd: None,
-                                    repo_name: None,
-                                    git_branch: None,
-                                    ports: None,
-                                    agent_kind: None,
-                                },
-                            });
-                        }
                     }
                 }
                 Err(_) => {
-                    let _ = controller.handle(ControlCommand::ClosePane {
+                    let _ = controller.handle(ControlCommand::CloseSurface {
                         workspace_id,
                         pane_id,
+                        surface_id,
                     });
                     break;
                 }

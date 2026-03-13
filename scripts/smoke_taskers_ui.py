@@ -127,7 +127,7 @@ def launch_xvfb(temp_dir: Path) -> tuple[str, subprocess.Popen[str]]:
 
 def build_binaries() -> None:
     run_command(
-        ["cargo", "build", "-p", "taskers-app", "-p", "taskers-cli"],
+        ["cargo", "build", "-p", "taskers", "-p", "taskers-cli"],
         capture_output=False,
     )
 
@@ -260,6 +260,9 @@ def assert_integrity_matches_model(model: dict[str, Any], integrity: dict[str, A
     expected_workspace_panes = sorted(workspace["panes"].keys())
     expected_layout_panes = workspace_window_leaves(workspace)
     expected_layout_panes_sorted = sorted(expected_layout_panes)
+    expected_layout_surface_ids = sorted(
+        workspace["panes"][pane_id]["active_surface"] for pane_id in expected_layout_panes
+    )
     attached_pane_cards = sorted(integrity["attached_pane_card_ids"])
     expected_window_ids = sorted(workspace["windows"].keys())
     expected_active_window_id = workspace["active_window"]
@@ -347,11 +350,11 @@ def assert_integrity_matches_model(model: dict[str, Any], integrity: dict[str, A
     cached_ghostty_surfaces = integrity["cached_ghostty_surface_ids"]
     attached_ghostty_surfaces = sorted(integrity["attached_ghostty_surface_ids"])
     if cached_ghostty_surfaces:
-        if attached_ghostty_surfaces != expected_layout_panes_sorted:
+        if attached_ghostty_surfaces != expected_layout_surface_ids:
             raise AssertionError(
-                "attached Ghostty surfaces do not match active layout panes"
+                "attached Ghostty surfaces do not match active layout surfaces"
             )
-        if not set(expected_layout_panes_sorted).issubset(cached_ghostty_surfaces):
+        if not set(expected_layout_surface_ids).issubset(cached_ghostty_surfaces):
             raise AssertionError("not all active layout panes have cached Ghostty surfaces")
     if (
         integrity["active_pane_focus_widget_type"] is not None

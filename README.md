@@ -1,6 +1,14 @@
 # taskers
 
-`taskers` is an agent-first terminal workspace app scaffolded around a Linux-first Rust shell, a flexible terminal backend boundary, and CMUX-style workspace/pane attention routing.
+`taskers` is an agent-first terminal workspace app scaffolded around a Linux-first Rust shell, a flexible terminal backend boundary, and a Niri-like tiling model for terminal workspaces.
+
+## Tiling model
+
+- Each workspace is a scrollable canvas of top-level terminal windows rather than one monolithic fullscreen split tree.
+- Creating a new terminal window places it next to the active one in a cardinal direction, producing the same "keep moving through the workspace" feel as Niri-style tiling.
+- Each top-level window owns its own split tree, so related panes stay grouped locally without flattening the whole workspace into one layout.
+- Directional focus prefers neighboring top-level windows first, then falls back to pane-to-pane movement inside the active window.
+- Workspace viewport position is persisted, and overview mode zooms the current workspace out to fit the full arrangement on screen.
 
 ## Workspace layout
 
@@ -14,15 +22,19 @@
 ## Quick start
 
 ```bash
-cargo run -p taskers-app
+cargo run -p taskers
 ```
 
 ```bash
-cargo run -p taskers-app -- --demo
+cargo run -p taskers -- --demo
 ```
 
 ```bash
 cargo run -p taskers-cli -- query status --socket /tmp/taskers.sock
+```
+
+```bash
+cargo run -p taskers-cli -- pane new-window --workspace <workspace-id> --direction right
 ```
 
 ```bash
@@ -74,11 +86,11 @@ This installs the `taskers` binary into Cargo's bin directory and writes a deskt
 
 This foundation now includes:
 
-- domain model, layout tree, attention state reducer, and persistence snapshot
-- explicit control protocol and Unix socket transport
+- domain model for scrollable workspaces, top-level workspace windows, nested pane layout trees, attention state, and persistence snapshots
+- explicit control protocol and Unix socket transport for workspace, window, pane, and viewport updates
 - PTY spawning foundation and explicit OSC marker parsing
-- GTK shell with live workspace switching, pane focus, split actions, autosave, and an app-hosted control server
+- GTK shell with live workspace switching, overview mode, directional workspace-window focus, split actions, autosave, and an app-hosted control server
 - real shell sessions per terminal pane, with live output streaming and input-on-enter in the pane UI
-- session load/save support with configurable session and socket paths
+- session load/save support with configurable session and socket paths, including persisted workspace viewport state
 
 The actual libghostty embedding work is intentionally isolated behind `taskers-ghostty` so the app shell and domain logic stay stable if the integration strategy changes.

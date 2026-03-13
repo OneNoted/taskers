@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, ControlResponse, InMemoryController};
 use taskers_domain::AppModel;
 use taskers_ghostty::BackendChoice;
+use taskers_runtime::ShellLaunchSpec;
 
 use crate::{pane_runtime::RuntimeManager, session_store};
 
@@ -15,9 +16,18 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(model: AppModel, session_path: PathBuf, backend: BackendChoice) -> Result<Self> {
+    pub fn new(
+        model: AppModel,
+        session_path: PathBuf,
+        backend: BackendChoice,
+        shell_launch: ShellLaunchSpec,
+    ) -> Result<Self> {
         let controller = InMemoryController::new(model.clone());
-        let runtime = RuntimeManager::new(controller.clone(), backend != BackendChoice::Ghostty);
+        let runtime = RuntimeManager::new(
+            controller.clone(),
+            backend != BackendChoice::Ghostty,
+            shell_launch,
+        );
         runtime.sync_model(&model)?;
 
         let state = Self {

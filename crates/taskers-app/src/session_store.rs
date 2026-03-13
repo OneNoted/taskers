@@ -32,7 +32,18 @@ pub fn default_session_path() -> PathBuf {
 
 pub fn load_or_bootstrap(path: &Path, demo: bool) -> Result<AppModel> {
     if path.exists() {
-        load_session(path)
+        match load_session(path) {
+            Ok(model) => Ok(model),
+            Err(error) => {
+                backup_incompatible_session(path)?;
+                eprintln!("failed to load session from {}: {}", path.display(), error);
+                if demo {
+                    Ok(AppModel::demo())
+                } else {
+                    Ok(AppModel::new("Workspace 1"))
+                }
+            }
+        }
     } else if demo {
         Ok(AppModel::demo())
     } else {
@@ -64,6 +75,15 @@ pub fn save_session(path: &Path, model: &AppModel) -> Result<()> {
     let data = serde_json::to_string_pretty(&session)?;
     fs::write(path, data)?;
 
+    Ok(())
+}
+
+fn backup_incompatible_session(path: &Path) -> Result<()> {
+    let backup_path = path.with_extension("json.bak");
+    if backup_path.exists() {
+        fs::remove_file(&backup_path)?;
+    }
+    fs::rename(path, backup_path)?;
     Ok(())
 }
 
