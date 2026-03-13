@@ -50,6 +50,18 @@ python3 scripts/check_ghostty_vendor_large_files.py
 This fails if new files over 1 MiB appear outside the approved Ghostty allowlist, or if an
 approved file grows past the repo-local `jj` limit.
 
+## UI smoke test
+
+Run the GTK/Ghostty smoke harness with:
+
+```bash
+python3 scripts/smoke_taskers_ui.py
+```
+
+This builds the local debug binaries, launches `taskers-app` under `Xvfb`, drives the app
+through the existing control socket, and asserts that the rendered pane/layout state stays
+consistent across pane split/close, workspace switch/close, and session restore.
+
 ## Install locally
 
 ```bash

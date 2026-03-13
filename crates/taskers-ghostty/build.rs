@@ -68,7 +68,5 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    panic!(
-        "failed to build vendored Ghostty bridge\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    panic!("failed to build vendored Ghostty bridge\nstdout:\n{stdout}\nstderr:\n{stderr}");
 }

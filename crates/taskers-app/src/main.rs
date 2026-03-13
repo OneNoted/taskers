@@ -20,6 +20,7 @@ use gtk::{
     STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, TextView, Widget, WrapMode, gdk, glib,
 };
 use pane_runtime::PaneRuntimeSnapshot;
+use serde_json::json;
 use taskers_control::{
     ControlCommand, InMemoryController, bind_socket, default_socket_path, serve,
 };
@@ -134,6 +135,7 @@ impl UiHandle {
         // for closed panes stay alive during the Paned tree teardown, avoiding
         // shared GL context corruption.
         self.cleanup_stale_panes(&model);
+        self.write_ui_integrity_snapshot(&model);
         *self.last_rendered.borrow_mut() = Some(model);
     }
 
@@ -221,7 +223,9 @@ impl UiHandle {
             .values()
             .flat_map(|ws| ws.panes.keys().copied())
             .collect();
-        self.pane_cards.borrow_mut().retain(|id, _| live.contains(id));
+        self.pane_cards
+            .borrow_mut()
+            .retain(|id, _| live.contains(id));
         self.ghostty_surfaces
             .borrow_mut()
             .retain(|id, _| live.contains(id));
@@ -237,6 +241,118 @@ impl UiHandle {
         update_sidebar(self, &shell, model);
         update_toolbar(&shell, model);
         update_layout(self, &shell, model);
+    }
+
+    fn write_ui_integrity_snapshot(&self, model: &AppModel) {
+        let Some(path) = std::env::var_os("TASKERS_UI_INTEGRITY_PATH").map(PathBuf::from) else {
+            return;
+        };
+
+        let (cached_pane_card_ids, attached_pane_card_ids) = {
+            let pane_cards = self.pane_cards.borrow();
+            (
+                sorted_id_strings(pane_cards.keys().copied()),
+                sorted_id_strings(
+                    pane_cards
+                        .iter()
+                        .filter_map(|(id, card)| card.root.parent().is_some().then_some(*id)),
+                ),
+            )
+        };
+
+        let (cached_ghostty_surface_ids, attached_ghostty_surface_ids) = {
+            let ghostty_surfaces = self.ghostty_surfaces.borrow();
+            let pane_cards = self.pane_cards.borrow();
+            (
+                sorted_id_strings(ghostty_surfaces.keys().copied()),
+                sorted_id_strings(ghostty_surfaces.iter().filter_map(|(id, widget)| {
+                    let in_live_layout = pane_cards
+                        .get(id)
+                        .is_some_and(|card| card.root.parent().is_some());
+                    (in_live_layout && widget.parent().is_some()).then_some(*id)
+                })),
+            )
+        };
+
+        let (layout_host_child_count, layout_root_widget_type) = {
+            let shell = self.shell.borrow();
+            shell.as_ref().map_or((0, None), |shell| {
+                (
+                    count_widget_children(shell.layout_host.upcast_ref()),
+                    shell
+                        .layout_host
+                        .first_child()
+                        .map(|child| child.type_().name().to_string()),
+                )
+            })
+        };
+
+        let all_live_pane_ids = sorted_id_strings(
+            model
+                .workspaces
+                .values()
+                .flat_map(|workspace| workspace.panes.keys().copied()),
+        );
+        let (active_workspace_pane_ids, active_layout_pane_ids, active_workspace_label) =
+            model.active_workspace().map_or_else(
+                || (Vec::new(), Vec::new(), None),
+                |workspace| {
+                    (
+                        sorted_id_strings(workspace.panes.keys().copied()),
+                        sorted_id_strings(workspace.layout.leaves()),
+                        Some(workspace.label.clone()),
+                    )
+                },
+            );
+
+        let payload = json!({
+            "active_workspace_id": model.active_workspace_id().map(|id| id.to_string()),
+            "active_workspace_label": active_workspace_label,
+            "all_live_pane_ids": all_live_pane_ids,
+            "active_workspace_pane_ids": active_workspace_pane_ids,
+            "active_layout_pane_ids": active_layout_pane_ids,
+            "cached_pane_card_ids": cached_pane_card_ids,
+            "attached_pane_card_ids": attached_pane_card_ids,
+            "cached_ghostty_surface_ids": cached_ghostty_surface_ids,
+            "attached_ghostty_surface_ids": attached_ghostty_surface_ids,
+            "layout_host_child_count": layout_host_child_count,
+            "layout_root_widget_type": layout_root_widget_type,
+        });
+
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "failed to create taskers UI integrity directory {}: {error}",
+                parent.display()
+            );
+            return;
+        }
+
+        let tmp_path = path.with_extension("tmp");
+        let encoded = match serde_json::to_vec_pretty(&payload) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                eprintln!("failed to encode taskers UI integrity snapshot: {error}");
+                return;
+            }
+        };
+
+        if let Err(error) = std::fs::write(&tmp_path, encoded) {
+            eprintln!(
+                "failed to write taskers UI integrity snapshot to {}: {error}",
+                tmp_path.display()
+            );
+            return;
+        }
+
+        if let Err(error) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            eprintln!(
+                "failed to publish taskers UI integrity snapshot to {}: {error}",
+                path.display()
+            );
+        }
     }
 
     fn pane_card(
@@ -485,10 +601,7 @@ fn initialize_terminal_backend(
             None,
         ),
         Err(error) => {
-            let note = format!(
-                "{} Falling back to placeholder terminal surfaces.",
-                error
-            );
+            let note = format!("{} Falling back to placeholder terminal surfaces.", error);
             let toast = format!("Ghostty backend unavailable: {error}");
             (BackendChoice::Mock, note, None, Some(toast))
         }
@@ -767,11 +880,7 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     }
 }
 
-fn build_layout_widget(
-    ui: &Rc<UiHandle>,
-    workspace: &Workspace,
-    node: &LayoutNode,
-) -> gtk::Widget {
+fn build_layout_widget(ui: &Rc<UiHandle>, workspace: &Workspace, node: &LayoutNode) -> gtk::Widget {
     match node {
         LayoutNode::Leaf { pane_id } => {
             let pane = workspace
@@ -888,6 +997,18 @@ fn clear_box(container: &GtkBox) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
+}
+
+fn count_widget_children(widget: &Widget) -> usize {
+    let mut count = 0;
+    let mut child = widget.first_child();
+
+    while let Some(current) = child {
+        count += 1;
+        child = current.next_sibling();
+    }
+
+    count
 }
 
 fn attention_dot_class(state: AttentionState) -> String {
@@ -1021,22 +1142,45 @@ fn connect_ghostty_widget(
 }
 
 fn detach_widget(widget: &Widget) {
-    if widget.parent().is_none() {
+    let Some(parent) = widget.parent() else {
+        return;
+    };
+
+    // Reparent through the actual container API. Calling gtk_widget_unparent()
+    // directly from app code bypasses the parent's bookkeeping and can leave
+    // reused pane widgets in a visually corrupted state after split/close
+    // rebuilds.
+    if let Ok(container) = parent.clone().downcast::<GtkBox>() {
+        container.remove(widget);
         return;
     }
 
-    unsafe {
-        gtk::ffi::gtk_widget_unparent(widget.as_ptr());
+    if let Ok(paned) = parent.downcast::<Paned>() {
+        if paned
+            .start_child()
+            .as_ref()
+            .is_some_and(|child| child == widget)
+        {
+            paned.set_start_child(None::<&Widget>);
+            return;
+        }
+
+        if paned
+            .end_child()
+            .as_ref()
+            .is_some_and(|child| child == widget)
+        {
+            paned.set_end_child(None::<&Widget>);
+            return;
+        }
     }
+
+    unreachable!("unsupported parent type for detachable widget");
 }
 
 fn format_pane_meta(pane: &PaneRecord, snapshot: Option<&PaneRuntimeSnapshot>) -> String {
     let cwd = pane.metadata.cwd.as_deref().unwrap_or("cwd unknown");
-    let branch = pane
-        .metadata
-        .git_branch
-        .as_deref()
-        .unwrap_or("no branch");
+    let branch = pane.metadata.git_branch.as_deref().unwrap_or("no branch");
     let agent = pane.metadata.agent_kind.as_deref().unwrap_or("shell");
     let ports = if pane.metadata.ports.is_empty() {
         "no ports".into()
@@ -1053,9 +1197,20 @@ fn format_pane_meta(pane: &PaneRecord, snapshot: Option<&PaneRuntimeSnapshot>) -
         .map(|process_id| format!("pid {process_id}"))
         .unwrap_or_else(|| "starting shell".into());
 
-    format!(
-        "{agent}  \u{2022}  {cwd}  \u{2022}  {branch}  \u{2022}  {ports}  \u{2022}  {process}"
-    )
+    format!("{agent}  \u{2022}  {cwd}  \u{2022}  {branch}  \u{2022}  {ports}  \u{2022}  {process}")
+}
+
+fn sorted_id_strings<I, T>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = T>,
+    T: ToString,
+{
+    let mut ids = values
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 fn spawn_control_server(controller: InMemoryController, socket_path: PathBuf) -> String {

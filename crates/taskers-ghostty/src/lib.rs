@@ -1,5 +1,5 @@
-pub mod bridge;
 pub mod backend;
+pub mod bridge;
 
 pub use backend::{
     AdapterError, BackendAvailability, BackendChoice, BackendProbe, DefaultBackend,

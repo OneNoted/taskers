@@ -99,8 +99,12 @@ impl GhosttyHost {
                 .transpose()?;
 
             let options = taskers_ghostty_surface_options_s {
-                working_directory: cwd.as_ref().map_or(std::ptr::null(), |value| value.as_ptr()),
-                title: title.as_ref().map_or(std::ptr::null(), |value| value.as_ptr()),
+                working_directory: cwd
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                title: title
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
             };
 
             let widget = (self.bridge.surface_new)(self.raw.as_ptr(), &options);
@@ -199,9 +203,12 @@ fn installed_runtime_dir() -> Option<PathBuf> {
         return Some(path);
     }
 
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join(".local").join("share").join("taskers").join("ghostty"))
+    std::env::var_os("HOME").map(PathBuf::from).map(|path| {
+        path.join(".local")
+            .join("share")
+            .join("taskers")
+            .join("ghostty")
+    })
 }
 
 #[cfg(taskers_ghostty_bridge)]
@@ -240,12 +247,10 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
                 message: error.to_string(),
             })?;
         let surface_new = *library
-            .get::<
-                unsafe extern "C" fn(
-                    *mut taskers_ghostty_host_t,
-                    *const taskers_ghostty_surface_options_s,
-                ) -> *mut c_void,
-            >(b"taskers_ghostty_surface_new\0")
+            .get::<unsafe extern "C" fn(
+                *mut taskers_ghostty_host_t,
+                *const taskers_ghostty_surface_options_s,
+            ) -> *mut c_void>(b"taskers_ghostty_surface_new\0")
             .map_err(|error| GhosttyError::LibraryLoad {
                 path: path.clone(),
                 message: error.to_string(),

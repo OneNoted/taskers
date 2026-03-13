@@ -17,10 +17,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(model: AppModel, session_path: PathBuf, backend: BackendChoice) -> Result<Self> {
         let controller = InMemoryController::new(model.clone());
-        let runtime = RuntimeManager::new(
-            controller.clone(),
-            backend != BackendChoice::Ghostty,
-        );
+        let runtime = RuntimeManager::new(controller.clone(), backend != BackendChoice::Ghostty);
         runtime.sync_model(&model)?;
 
         let state = Self {

@@ -78,6 +78,12 @@ enum WorkspaceCommand {
         #[arg(long)]
         label: String,
     },
+    Switch {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+    },
     Rename {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -85,6 +91,12 @@ enum WorkspaceCommand {
         workspace: WorkspaceId,
         #[arg(long)]
         label: String,
+    },
+    Close {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
     },
 }
 
@@ -101,6 +113,14 @@ enum PaneCommand {
         axis: CliAxis,
     },
     Focus {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long)]
+        pane: PaneId,
+    },
+    Close {
         #[arg(long)]
         socket: Option<PathBuf>,
         #[arg(long)]
@@ -226,6 +246,16 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             }
+            WorkspaceCommand::Switch { socket, workspace } => {
+                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let response = client
+                    .send(ControlCommand::SwitchWorkspace {
+                        window_id: None,
+                        workspace_id: workspace,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
             WorkspaceCommand::Rename {
                 socket,
                 workspace,
@@ -236,6 +266,15 @@ async fn main() -> anyhow::Result<()> {
                     .send(ControlCommand::RenameWorkspace {
                         workspace_id: workspace,
                         label,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            WorkspaceCommand::Close { socket, workspace } => {
+                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let response = client
+                    .send(ControlCommand::CloseWorkspace {
+                        workspace_id: workspace,
                     })
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
@@ -266,6 +305,20 @@ async fn main() -> anyhow::Result<()> {
                 let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
                 let response = client
                     .send(ControlCommand::FocusPane {
+                        workspace_id: workspace,
+                        pane_id: pane,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            PaneCommand::Close {
+                socket,
+                workspace,
+                pane,
+            } => {
+                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let response = client
+                    .send(ControlCommand::ClosePane {
                         workspace_id: workspace,
                         pane_id: pane,
                     })
@@ -388,7 +441,10 @@ fn install_app(skip_build: bool) -> anyhow::Result<()> {
             .join("libtaskers_ghostty_bridge.so")
             .display()
     );
-    println!("Ghostty locale: {}", taskers_data_dir.join("locale").display());
+    println!(
+        "Ghostty locale: {}",
+        taskers_data_dir.join("locale").display()
+    );
 
     Ok(())
 }
@@ -430,7 +486,9 @@ fn install_ghostty_runtime(
     locale_dir: &Path,
     terminfo_dir: &Path,
 ) -> anyhow::Result<()> {
-    let staging_dir = workspace_root.join("target").join("taskers-ghostty-install");
+    let staging_dir = workspace_root
+        .join("target")
+        .join("taskers-ghostty-install");
     let status = ProcessCommand::new("zig")
         .current_dir(workspace_root.join("vendor").join("ghostty"))
         .args([
@@ -450,25 +508,24 @@ fn install_ghostty_runtime(
         anyhow::bail!("zig build for Ghostty runtime assets exited with status {status}");
     }
 
-    copy_directory(
-        &staging_dir.join("share").join("ghostty"),
-        resources_dir,
-    )
-    .with_context(|| format!("failed to copy Ghostty resources to {}", resources_dir.display()))?;
+    copy_directory(&staging_dir.join("share").join("ghostty"), resources_dir).with_context(
+        || {
+            format!(
+                "failed to copy Ghostty resources to {}",
+                resources_dir.display()
+            )
+        },
+    )?;
     copy_directory(&staging_dir.join("lib"), &resources_dir.join("lib")).with_context(|| {
         format!(
             "failed to copy Ghostty bridge libraries to {}",
             resources_dir.join("lib").display()
         )
     })?;
-    copy_directory(&staging_dir.join("share").join("locale"), locale_dir).with_context(|| {
-        format!("failed to copy locale files to {}", locale_dir.display())
-    })?;
-    copy_directory(
-        &staging_dir.join("share").join("terminfo"),
-        terminfo_dir,
-    )
-    .with_context(|| format!("failed to copy terminfo to {}", terminfo_dir.display()))?;
+    copy_directory(&staging_dir.join("share").join("locale"), locale_dir)
+        .with_context(|| format!("failed to copy locale files to {}", locale_dir.display()))?;
+    copy_directory(&staging_dir.join("share").join("terminfo"), terminfo_dir)
+        .with_context(|| format!("failed to copy terminfo to {}", terminfo_dir.display()))?;
 
     Ok(())
 }
