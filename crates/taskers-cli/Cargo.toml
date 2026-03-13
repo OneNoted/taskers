@@ -1,0 +1,18 @@
+[package]
+name = "taskers-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "taskersctl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+taskers-control = { path = "../taskers-control" }
+taskers-domain = { path = "../taskers-domain" }

@@ -1,0 +1,25 @@
+[package]
+name = "taskers-app"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "taskers"
+path = "src/main.rs"
+
+[dependencies]
+adw.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+gtk.workspace = true
+serde_json.workspace = true
+taskers-runtime = { path = "../taskers-runtime" }
+tokio.workspace = true
+taskers-control = { path = "../taskers-control" }
+taskers-domain = { path = "../taskers-domain" }
+taskers-ghostty = { path = "../taskers-ghostty" }
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
