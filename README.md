@@ -29,6 +29,27 @@ cargo run -p taskers-cli -- query status --socket /tmp/taskers.sock
 cargo run -p taskers-cli -- pane split --workspace <workspace-id> --axis vertical
 ```
 
+## Repository setup
+
+If you use `jj` in this repository, run the repo setup script once per clone:
+
+```bash
+./scripts/setup-jj.sh
+```
+
+The vendored Ghostty tree includes approved upstream assets larger than Jujutsu's default
+1 MiB snapshot limit. The setup script raises the repo-local limit just enough to snapshot
+the current vendored tree without changing your global `jj` behavior.
+
+When refreshing `vendor/ghostty`, run the large-file check before pushing:
+
+```bash
+python3 scripts/check_ghostty_vendor_large_files.py
+```
+
+This fails if new files over 1 MiB appear outside the approved Ghostty allowlist, or if an
+approved file grows past the repo-local `jj` limit.
+
 ## Install locally
 
 ```bash
