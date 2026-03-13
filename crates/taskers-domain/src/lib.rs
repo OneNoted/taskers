@@ -5,11 +5,13 @@ pub mod model;
 pub mod signal;
 
 pub use attention::AttentionState;
-pub use ids::{PaneId, SessionId, WindowId, WorkspaceId};
-pub use layout::{LayoutNode, SplitAxis};
+pub use ids::{PaneId, SessionId, WindowId, WorkspaceId, WorkspaceWindowId};
+pub use layout::{Direction, LayoutNode, SplitAxis};
 pub use model::{
-    ActivityItem, AppModel, DomainError, NotificationItem, PaneKind, PaneMetadata,
-    PaneMetadataPatch, PaneRecord, PersistedSession, SESSION_SCHEMA_VERSION, WindowRecord,
-    Workspace, WorkspaceSummary,
+    ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, DEFAULT_WORKSPACE_WINDOW_HEIGHT,
+    DEFAULT_WORKSPACE_WINDOW_WIDTH, DomainError, KEYBOARD_RESIZE_STEP, MIN_WORKSPACE_WINDOW_HEIGHT,
+    NotificationItem, PaneKind, PaneMetadata, PaneMetadataPatch, PaneRecord, PersistedSession,
+    SESSION_SCHEMA_VERSION, WindowFrame, WindowRecord, Workspace, WorkspaceSummary,
+    WorkspaceViewport, WorkspaceWindowRecord,
 };
 pub use signal::{SignalEvent, SignalKind};

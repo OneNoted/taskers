@@ -1039,6 +1039,7 @@ dependencies = [
  "clap",
  "gtk4",
  "libadwaita",
+ "serde",
  "serde_json",
  "taskers-control",
  "taskers-domain",

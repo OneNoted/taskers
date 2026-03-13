@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, ControlResponse, InMemoryController};
@@ -31,10 +31,6 @@ impl AppState {
 
     pub fn controller(&self) -> InMemoryController {
         self.controller.clone()
-    }
-
-    pub fn session_path(&self) -> &Path {
-        &self.session_path
     }
 
     pub fn runtime(&self) -> RuntimeManager {

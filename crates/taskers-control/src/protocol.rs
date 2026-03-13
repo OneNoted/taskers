@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use taskers_domain::{
-    AppModel, PaneId, PaneMetadataPatch, PersistedSession, SignalEvent, SplitAxis, WindowId,
-    WorkspaceId,
+    AppModel, Direction, PaneId, PaneMetadataPatch, PersistedSession, SignalEvent, SplitAxis,
+    WindowFrame, WindowId, WorkspaceId, WorkspaceViewport, WorkspaceWindowId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,13 +25,50 @@ pub enum ControlCommand {
         pane_id: Option<PaneId>,
         axis: SplitAxis,
     },
+    CreateWorkspaceWindow {
+        workspace_id: WorkspaceId,
+        direction: Direction,
+    },
+    FocusWorkspaceWindow {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+    },
     FocusPane {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
     },
+    FocusPaneDirection {
+        workspace_id: WorkspaceId,
+        direction: Direction,
+    },
+    ResizeActiveWindow {
+        workspace_id: WorkspaceId,
+        direction: Direction,
+        amount: i32,
+    },
+    ResizeActivePaneSplit {
+        workspace_id: WorkspaceId,
+        direction: Direction,
+        amount: i32,
+    },
+    SetWorkspaceWindowFrame {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        frame: WindowFrame,
+    },
+    SetWindowSplitRatio {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
     UpdatePaneMetadata {
         pane_id: PaneId,
         patch: PaneMetadataPatch,
+    },
+    SetWorkspaceViewport {
+        workspace_id: WorkspaceId,
+        viewport: WorkspaceViewport,
     },
     ClosePane {
         workspace_id: WorkspaceId,
@@ -69,6 +106,9 @@ pub enum ControlResponse {
         workspace_id: WorkspaceId,
     },
     PaneSplit {
+        pane_id: PaneId,
+    },
+    WorkspaceWindowCreated {
         pane_id: PaneId,
     },
     Status {

@@ -63,6 +63,24 @@ impl InMemoryController {
                     pane_id: new_pane_id,
                 })
             }
+            ControlCommand::CreateWorkspaceWindow {
+                workspace_id,
+                direction,
+            } => {
+                let new_pane_id = model.create_workspace_window(workspace_id, direction)?;
+                Ok(ControlResponse::WorkspaceWindowCreated {
+                    pane_id: new_pane_id,
+                })
+            }
+            ControlCommand::FocusWorkspaceWindow {
+                workspace_id,
+                workspace_window_id,
+            } => {
+                model.focus_workspace_window(workspace_id, workspace_window_id)?;
+                Ok(ControlResponse::Ack {
+                    message: "workspace window focused".into(),
+                })
+            }
             ControlCommand::FocusPane {
                 workspace_id,
                 pane_id,
@@ -72,10 +90,69 @@ impl InMemoryController {
                     message: "pane focused".into(),
                 })
             }
+            ControlCommand::FocusPaneDirection {
+                workspace_id,
+                direction,
+            } => {
+                model.focus_pane_direction(workspace_id, direction)?;
+                Ok(ControlResponse::Ack {
+                    message: "pane focus moved".into(),
+                })
+            }
+            ControlCommand::ResizeActiveWindow {
+                workspace_id,
+                direction,
+                amount,
+            } => {
+                model.resize_active_window(workspace_id, direction, amount)?;
+                Ok(ControlResponse::Ack {
+                    message: "workspace window resized".into(),
+                })
+            }
+            ControlCommand::ResizeActivePaneSplit {
+                workspace_id,
+                direction,
+                amount,
+            } => {
+                model.resize_active_pane_split(workspace_id, direction, amount)?;
+                Ok(ControlResponse::Ack {
+                    message: "pane split resized".into(),
+                })
+            }
+            ControlCommand::SetWorkspaceWindowFrame {
+                workspace_id,
+                workspace_window_id,
+                frame,
+            } => {
+                model.set_workspace_window_frame(workspace_id, workspace_window_id, frame)?;
+                Ok(ControlResponse::Ack {
+                    message: "workspace window frame updated".into(),
+                })
+            }
+            ControlCommand::SetWindowSplitRatio {
+                workspace_id,
+                workspace_window_id,
+                path,
+                ratio,
+            } => {
+                model.set_window_split_ratio(workspace_id, workspace_window_id, &path, ratio)?;
+                Ok(ControlResponse::Ack {
+                    message: "window split ratio updated".into(),
+                })
+            }
             ControlCommand::UpdatePaneMetadata { pane_id, patch } => {
                 model.update_pane_metadata(pane_id, patch)?;
                 Ok(ControlResponse::Ack {
                     message: "pane metadata updated".into(),
+                })
+            }
+            ControlCommand::SetWorkspaceViewport {
+                workspace_id,
+                viewport,
+            } => {
+                model.set_workspace_viewport(workspace_id, viewport)?;
+                Ok(ControlResponse::Ack {
+                    message: "workspace viewport updated".into(),
                 })
             }
             ControlCommand::ClosePane {

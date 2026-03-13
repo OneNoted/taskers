@@ -4,6 +4,7 @@ use std::{
     ptr::NonNull,
 };
 
+use gtk::prelude::ObjectType;
 use gtk::{Widget, glib::translate::from_glib_full};
 use libloading::Library;
 use thiserror::Error;
@@ -47,6 +48,7 @@ struct GhosttyBridgeLibrary {
         *mut taskers_ghostty_host_t,
         *const taskers_ghostty_surface_options_s,
     ) -> *mut c_void,
+    surface_grab_focus: unsafe extern "C" fn(*mut c_void) -> c_int,
 }
 
 impl GhosttyHost {
@@ -118,6 +120,24 @@ impl GhosttyHost {
         #[cfg(not(taskers_ghostty_bridge))]
         {
             let _ = descriptor;
+            Err(GhosttyError::Unavailable)
+        }
+    }
+
+    pub fn focus_surface(&self, widget: &Widget) -> Result<(), GhosttyError> {
+        #[cfg(taskers_ghostty_bridge)]
+        unsafe {
+            let ok = (self.bridge.surface_grab_focus)(widget.as_ptr().cast());
+            if ok == 0 {
+                Err(GhosttyError::SurfaceInit)
+            } else {
+                Ok(())
+            }
+        }
+
+        #[cfg(not(taskers_ghostty_bridge))]
+        {
+            let _ = widget;
             Err(GhosttyError::Unavailable)
         }
     }
@@ -255,6 +275,14 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
                 path: path.clone(),
                 message: error.to_string(),
             })?;
+        let surface_grab_focus = *library
+            .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(
+                b"taskers_ghostty_surface_grab_focus\0",
+            )
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
 
         Ok(GhosttyBridgeLibrary {
             _library: library,
@@ -262,6 +290,7 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
             host_free,
             host_tick,
             surface_new,
+            surface_grab_focus,
         })
     }
 }

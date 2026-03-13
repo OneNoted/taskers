@@ -41,5 +41,6 @@ macro_rules! define_id {
 
 define_id!(WindowId);
 define_id!(WorkspaceId);
+define_id!(WorkspaceWindowId);
 define_id!(PaneId);
 define_id!(SessionId);

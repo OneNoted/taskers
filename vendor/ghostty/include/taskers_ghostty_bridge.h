@@ -18,6 +18,7 @@ int taskers_ghostty_host_tick(taskers_ghostty_host_t *);
 void *taskers_ghostty_surface_new(
     taskers_ghostty_host_t *,
     const taskers_ghostty_surface_options_s *);
+int taskers_ghostty_surface_grab_focus(void *);
 
 #ifdef __cplusplus
 }

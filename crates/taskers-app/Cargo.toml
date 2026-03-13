@@ -13,6 +13,7 @@ adw.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 gtk.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 taskers-runtime = { path = "../taskers-runtime" }
 tokio.workspace = true

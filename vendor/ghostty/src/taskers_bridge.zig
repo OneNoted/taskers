@@ -91,3 +91,10 @@ pub export fn taskers_ghostty_surface_new(
     _ = surface.refSink();
     return surface.as(gtk.Widget);
 }
+
+pub export fn taskers_ghostty_surface_grab_focus(widget: ?*gtk.Widget) c_int {
+    const ptr = widget orelse return 0;
+    const surface: *Surface = @ptrCast(@alignCast(ptr));
+    surface.grabFocus();
+    return 1;
+}

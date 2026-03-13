@@ -12,7 +12,8 @@ use taskers_control::{
     default_socket_path, serve,
 };
 use taskers_domain::{
-    AppModel, PaneId, PaneMetadataPatch, SignalEvent, SignalKind, SplitAxis, WorkspaceId,
+    AppModel, Direction, KEYBOARD_RESIZE_STEP, PaneId, PaneMetadataPatch, SignalEvent, SignalKind,
+    SplitAxis, WorkspaceId,
 };
 use time::OffsetDateTime;
 
@@ -102,6 +103,14 @@ enum WorkspaceCommand {
 
 #[derive(Debug, Subcommand)]
 enum PaneCommand {
+    NewWindow {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long, value_enum, default_value_t = CliDirection::Right)]
+        direction: CliDirection,
+    },
     Split {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -119,6 +128,34 @@ enum PaneCommand {
         workspace: WorkspaceId,
         #[arg(long)]
         pane: PaneId,
+    },
+    FocusDirection {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long, value_enum)]
+        direction: CliDirection,
+    },
+    ResizeWindow {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long, value_enum)]
+        direction: CliDirection,
+        #[arg(long, default_value_t = KEYBOARD_RESIZE_STEP)]
+        amount: i32,
+    },
+    ResizeSplit {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long, value_enum)]
+        direction: CliDirection,
+        #[arg(long, default_value_t = KEYBOARD_RESIZE_STEP)]
+        amount: i32,
     },
     Close {
         #[arg(long)]
@@ -162,6 +199,14 @@ enum CliAxis {
     Vertical,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 impl From<CliSignalKind> for SignalKind {
     fn from(value: CliSignalKind) -> Self {
         match value {
@@ -180,6 +225,17 @@ impl From<CliAxis> for SplitAxis {
         match value {
             CliAxis::Horizontal => SplitAxis::Horizontal,
             CliAxis::Vertical => SplitAxis::Vertical,
+        }
+    }
+}
+
+impl From<CliDirection> for Direction {
+    fn from(value: CliDirection) -> Self {
+        match value {
+            CliDirection::Left => Direction::Left,
+            CliDirection::Right => Direction::Right,
+            CliDirection::Up => Direction::Up,
+            CliDirection::Down => Direction::Down,
         }
     }
 }
@@ -281,6 +337,20 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Pane { command } => match command {
+            PaneCommand::NewWindow {
+                socket,
+                workspace,
+                direction,
+            } => {
+                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let response = client
+                    .send(ControlCommand::CreateWorkspaceWindow {
+                        workspace_id: workspace,
+                        direction: direction.into(),
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
             PaneCommand::Split {
                 socket,
                 workspace,
@@ -307,6 +377,52 @@ async fn main() -> anyhow::Result<()> {
                     .send(ControlCommand::FocusPane {
                         workspace_id: workspace,
                         pane_id: pane,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            PaneCommand::FocusDirection {
+                socket,
+                workspace,
+                direction,
+            } => {
+                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let response = client
+                    .send(ControlCommand::FocusPaneDirection {
+                        workspace_id: workspace,
+                        direction: direction.into(),
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            PaneCommand::ResizeWindow {
+                socket,
+                workspace,
+                direction,
+                amount,
+            } => {
+                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let response = client
+                    .send(ControlCommand::ResizeActiveWindow {
+                        workspace_id: workspace,
+                        direction: direction.into(),
+                        amount,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            PaneCommand::ResizeSplit {
+                socket,
+                workspace,
+                direction,
+                amount,
+            } => {
+                let client = ControlClient::new(socket.unwrap_or_else(default_socket_path));
+                let response = client
+                    .send(ControlCommand::ResizeActivePaneSplit {
+                        workspace_id: workspace,
+                        direction: direction.into(),
+                        amount,
                     })
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
