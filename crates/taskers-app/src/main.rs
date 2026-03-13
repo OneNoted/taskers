@@ -129,8 +129,11 @@ impl UiHandle {
         }
 
         self.ensure_shell();
-        self.cleanup_stale_panes(&model);
         self.render_model(&model);
+        // Clean up stale caches AFTER layout rebuild so that Ghostty surfaces
+        // for closed panes stay alive during the Paned tree teardown, avoiding
+        // shared GL context corruption.
+        self.cleanup_stale_panes(&model);
         *self.last_rendered.borrow_mut() = Some(model);
     }
 
@@ -736,16 +739,13 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     let needs_rebuild = *ui.layout_state.borrow() != next_state;
 
     if needs_rebuild {
-        // Pre-detach all cached pane cards before destroying old layout tree.
-        // Without this, Paned finalization unrealizes child widgets (including
-        // Ghostty GL/Vulkan surfaces), causing a black screen.
-        for card in ui.pane_cards.borrow().values() {
-            detach_widget(card.root.upcast_ref());
-        }
-        clear_box(&shell.layout_host);
-        if let Some(workspace) = model.active_workspace() {
-            let layout = build_layout_widget(ui, workspace, &workspace.layout);
-            shell.layout_host.append(&layout);
+        // Build new layout FIRST — build_layout_widget detaches surviving pane
+        // cards from the old Paned tree individually.  Dead pane cards stay in
+        // the old tree; their Ghostty surfaces remain referenced in the cache
+        // (cleanup runs later) so finalization of the old tree does not destroy
+        // live GL resources.
+        let new_content: Widget = if let Some(workspace) = model.active_workspace() {
+            build_layout_widget(ui, workspace, &workspace.layout)
         } else {
             let empty = Label::new(Some("No workspace selected"));
             empty.add_css_class("empty-state");
@@ -753,8 +753,10 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             empty.set_yalign(0.5);
             empty.set_hexpand(true);
             empty.set_vexpand(true);
-            shell.layout_host.append(&empty);
-        }
+            empty.upcast()
+        };
+        clear_box(&shell.layout_host);
+        shell.layout_host.append(&new_content);
         *ui.layout_state.borrow_mut() = next_state;
     }
 
