@@ -447,7 +447,6 @@ impl Workspace {
         if let Some(window) = self.windows.get(&window_id) {
             self.active_window = window_id;
             self.active_pane = window.active_pane;
-            self.acknowledge_pane_notifications(window.active_pane);
         }
     }
 
@@ -459,7 +458,6 @@ impl Workspace {
             window.active_pane = pane_id;
         }
         self.sync_active_from_window(window_id);
-        self.acknowledge_pane_notifications(pane_id);
         true
     }
 
@@ -902,9 +900,6 @@ impl AppModel {
             return Err(DomainError::MissingWorkspace(workspace_id));
         }
         window.active_workspace = workspace_id;
-        if let Some(workspace) = self.workspaces.get_mut(&workspace_id) {
-            workspace.acknowledge_pane_notifications(workspace.active_pane);
-        }
         Ok(())
     }
 
@@ -1084,7 +1079,6 @@ impl AppModel {
                 window.active_pane = next_pane;
             }
             workspace.sync_active_from_window(active_window_id);
-            workspace.acknowledge_pane_notifications(next_pane);
         }
 
         Ok(())
@@ -2399,5 +2393,66 @@ mod tests {
                 .map(|summary| summary.state),
             Some(WorkspaceAgentState::Inactive)
         );
+    }
+
+    #[test]
+    fn focusing_waiting_agent_does_not_clear_attention_item() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let window_id = model.active_window;
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface id");
+
+        model
+            .apply_signal(
+                workspace_id,
+                pane_id,
+                SignalEvent::with_metadata(
+                    "test",
+                    SignalKind::WaitingInput,
+                    Some("Need review".into()),
+                    Some(SignalPaneMetadata {
+                        title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                    }),
+                ),
+            )
+            .expect("waiting signal applied");
+
+        let other_workspace_id = model.create_workspace("Docs");
+        assert_eq!(model.activity_items().len(), 1);
+
+        model
+            .switch_workspace(window_id, workspace_id)
+            .expect("switch back to waiting workspace");
+        model
+            .focus_surface(workspace_id, pane_id, surface_id)
+            .expect("focus waiting surface");
+
+        let activity_items = model.activity_items();
+        assert_eq!(activity_items.len(), 1);
+        assert_eq!(activity_items[0].state, AttentionState::WaitingInput);
+        assert_eq!(
+            model
+                .workspaces
+                .get(&workspace_id)
+                .expect("workspace")
+                .notifications
+                .iter()
+                .filter(|item| item.cleared_at.is_none())
+                .count(),
+            1
+        );
+        assert_eq!(model.active_workspace_id(), Some(workspace_id));
+        assert_ne!(workspace_id, other_workspace_id);
     }
 }
