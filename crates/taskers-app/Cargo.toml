@@ -19,11 +19,11 @@ clap.workspace = true
 gtk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-taskers-runtime = { version = "0.1.0", path = "../taskers-runtime" }
+taskers-runtime = { version = "0.2.0", path = "../taskers-runtime" }
 tokio.workspace = true
-taskers-control = { version = "0.1.0", path = "../taskers-control" }
-taskers-domain = { version = "0.1.0", path = "../taskers-domain" }
-taskers-ghostty = { version = "0.1.0", path = "../taskers-ghostty" }
+taskers-control = { version = "0.2.0", path = "../taskers-control" }
+taskers-domain = { version = "0.2.0", path = "../taskers-domain" }
+taskers-ghostty = { version = "0.2.0", path = "../taskers-ghostty" }
 time.workspace = true
 
 [dev-dependencies]
