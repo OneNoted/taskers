@@ -1,4 +1,4 @@
-use crate::bridge::{runtime_bridge_path, runtime_resources_dir};
+use crate::runtime::{runtime_bridge_path, runtime_resources_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;

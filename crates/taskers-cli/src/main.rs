@@ -965,6 +965,8 @@ fn install_ghostty_runtime(
             "-Dapp-runtime=gtk",
             "-Demit-exe=false",
             "-Dgtk-wayland=false",
+            "-Dstrip=true",
+            "-Di18n=false",
             "--summary",
             "none",
             "--prefix",
@@ -1006,6 +1008,16 @@ fn install_ghostty_runtime(
         format!(
             "failed to copy embedded terminfo to {}",
             embedded_terminfo_dir.display()
+        )
+    })?;
+    std::fs::write(
+        resources_dir.join(".taskers-runtime-version"),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write Ghostty runtime version marker to {}",
+            resources_dir.join(".taskers-runtime-version").display()
         )
     })?;
 

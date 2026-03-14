@@ -8,9 +8,10 @@ use std::{
     collections::{HashMap, HashSet},
     future::pending,
     path::PathBuf,
+    process::{Command, Stdio},
     rc::Rc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use adw::prelude::*;
@@ -36,6 +37,7 @@ use taskers_domain::{
 };
 use taskers_ghostty::{
     BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, SurfaceDescriptor, TerminalBackend,
+    ensure_runtime_installed,
 };
 use taskers_runtime::{
     ShellLaunchSpec, default_shell_program, install_shell_integration, validate_shell_program,
@@ -55,6 +57,8 @@ struct Cli {
     clean_shell: bool,
     #[arg(long, default_value_t = false, conflicts_with = "clean_shell")]
     raw_shell: bool,
+    #[arg(long, hide = true, default_value_t = false)]
+    internal_ghostty_probe: bool,
 }
 
 struct StartupContext {
@@ -1462,6 +1466,9 @@ impl UiHandle {
 
 fn main() -> gtk::glib::ExitCode {
     let cli = Cli::parse();
+    if cli.internal_ghostty_probe {
+        return run_internal_ghostty_probe();
+    }
     let shell_mode_non_unique = cli.clean_shell || cli.raw_shell;
     let run_non_unique = shell_mode_non_unique
         || cli.socket.is_some()
@@ -1472,6 +1479,14 @@ fn main() -> gtk::glib::ExitCode {
         .session
         .unwrap_or_else(session_store::default_session_path);
     let config_path = settings_store::default_config_path();
+    let ghostty_runtime_toast = match ensure_runtime_installed() {
+        Ok(Some(runtime)) => Some(format!(
+            "Installed Ghostty runtime assets to {}",
+            runtime.runtime_dir.display()
+        )),
+        Ok(None) => None,
+        Err(error) => Some(format!("Ghostty runtime bootstrap unavailable: {error}")),
+    };
     let probe = DefaultBackend::probe(BackendChoice::Auto);
     if cli.clean_shell {
         unsafe {
@@ -1523,7 +1538,7 @@ fn main() -> gtk::glib::ExitCode {
         initialize_terminal_backend(&probe);
     let startup_toast = merge_startup_toasts(
         merge_startup_toasts(
-            shell_integration_toast,
+            merge_startup_toasts(ghostty_runtime_toast, shell_integration_toast),
             cli.clean_shell
                 .then(|| "Using clean shell startup".to_string()),
         ),
@@ -1657,6 +1672,15 @@ fn initialize_terminal_backend(
         return (BackendChoice::Mock, probe.notes.clone(), None, None);
     }
 
+    if let Err(error) = probe_ghostty_backend_process() {
+        let note = format!(
+            "{} Ghostty self-probe failed; using placeholder terminal surfaces.",
+            probe.notes
+        );
+        let toast = format!("Ghostty backend unavailable: {error}");
+        return (BackendChoice::Mock, note, None, Some(toast));
+    }
+
     match GhosttyHost::new() {
         Ok(host) => (
             BackendChoice::Ghostty,
@@ -1669,6 +1693,67 @@ fn initialize_terminal_backend(
             let toast = format!("Ghostty backend unavailable: {error}");
             (BackendChoice::Mock, note, None, Some(toast))
         }
+    }
+}
+
+fn run_internal_ghostty_probe() -> gtk::glib::ExitCode {
+    match GhosttyHost::new() {
+        Ok(host) => {
+            let _ = host.tick();
+            thread::sleep(Duration::from_millis(250));
+            gtk::glib::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("ghostty self-probe failed: {error}");
+            gtk::glib::ExitCode::FAILURE
+        }
+    }
+}
+
+fn probe_ghostty_backend_process() -> Result<(), String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve current executable: {error}"))?;
+    let mut child = Command::new(current_exe)
+        .arg("--internal-ghostty-probe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to launch Ghostty self-probe: {error}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(describe_exit_status(status));
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Ghostty self-probe timed out".into());
+            }
+            Err(error) => return Err(format!("failed to wait for Ghostty self-probe: {error}")),
+        }
+    }
+}
+
+fn describe_exit_status(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        if let Some(signal) = status.signal() {
+            return format!("Ghostty self-probe crashed with signal {signal}");
+        }
+    }
+
+    match status.code() {
+        Some(code) => format!("Ghostty self-probe exited with status {code}"),
+        None => "Ghostty self-probe exited unsuccessfully".into(),
     }
 }
 

@@ -13,8 +13,14 @@ build = "build.rs"
 gtk.workspace = true
 libloading = "0.8"
 serde.workspace = true
+tar = "0.4"
 thiserror.workspace = true
+ureq = "2.12"
+xz2 = "0.1"
 
 [features]
 default = []
 libghostty = []
+
+[dev-dependencies]
+tempfile.workspace = true

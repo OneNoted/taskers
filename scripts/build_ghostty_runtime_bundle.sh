@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo_root/Cargo.toml" | head -n1)"
+target="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
+out_dir="${2:-$repo_root/dist}"
+asset_name="taskers-ghostty-runtime-v${version}-${target}.tar.xz"
+stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/taskers-ghostty-runtime.XXXXXX")"
+prefix_dir="$stage_dir/prefix"
+bundle_dir="$stage_dir/bundle"
+
+cleanup() {
+  rm -rf "$stage_dir"
+}
+trap cleanup EXIT
+
+(
+  cd "$repo_root/vendor/ghostty"
+  zig build taskers-bridge \
+    -Dapp-runtime=gtk \
+    -Demit-exe=false \
+    -Dgtk-wayland=false \
+    -Dstrip=true \
+    -Di18n=false \
+    --summary none \
+    --prefix "$prefix_dir"
+)
+
+mkdir -p "$bundle_dir/ghostty/lib" "$bundle_dir/ghostty/shell-integration" "$bundle_dir/terminfo"
+cp "$prefix_dir/lib/libtaskers_ghostty_bridge.so" "$bundle_dir/ghostty/lib/"
+cp -R "$prefix_dir/share/ghostty/shell-integration/." "$bundle_dir/ghostty/shell-integration/"
+cp -R "$prefix_dir/share/terminfo/." "$bundle_dir/terminfo/"
+printf '%s\n' "$version" > "$bundle_dir/ghostty/.taskers-runtime-version"
+
+mkdir -p "$out_dir"
+XZ_OPT=-9 tar -C "$bundle_dir" -cJf "$out_dir/$asset_name" ghostty terminfo
+printf '%s\n' "$out_dir/$asset_name"

@@ -19,6 +19,7 @@ use libloading::Library;
 use thiserror::Error;
 
 use crate::backend::SurfaceDescriptor;
+use crate::runtime::{configure_runtime_environment, runtime_bridge_path};
 
 #[derive(Debug, Error)]
 pub enum GhosttyError {
@@ -195,85 +196,6 @@ impl Drop for GhosttyHost {
             (self.bridge.host_free)(self.raw.as_ptr());
         }
     }
-}
-
-pub fn configure_runtime_environment() {
-    if std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some() {
-        return;
-    }
-
-    if let Some(path) = installed_runtime_dir().filter(|path| path.exists()) {
-        unsafe {
-            std::env::set_var("GHOSTTY_RESOURCES_DIR", &path);
-        }
-        return;
-    }
-
-    if let Some(path) = option_env!("TASKERS_GHOSTTY_BUILD_RESOURCES_DIR")
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-    {
-        unsafe {
-            std::env::set_var("GHOSTTY_RESOURCES_DIR", &path);
-        }
-    }
-}
-
-pub fn runtime_resources_dir() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("GHOSTTY_RESOURCES_DIR")
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-    {
-        return Some(path);
-    }
-
-    if let Some(path) = installed_runtime_dir().filter(|path| path.exists()) {
-        return Some(path);
-    }
-
-    option_env!("TASKERS_GHOSTTY_BUILD_RESOURCES_DIR")
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-}
-
-pub fn runtime_bridge_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("TASKERS_GHOSTTY_BRIDGE_PATH")
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-    {
-        return Some(path);
-    }
-
-    if let Some(path) = installed_runtime_dir()
-        .map(|root| root.join("lib").join("libtaskers_ghostty_bridge.so"))
-        .filter(|path| path.exists())
-    {
-        return Some(path);
-    }
-
-    option_env!("TASKERS_GHOSTTY_BUILD_BRIDGE_PATH")
-        .map(PathBuf::from)
-        .filter(|path| path.exists())
-}
-
-fn installed_runtime_dir() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR").map(PathBuf::from) {
-        return Some(path);
-    }
-
-    if let Some(path) = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join("taskers").join("ghostty"))
-    {
-        return Some(path);
-    }
-
-    std::env::var_os("HOME").map(PathBuf::from).map(|path| {
-        path.join(".local")
-            .join("share")
-            .join("taskers")
-            .join("ghostty")
-    })
 }
 
 #[cfg(taskers_ghostty_bridge)]

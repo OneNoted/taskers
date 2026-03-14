@@ -18,6 +18,10 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
     }
+    println!("cargo:rustc-cfg=taskers_ghostty_bridge");
+    if let Ok(target) = env::var("TARGET") {
+        println!("cargo:rustc-env=TASKERS_BUILD_TARGET={target}");
+    }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let workspace_root = manifest_dir
@@ -28,7 +32,7 @@ fn main() {
     let vendor_dir = workspace_root.join("vendor").join("ghostty");
     if !vendor_dir.exists() {
         println!(
-            "cargo:warning=vendored Ghostty source tree not found; building without the Ghostty bridge"
+            "cargo:warning=vendored Ghostty source tree not found; runtime bundle bootstrap will be required"
         );
         return;
     }
@@ -60,6 +64,8 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
             "-Dapp-runtime=gtk",
             "-Demit-exe=false",
             "-Dgtk-wayland=false",
+            "-Dstrip=true",
+            "-Di18n=false",
             "--summary",
             "none",
             "--prefix",
