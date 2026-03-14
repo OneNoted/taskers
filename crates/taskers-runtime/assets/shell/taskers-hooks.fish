@@ -106,11 +106,14 @@ end
 function taskers__emit_with_metadata --argument kind message
     taskers__collect_metadata
     set -l agent_active (taskers__agent_active_for_kind "$kind")
-    test -x "$TASKERS_SHELL_BRIDGE_PATH"; or return 0
+    test -x "$TASKERS_CTL_PATH"; or return 0
+    test -n "$TASKERS_WORKSPACE_ID"; or return 0
+    test -n "$TASKERS_PANE_ID"; or return 0
 
     set -l argv \
-        "$TASKERS_SHELL_BRIDGE_PATH" \
+        "$TASKERS_CTL_PATH" \
         signal \
+        --source shell \
         --kind "$kind" \
         --title "$TASKERS_META_TITLE" \
         --cwd "$TASKERS_META_CWD" \

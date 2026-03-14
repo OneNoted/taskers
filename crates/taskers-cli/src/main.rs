@@ -45,9 +45,9 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
         #[arg(long)]
-        workspace: WorkspaceId,
+        workspace: Option<WorkspaceId>,
         #[arg(long)]
-        pane: PaneId,
+        pane: Option<PaneId>,
         #[arg(long)]
         surface: Option<SurfaceId>,
         #[arg(long)]
@@ -66,6 +66,8 @@ enum Command {
         agent: Option<String>,
         #[arg(long)]
         agent_active: Option<bool>,
+        #[arg(long, hide = true)]
+        source: Option<String>,
     },
     Notify {
         #[arg(long)]
@@ -363,7 +365,15 @@ async fn main() -> anyhow::Result<()> {
             branch,
             agent,
             agent_active,
+            source,
         } => {
+            let workspace_id = workspace
+                .or_else(env_workspace_id)
+                .context("missing workspace id; pass --workspace or run from inside Taskers")?;
+            let pane_id = pane
+                .or_else(env_pane_id)
+                .context("missing pane id; pass --pane or run from inside Taskers")?;
+            let surface_id = surface.or_else(env_surface_id);
             let client = ControlClient::new(resolve_socket_path(socket));
             let metadata = if title.is_some()
                 || cwd.is_some()
@@ -386,11 +396,11 @@ async fn main() -> anyhow::Result<()> {
             };
             let response = client
                 .send(ControlCommand::EmitSignal {
-                    workspace_id: workspace,
-                    pane_id: pane,
-                    surface_id: surface,
+                    workspace_id,
+                    pane_id,
+                    surface_id,
                     event: SignalEvent {
-                        source: "taskers-cli".into(),
+                        source: source.unwrap_or_else(|| "taskers-cli".into()),
                         kind: kind.into(),
                         message,
                         metadata,
@@ -1078,4 +1088,44 @@ where
         command.arg(arg);
     }
     let _ = command.status();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::{env_pane_id, env_surface_id, env_workspace_id, infer_agent_kind};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn infers_known_agent_names() {
+        assert_eq!(infer_agent_kind("Codex"), Some("codex".into()));
+        assert_eq!(infer_agent_kind("Claude Code"), Some("claude".into()));
+        assert_eq!(infer_agent_kind("opencode"), Some("opencode".into()));
+        assert_eq!(infer_agent_kind("unknown"), None);
+    }
+
+    #[test]
+    fn reads_runtime_context_ids_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::set_var(
+                "TASKERS_WORKSPACE_ID",
+                "019cede5-2843-7da1-a281-dd6b5d1cfbe6",
+            );
+            std::env::set_var("TASKERS_PANE_ID", "019cede5-2843-7da1-a281-dd4f2de73c9c");
+            std::env::set_var("TASKERS_SURFACE_ID", "019cede5-2843-7da1-a281-dd2119ae9b83");
+        }
+
+        assert!(env_workspace_id().is_some());
+        assert!(env_pane_id().is_some());
+        assert!(env_surface_id().is_some());
+
+        unsafe {
+            std::env::remove_var("TASKERS_WORKSPACE_ID");
+            std::env::remove_var("TASKERS_PANE_ID");
+            std::env::remove_var("TASKERS_SURFACE_ID");
+        }
+    }
 }

@@ -11,29 +11,6 @@ if [ -n "$payload" ]; then
         | jq -r '."last-assistant-message" // .message // .title // empty' 2>/dev/null \
         | head -c 160
     )
-  elif command -v python3 >/dev/null 2>&1; then
-    message=$(
-      python3 - "$payload" <<'PY'
-import json
-import sys
-
-payload = sys.argv[1] if len(sys.argv) > 1 else ""
-message = ""
-if payload:
-    try:
-        decoded = json.loads(payload)
-    except Exception:
-        decoded = {}
-    if isinstance(decoded, dict):
-        message = (
-            decoded.get("last-assistant-message")
-            or decoded.get("message")
-            or decoded.get("title")
-            or ""
-        )
-print(str(message)[:160], end="")
-PY
-    )
   fi
 fi
 

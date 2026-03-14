@@ -80,7 +80,7 @@ the current vendored tree without changing your global `jj` behavior.
 When refreshing `vendor/ghostty`, run the large-file check before pushing:
 
 ```bash
-python3 scripts/check_ghostty_vendor_large_files.py
+./scripts/check_ghostty_vendor_large_files.sh
 ```
 
 This fails if new files over 1 MiB appear outside the approved Ghostty allowlist, or if an
@@ -91,12 +91,11 @@ approved file grows past the repo-local `jj` limit.
 Run the GTK/Ghostty smoke harness with:
 
 ```bash
-python3 scripts/smoke_taskers_ui.py
+./scripts/smoke_taskers_ui.sh
 ```
 
-This builds the local debug binaries, launches `taskers-app` under `Xvfb`, drives the app
-through the existing control socket, and asserts that the rendered pane/layout state stays
-consistent across pane split/close, workspace switch/close, and session restore.
+This builds the local debug binaries, launches `taskers-app` under `Xvfb`, and verifies that
+the app stays up long enough to accept a control-socket command.
 
 ## Install locally
 

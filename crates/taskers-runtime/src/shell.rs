@@ -94,14 +94,6 @@ impl ShellIntegration {
             false,
         )?;
         write_asset(
-            &root.join("taskers-shell-bridge.py"),
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/assets/shell/taskers-shell-bridge.py"
-            )),
-            true,
-        )?;
-        write_asset(
             &root.join("taskers-agent-proxy.sh"),
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -202,13 +194,6 @@ impl ShellIntegration {
         env.insert(
             "TASKERS_SHELL_INTEGRATION_DIR".into(),
             self.root.display().to_string(),
-        );
-        env.insert(
-            "TASKERS_SHELL_BRIDGE_PATH".into(),
-            self.root
-                .join("taskers-shell-bridge.py")
-                .display()
-                .to_string(),
         );
         if let Some(path) = resolve_taskersctl_path() {
             env.insert("TASKERS_CTL_PATH".into(), path.display().to_string());

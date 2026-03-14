@@ -110,11 +110,14 @@ taskers__emit_with_metadata() {
   taskers__collect_metadata
   agent_active=$(taskers__agent_active_for_kind "$kind")
 
-  [[ -x "${TASKERS_SHELL_BRIDGE_PATH:-}" ]] || return 0
+  [[ -x "${TASKERS_CTL_PATH:-}" ]] || return 0
+  [[ -n "${TASKERS_WORKSPACE_ID:-}" ]] || return 0
+  [[ -n "${TASKERS_PANE_ID:-}" ]] || return 0
 
   argv=(
-    "$TASKERS_SHELL_BRIDGE_PATH"
+    "$TASKERS_CTL_PATH"
     signal
+    --source shell
     --kind "$kind"
     --title "$TASKERS_META_TITLE"
     --cwd "$TASKERS_META_CWD"

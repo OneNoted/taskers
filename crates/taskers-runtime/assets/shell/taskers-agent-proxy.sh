@@ -54,47 +54,24 @@ emit_signal() {
       git_branch=$(git -C "$PWD" branch --show-current 2>/dev/null || true)
     fi
   fi
-  if [ -x "${TASKERS_SHELL_BRIDGE_PATH:-}" ]; then
-    set -- signal --kind "$kind" --agent "$agent_kind" --title "$agent_title"
-    if [ -n "${PWD:-}" ]; then
-      set -- "$@" --cwd "$PWD"
-    fi
-    if [ -n "$repo_name" ]; then
-      set -- "$@" --repo "$repo_name"
-    fi
-    if [ -n "$git_branch" ]; then
-      set -- "$@" --branch "$git_branch"
-    fi
-    if [ -n "$message" ]; then
-      set -- "$@" --message "$message"
-      "$TASKERS_SHELL_BRIDGE_PATH" "$@" >/dev/null 2>&1 || true
-    else
-      "$TASKERS_SHELL_BRIDGE_PATH" "$@" >/dev/null 2>&1 || true
-    fi
-    return 0
-  fi
+  [ -x "${TASKERS_CTL_PATH:-}" ] || return 0
+  [ -n "${TASKERS_WORKSPACE_ID:-}" ] || return 0
+  [ -n "${TASKERS_PANE_ID:-}" ] || return 0
 
-  if [ -x "${TASKERS_CTL_PATH:-}" ] && [ -n "${TASKERS_WORKSPACE_ID:-}" ] && [ -n "${TASKERS_PANE_ID:-}" ]; then
-    set -- signal --workspace "$TASKERS_WORKSPACE_ID" --pane "$TASKERS_PANE_ID" --kind "$kind"
-    if [ -n "${TASKERS_SURFACE_ID:-}" ]; then
-      set -- "$@" --surface "$TASKERS_SURFACE_ID"
-    fi
-    set -- "$@" --agent "$agent_kind"
-    set -- "$@" --title "$agent_title"
-    if [ -n "${PWD:-}" ]; then
-      set -- "$@" --cwd "$PWD"
-    fi
-    if [ -n "$repo_name" ]; then
-      set -- "$@" --repo "$repo_name"
-    fi
-    if [ -n "$git_branch" ]; then
-      set -- "$@" --branch "$git_branch"
-    fi
-    if [ -n "$message" ]; then
-      set -- "$@" --message "$message"
-    fi
-    "$TASKERS_CTL_PATH" "$@" >/dev/null 2>&1 || true
+  set -- signal --source shell --kind "$kind" --agent "$agent_kind" --title "$agent_title"
+  if [ -n "${PWD:-}" ]; then
+    set -- "$@" --cwd "$PWD"
   fi
+  if [ -n "$repo_name" ]; then
+    set -- "$@" --repo "$repo_name"
+  fi
+  if [ -n "$git_branch" ]; then
+    set -- "$@" --branch "$git_branch"
+  fi
+  if [ -n "$message" ]; then
+    set -- "$@" --message "$message"
+  fi
+  "$TASKERS_CTL_PATH" "$@" >/dev/null 2>&1 || true
 }
 
 if [ "${TASKERS_AGENT_PROXY_ACTIVE:-0}" != "1" ]; then
