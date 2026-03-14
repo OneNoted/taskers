@@ -2,6 +2,18 @@
 
 `taskers` is an agent-first terminal workspace app scaffolded around a Linux-first Rust shell, a flexible terminal backend boundary, and a Niri-like tiling model for terminal workspaces.
 
+It keeps per-agent status visible in the workspace strip, routes attention-worthy transitions into a dedicated sidebar, and lets terminal work stay organized as movable workspace windows instead of one giant split tree.
+
+## Screenshots
+
+Agent-aware workspace navigation and attention handling:
+
+![Taskers demo showing workspace status chips and attention cards](docs/screenshots/demo-attention.png)
+
+Split workspace layout with grouped panes inside a top-level workspace window:
+
+![Taskers demo showing a multi-window terminal layout](docs/screenshots/demo-layout.png)
+
 ## Tiling model
 
 - Each workspace is a scrollable canvas of top-level terminal windows rather than one monolithic fullscreen split tree.
@@ -18,6 +30,18 @@
 - `taskers-ghostty`: terminal backend abstraction and libghostty probe/fallback surface
 - `taskers-cli`: CLI for querying and mutating the app over the local control socket
 - `taskers-app`: GTK4/libadwaita shell that owns controller state, session persistence, and the local control socket
+
+## Install from crates.io
+
+```bash
+cargo install taskers --locked
+```
+
+On Linux, the first launch bootstraps the version-matched Ghostty runtime bundle into your local XDG data directory when needed.
+
+```bash
+taskers --demo
+```
 
 ## Quick start
 
@@ -89,8 +113,9 @@ This foundation now includes:
 - domain model for scrollable workspaces, top-level workspace windows, nested pane layout trees, attention state, and persistence snapshots
 - explicit control protocol and Unix socket transport for workspace, window, pane, and viewport updates
 - PTY spawning foundation and explicit OSC marker parsing
-- GTK shell with live workspace switching, overview mode, directional workspace-window focus, split actions, autosave, and an app-hosted control server
+- GTK shell with live workspace switching, overview mode, directional workspace-window focus, split actions, autosave, agent-aware sidebars, and an app-hosted control server
 - real shell sessions per terminal pane, with live output streaming and input-on-enter in the pane UI
 - session load/save support with configurable session and socket paths, including persisted workspace viewport state
+- registry installs that bootstrap the matching Ghostty runtime assets on first launch
 
 The actual libghostty embedding work is intentionally isolated behind `taskers-ghostty` so the app shell and domain logic stay stable if the integration strategy changes.
