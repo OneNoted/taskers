@@ -302,12 +302,6 @@ const WORKSPACE_CANVAS_PADDING: i32 = 2;
 const SURFACE_TAB_GAP: i32 = 4;
 const SURFACE_TAB_MIN_WIDTH: i32 = 72;
 const SURFACE_TAB_MAX_WIDTH: i32 = 220;
-const SURFACE_TAB_ANIMATION_US: i64 = 280_000;
-const SURFACE_TAB_DRAG_SNAP_US: i64 = 180_000;
-const SURFACE_TAB_DRAG_THRESHOLD_PX: f64 = 6.0;
-const SURFACE_TAB_ENTER_OFFSET_PX: f64 = 28.0;
-const SURFACE_TAB_EXIT_OFFSET_PX: f64 = 28.0;
-const SURFACE_TAB_SIZE_DELTA_PX: i32 = 18;
 
 #[derive(Clone, Copy)]
 struct WorkspaceRenderContext {
@@ -642,7 +636,7 @@ impl UiHandle {
         anim_details.append(&anim_title);
 
         let anim_detail = Label::new(Some(
-            "Smooth fade transitions when creating windows, switching workspaces, and splitting panes.",
+            "Animate terminal lifecycle changes, including pane/window create-delete transitions and surface tab open-close motion.",
         ));
         anim_detail.set_xalign(0.0);
         anim_detail.set_wrap(true);
@@ -3034,18 +3028,6 @@ fn begin_inline_rename(
     entry.add_controller(key_controller);
 }
 
-// ── Animation helpers ──
-//
-
-fn ease_in_out_cubic(t: f64) -> f64 {
-    let clamped = t.clamp(0.0, 1.0);
-    if clamped < 0.5 {
-        4.0 * clamped * clamped * clamped
-    } else {
-        1.0 - ((-2.0 * clamped + 2.0).powi(3) / 2.0)
-    }
-}
-
 fn layout_render_key(
     workspace: &Workspace,
     render_context: WorkspaceRenderContext,
@@ -3118,11 +3100,11 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                     .unwrap_or(false);
 
             if should_animate_transition {
-                let previous_scene = previous_workspace.map(|workspace| {
-                    build_workspace_scene_snapshot(ui.as_ref(), shell, workspace)
-                });
-                let previous_visuals =
-                    previous_workspace.map(build_workspace_scene_visuals).unwrap_or_default();
+                let previous_scene = previous_workspace
+                    .map(|workspace| build_workspace_scene_snapshot(ui.as_ref(), shell, workspace));
+                let previous_visuals = previous_workspace
+                    .map(build_workspace_scene_visuals)
+                    .unwrap_or_default();
                 let mut plan = plan_workspace_transition(
                     previous_scene.as_ref(),
                     &next_scene,
@@ -3248,7 +3230,10 @@ fn set_workspace_stage_size(shell: &ShellWidgets, width: i32, height: i32) {
     let width = width.max(1);
     let height = height.max(1);
     shell.workspace_stage.root.set_size_request(width, height);
-    shell.workspace_stage.ghost_layer.set_size_request(width, height);
+    shell
+        .workspace_stage
+        .ghost_layer
+        .set_size_request(width, height);
     shell.layout_host.set_size_request(width, height);
 }
 
@@ -3382,7 +3367,10 @@ fn start_workspace_transition(
         let start_rect = presented_transition_rect(item.start_rect);
         let end_rect = presented_transition_rect(item.end_rect);
         let spec = workspace_transition_spec(item.kind);
-        shell.workspace_stage.ghost_layer.put(&widget, start_rect.x, start_rect.y);
+        shell
+            .workspace_stage
+            .ghost_layer
+            .put(&widget, start_rect.x, start_rect.y);
         apply_workspace_transition_widget_frame(
             &shell.workspace_stage.ghost_layer,
             &widget,
@@ -3403,7 +3391,10 @@ fn start_workspace_transition(
     let mut state = ui.workspace_transition_state.borrow_mut();
     state.target_canvas_width = target_canvas_size.0.max(1);
     state.target_canvas_height = target_canvas_size.1.max(1);
-    state.presented = items.iter().map(|item| (item.id, item.start_rect)).collect();
+    state.presented = items
+        .iter()
+        .map(|item| (item.id, item.start_rect))
+        .collect();
     state.motion = Some(WorkspaceTransitionMotionState {
         start_time: glib::monotonic_time(),
         items,
@@ -4463,12 +4454,13 @@ fn remove_surface_tab(
         state.exiting.push(SurfaceTabExitAnimation {
             root: tab.root,
             start_time: glib::monotonic_time(),
-            duration_us: SURFACE_TAB_ANIMATION_US,
+            duration_us: TERMINAL_MOTION_SPEC.tab.structural.duration_us,
             start_item,
             end_item: PresentedSurfaceTabItem {
-                x: start_item.x - SURFACE_TAB_EXIT_OFFSET_PX,
+                x: start_item.x - TERMINAL_MOTION_SPEC.tab.exit_offset_px,
                 opacity: 0.0,
-                width: (start_item.width - SURFACE_TAB_SIZE_DELTA_PX).max(SURFACE_TAB_MIN_WIDTH),
+                width: (start_item.width - TERMINAL_MOTION_SPEC.tab.size_delta_px)
+                    .max(SURFACE_TAB_MIN_WIDTH),
                 height: start_item.height,
             },
         });
@@ -4588,7 +4580,7 @@ fn set_surface_tab_layout(
     let duration_us = state
         .next_animation_duration_us
         .take()
-        .unwrap_or(SURFACE_TAB_ANIMATION_US);
+        .unwrap_or(TERMINAL_MOTION_SPEC.tab.structural.duration_us);
     state.layout = Some(layout);
 
     if !animations_enabled {
@@ -4681,9 +4673,10 @@ fn surface_tab_enter_item(
 ) -> PresentedSurfaceTabItem {
     match key {
         SurfaceTabItemKey::Surface(_) => PresentedSurfaceTabItem {
-            x: target.x + SURFACE_TAB_ENTER_OFFSET_PX,
+            x: target.x + TERMINAL_MOTION_SPEC.tab.enter_offset_px,
             opacity: 0.0,
-            width: (target.width - SURFACE_TAB_SIZE_DELTA_PX).max(SURFACE_TAB_MIN_WIDTH),
+            width: (target.width - TERMINAL_MOTION_SPEC.tab.size_delta_px)
+                .max(SURFACE_TAB_MIN_WIDTH),
             height: target.height,
         },
         SurfaceTabItemKey::AddButton => target,
@@ -4717,7 +4710,7 @@ fn advance_surface_tab_tick(strip: &SurfaceTabStripWidgets, now: i64) -> bool {
         if let Some(motion) = state.motion.clone() {
             let progress =
                 ((now - motion.start_time) as f64 / motion.duration_us as f64).clamp(0.0, 1.0);
-            let eased = ease_in_out_cubic(progress);
+            let eased = TERMINAL_MOTION_SPEC.tab.structural.curve.sample(progress);
             state.presented = motion
                 .target_items
                 .iter()
@@ -4752,7 +4745,7 @@ fn advance_surface_tab_tick(strip: &SurfaceTabStripWidgets, now: i64) -> bool {
         state.exiting.retain(|exit| {
             let progress =
                 ((now - exit.start_time) as f64 / exit.duration_us as f64).clamp(0.0, 1.0);
-            let eased = ease_in_out_cubic(progress);
+            let eased = TERMINAL_MOTION_SPEC.tab.structural.curve.sample(progress);
             let item = lerp_surface_tab_item(exit.start_item, exit.end_item, eased);
             if progress >= 1.0 {
                 completed_exits.push(exit.root.clone());
@@ -4907,7 +4900,7 @@ fn update_surface_tab_drag(
         }
         drag.current_dx = dx;
         let mut should_suppress_click = false;
-        if !drag.threshold_crossed && dx.abs() >= SURFACE_TAB_DRAG_THRESHOLD_PX {
+        if !drag.threshold_crossed && dx.abs() >= TERMINAL_MOTION_SPEC.tab.drag_threshold_px {
             drag.threshold_crossed = true;
             should_suppress_click = true;
         }
@@ -4958,8 +4951,9 @@ fn end_surface_tab_drag(
         let Some(drag) = state.drag.take() else {
             return;
         };
-        state.next_animation_duration_us =
-            drag.threshold_crossed.then_some(SURFACE_TAB_DRAG_SNAP_US);
+        state.next_animation_duration_us = drag
+            .threshold_crossed
+            .then_some(TERMINAL_MOTION_SPEC.tab.drag_snap.duration_us);
         (
             drag.threshold_crossed,
             drag.preview_order.iter().position(|id| *id == surface_id),
