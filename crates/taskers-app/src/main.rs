@@ -112,9 +112,24 @@ struct PaneCardWidgets {
     agent_icon: AgentIconWidget,
     title: Label,
     status_dot: Label,
-    surface_tabs: GtkBox,
+    surface_tabs: SurfaceTabStripWidgets,
     terminal_host: GtkBox,
     focus_target: Widget,
+}
+
+#[derive(Clone)]
+struct SurfaceTabStripWidgets {
+    root: GtkBox,
+    add_button: Button,
+    tabs: Rc<RefCell<HashMap<SurfaceId, SurfaceTabWidgets>>>,
+}
+
+#[derive(Clone)]
+struct SurfaceTabWidgets {
+    root: GtkBox,
+    dot: Label,
+    agent_icon: AgentIconWidget,
+    title: Label,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1345,9 +1360,8 @@ impl UiHandle {
 
         root.append(&header);
 
-        let surface_tabs = GtkBox::new(Orientation::Horizontal, 4);
-        surface_tabs.add_css_class("surface-tabs");
-        root.append(&surface_tabs);
+        let surface_tabs = build_surface_tab_strip(self, workspace_id, pane.id);
+        root.append(&surface_tabs.root);
 
         let terminal_host = GtkBox::new(Orientation::Vertical, 0);
         terminal_host.set_hexpand(true);
@@ -3535,86 +3549,169 @@ fn sync_surface_tabs(
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) {
-    clear_box(&card.surface_tabs);
-
+    let desired_surface_ids = pane.surface_ids().collect::<HashSet<_>>();
+    let mut tabs = card.surface_tabs.tabs.borrow_mut();
     for surface in pane.surfaces.values() {
-        let tab = GtkBox::new(Orientation::Horizontal, 4);
-        tab.add_css_class("surface-tab");
-        if surface.attention != AttentionState::Normal {
-            tab.add_css_class("surface-tab-has-attention");
-            tab.add_css_class(&format!(
-                "surface-tab-state-{}",
-                attention_state_slug(surface.attention)
-            ));
-        }
-        if surface.id == pane.active_surface {
-            tab.add_css_class("surface-tab-active");
-        }
-
-        let dot = Label::new(Some("\u{25cf}"));
-        dot.add_css_class("status-dot");
-        dot.add_css_class(&attention_dot_class(surface.attention));
-        dot.set_tooltip_text(Some(surface.attention.label()));
-        tab.append(&dot);
-
-        let label = Button::new();
-        label.add_css_class("flat");
-        label.add_css_class("surface-tab-label");
-        let label_content = GtkBox::new(Orientation::Horizontal, 4);
-        label_content.set_hexpand(true);
-        let agent_icon = build_agent_icon(surface_agent_kind(surface), 12);
-        agent_icon.add_css_class("surface-tab-agent-icon");
-        label_content.append(agent_icon.widget());
-        let title = Label::new(Some(&display_surface_title(surface)));
-        title.add_css_class("surface-tab-title");
-        title.set_xalign(0.0);
-        title.set_hexpand(true);
-        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        label_content.append(&title);
-        label.set_child(Some(&label_content));
-        let focus_ui = Rc::clone(ui);
-        let pane_id = pane.id;
-        let surface_id = surface.id;
-        label.connect_clicked(move |_| {
-            focus_ui.dispatch(ControlCommand::FocusSurface {
-                workspace_id,
-                pane_id,
-                surface_id,
-            });
-        });
-        tab.append(&label);
-
-        let close = Button::with_label("\u{00d7}");
-        close.add_css_class("flat");
-        close.add_css_class("surface-tab-close");
-        let close_ui = Rc::clone(ui);
-        let close_pane_id = pane.id;
-        let close_surface_id = surface.id;
-        close.connect_clicked(move |_| {
-            close_ui.dispatch(ControlCommand::CloseSurface {
-                workspace_id,
-                pane_id: close_pane_id,
-                surface_id: close_surface_id,
-            });
-        });
-        tab.append(&close);
-
-        card.surface_tabs.append(&tab);
+        let tab = tabs
+            .entry(surface.id)
+            .or_insert_with(|| build_surface_tab(ui, workspace_id, pane.id, surface.id));
+        configure_surface_tab(tab, surface, pane.active_surface);
     }
 
-    let add = Button::with_label("+");
-    add.add_css_class("flat");
-    add.add_css_class("surface-tab-add");
+    let stale_surface_ids = tabs
+        .keys()
+        .copied()
+        .filter(|surface_id| !desired_surface_ids.contains(surface_id))
+        .collect::<Vec<_>>();
+    for surface_id in stale_surface_ids {
+        if let Some(tab) = tabs.remove(&surface_id) {
+            card.surface_tabs.root.remove(&tab.root);
+        }
+    }
+
+    let mut previous: Option<Widget> = None;
+    for surface in pane.surfaces.values() {
+        let tab = tabs
+            .get(&surface.id)
+            .expect("surface tab should exist after sync");
+        card.surface_tabs
+            .root
+            .insert_child_after(&tab.root, previous.as_ref());
+        previous = Some(tab.root.clone().upcast());
+    }
+    card.surface_tabs
+        .root
+        .insert_child_after(&card.surface_tabs.add_button, previous.as_ref());
+}
+
+fn build_surface_tab_strip(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+) -> SurfaceTabStripWidgets {
+    let root = GtkBox::new(Orientation::Horizontal, 4);
+    root.add_css_class("surface-tabs");
+
+    let add_button = Button::with_label("+");
+    add_button.add_css_class("flat");
+    add_button.add_css_class("surface-tab-add");
     let add_ui = Rc::clone(ui);
-    let pane_id = pane.id;
-    add.connect_clicked(move |_| {
+    add_button.connect_clicked(move |_| {
         add_ui.dispatch(ControlCommand::CreateSurface {
             workspace_id,
             pane_id,
             kind: PaneKind::Terminal,
         });
     });
-    card.surface_tabs.append(&add);
+    root.append(&add_button);
+
+    SurfaceTabStripWidgets {
+        root,
+        add_button,
+        tabs: Rc::new(RefCell::new(HashMap::new())),
+    }
+}
+
+fn build_surface_tab(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+    surface_id: SurfaceId,
+) -> SurfaceTabWidgets {
+    let root = GtkBox::new(Orientation::Horizontal, 4);
+    root.add_css_class("surface-tab");
+
+    let dot = Label::new(Some("\u{25cf}"));
+    dot.add_css_class("status-dot");
+    root.append(&dot);
+
+    let label = Button::new();
+    label.add_css_class("flat");
+    label.add_css_class("surface-tab-label");
+    let label_content = GtkBox::new(Orientation::Horizontal, 4);
+    label_content.set_hexpand(true);
+    let agent_icon = build_agent_icon(None, 12);
+    agent_icon.add_css_class("surface-tab-agent-icon");
+    label_content.append(agent_icon.widget());
+    let title = Label::new(None);
+    title.add_css_class("surface-tab-title");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label_content.append(&title);
+    label.set_child(Some(&label_content));
+    let focus_ui = Rc::clone(ui);
+    label.connect_clicked(move |_| {
+        focus_ui.dispatch(ControlCommand::FocusSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+    });
+    root.append(&label);
+
+    let close = Button::with_label("\u{00d7}");
+    close.add_css_class("flat");
+    close.add_css_class("surface-tab-close");
+    let close_ui = Rc::clone(ui);
+    close.connect_clicked(move |_| {
+        close_ui.dispatch(ControlCommand::CloseSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+    });
+    root.append(&close);
+
+    SurfaceTabWidgets {
+        root,
+        dot,
+        agent_icon,
+        title,
+    }
+}
+
+fn configure_surface_tab(
+    tab: &SurfaceTabWidgets,
+    surface: &SurfaceRecord,
+    active_surface_id: SurfaceId,
+) {
+    for cls in &[
+        "surface-tab-has-attention",
+        "surface-tab-active",
+        "surface-tab-state-busy",
+        "surface-tab-state-completed",
+        "surface-tab-state-waiting",
+        "surface-tab-state-error",
+    ] {
+        tab.root.remove_css_class(cls);
+    }
+    for cls in &[
+        "status-dot-normal",
+        "status-dot-busy",
+        "status-dot-completed",
+        "status-dot-waiting",
+        "status-dot-error",
+    ] {
+        tab.dot.remove_css_class(cls);
+    }
+
+    if surface.attention != AttentionState::Normal {
+        tab.root.add_css_class("surface-tab-has-attention");
+        tab.root.add_css_class(&format!(
+            "surface-tab-state-{}",
+            attention_state_slug(surface.attention)
+        ));
+    }
+    if surface.id == active_surface_id {
+        tab.root.add_css_class("surface-tab-active");
+    }
+
+    tab.dot
+        .add_css_class(&attention_dot_class(surface.attention));
+    tab.dot.set_tooltip_text(Some(surface.attention.label()));
+    configure_agent_icon(&tab.agent_icon, surface_agent_kind(surface), 12);
+    tab.title.set_text(&display_surface_title(surface));
 }
 
 fn clear_box(container: &GtkBox) {
