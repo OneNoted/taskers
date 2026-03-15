@@ -1234,6 +1234,34 @@ impl UiHandle {
         status_dot.set_tooltip_text(Some(pane_attention.label()));
         header.append(&status_dot);
 
+        let split_right_btn = Button::with_label("\u{25eb}");
+        split_right_btn.add_css_class("pane-action");
+        split_right_btn.set_tooltip_text(Some("Split right"));
+        let sr_ui = Rc::clone(self);
+        let sr_pane_id = pane.id;
+        split_right_btn.connect_clicked(move |_| {
+            sr_ui.dispatch(ControlCommand::SplitPane {
+                workspace_id,
+                pane_id: Some(sr_pane_id),
+                axis: taskers_domain::SplitAxis::Horizontal,
+            });
+        });
+        header.append(&split_right_btn);
+
+        let split_down_btn = Button::with_label("\u{2501}");
+        split_down_btn.add_css_class("pane-action");
+        split_down_btn.set_tooltip_text(Some("Split down"));
+        let sd_ui = Rc::clone(self);
+        let sd_pane_id = pane.id;
+        split_down_btn.connect_clicked(move |_| {
+            sd_ui.dispatch(ControlCommand::SplitPane {
+                workspace_id,
+                pane_id: Some(sd_pane_id),
+                axis: taskers_domain::SplitAxis::Vertical,
+            });
+        });
+        header.append(&split_down_btn);
+
         let close_button = Button::with_label("\u{00d7}");
         close_button.add_css_class("pane-close");
         close_button.set_tooltip_text(Some("Close pane"));
@@ -5228,6 +5256,28 @@ fn install_css() {
         .pane-close:hover {
             background: rgba(239,68,68,0.15);
             color: #ef4444;
+        }
+
+        .pane-action {
+            background: transparent;
+            color: #3f3f46;
+            border-radius: 3px;
+            min-width: 18px;
+            min-height: 18px;
+            padding: 0;
+            font-size: 0.75rem;
+            opacity: 0;
+            transition: opacity 150ms ease, background 120ms ease, color 120ms ease;
+        }
+
+        .pane-header:hover .pane-action {
+            opacity: 0.7;
+        }
+
+        .pane-action:hover {
+            opacity: 1;
+            background: rgba(99,102,241,0.12);
+            color: #a1a1aa;
         }
 
         .pane-meta {
