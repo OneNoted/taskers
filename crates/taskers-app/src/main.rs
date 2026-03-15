@@ -2,6 +2,7 @@ mod app_state;
 mod pane_runtime;
 mod session_store;
 mod settings_store;
+mod terminal_transitions;
 
 use std::{
     cell::{Cell, RefCell},
