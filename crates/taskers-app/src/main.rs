@@ -44,6 +44,11 @@ use taskers_ghostty::{
 use taskers_runtime::{
     ShellLaunchSpec, default_shell_program, install_shell_integration, validate_shell_program,
 };
+use terminal_transitions::{
+    PaneSceneSnapshot, PresentedTransitionRect, TERMINAL_MOTION_SPEC, TransitionItemId,
+    TransitionItemKind, TransitionPhase, WorkspaceSceneSnapshot, WorkspaceWindowSnapshot,
+    derive_pane_frames, plan_workspace_transition, retarget_transition_plan,
+};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "taskers")]
@@ -94,6 +99,7 @@ struct UiHandle {
     pending_focus_source: RefCell<Option<glib::SourceId>>,
     desktop_notifications: RefCell<HashSet<String>>,
     overview_mode: Cell<bool>,
+    workspace_transition_state: RefCell<WorkspaceTransitionState>,
 }
 
 #[derive(Clone)]
@@ -105,6 +111,7 @@ struct ShellWidgets {
     activity_empty: Label,
     layout_scroll: ScrolledWindow,
     layout_host: Fixed,
+    workspace_stage: WorkspaceStageWidgets,
 }
 
 #[derive(Clone)]
@@ -116,6 +123,57 @@ struct PaneCardWidgets {
     surface_tabs: SurfaceTabStripWidgets,
     terminal_host: GtkBox,
     focus_target: Widget,
+}
+
+#[derive(Clone)]
+struct WorkspaceStageWidgets {
+    root: Overlay,
+    ghost_layer: Fixed,
+}
+
+#[derive(Default)]
+struct WorkspaceTransitionState {
+    presented: HashMap<TransitionItemId, PresentedTransitionRect>,
+    motion: Option<WorkspaceTransitionMotionState>,
+    tick_running: bool,
+    target_canvas_width: i32,
+    target_canvas_height: i32,
+}
+
+#[derive(Clone)]
+struct WorkspaceTransitionMotionState {
+    start_time: i64,
+    items: Vec<WorkspaceTransitionMotionItem>,
+}
+
+#[derive(Clone)]
+struct WorkspaceTransitionMotionItem {
+    id: TransitionItemId,
+    widget: Widget,
+    start_rect: PresentedTransitionRect,
+    end_rect: PresentedTransitionRect,
+    duration_us: i64,
+    curve: terminal_transitions::MotionCurve,
+    start_opacity: f64,
+}
+
+#[derive(Clone, Default)]
+struct WorkspaceSceneVisuals {
+    windows: HashMap<WorkspaceWindowId, WindowGhostVisual>,
+    panes: HashMap<taskers_domain::PaneId, PaneGhostVisual>,
+}
+
+#[derive(Clone, Copy)]
+struct WindowGhostVisual {
+    active: bool,
+    attention: AttentionState,
+}
+
+#[derive(Clone)]
+struct PaneGhostVisual {
+    title: String,
+    active: bool,
+    attention: AttentionState,
 }
 
 #[derive(Clone)]
@@ -334,6 +392,7 @@ impl UiHandle {
             pending_focus_source: RefCell::new(None),
             desktop_notifications: RefCell::new(HashSet::new()),
             overview_mode: Cell::new(false),
+            workspace_transition_state: RefCell::new(WorkspaceTransitionState::default()),
         })
     }
 
@@ -2247,6 +2306,24 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     layout_host.set_halign(Align::Start);
     layout_host.set_valign(Align::Start);
 
+    let workspace_stage_root = Overlay::new();
+    workspace_stage_root.set_halign(Align::Start);
+    workspace_stage_root.set_valign(Align::Start);
+    workspace_stage_root.set_hexpand(false);
+    workspace_stage_root.set_vexpand(false);
+
+    let ghost_layer = Fixed::new();
+    ghost_layer.set_halign(Align::Start);
+    ghost_layer.set_valign(Align::Start);
+    ghost_layer.set_hexpand(false);
+    ghost_layer.set_vexpand(false);
+    workspace_stage_root.add_overlay(&ghost_layer);
+
+    let workspace_stage = WorkspaceStageWidgets {
+        root: workspace_stage_root,
+        ghost_layer,
+    };
+
     let layout_scroll = ScrolledWindow::new();
     layout_scroll.set_hexpand(true);
     layout_scroll.set_vexpand(true);
@@ -2312,6 +2389,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
         activity_empty,
         layout_scroll,
         layout_host,
+        workspace_stage,
     }
 }
 
@@ -3016,30 +3094,87 @@ fn compute_layout_render_state(ui: &UiHandle, model: &AppModel) -> LayoutRenderS
 fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     let previous_model = ui.last_rendered.borrow().clone();
     let next_state = compute_layout_render_state(ui.as_ref(), model);
-    let needs_rebuild = *ui.layout_state.borrow() != next_state;
+    let previous_layout_state = ui.layout_state.borrow().clone();
+    let needs_rebuild = previous_layout_state != next_state;
     let overview_mode = ui.overview_mode.get();
 
     if needs_rebuild {
-        let new_content: Widget = if let Some(workspace) = model.active_workspace() {
-            build_workspace_canvas_widget(ui, shell, workspace)
+        if let Some(workspace) = model.active_workspace() {
+            ensure_workspace_stage(shell);
+            let new_canvas = build_workspace_canvas_widget(ui, shell, workspace);
+            shell.workspace_stage.root.set_child(Some(&new_canvas));
+
+            let next_scene = build_workspace_scene_snapshot(ui.as_ref(), shell, workspace);
+            let next_visuals = build_workspace_scene_visuals(workspace);
+            let previous_workspace = previous_model
+                .as_ref()
+                .and_then(AppModel::active_workspace)
+                .filter(|candidate| candidate.id == workspace.id);
+            let should_animate_transition = ui.settings.borrow().animations_enabled
+                && !overview_mode
+                && !previous_layout_state.overview_mode
+                && previous_workspace
+                    .map(|previous| has_terminal_lifecycle_change(previous, workspace))
+                    .unwrap_or(false);
+
+            if should_animate_transition {
+                let previous_scene = previous_workspace.map(|workspace| {
+                    build_workspace_scene_snapshot(ui.as_ref(), shell, workspace)
+                });
+                let previous_visuals =
+                    previous_workspace.map(build_workspace_scene_visuals).unwrap_or_default();
+                let mut plan = plan_workspace_transition(
+                    previous_scene.as_ref(),
+                    &next_scene,
+                    TERMINAL_MOTION_SPEC,
+                );
+                let presented = ui.workspace_transition_state.borrow().presented.clone();
+                retarget_transition_plan(&mut plan, &presented);
+                if plan.items.is_empty() {
+                    reset_workspace_transition(
+                        ui.as_ref(),
+                        shell,
+                        (next_scene.canvas_width, next_scene.canvas_height),
+                    );
+                } else {
+                    start_workspace_transition(
+                        ui,
+                        shell,
+                        plan,
+                        (next_scene.canvas_width, next_scene.canvas_height),
+                        &previous_visuals,
+                        &next_visuals,
+                    );
+                }
+            } else {
+                reset_workspace_transition(
+                    ui.as_ref(),
+                    shell,
+                    (next_scene.canvas_width, next_scene.canvas_height),
+                );
+            }
         } else {
+            reset_workspace_transition(ui.as_ref(), shell, (1, 1));
+            if shell.workspace_stage.root.parent().is_some() {
+                shell.layout_host.remove(&shell.workspace_stage.root);
+            }
+            shell.layout_host.set_size_request(-1, -1);
             let empty = Label::new(Some("No workspace selected"));
             empty.add_css_class("empty-state");
             empty.set_xalign(0.5);
             empty.set_yalign(0.5);
             empty.set_hexpand(true);
             empty.set_vexpand(true);
-            empty.upcast()
-        };
-        clear_fixed(&shell.layout_host);
-        shell.layout_host.put(&new_content, 0.0, 0.0);
+            clear_fixed(&shell.layout_host);
+            shell.layout_host.put(&empty, 0.0, 0.0);
+        }
         *ui.layout_state.borrow_mut() = next_state;
     }
 
     if let Some(workspace) = model.active_workspace() {
         // Sync active window CSS class without a full rebuild.
         let active_name = format!("ww-{}", workspace.active_window);
-        sync_active_window_class(&shell.layout_host, &active_name);
+        sync_active_window_class(&shell.workspace_stage, &active_name);
 
         for pane in workspace.panes.values() {
             ui.sync_pane_card(workspace.id, workspace.active_pane, pane);
@@ -3102,11 +3237,448 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     }
 }
 
+fn ensure_workspace_stage(shell: &ShellWidgets) {
+    if shell.workspace_stage.root.parent().is_none() {
+        clear_fixed(&shell.layout_host);
+        shell.layout_host.put(&shell.workspace_stage.root, 0.0, 0.0);
+    }
+}
+
+fn set_workspace_stage_size(shell: &ShellWidgets, width: i32, height: i32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    shell.workspace_stage.root.set_size_request(width, height);
+    shell.workspace_stage.ghost_layer.set_size_request(width, height);
+    shell.layout_host.set_size_request(width, height);
+}
+
+fn reset_workspace_transition(ui: &UiHandle, shell: &ShellWidgets, canvas_size: (i32, i32)) {
+    clear_fixed(&shell.workspace_stage.ghost_layer);
+    let mut state = ui.workspace_transition_state.borrow_mut();
+    state.motion = None;
+    state.presented.clear();
+    state.target_canvas_width = canvas_size.0.max(1);
+    state.target_canvas_height = canvas_size.1.max(1);
+    drop(state);
+    if shell.workspace_stage.root.parent().is_some() {
+        set_workspace_stage_size(shell, canvas_size.0, canvas_size.1);
+    }
+}
+
+fn build_workspace_scene_snapshot(
+    ui: &UiHandle,
+    shell: &ShellWidgets,
+    workspace: &Workspace,
+) -> WorkspaceSceneSnapshot {
+    let render_context = workspace_render_context(
+        ui,
+        Some(shell),
+        workspace,
+        ui.overview_mode.get(),
+        workspace_viewport_width(ui, Some(shell)),
+        workspace_viewport_height(ui, Some(shell)),
+    );
+    let metrics = workspace_canvas_metrics(workspace, render_context);
+    let windows = workspace
+        .windows
+        .values()
+        .map(|window| {
+            let display_frame = display_window_frame(window.frame, render_context);
+            WorkspaceWindowSnapshot {
+                id: window.id,
+                rect: WindowFrame {
+                    x: display_frame.x + metrics.offset_x,
+                    y: display_frame.y + metrics.offset_y,
+                    width: display_frame.width,
+                    height: display_frame.height,
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    let panes = workspace
+        .windows
+        .values()
+        .flat_map(|window| {
+            let display_frame = display_window_frame(window.frame, render_context);
+            derive_pane_frames(display_frame, &window.layout)
+                .into_iter()
+                .map(move |(pane_id, pane_rect)| PaneSceneSnapshot {
+                    id: pane_id,
+                    window_id: window.id,
+                    rect: WindowFrame {
+                        x: pane_rect.x + metrics.offset_x,
+                        y: pane_rect.y + metrics.offset_y,
+                        width: pane_rect.width,
+                        height: pane_rect.height,
+                    },
+                })
+        })
+        .collect::<Vec<_>>();
+
+    WorkspaceSceneSnapshot {
+        canvas_width: metrics.width,
+        canvas_height: metrics.height,
+        windows,
+        panes,
+    }
+}
+
+fn build_workspace_scene_visuals(workspace: &Workspace) -> WorkspaceSceneVisuals {
+    let windows = workspace
+        .windows
+        .values()
+        .map(|window| {
+            (
+                window.id,
+                WindowGhostVisual {
+                    active: window.id == workspace.active_window,
+                    attention: workspace_window_attention(workspace, window),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let panes = workspace
+        .panes
+        .values()
+        .map(|pane| {
+            (
+                pane.id,
+                PaneGhostVisual {
+                    title: pane
+                        .active_surface()
+                        .map(display_surface_title)
+                        .unwrap_or_else(|| "Unnamed terminal pane".into()),
+                    active: pane.id == workspace.active_pane,
+                    attention: pane.active_attention(),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    WorkspaceSceneVisuals { windows, panes }
+}
+
+fn has_terminal_lifecycle_change(previous: &Workspace, next: &Workspace) -> bool {
+    previous.windows.keys().copied().collect::<HashSet<_>>()
+        != next.windows.keys().copied().collect::<HashSet<_>>()
+        || previous.panes.keys().copied().collect::<HashSet<_>>()
+            != next.panes.keys().copied().collect::<HashSet<_>>()
+}
+
+fn start_workspace_transition(
+    ui: &Rc<UiHandle>,
+    shell: &ShellWidgets,
+    plan: terminal_transitions::TransitionPlan,
+    target_canvas_size: (i32, i32),
+    previous_visuals: &WorkspaceSceneVisuals,
+    next_visuals: &WorkspaceSceneVisuals,
+) {
+    clear_fixed(&shell.workspace_stage.ghost_layer);
+    set_workspace_stage_size(shell, plan.canvas_width, plan.canvas_height);
+
+    let mut items = Vec::new();
+    for item in plan.items {
+        let widget = build_workspace_transition_widget(&item, previous_visuals, next_visuals);
+        let start_rect = presented_transition_rect(item.start_rect);
+        let end_rect = presented_transition_rect(item.end_rect);
+        let spec = workspace_transition_spec(item.kind);
+        shell.workspace_stage.ghost_layer.put(&widget, start_rect.x, start_rect.y);
+        apply_workspace_transition_widget_frame(
+            &shell.workspace_stage.ghost_layer,
+            &widget,
+            start_rect,
+            spec.ghost_start_opacity,
+        );
+        items.push(WorkspaceTransitionMotionItem {
+            id: item.id,
+            widget,
+            start_rect,
+            end_rect,
+            duration_us: spec.timing.duration_us,
+            curve: spec.timing.curve,
+            start_opacity: spec.ghost_start_opacity,
+        });
+    }
+
+    let mut state = ui.workspace_transition_state.borrow_mut();
+    state.target_canvas_width = target_canvas_size.0.max(1);
+    state.target_canvas_height = target_canvas_size.1.max(1);
+    state.presented = items.iter().map(|item| (item.id, item.start_rect)).collect();
+    state.motion = Some(WorkspaceTransitionMotionState {
+        start_time: glib::monotonic_time(),
+        items,
+    });
+    drop(state);
+
+    start_workspace_transition_tick(ui, shell);
+}
+
+fn workspace_transition_spec(
+    kind: TransitionItemKind,
+) -> terminal_transitions::LifecycleMotionSpec {
+    match kind {
+        TransitionItemKind::Window => TERMINAL_MOTION_SPEC.window,
+        TransitionItemKind::Pane => TERMINAL_MOTION_SPEC.pane,
+    }
+}
+
+fn build_workspace_transition_widget(
+    item: &terminal_transitions::TransitionItem,
+    previous_visuals: &WorkspaceSceneVisuals,
+    next_visuals: &WorkspaceSceneVisuals,
+) -> Widget {
+    match item.id {
+        TransitionItemId::Window(window_id) => {
+            let visual = match item.phase {
+                TransitionPhase::Exit => previous_visuals.windows.get(&window_id).copied(),
+                _ => next_visuals
+                    .windows
+                    .get(&window_id)
+                    .copied()
+                    .or_else(|| previous_visuals.windows.get(&window_id).copied()),
+            }
+            .unwrap_or(WindowGhostVisual {
+                active: false,
+                attention: AttentionState::Normal,
+            });
+            build_workspace_window_ghost(visual)
+        }
+        TransitionItemId::Pane(pane_id) => {
+            let visual = match item.phase {
+                TransitionPhase::Exit => previous_visuals.panes.get(&pane_id).cloned(),
+                _ => next_visuals
+                    .panes
+                    .get(&pane_id)
+                    .cloned()
+                    .or_else(|| previous_visuals.panes.get(&pane_id).cloned()),
+            }
+            .unwrap_or(PaneGhostVisual {
+                title: "Unnamed terminal pane".into(),
+                active: false,
+                attention: AttentionState::Normal,
+            });
+            build_pane_ghost(visual)
+        }
+    }
+}
+
+fn build_workspace_window_ghost(visual: WindowGhostVisual) -> Widget {
+    let root = GtkBox::new(Orientation::Vertical, 0);
+    root.add_css_class("workspace-window");
+    root.add_css_class("workspace-window-ghost");
+    if visual.attention != AttentionState::Normal {
+        root.add_css_class(&format!(
+            "workspace-window-state-{}",
+            attention_state_slug(visual.attention)
+        ));
+    }
+    if visual.active {
+        root.add_css_class("workspace-window-active");
+    }
+
+    let chrome = GtkBox::new(Orientation::Vertical, 0);
+    chrome.add_css_class("workspace-window-ghost-chrome");
+    let header = GtkBox::new(Orientation::Horizontal, 4);
+    header.add_css_class("pane-header");
+    header.add_css_class("workspace-window-ghost-header");
+    let title = Label::new(Some("Terminal"));
+    title.add_css_class("pane-title");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    header.append(&title);
+    let dot = Label::new(Some("\u{25cf}"));
+    dot.add_css_class("status-dot");
+    dot.add_css_class(&attention_dot_class(visual.attention));
+    header.append(&dot);
+    chrome.append(&header);
+
+    let strip = GtkBox::new(Orientation::Horizontal, 4);
+    strip.add_css_class("surface-tabs");
+    strip.add_css_class("workspace-window-ghost-strip");
+    let tab = GtkBox::new(Orientation::Horizontal, 0);
+    tab.add_css_class("surface-tab");
+    tab.add_css_class("workspace-window-ghost-tab");
+    tab.set_size_request(132, 22);
+    strip.append(&tab);
+    chrome.append(&strip);
+
+    let body = GtkBox::new(Orientation::Vertical, 0);
+    body.add_css_class("workspace-window-ghost-body");
+    body.set_hexpand(true);
+    body.set_vexpand(true);
+    chrome.append(&body);
+
+    root.append(&chrome);
+    root.upcast()
+}
+
+fn build_pane_ghost(visual: PaneGhostVisual) -> Widget {
+    let root = GtkBox::new(Orientation::Vertical, 0);
+    root.add_css_class("pane-card");
+    root.add_css_class("pane-ghost");
+    if visual.active {
+        root.add_css_class("pane-card-active");
+    }
+    if visual.attention != AttentionState::Normal {
+        root.add_css_class(&format!(
+            "pane-card-state-{}",
+            attention_state_slug(visual.attention)
+        ));
+    }
+
+    let header = GtkBox::new(Orientation::Horizontal, 4);
+    header.add_css_class("pane-header");
+    header.add_css_class("pane-ghost-header");
+    header.set_margin_start(6);
+    header.set_margin_end(6);
+    header.set_margin_top(2);
+    header.set_margin_bottom(2);
+    let title = Label::new(Some(&visual.title));
+    title.add_css_class("pane-title");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    header.append(&title);
+    let dot = Label::new(Some("\u{25cf}"));
+    dot.add_css_class("status-dot");
+    dot.add_css_class(&attention_dot_class(visual.attention));
+    header.append(&dot);
+    root.append(&header);
+
+    let tabs = GtkBox::new(Orientation::Horizontal, 4);
+    tabs.add_css_class("surface-tabs");
+    tabs.add_css_class("pane-ghost-tabs");
+    tabs.set_margin_start(8);
+    tabs.set_margin_end(8);
+    tabs.set_margin_top(4);
+    tabs.set_margin_bottom(6);
+    let tab = GtkBox::new(Orientation::Horizontal, 0);
+    tab.add_css_class("surface-tab");
+    tab.add_css_class("pane-ghost-tab");
+    tab.set_size_request(128, 22);
+    tabs.append(&tab);
+    root.append(&tabs);
+
+    let body = GtkBox::new(Orientation::Vertical, 0);
+    body.add_css_class("pane-ghost-body");
+    body.set_hexpand(true);
+    body.set_vexpand(true);
+    root.append(&body);
+
+    root.upcast()
+}
+
+fn start_workspace_transition_tick(ui: &Rc<UiHandle>, shell: &ShellWidgets) {
+    let mut state = ui.workspace_transition_state.borrow_mut();
+    if state.tick_running {
+        return;
+    }
+    state.tick_running = true;
+    drop(state);
+
+    let ui = Rc::clone(ui);
+    let shell = shell.clone();
+    let tick_root = shell.workspace_stage.root.clone();
+    tick_root.add_tick_callback(move |_, clock| {
+        if advance_workspace_transition_tick(&ui, &shell, clock.frame_time()) {
+            glib::ControlFlow::Continue
+        } else {
+            ui.workspace_transition_state.borrow_mut().tick_running = false;
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+fn advance_workspace_transition_tick(ui: &UiHandle, shell: &ShellWidgets, now: i64) -> bool {
+    let (frames, keep_running, target_canvas_size) = {
+        let mut state = ui.workspace_transition_state.borrow_mut();
+        let Some(motion) = state.motion.clone() else {
+            return false;
+        };
+
+        state.presented.clear();
+        let mut frames = Vec::new();
+        let mut keep_running = false;
+        for item in &motion.items {
+            let progress =
+                ((now - motion.start_time) as f64 / item.duration_us as f64).clamp(0.0, 1.0);
+            let eased = item.curve.sample(progress);
+            let rect = lerp_presented_transition_rect(item.start_rect, item.end_rect, eased);
+            let opacity = item.start_opacity * (1.0 - eased);
+            state.presented.insert(item.id, rect);
+            frames.push((item.widget.clone(), rect, opacity));
+            if progress < 1.0 {
+                keep_running = true;
+            }
+        }
+        if !keep_running {
+            state.motion = None;
+            state.presented.clear();
+        }
+        (
+            frames,
+            keep_running,
+            (state.target_canvas_width, state.target_canvas_height),
+        )
+    };
+
+    for (widget, rect, opacity) in &frames {
+        apply_workspace_transition_widget_frame(
+            &shell.workspace_stage.ghost_layer,
+            widget,
+            *rect,
+            *opacity,
+        );
+    }
+
+    if !keep_running {
+        clear_fixed(&shell.workspace_stage.ghost_layer);
+        set_workspace_stage_size(shell, target_canvas_size.0, target_canvas_size.1);
+    }
+
+    keep_running
+}
+
+fn presented_transition_rect(frame: WindowFrame) -> PresentedTransitionRect {
+    PresentedTransitionRect {
+        x: f64::from(frame.x),
+        y: f64::from(frame.y),
+        width: f64::from(frame.width),
+        height: f64::from(frame.height),
+    }
+}
+
+fn lerp_presented_transition_rect(
+    start: PresentedTransitionRect,
+    end: PresentedTransitionRect,
+    t: f64,
+) -> PresentedTransitionRect {
+    PresentedTransitionRect {
+        x: start.x + ((end.x - start.x) * t),
+        y: start.y + ((end.y - start.y) * t),
+        width: start.width + ((end.width - start.width) * t),
+        height: start.height + ((end.height - start.height) * t),
+    }
+}
+
+fn apply_workspace_transition_widget_frame(
+    layer: &Fixed,
+    widget: &Widget,
+    rect: PresentedTransitionRect,
+    opacity: f64,
+) {
+    widget.set_size_request(
+        rect.width.round().max(1.0) as i32,
+        rect.height.round().max(1.0) as i32,
+    );
+    layer.move_(widget, rect.x, rect.y);
+    widget.set_opacity(opacity.clamp(0.0, 1.0));
+}
+
 /// Walk the layout host tree to toggle `.workspace-window-active` on the
 /// correct window widget, identified by its widget name.
-fn sync_active_window_class(layout_host: &Fixed, active_name: &str) {
-    // layout_host -> canvas (Fixed child at index 0) -> overlay children
-    let Some(canvas) = layout_host.first_child() else {
+fn sync_active_window_class(workspace_stage: &WorkspaceStageWidgets, active_name: &str) {
+    let Some(canvas) = workspace_stage.root.child() else {
         return;
     };
     let mut child = canvas.first_child();
@@ -5877,6 +6449,38 @@ fn install_css() {
             border-color: rgba(248,113,113,0.38);
         }
 
+        .workspace-window-ghost {
+            background: rgba(18,20,28,0.78);
+            border-style: dashed;
+            box-shadow: 0 12px 28px rgba(0,0,0,0.26);
+        }
+
+        .workspace-window-ghost-chrome {
+            padding: 6px;
+            spacing: 0;
+        }
+
+        .workspace-window-ghost-header {
+            margin: 0;
+            padding: 2px 6px;
+        }
+
+        .workspace-window-ghost-strip {
+            margin: 4px 0 6px;
+        }
+
+        .workspace-window-ghost-tab {
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.10);
+        }
+
+        .workspace-window-ghost-body {
+            margin: 0 2px 2px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
+        }
+
         .workspace-window-resize-handle {
             background: transparent;
             transition: background 160ms ease-in-out;
@@ -5936,6 +6540,34 @@ fn install_css() {
         .pane-card-active.pane-card-state-waiting .pane-header {
             background: rgba(96,165,250,0.10);
             border-bottom-color: rgba(96,165,250,0.24);
+        }
+
+        .pane-ghost {
+            background: rgba(18,20,28,0.82);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 6px;
+            box-shadow: 0 10px 24px rgba(0,0,0,0.20);
+        }
+
+        .pane-ghost-header {
+            margin: 0;
+        }
+
+        .pane-ghost-tabs {
+            margin: 4px 8px 6px;
+            min-height: 24px;
+        }
+
+        .pane-ghost-tab {
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.10);
+        }
+
+        .pane-ghost-body {
+            margin: 0 8px 8px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
         }
 
         .pane-title {
