@@ -17,10 +17,11 @@ use std::{
 use adw::prelude::*;
 use app_state::AppState;
 use clap::Parser;
+use gdk_pixbuf::{InterpType, PixbufLoader, prelude::PixbufLoaderExt};
 use gtk::{
-    Align, Box as GtkBox, Button, CssProvider, Entry, Fixed, Label, Orientation, Overlay, Paned,
-    PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator, TextView, Widget,
-    WrapMode, gdk, glib,
+    Align, Box as GtkBox, Button, CssProvider, Entry, Fixed, Image, Label, Orientation, Overlay,
+    Paned, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator, TextView,
+    Widget, WrapMode, gdk, glib,
 };
 use pane_runtime::PaneRuntimeSnapshot;
 use serde_json::json;
@@ -112,6 +113,7 @@ struct ShellWidgets {
 #[derive(Clone)]
 struct PaneCardWidgets {
     root: GtkBox,
+    agent_icon: Image,
     title: Label,
     status_dot: Label,
     surface_tabs: GtkBox,
@@ -158,6 +160,11 @@ struct WorkspaceRenderContext {
     viewport_height: i32,
     overview_mode: bool,
     overview_scale: f64,
+}
+
+thread_local! {
+    static AGENT_ICON_TEXTURES: RefCell<HashMap<(&'static str, i32), gdk::Texture>> =
+        RefCell::new(HashMap::new());
 }
 
 impl UiHandle {
@@ -1172,15 +1179,14 @@ impl UiHandle {
         header.set_margin_top(1);
         header.set_margin_bottom(1);
 
-        let title = Label::new(None);
+        let agent_icon = build_agent_icon(pane.active_surface().and_then(surface_agent_kind), 13);
+        agent_icon.add_css_class("pane-agent-icon");
+        header.append(&agent_icon);
+
+        let title = Label::new(Some("Unnamed terminal pane"));
         title.add_css_class("pane-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
-        set_agent_glyph_label(
-            &title,
-            pane.active_surface().and_then(surface_agent_kind),
-            "Unnamed terminal pane",
-        );
         header.append(&title);
 
         let status_dot = Label::new(Some("\u{25cf}"));
@@ -1301,6 +1307,7 @@ impl UiHandle {
         let card = PaneCardWidgets {
             focus_target: root.clone().upcast(),
             root,
+            agent_icon,
             title,
             status_dot,
             surface_tabs,
@@ -1331,11 +1338,12 @@ impl UiHandle {
             .active_surface()
             .map(display_surface_title)
             .unwrap_or_else(|| "Unnamed terminal pane".into());
-        set_agent_glyph_label(
-            &card.title,
+        configure_agent_icon(
+            &card.agent_icon,
             pane.active_surface().and_then(surface_agent_kind),
-            &display_title,
+            13,
         );
+        card.title.set_text(&display_title);
         card.title
             .set_tooltip_text(Some(&format_pane_meta(pane, snapshot.as_ref())));
 
@@ -2208,19 +2216,21 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             heading.set_hexpand(true);
             heading.append(&build_workspace_status_widget(&summary));
 
-            let label = Label::new(None);
-            label.add_css_class("workspace-label");
-            label.set_xalign(0.0);
-            label.set_hexpand(true);
-            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            set_agent_glyph_label(
-                &label,
+            let agent_icon = build_agent_icon(
                 model
                     .workspaces
                     .get(&summary.workspace_id)
                     .and_then(workspace_agent_kind),
-                &summary.label,
+                11,
             );
+            agent_icon.add_css_class("workspace-agent-icon");
+            heading.append(&agent_icon);
+
+            let label = Label::new(Some(&summary.label));
+            label.add_css_class("workspace-label");
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
             heading.append(&label);
             row.append(&heading);
 
@@ -2568,6 +2578,13 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     dot.add_css_class(&attention_dot_class(item.state));
     heading.append(&dot);
 
+    let agent_icon = build_agent_icon(
+        activity_surface(model, item).and_then(surface_agent_kind),
+        12,
+    );
+    agent_icon.add_css_class("activity-agent-icon");
+    heading.append(&agent_icon);
+
     let title = model
         .workspaces
         .get(&item.workspace_id)
@@ -2579,16 +2596,11 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
                 .map(display_surface_title)
         })
         .unwrap_or_else(|| "Terminal pane".into());
-    let title_label = Label::new(None);
+    let title_label = Label::new(Some(&title));
     title_label.add_css_class("pane-title");
     title_label.set_xalign(0.0);
     title_label.set_hexpand(true);
     title_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    set_agent_glyph_label(
-        &title_label,
-        activity_surface(model, item).and_then(surface_agent_kind),
-        &title,
-    );
     heading.append(&title_label);
 
     let time_label = Label::new(Some(&item.created_at.time().to_string()));
@@ -3623,16 +3635,14 @@ fn sync_surface_tabs(
         label.add_css_class("surface-tab-label");
         let label_content = GtkBox::new(Orientation::Horizontal, 4);
         label_content.set_hexpand(true);
-        let title = Label::new(None);
+        let agent_icon = build_agent_icon(surface_agent_kind(surface), 11);
+        agent_icon.add_css_class("surface-tab-agent-icon");
+        label_content.append(&agent_icon);
+        let title = Label::new(Some(&display_surface_title(surface)));
         title.add_css_class("surface-tab-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        set_agent_glyph_label(
-            &title,
-            surface_agent_kind(surface),
-            &display_surface_title(surface),
-        );
         label_content.append(&title);
         label.set_child(Some(&label_content));
         let focus_ui = Rc::clone(ui);
@@ -3754,35 +3764,113 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     }
 }
 
-const AGENT_GLYPH_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
+fn build_agent_icon(agent_kind: Option<&str>, size: i32) -> Image {
+    let icon = Image::new();
+    icon.set_halign(Align::Center);
+    icon.set_valign(Align::Center);
+    icon.set_size_request(size, size);
+    configure_agent_icon(&icon, agent_kind, size);
+    icon
+}
 
-fn set_agent_glyph_label(label: &Label, agent_kind: Option<&str>, text: &str) {
-    let escaped = glib::markup_escape_text(text);
-    let Some((glyph, color)) = agent_glyph(agent_kind) else {
-        label.set_text(text);
+fn configure_agent_icon(icon: &Image, agent_kind: Option<&str>, size: i32) {
+    let Some(texture) = agent_kind.and_then(|agent_kind| agent_icon_texture(agent_kind, size))
+    else {
+        icon.set_paintable(None::<&gdk::Texture>);
+        icon.set_tooltip_text(None);
+        icon.set_visible(false);
         return;
     };
 
-    let glyph = glib::markup_escape_text(&glyph.to_string());
-    label.set_markup(&format!(
-        "<span font_family=\"{AGENT_GLYPH_FONT_FAMILY}\" foreground=\"{color}\">{glyph}</span> {escaped}"
-    ));
+    icon.set_paintable(Some(&texture));
+    icon.set_tooltip_text(
+        agent_kind
+            .and_then(|agent_kind| normalized_agent_kind(Some(agent_kind)))
+            .map(humanize_agent_kind)
+            .as_deref(),
+    );
+    icon.set_visible(true);
 }
 
-fn agent_glyph(agent_kind: Option<&str>) -> Option<(char, &'static str)> {
-    match normalized_agent_kind(agent_kind)? {
-        "codex" => Some(('\u{ec10}', "#7cb4ff")),
-        "claude" => Some(('\u{ee0d}', "#f59e63")),
-        "opencode" => Some(('\u{f0169}', "#6ee7b7")),
-        "aider" => Some(('\u{f09d1}', "#c9a7ff")),
+fn agent_icon_texture(agent_kind: &str, size: i32) -> Option<gdk::Texture> {
+    let slug = agent_icon_slug(agent_kind)?;
+    AGENT_ICON_TEXTURES.with(|cache| {
+        if let Some(texture) = cache.borrow().get(&(slug, size)).cloned() {
+            return Some(texture);
+        }
+
+        let texture = decode_agent_icon_texture(agent_icon_bytes(slug), size)?;
+        cache.borrow_mut().insert((slug, size), texture.clone());
+        Some(texture)
+    })
+}
+
+fn agent_icon_slug(agent_kind: &str) -> Option<&'static str> {
+    match normalized_agent_kind(Some(agent_kind))? {
+        "codex" => Some("openai"),
+        "claude" => Some("anthropic"),
+        "opencode" => Some("opencode"),
         _ => None,
     }
 }
 
-fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<&str> {
-    agent_kind
-        .map(str::trim)
-        .filter(|agent_kind| !agent_kind.is_empty() && *agent_kind != "shell")
+fn agent_icon_bytes(slug: &str) -> &'static [u8] {
+    match slug {
+        "openai" => include_bytes!("../assets/agent-openai.png"),
+        "anthropic" => include_bytes!("../assets/agent-anthropic.png"),
+        "opencode" => include_bytes!("../assets/agent-opencode.png"),
+        _ => &[],
+    }
+}
+
+fn decode_agent_icon_texture(bytes: &[u8], size: i32) -> Option<gdk::Texture> {
+    let loader = PixbufLoader::new();
+    loader.write(bytes).ok()?;
+    loader.close().ok()?;
+    let pixbuf = loader.pixbuf()?;
+    let scaled = scale_agent_icon_pixbuf(&pixbuf, size)?;
+    Some(gdk::Texture::for_pixbuf(&scaled))
+}
+
+fn scale_agent_icon_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf, size: i32) -> Option<gdk_pixbuf::Pixbuf> {
+    if size <= 0 {
+        return None;
+    }
+
+    let width = pixbuf.width().max(1);
+    let height = pixbuf.height().max(1);
+    let largest_edge = width.max(height);
+    if largest_edge == size {
+        return Some(pixbuf.clone());
+    }
+
+    let scale = f64::from(size) / f64::from(largest_edge);
+    let scaled_width = (f64::from(width) * scale).round().max(1.0) as i32;
+    let scaled_height = (f64::from(height) * scale).round().max(1.0) as i32;
+    pixbuf.scale_simple(scaled_width, scaled_height, InterpType::Bilinear)
+}
+
+fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<&'static str> {
+    let agent_kind = agent_kind?.trim();
+    if agent_kind.is_empty() || agent_kind.eq_ignore_ascii_case("shell") {
+        return None;
+    }
+
+    if agent_kind.eq_ignore_ascii_case("codex") || agent_kind.eq_ignore_ascii_case("openai") {
+        Some("codex")
+    } else if agent_kind.eq_ignore_ascii_case("claude")
+        || agent_kind.eq_ignore_ascii_case("claude code")
+        || agent_kind.eq_ignore_ascii_case("claude-code")
+        || agent_kind.eq_ignore_ascii_case("anthropic")
+    {
+        Some("claude")
+    } else if agent_kind.eq_ignore_ascii_case("opencode") {
+        Some("opencode")
+    } else if agent_kind.eq_ignore_ascii_case("aider") {
+        Some("aider")
+    } else {
+        None
+    }
 }
 
 fn infer_agent_kind(value: &str) -> Option<&'static str> {
@@ -3800,7 +3888,7 @@ fn infer_agent_kind(value: &str) -> Option<&'static str> {
     }
 }
 
-fn surface_agent_kind(surface: &SurfaceRecord) -> Option<&str> {
+fn surface_agent_kind(surface: &SurfaceRecord) -> Option<&'static str> {
     normalized_agent_kind(surface.metadata.agent_kind.as_deref())
         .or_else(|| surface.metadata.title.as_deref().and_then(infer_agent_kind))
         .or_else(|| {
@@ -3812,7 +3900,7 @@ fn surface_agent_kind(surface: &SurfaceRecord) -> Option<&str> {
         })
 }
 
-fn workspace_agent_kind(workspace: &Workspace) -> Option<&str> {
+fn workspace_agent_kind(workspace: &Workspace) -> Option<&'static str> {
     workspace
         .panes
         .get(&workspace.active_pane)
@@ -4518,6 +4606,13 @@ fn install_css() {
             font-weight: 600;
             color: #f4f4f5;
             font-size: 0.80rem;
+        }
+
+        .workspace-agent-icon,
+        .activity-agent-icon,
+        .pane-agent-icon,
+        .surface-tab-agent-icon {
+            opacity: 0.96;
         }
 
         .workspace-preview {
