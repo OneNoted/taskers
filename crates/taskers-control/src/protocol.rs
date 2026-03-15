@@ -90,6 +90,12 @@ pub enum ControlCommand {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    MoveSurface {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        to_index: usize,
+    },
     SetWorkspaceViewport {
         workspace_id: WorkspaceId,
         viewport: WorkspaceViewport,

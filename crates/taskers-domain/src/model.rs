@@ -178,6 +178,21 @@ impl PaneRecord {
         }
     }
 
+    fn move_surface(&mut self, surface_id: SurfaceId, to_index: usize) -> bool {
+        let Some(from_index) = self.surfaces.get_index_of(&surface_id) else {
+            return false;
+        };
+
+        let last_index = self.surfaces.len().saturating_sub(1);
+        let target_index = to_index.min(last_index);
+        if from_index == target_index {
+            return true;
+        }
+
+        self.surfaces.move_index(from_index, target_index);
+        true
+    }
+
     fn normalize(&mut self) {
         if self.surfaces.is_empty() {
             let replacement = SurfaceRecord::new(PaneKind::Terminal);
@@ -1432,6 +1447,34 @@ impl AppModel {
         Ok(())
     }
 
+    pub fn move_surface(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        to_index: usize,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let pane = workspace
+            .panes
+            .get_mut(&pane_id)
+            .ok_or(DomainError::PaneNotInWorkspace {
+                workspace_id,
+                pane_id,
+            })?;
+        if !pane.move_surface(surface_id, to_index) {
+            return Err(DomainError::SurfaceNotInPane {
+                workspace_id,
+                pane_id,
+                surface_id,
+            });
+        }
+        Ok(())
+    }
+
     pub fn close_pane(
         &mut self,
         workspace_id: WorkspaceId,
@@ -1993,6 +2036,139 @@ mod tests {
         assert_eq!(workspace.windows.len(), 1);
         assert!(!workspace.panes.contains_key(&right_window_pane));
         assert_ne!(workspace.active_pane, right_window_pane);
+    }
+
+    #[test]
+    fn moving_surface_reorders_pane_without_changing_active_surface() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let first_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface id");
+
+        let second_surface_id = model
+            .create_surface(workspace_id, pane_id, PaneKind::Terminal)
+            .expect("second surface");
+        let third_surface_id = model
+            .create_surface(workspace_id, pane_id, PaneKind::Terminal)
+            .expect("third surface");
+
+        model
+            .focus_surface(workspace_id, pane_id, second_surface_id)
+            .expect("focus second surface");
+        model
+            .move_surface(workspace_id, pane_id, second_surface_id, 0)
+            .expect("move second surface to front");
+
+        let pane = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .expect("pane");
+        let order = pane.surface_ids().collect::<Vec<_>>();
+
+        assert_eq!(
+            order,
+            vec![second_surface_id, first_surface_id, third_surface_id]
+        );
+        assert_eq!(pane.active_surface, second_surface_id);
+    }
+
+    #[test]
+    fn moving_surface_clamps_to_end_of_pane() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let first_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface id");
+        let second_surface_id = model
+            .create_surface(workspace_id, pane_id, PaneKind::Terminal)
+            .expect("second surface");
+        let third_surface_id = model
+            .create_surface(workspace_id, pane_id, PaneKind::Terminal)
+            .expect("third surface");
+
+        model
+            .move_surface(workspace_id, pane_id, first_surface_id, usize::MAX)
+            .expect("move first surface to end");
+
+        let pane = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .expect("pane");
+        let order = pane.surface_ids().collect::<Vec<_>>();
+
+        assert_eq!(
+            order,
+            vec![second_surface_id, third_surface_id, first_surface_id]
+        );
+    }
+
+    #[test]
+    fn moving_surface_to_current_index_is_a_noop() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let first_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface id");
+        let second_surface_id = model
+            .create_surface(workspace_id, pane_id, PaneKind::Terminal)
+            .expect("second surface");
+
+        model
+            .move_surface(workspace_id, pane_id, second_surface_id, 1)
+            .expect("move second surface to current slot");
+
+        let pane = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .expect("pane");
+        let order = pane.surface_ids().collect::<Vec<_>>();
+
+        assert_eq!(order, vec![first_surface_id, second_surface_id]);
+        assert_eq!(pane.active_surface, second_surface_id);
+    }
+
+    #[test]
+    fn closing_surface_after_reorder_removes_the_requested_surface() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let first_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface id");
+        let second_surface_id = model
+            .create_surface(workspace_id, pane_id, PaneKind::Terminal)
+            .expect("second surface");
+        let third_surface_id = model
+            .create_surface(workspace_id, pane_id, PaneKind::Terminal)
+            .expect("third surface");
+
+        model
+            .move_surface(workspace_id, pane_id, first_surface_id, 2)
+            .expect("move first surface to end");
+        model
+            .close_surface(workspace_id, pane_id, second_surface_id)
+            .expect("close second surface");
+
+        let pane = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .expect("pane");
+        let order = pane.surface_ids().collect::<Vec<_>>();
+
+        assert_eq!(order, vec![third_surface_id, first_surface_id]);
+        assert!(!order.contains(&second_surface_id));
     }
 
     #[test]

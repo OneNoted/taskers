@@ -190,6 +190,17 @@ impl InMemoryController {
                     message: "surface closed".into(),
                 })
             }
+            ControlCommand::MoveSurface {
+                workspace_id,
+                pane_id,
+                surface_id,
+                to_index,
+            } => {
+                model.move_surface(workspace_id, pane_id, surface_id, to_index)?;
+                Ok(ControlResponse::Ack {
+                    message: "surface moved".into(),
+                })
+            }
             ControlCommand::SetWorkspaceViewport {
                 workspace_id,
                 viewport,
