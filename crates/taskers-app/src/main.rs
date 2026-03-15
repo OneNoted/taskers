@@ -1387,6 +1387,28 @@ impl UiHandle {
         status_dot.set_tooltip_text(Some(pane_attention.label()));
         header.append(&status_dot);
 
+        let new_window_right_btn = Button::with_label("\u{2192}");
+        new_window_right_btn.add_css_class("pane-action");
+        new_window_right_btn.add_css_class("pane-window-action");
+        new_window_right_btn.set_tooltip_text(Some("New window right"));
+        let nwr_ui = Rc::clone(self);
+        let nwr_pane_id = pane.id;
+        new_window_right_btn.connect_clicked(move |_| {
+            create_workspace_window_from_pane(&nwr_ui, workspace_id, nwr_pane_id, Direction::Right);
+        });
+        header.append(&new_window_right_btn);
+
+        let new_window_down_btn = Button::with_label("\u{2193}");
+        new_window_down_btn.add_css_class("pane-action");
+        new_window_down_btn.add_css_class("pane-window-action");
+        new_window_down_btn.set_tooltip_text(Some("New window below"));
+        let nwd_ui = Rc::clone(self);
+        let nwd_pane_id = pane.id;
+        new_window_down_btn.connect_clicked(move |_| {
+            create_workspace_window_from_pane(&nwd_ui, workspace_id, nwd_pane_id, Direction::Down);
+        });
+        header.append(&new_window_down_btn);
+
         let split_right_btn = Button::with_label("\u{25eb}");
         split_right_btn.add_css_class("pane-action");
         split_right_btn.set_tooltip_text(Some("Split right"));
@@ -1443,6 +1465,42 @@ impl UiHandle {
             content.set_margin_end(4);
             content.set_margin_top(4);
             content.set_margin_bottom(4);
+
+            let new_right = Button::with_label("\u{2192} New Window Right");
+            new_right.add_css_class("flat");
+            new_right.add_css_class("context-item");
+            let nr_ui = Rc::clone(&ctx_ui);
+            let nr_pop = popover.clone();
+            new_right.connect_clicked(move |_| {
+                nr_pop.popdown();
+                create_workspace_window_from_pane(
+                    &nr_ui,
+                    workspace_id,
+                    ctx_pane_id,
+                    Direction::Right,
+                );
+            });
+            content.append(&new_right);
+
+            let new_below = Button::with_label("\u{2193} New Window Below");
+            new_below.add_css_class("flat");
+            new_below.add_css_class("context-item");
+            let nb_ui = Rc::clone(&ctx_ui);
+            let nb_pop = popover.clone();
+            new_below.connect_clicked(move |_| {
+                nb_pop.popdown();
+                create_workspace_window_from_pane(
+                    &nb_ui,
+                    workspace_id,
+                    ctx_pane_id,
+                    Direction::Down,
+                );
+            });
+            content.append(&new_below);
+
+            let new_window_sep = Separator::new(Orientation::Horizontal);
+            new_window_sep.add_css_class("context-separator");
+            content.append(&new_window_sep);
 
             let split_right = Button::with_label("\u{25eb} Split Right");
             split_right.add_css_class("flat");
@@ -4231,6 +4289,37 @@ fn refresh_terminal_body(
     let _ = initialize_terminal_body(ui, workspace_id, pane, card);
 }
 
+fn create_workspace_window_from_pane(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+    direction: Direction,
+) {
+    let should_focus_pane = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .is_some_and(|workspace| {
+            workspace.active_pane != pane_id
+                || workspace
+                    .window_for_pane(pane_id)
+                    .is_some_and(|window_id| window_id != workspace.active_window)
+        });
+
+    if should_focus_pane {
+        ui.dispatch(ControlCommand::FocusPane {
+            workspace_id,
+            pane_id,
+        });
+    }
+
+    ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+        workspace_id,
+        direction,
+    });
+}
+
 fn sync_surface_tabs(
     ui: &Rc<UiHandle>,
     workspace_id: taskers_domain::WorkspaceId,
@@ -6635,6 +6724,10 @@ fn install_css() {
 
         .pane-header:hover .pane-action {
             opacity: 0.7;
+        }
+
+        .pane-card-active .pane-action {
+            opacity: 0.62;
         }
 
         .pane-action:hover {
