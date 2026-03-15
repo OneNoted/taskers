@@ -12,6 +12,10 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     rc::Rc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -4141,32 +4145,40 @@ fn bind_split_ratio_updates(
     path: Vec<bool>,
     ratio: u16,
 ) {
-    let suppress = Rc::new(Cell::new(false));
-    let path = Rc::new(path);
-    let pending_source = Rc::new(RefCell::new(None::<glib::SourceId>));
+    let suppress = Arc::new(AtomicBool::new(false));
+    let path = Arc::new(path);
+    let pending_source = Arc::new(Mutex::new(None::<glib::SourceId>));
+    let app_state = ui.app_state.clone();
 
     let sync_paned = paned.clone();
-    let suppress_for_sync = Rc::clone(&suppress);
+    let suppress_for_sync = Arc::clone(&suppress);
     glib::idle_add_local_once(move || {
-        suppress_for_sync.set(true);
+        suppress_for_sync.store(true, Ordering::Release);
         let extent = paned_extent(&sync_paned, axis);
         if extent > 0 {
             sync_paned.set_position(((extent * i32::from(ratio)) / 1000).max(1));
         }
-        suppress_for_sync.set(false);
+        suppress_for_sync.store(false, Ordering::Release);
     });
 
-    let ratio_ui = Rc::clone(ui);
-    let suppress_for_notify = Rc::clone(&suppress);
-    let pending_for_notify = Rc::clone(&pending_source);
-    paned.connect_notify_local(Some("position"), move |paned, _| {
-        if suppress_for_notify.get() {
+    let suppress_for_notify = Arc::clone(&suppress);
+    let pending_for_notify = Arc::clone(&pending_source);
+    let path_for_notify = Arc::clone(&path);
+    paned.connect_position_notify(move |paned| {
+        if suppress_for_notify.load(Ordering::Acquire) {
             return;
         }
 
-        if let Some(source) = pending_for_notify.borrow_mut().take() {
+        let previous_source = {
+            let mut pending = pending_for_notify
+                .lock()
+                .expect("split ratio source mutex poisoned");
+            pending.take()
+        };
+        if let Some(source) = previous_source {
             source.remove();
         }
+
         let extent = paned_extent(paned, axis);
         if extent <= 0 {
             return;
@@ -4174,17 +4186,33 @@ fn bind_split_ratio_updates(
         let ratio = (((paned.position() as f64) / f64::from(extent)) * 1000.0)
             .round()
             .clamp(0.0, 1000.0) as u16;
-        let path = Rc::clone(&path);
-        let ratio_ui = Rc::clone(&ratio_ui);
-        let source = glib::timeout_add_local_once(Duration::from_millis(120), move || {
-            ratio_ui.dispatch(ControlCommand::SetWindowSplitRatio {
+
+        let app_state = app_state.clone();
+        let path = Arc::clone(&path_for_notify);
+        let pending_for_timeout = Arc::clone(&pending_for_notify);
+        let source = glib::timeout_add_once(Duration::from_millis(120), move || {
+            if let Ok(mut pending) = pending_for_timeout.lock() {
+                pending.take();
+            }
+
+            if let Err(error) = app_state.dispatch(ControlCommand::SetWindowSplitRatio {
                 workspace_id,
                 workspace_window_id,
                 path: path.as_ref().clone(),
                 ratio,
-            });
+            }) {
+                eprintln!("failed to update window split ratio: {error}");
+            }
         });
-        *pending_for_notify.borrow_mut() = Some(source);
+        let mut pending = pending_for_notify
+            .lock()
+            .expect("split ratio source mutex poisoned");
+        if pending.is_none() {
+            *pending = Some(source);
+        } else {
+            drop(pending);
+            source.remove();
+        }
     });
 }
 
