@@ -4267,14 +4267,12 @@ fn workspace_base_canvas_metrics(workspace: &Workspace, viewport_height: i32) ->
         .iter()
         .map(|frame| frame.x)
         .min()
-        .unwrap_or(0)
-        .min(0);
+        .unwrap_or(0);
     let min_y = display_frames
         .iter()
         .map(|frame| frame.y)
         .min()
-        .unwrap_or(0)
-        .min(0);
+        .unwrap_or(0);
     let offset_x = WORKSPACE_CANVAS_PADDING - min_x;
     let offset_y = WORKSPACE_CANVAS_PADDING - min_y;
     let width = display_frames
@@ -4342,14 +4340,12 @@ fn workspace_canvas_metrics(
         .iter()
         .map(|frame| frame.x)
         .min()
-        .unwrap_or(0)
-        .min(0);
+        .unwrap_or(0);
     let min_y = display_frames
         .iter()
         .map(|frame| frame.y)
         .min()
-        .unwrap_or(0)
-        .min(0);
+        .unwrap_or(0);
     let offset_x = WORKSPACE_CANVAS_PADDING - min_x;
     let offset_y = WORKSPACE_CANVAS_PADDING - min_y;
     let width = display_frames
