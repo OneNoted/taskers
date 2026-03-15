@@ -2400,6 +2400,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     ghost_layer.set_valign(Align::Start);
     ghost_layer.set_hexpand(false);
     ghost_layer.set_vexpand(false);
+    ghost_layer.set_can_target(false);
     workspace_stage_root.add_overlay(&ghost_layer);
 
     let workspace_stage = WorkspaceStageWidgets {
