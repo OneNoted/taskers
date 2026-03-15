@@ -119,9 +119,10 @@ struct PaneCardWidgets {
 
 #[derive(Clone)]
 struct SurfaceTabStripWidgets {
-    root: GtkBox,
+    root: Fixed,
     add_button: Button,
     tabs: Rc<RefCell<HashMap<SurfaceId, SurfaceTabWidgets>>>,
+    state: Rc<RefCell<SurfaceTabStripState>>,
 }
 
 #[derive(Clone)]
@@ -130,6 +131,81 @@ struct SurfaceTabWidgets {
     dot: Label,
     agent_icon: AgentIconWidget,
     title: Label,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SurfaceTabItemKey {
+    Surface(SurfaceId),
+    AddButton,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SurfaceTabStripLayout {
+    items: Vec<SurfaceTabLayoutItem>,
+    add_button: SurfaceTabAuxLayoutItem,
+    height: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SurfaceTabLayoutItem {
+    surface_id: SurfaceId,
+    x: f64,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SurfaceTabAuxLayoutItem {
+    x: f64,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PresentedSurfaceTabItem {
+    x: f64,
+    opacity: f64,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone)]
+struct SurfaceTabMotionState {
+    start_time: i64,
+    duration_us: i64,
+    start_items: HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem>,
+    target_items: HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem>,
+}
+
+#[derive(Clone)]
+struct SurfaceTabExitAnimation {
+    root: GtkBox,
+    start_time: i64,
+    duration_us: i64,
+    start_item: PresentedSurfaceTabItem,
+    end_item: PresentedSurfaceTabItem,
+}
+
+#[derive(Clone)]
+struct SurfaceTabDragState {
+    surface_id: SurfaceId,
+    start_x: f64,
+    current_dx: f64,
+    preview_order: Vec<SurfaceId>,
+    threshold_crossed: bool,
+}
+
+#[derive(Default)]
+struct SurfaceTabStripState {
+    model_order: Vec<SurfaceId>,
+    layout: Option<SurfaceTabStripLayout>,
+    presented: HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem>,
+    motion: Option<SurfaceTabMotionState>,
+    exiting: Vec<SurfaceTabExitAnimation>,
+    drag: Option<SurfaceTabDragState>,
+    tick_running: bool,
+    suppress_click_surface: Option<SurfaceId>,
+    next_animation_duration_us: Option<i64>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -164,6 +240,15 @@ struct CanvasMetrics {
 }
 
 const WORKSPACE_CANVAS_PADDING: i32 = 2;
+const SURFACE_TAB_GAP: i32 = 4;
+const SURFACE_TAB_MIN_WIDTH: i32 = 72;
+const SURFACE_TAB_MAX_WIDTH: i32 = 220;
+const SURFACE_TAB_ANIMATION_US: i64 = 280_000;
+const SURFACE_TAB_DRAG_SNAP_US: i64 = 180_000;
+const SURFACE_TAB_DRAG_THRESHOLD_PX: f64 = 6.0;
+const SURFACE_TAB_ENTER_OFFSET_PX: f64 = 28.0;
+const SURFACE_TAB_EXIT_OFFSET_PX: f64 = 28.0;
+const SURFACE_TAB_SIZE_DELTA_PX: i32 = 18;
 
 #[derive(Clone, Copy)]
 struct WorkspaceRenderContext {
@@ -2873,6 +2958,14 @@ fn begin_inline_rename(
 // ── Animation helpers ──
 //
 
+fn ease_in_out_cubic(t: f64) -> f64 {
+    let clamped = t.clamp(0.0, 1.0);
+    if clamped < 0.5 {
+        4.0 * clamped * clamped * clamped
+    } else {
+        1.0 - ((-2.0 * clamped + 2.0).powi(3) / 2.0)
+    }
+}
 
 fn layout_render_key(
     workspace: &Workspace,
@@ -3550,11 +3643,16 @@ fn sync_surface_tabs(
     card: &PaneCardWidgets,
 ) {
     let desired_surface_ids = pane.surface_ids().collect::<HashSet<_>>();
+    let model_order = pane.surface_ids().collect::<Vec<_>>();
+    let animations_enabled = ui.settings.borrow().animations_enabled;
     let mut tabs = card.surface_tabs.tabs.borrow_mut();
     for surface in pane.surfaces.values() {
-        let tab = tabs
-            .entry(surface.id)
-            .or_insert_with(|| build_surface_tab(ui, workspace_id, pane.id, surface.id));
+        let tab = tabs.entry(surface.id).or_insert_with(|| {
+            build_surface_tab(ui, &card.surface_tabs, workspace_id, pane.id, surface.id)
+        });
+        if tab.root.parent().is_none() {
+            card.surface_tabs.root.put(&tab.root, 0.0, 0.0);
+        }
         configure_surface_tab(tab, surface, pane.active_surface);
     }
 
@@ -3563,25 +3661,55 @@ fn sync_surface_tabs(
         .copied()
         .filter(|surface_id| !desired_surface_ids.contains(surface_id))
         .collect::<Vec<_>>();
+    let mut removed_tabs = Vec::new();
     for surface_id in stale_surface_ids {
         if let Some(tab) = tabs.remove(&surface_id) {
-            card.surface_tabs.root.remove(&tab.root);
+            removed_tabs.push((surface_id, tab));
+        }
+    }
+    drop(tabs);
+
+    {
+        let mut state = card.surface_tabs.state.borrow_mut();
+        state.model_order = model_order.clone();
+        if state
+            .drag
+            .as_ref()
+            .is_some_and(|drag| !desired_surface_ids.contains(&drag.surface_id))
+        {
+            state.drag = None;
         }
     }
 
-    let mut previous: Option<Widget> = None;
-    for surface in pane.surfaces.values() {
-        let tab = tabs
-            .get(&surface.id)
-            .expect("surface tab should exist after sync");
-        card.surface_tabs
-            .root
-            .insert_child_after(&tab.root, previous.as_ref());
-        previous = Some(tab.root.clone().upcast());
+    for (surface_id, tab) in removed_tabs {
+        remove_surface_tab(&card.surface_tabs, surface_id, tab, animations_enabled);
     }
-    card.surface_tabs
-        .root
-        .insert_child_after(&card.surface_tabs.add_button, previous.as_ref());
+
+    let display_order = {
+        let state = card.surface_tabs.state.borrow();
+        state
+            .drag
+            .as_ref()
+            .map(|drag| {
+                let mut order = drag
+                    .preview_order
+                    .iter()
+                    .copied()
+                    .filter(|surface_id| desired_surface_ids.contains(surface_id))
+                    .collect::<Vec<_>>();
+                for surface_id in &model_order {
+                    if !order.contains(surface_id) {
+                        order.push(*surface_id);
+                    }
+                }
+                order
+            })
+            .unwrap_or_else(|| model_order.clone())
+    };
+
+    let layout = compute_surface_tab_strip_layout(&card.surface_tabs, &display_order);
+    set_surface_tab_layout(&card.surface_tabs, layout, animations_enabled);
+    apply_surface_tab_widgets(&card.surface_tabs);
 }
 
 fn build_surface_tab_strip(
@@ -3589,8 +3717,9 @@ fn build_surface_tab_strip(
     workspace_id: taskers_domain::WorkspaceId,
     pane_id: taskers_domain::PaneId,
 ) -> SurfaceTabStripWidgets {
-    let root = GtkBox::new(Orientation::Horizontal, 4);
+    let root = Fixed::new();
     root.add_css_class("surface-tabs");
+    root.set_hexpand(true);
 
     let add_button = Button::with_label("+");
     add_button.add_css_class("flat");
@@ -3603,17 +3732,19 @@ fn build_surface_tab_strip(
             kind: PaneKind::Terminal,
         });
     });
-    root.append(&add_button);
+    root.put(&add_button, 0.0, 0.0);
 
     SurfaceTabStripWidgets {
         root,
         add_button,
         tabs: Rc::new(RefCell::new(HashMap::new())),
+        state: Rc::new(RefCell::new(SurfaceTabStripState::default())),
     }
 }
 
 fn build_surface_tab(
     ui: &Rc<UiHandle>,
+    strip: &SurfaceTabStripWidgets,
     workspace_id: taskers_domain::WorkspaceId,
     pane_id: taskers_domain::PaneId,
     surface_id: SurfaceId,
@@ -3628,6 +3759,7 @@ fn build_surface_tab(
     let label = Button::new();
     label.add_css_class("flat");
     label.add_css_class("surface-tab-label");
+    label.set_hexpand(true);
     let label_content = GtkBox::new(Orientation::Horizontal, 4);
     label_content.set_hexpand(true);
     let agent_icon = build_agent_icon(None, 12);
@@ -3641,13 +3773,36 @@ fn build_surface_tab(
     label_content.append(&title);
     label.set_child(Some(&label_content));
     let focus_ui = Rc::clone(ui);
+    let focus_state = Rc::clone(&strip.state);
     label.connect_clicked(move |_| {
+        let mut strip_state = focus_state.borrow_mut();
+        if strip_state.suppress_click_surface == Some(surface_id) {
+            strip_state.suppress_click_surface = None;
+            return;
+        }
+        drop(strip_state);
         focus_ui.dispatch(ControlCommand::FocusSurface {
             workspace_id,
             pane_id,
             surface_id,
         });
     });
+    let drag_ui = Rc::clone(ui);
+    let drag_strip = strip.clone();
+    let drag = gtk::GestureDrag::new();
+    drag.connect_drag_begin(move |_, _, _| {
+        begin_surface_tab_drag(&drag_strip, surface_id);
+    });
+    let drag_strip = strip.clone();
+    let drag_ui_for_update = Rc::clone(&drag_ui);
+    drag.connect_drag_update(move |_, dx, _| {
+        update_surface_tab_drag(&drag_ui_for_update, &drag_strip, surface_id, dx);
+    });
+    let drag_strip = strip.clone();
+    drag.connect_drag_end(move |_, _, _| {
+        end_surface_tab_drag(&drag_ui, &drag_strip, workspace_id, pane_id, surface_id);
+    });
+    label.add_controller(drag);
     root.append(&label);
 
     let close = Button::with_label("\u{00d7}");
@@ -3712,6 +3867,624 @@ fn configure_surface_tab(
     tab.dot.set_tooltip_text(Some(surface.attention.label()));
     configure_agent_icon(&tab.agent_icon, surface_agent_kind(surface), 12);
     tab.title.set_text(&display_surface_title(surface));
+}
+
+fn remove_surface_tab(
+    strip: &SurfaceTabStripWidgets,
+    surface_id: SurfaceId,
+    tab: SurfaceTabWidgets,
+    animations_enabled: bool,
+) {
+    let key = SurfaceTabItemKey::Surface(surface_id);
+    let mut state = strip.state.borrow_mut();
+    if !animations_enabled {
+        state.presented.remove(&key);
+        if tab.root.parent().is_some() {
+            strip.root.remove(&tab.root);
+        }
+        return;
+    }
+
+    if let Some(start_item) = state.presented.remove(&key) {
+        tab.root.add_css_class("surface-tab-exiting");
+        state.exiting.push(SurfaceTabExitAnimation {
+            root: tab.root,
+            start_time: glib::monotonic_time(),
+            duration_us: SURFACE_TAB_ANIMATION_US,
+            start_item,
+            end_item: PresentedSurfaceTabItem {
+                x: start_item.x - SURFACE_TAB_EXIT_OFFSET_PX,
+                opacity: 0.0,
+                width: (start_item.width - SURFACE_TAB_SIZE_DELTA_PX).max(SURFACE_TAB_MIN_WIDTH),
+                height: start_item.height,
+            },
+        });
+    } else if tab.root.parent().is_some() {
+        strip.root.remove(&tab.root);
+    }
+}
+
+fn compute_surface_tab_strip_layout(
+    strip: &SurfaceTabStripWidgets,
+    order: &[SurfaceId],
+) -> SurfaceTabStripLayout {
+    let tabs = strip.tabs.borrow();
+    let mut widths = Vec::new();
+    let mut heights = Vec::new();
+    for surface_id in order {
+        let Some(tab) = tabs.get(surface_id) else {
+            continue;
+        };
+        let (_, natural_width, _, _) = tab.root.measure(Orientation::Horizontal, -1);
+        let (_, natural_height, _, _) = tab.root.measure(Orientation::Vertical, -1);
+        widths.push(natural_width.clamp(SURFACE_TAB_MIN_WIDTH, SURFACE_TAB_MAX_WIDTH));
+        heights.push(natural_height);
+    }
+    drop(tabs);
+
+    let (_, add_width, _, _) = strip.add_button.measure(Orientation::Horizontal, -1);
+    let (_, add_height, _, _) = strip.add_button.measure(Orientation::Vertical, -1);
+    let gap_count = if widths.is_empty() {
+        0
+    } else {
+        widths.len() as i32
+    };
+    shrink_surface_tab_widths(
+        &mut widths,
+        add_width,
+        gap_count,
+        strip.root.allocated_width(),
+    );
+
+    let mut x = 0.0;
+    let mut items = Vec::new();
+    let mut max_height = add_height;
+    for (index, surface_id) in order.iter().copied().enumerate() {
+        let Some(width) = widths.get(index).copied() else {
+            continue;
+        };
+        let height = heights.get(index).copied().unwrap_or(add_height);
+        max_height = max_height.max(height);
+        items.push(SurfaceTabLayoutItem {
+            surface_id,
+            x,
+            width,
+            height,
+        });
+        x += f64::from(width + SURFACE_TAB_GAP);
+    }
+
+    SurfaceTabStripLayout {
+        items,
+        add_button: SurfaceTabAuxLayoutItem {
+            x,
+            width: add_width,
+            height: add_height,
+        },
+        height: max_height,
+    }
+}
+
+fn shrink_surface_tab_widths(
+    widths: &mut [i32],
+    add_width: i32,
+    gap_count: i32,
+    available_width: i32,
+) {
+    if widths.is_empty() || available_width <= 0 {
+        return;
+    }
+
+    let gap_total = gap_count * SURFACE_TAB_GAP;
+    let mut total_width = widths.iter().sum::<i32>() + add_width + gap_total;
+    if total_width <= available_width {
+        return;
+    }
+
+    let min_total = widths.len() as i32 * SURFACE_TAB_MIN_WIDTH + add_width + gap_total;
+    if available_width <= min_total {
+        widths.fill(SURFACE_TAB_MIN_WIDTH);
+        return;
+    }
+
+    while total_width > available_width {
+        let mut reduced_any = false;
+        for width in widths.iter_mut() {
+            if total_width <= available_width {
+                break;
+            }
+            if *width > SURFACE_TAB_MIN_WIDTH {
+                *width -= 1;
+                total_width -= 1;
+                reduced_any = true;
+            }
+        }
+        if !reduced_any {
+            break;
+        }
+    }
+}
+
+fn set_surface_tab_layout(
+    strip: &SurfaceTabStripWidgets,
+    layout: SurfaceTabStripLayout,
+    animations_enabled: bool,
+) {
+    let mut state = strip.state.borrow_mut();
+    let target_items = surface_tab_target_items(&layout, state.drag.as_ref());
+    let duration_us = state
+        .next_animation_duration_us
+        .take()
+        .unwrap_or(SURFACE_TAB_ANIMATION_US);
+    state.layout = Some(layout);
+
+    if !animations_enabled {
+        for exit in state.exiting.drain(..) {
+            if exit.root.parent().is_some() {
+                strip.root.remove(&exit.root);
+            }
+        }
+        state.motion = None;
+        state.presented = target_items;
+        return;
+    }
+
+    if state.presented.is_empty() {
+        state.motion = None;
+        state.presented = target_items;
+        return;
+    }
+
+    let start_items = target_items
+        .iter()
+        .map(|(key, target)| {
+            let start = state
+                .presented
+                .get(key)
+                .copied()
+                .unwrap_or_else(|| surface_tab_enter_item(*key, *target));
+            (*key, start)
+        })
+        .collect::<HashMap<_, _>>();
+
+    if start_items == target_items {
+        state.motion = None;
+        state.presented = target_items;
+        return;
+    }
+
+    state.presented = start_items.clone();
+    state.motion = Some(SurfaceTabMotionState {
+        start_time: glib::monotonic_time(),
+        duration_us,
+        start_items,
+        target_items,
+    });
+    drop(state);
+    start_surface_tab_tick(strip);
+}
+
+fn surface_tab_target_items(
+    layout: &SurfaceTabStripLayout,
+    drag: Option<&SurfaceTabDragState>,
+) -> HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem> {
+    let mut items = layout
+        .items
+        .iter()
+        .map(|item| {
+            (
+                SurfaceTabItemKey::Surface(item.surface_id),
+                PresentedSurfaceTabItem {
+                    x: item.x,
+                    opacity: 1.0,
+                    width: item.width,
+                    height: item.height,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    items.insert(
+        SurfaceTabItemKey::AddButton,
+        PresentedSurfaceTabItem {
+            x: layout.add_button.x,
+            opacity: 1.0,
+            width: layout.add_button.width,
+            height: layout.add_button.height,
+        },
+    );
+
+    if let Some(drag) = drag.filter(|drag| drag.threshold_crossed) {
+        if let Some(item) = items.get_mut(&SurfaceTabItemKey::Surface(drag.surface_id)) {
+            item.x = drag.start_x + drag.current_dx;
+        }
+    }
+
+    items
+}
+
+fn surface_tab_enter_item(
+    key: SurfaceTabItemKey,
+    target: PresentedSurfaceTabItem,
+) -> PresentedSurfaceTabItem {
+    match key {
+        SurfaceTabItemKey::Surface(_) => PresentedSurfaceTabItem {
+            x: target.x + SURFACE_TAB_ENTER_OFFSET_PX,
+            opacity: 0.0,
+            width: (target.width - SURFACE_TAB_SIZE_DELTA_PX).max(SURFACE_TAB_MIN_WIDTH),
+            height: target.height,
+        },
+        SurfaceTabItemKey::AddButton => target,
+    }
+}
+
+fn start_surface_tab_tick(strip: &SurfaceTabStripWidgets) {
+    let mut state = strip.state.borrow_mut();
+    if state.tick_running {
+        return;
+    }
+    state.tick_running = true;
+    drop(state);
+
+    let strip = strip.clone();
+    let root = strip.root.clone();
+    root.add_tick_callback(move |_, clock| {
+        if advance_surface_tab_tick(&strip, clock.frame_time()) {
+            glib::ControlFlow::Continue
+        } else {
+            strip.state.borrow_mut().tick_running = false;
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+fn advance_surface_tab_tick(strip: &SurfaceTabStripWidgets, now: i64) -> bool {
+    let (presented, exiting, height, completed_exits, keep_running) = {
+        let mut state = strip.state.borrow_mut();
+
+        if let Some(motion) = state.motion.clone() {
+            let progress =
+                ((now - motion.start_time) as f64 / motion.duration_us as f64).clamp(0.0, 1.0);
+            let eased = ease_in_out_cubic(progress);
+            state.presented = motion
+                .target_items
+                .iter()
+                .map(|(key, target)| {
+                    let start = motion.start_items.get(key).copied().unwrap_or(*target);
+                    (*key, lerp_surface_tab_item(start, *target, eased))
+                })
+                .collect();
+            if progress >= 1.0 {
+                state.presented = motion.target_items;
+                state.motion = None;
+            }
+        }
+
+        if let Some(drag_surface_id) = state
+            .drag
+            .as_ref()
+            .filter(|drag| drag.threshold_crossed)
+            .map(|drag| (drag.surface_id, drag.start_x + drag.current_dx))
+        {
+            if let Some(item) = state
+                .presented
+                .get_mut(&SurfaceTabItemKey::Surface(drag_surface_id.0))
+            {
+                item.x = drag_surface_id.1;
+                item.opacity = 1.0;
+            }
+        }
+
+        let mut exiting = Vec::new();
+        let mut completed_exits = Vec::new();
+        state.exiting.retain(|exit| {
+            let progress =
+                ((now - exit.start_time) as f64 / exit.duration_us as f64).clamp(0.0, 1.0);
+            let eased = ease_in_out_cubic(progress);
+            let item = lerp_surface_tab_item(exit.start_item, exit.end_item, eased);
+            if progress >= 1.0 {
+                completed_exits.push(exit.root.clone());
+                false
+            } else {
+                exiting.push((exit.root.clone(), item));
+                true
+            }
+        });
+
+        let height = state
+            .layout
+            .as_ref()
+            .map(|layout| layout.height)
+            .unwrap_or(0);
+        let keep_running = state.motion.is_some() || !state.exiting.is_empty();
+        (
+            state.presented.clone(),
+            exiting,
+            height,
+            completed_exits,
+            keep_running,
+        )
+    };
+
+    apply_surface_tab_widget_frames(strip, &presented, &exiting, height);
+    for exit_root in completed_exits {
+        if exit_root.parent().is_some() {
+            strip.root.remove(&exit_root);
+        }
+    }
+
+    keep_running
+}
+
+fn apply_surface_tab_widgets(strip: &SurfaceTabStripWidgets) {
+    let (presented, exiting, height) = {
+        let state = strip.state.borrow();
+        let exiting = state
+            .exiting
+            .iter()
+            .map(|exit| (exit.root.clone(), exit.start_item))
+            .collect::<Vec<_>>();
+        let mut presented = state.presented.clone();
+        if let Some(drag) = state.drag.as_ref().filter(|drag| drag.threshold_crossed) {
+            if let Some(item) = presented.get_mut(&SurfaceTabItemKey::Surface(drag.surface_id)) {
+                item.x = drag.start_x + drag.current_dx;
+                item.opacity = 1.0;
+            }
+        }
+        (
+            presented,
+            exiting,
+            state
+                .layout
+                .as_ref()
+                .map(|layout| layout.height)
+                .unwrap_or(0),
+        )
+    };
+    apply_surface_tab_widget_frames(strip, &presented, &exiting, height);
+}
+
+fn apply_surface_tab_widget_frames(
+    strip: &SurfaceTabStripWidgets,
+    presented: &HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem>,
+    exiting: &[(GtkBox, PresentedSurfaceTabItem)],
+    height: i32,
+) {
+    let tabs = strip.tabs.borrow();
+    for (surface_id, tab) in tabs.iter() {
+        let Some(item) = presented.get(&SurfaceTabItemKey::Surface(*surface_id)) else {
+            continue;
+        };
+        if tab.root.parent().is_none() {
+            strip.root.put(&tab.root, item.x, 0.0);
+        }
+        tab.root
+            .set_size_request(item.width, item.height.max(height));
+        strip.root.move_(&tab.root, item.x, 0.0);
+        tab.root.set_opacity(item.opacity);
+    }
+
+    if let Some(item) = presented.get(&SurfaceTabItemKey::AddButton) {
+        if strip.add_button.parent().is_none() {
+            strip.root.put(&strip.add_button, item.x, 0.0);
+        }
+        strip
+            .add_button
+            .set_size_request(item.width, item.height.max(height));
+        strip.root.move_(&strip.add_button, item.x, 0.0);
+        strip.add_button.set_opacity(item.opacity);
+    }
+
+    for (exit_root, item) in exiting {
+        if exit_root.parent().is_none() {
+            strip.root.put(exit_root, item.x, 0.0);
+        }
+        exit_root.set_size_request(item.width, item.height.max(height));
+        strip.root.move_(exit_root, item.x, 0.0);
+        exit_root.set_opacity(item.opacity);
+    }
+
+    strip.root.set_size_request(-1, height.max(1));
+}
+
+fn begin_surface_tab_drag(strip: &SurfaceTabStripWidgets, surface_id: SurfaceId) {
+    let mut state = strip.state.borrow_mut();
+    let Some(presented) = state
+        .presented
+        .get(&SurfaceTabItemKey::Surface(surface_id))
+        .copied()
+    else {
+        return;
+    };
+    let preview_order = state
+        .layout
+        .as_ref()
+        .map(|layout| layout.items.iter().map(|item| item.surface_id).collect())
+        .unwrap_or_else(|| state.model_order.clone());
+    state.drag = Some(SurfaceTabDragState {
+        surface_id,
+        start_x: presented.x,
+        current_dx: 0.0,
+        preview_order,
+        threshold_crossed: false,
+    });
+    drop(state);
+
+    if let Some(tab) = strip.tabs.borrow().get(&surface_id).cloned() {
+        tab.root.add_css_class("surface-tab-dragging");
+        raise_surface_tab_widget(strip, &tab.root, presented);
+    }
+}
+
+fn update_surface_tab_drag(
+    ui: &Rc<UiHandle>,
+    strip: &SurfaceTabStripWidgets,
+    surface_id: SurfaceId,
+    dx: f64,
+) {
+    let mut next_order = None;
+    let (should_suppress_click, threshold_crossed, layout, current_center, current_preview) = {
+        let mut state = strip.state.borrow_mut();
+        let current_width = surface_tab_item_width(&state, surface_id);
+        let state_layout = state.layout.clone();
+        let Some(drag) = state.drag.as_mut() else {
+            return;
+        };
+        if drag.surface_id != surface_id {
+            return;
+        }
+        drag.current_dx = dx;
+        let mut should_suppress_click = false;
+        if !drag.threshold_crossed && dx.abs() >= SURFACE_TAB_DRAG_THRESHOLD_PX {
+            drag.threshold_crossed = true;
+            should_suppress_click = true;
+        }
+        (
+            should_suppress_click,
+            drag.threshold_crossed,
+            state_layout,
+            drag.start_x + drag.current_dx + current_width / 2.0,
+            drag.preview_order.clone(),
+        )
+    };
+
+    if should_suppress_click {
+        strip.state.borrow_mut().suppress_click_surface = Some(surface_id);
+    }
+    if !threshold_crossed {
+        apply_surface_tab_widgets(strip);
+        return;
+    }
+
+    if let Some(layout) = layout {
+        let preview =
+            surface_tab_preview_order(&layout, &current_preview, surface_id, current_center);
+        if preview != current_preview {
+            if let Some(drag) = strip.state.borrow_mut().drag.as_mut() {
+                drag.preview_order = preview.clone();
+            }
+            next_order = Some(preview);
+        }
+    }
+
+    if let Some(order) = next_order {
+        let layout = compute_surface_tab_strip_layout(strip, &order);
+        set_surface_tab_layout(strip, layout, ui.settings.borrow().animations_enabled);
+    }
+    apply_surface_tab_widgets(strip);
+}
+
+fn end_surface_tab_drag(
+    ui: &Rc<UiHandle>,
+    strip: &SurfaceTabStripWidgets,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+    surface_id: SurfaceId,
+) {
+    let (threshold_crossed, preview_index, current_index) = {
+        let mut state = strip.state.borrow_mut();
+        let Some(drag) = state.drag.take() else {
+            return;
+        };
+        state.next_animation_duration_us =
+            drag.threshold_crossed.then_some(SURFACE_TAB_DRAG_SNAP_US);
+        (
+            drag.threshold_crossed,
+            drag.preview_order.iter().position(|id| *id == surface_id),
+            state.model_order.iter().position(|id| *id == surface_id),
+        )
+    };
+
+    if let Some(tab) = strip.tabs.borrow().get(&surface_id).cloned() {
+        tab.root.remove_css_class("surface-tab-dragging");
+    }
+
+    if !threshold_crossed {
+        apply_surface_tab_widgets(strip);
+        return;
+    }
+
+    if preview_index != current_index {
+        ui.dispatch(ControlCommand::MoveSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+            to_index: preview_index.unwrap_or_default(),
+        });
+        return;
+    }
+
+    ui.refresh(true);
+}
+
+fn surface_tab_item_width(state: &SurfaceTabStripState, surface_id: SurfaceId) -> f64 {
+    state
+        .presented
+        .get(&SurfaceTabItemKey::Surface(surface_id))
+        .map(|item| f64::from(item.width))
+        .or_else(|| {
+            state.layout.as_ref().and_then(|layout| {
+                layout
+                    .items
+                    .iter()
+                    .find(|item| item.surface_id == surface_id)
+                    .map(|item| f64::from(item.width))
+            })
+        })
+        .unwrap_or(f64::from(SURFACE_TAB_MIN_WIDTH))
+}
+
+fn surface_tab_preview_order(
+    layout: &SurfaceTabStripLayout,
+    current_order: &[SurfaceId],
+    surface_id: SurfaceId,
+    current_center: f64,
+) -> Vec<SurfaceId> {
+    let mut order = current_order
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != surface_id)
+        .collect::<Vec<_>>();
+    let insert_index = order
+        .iter()
+        .position(|candidate| {
+            layout
+                .items
+                .iter()
+                .find(|item| item.surface_id == *candidate)
+                .map(|item| current_center < item.x + (f64::from(item.width) / 2.0))
+                .unwrap_or(false)
+        })
+        .unwrap_or(order.len());
+    order.insert(insert_index, surface_id);
+    order
+}
+
+fn raise_surface_tab_widget(
+    strip: &SurfaceTabStripWidgets,
+    widget: &GtkBox,
+    presented: PresentedSurfaceTabItem,
+) {
+    if widget.parent().is_some() {
+        strip.root.remove(widget);
+    }
+    strip.root.put(widget, presented.x, 0.0);
+}
+
+fn lerp_surface_tab_item(
+    start: PresentedSurfaceTabItem,
+    end: PresentedSurfaceTabItem,
+    progress: f64,
+) -> PresentedSurfaceTabItem {
+    PresentedSurfaceTabItem {
+        x: start.x + ((end.x - start.x) * progress),
+        opacity: start.opacity + ((end.opacity - start.opacity) * progress),
+        width: lerp_i32(start.width, end.width, progress),
+        height: lerp_i32(start.height, end.height, progress),
+    }
+}
+
+fn lerp_i32(start: i32, end: i32, progress: f64) -> i32 {
+    (f64::from(start) + (f64::from(end - start) * progress)).round() as i32
 }
 
 fn clear_box(container: &GtkBox) {
@@ -5219,6 +5992,7 @@ fn install_css() {
 
         .surface-tabs {
             margin: 4px 8px 6px;
+            min-height: 24px;
         }
 
         .surface-tab {
@@ -5252,6 +6026,15 @@ fn install_css() {
         .surface-tab-has-attention.surface-tab-state-error {
             background: rgba(248,113,113,0.10);
             border-color: rgba(248,113,113,0.28);
+        }
+
+        .surface-tab-dragging {
+            background: rgba(255,255,255,0.08);
+            border-color: rgba(255,255,255,0.18);
+        }
+
+        .surface-tab-exiting {
+            border-color: rgba(255,255,255,0.04);
         }
 
         .surface-tab-label,
