@@ -17,15 +17,15 @@ use std::{
 use adw::prelude::*;
 use app_state::AppState;
 use clap::Parser;
-use gdk_pixbuf::{InterpType, PixbufLoader, prelude::PixbufLoaderExt};
 use gtk::{
-    Align, Box as GtkBox, Button, CssProvider, Entry, Fixed, Image, Label, Orientation, Overlay,
-    Paned, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator, TextView,
-    Widget, WrapMode, gdk, glib,
+    Align, Box as GtkBox, Button, CssProvider, DrawingArea, Entry, Fixed, Label, Orientation,
+    Overlay, Paned, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator,
+    TextView, Widget, WrapMode, gdk, glib,
 };
 use pane_runtime::PaneRuntimeSnapshot;
 use serde_json::json;
 use settings_store::{AppConfig, ShortcutAction};
+use svgtypes::{SimplePathSegment, SimplifyingPathParser};
 use taskers_control::{
     ControlCommand, InMemoryController, bind_socket, default_socket_path, serve,
 };
@@ -113,7 +113,7 @@ struct ShellWidgets {
 #[derive(Clone)]
 struct PaneCardWidgets {
     root: GtkBox,
-    agent_icon: Image,
+    agent_icon: AgentIconWidget,
     title: Label,
     status_dot: Label,
     surface_tabs: GtkBox,
@@ -162,8 +162,46 @@ struct WorkspaceRenderContext {
     overview_scale: f64,
 }
 
+#[derive(Clone)]
+struct AgentIconWidget {
+    root: DrawingArea,
+    state: Rc<RefCell<AgentIconState>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct AgentIconState {
+    kind: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentIconSpec {
+    view_box_width: f64,
+    view_box_height: f64,
+    paths: &'static [AgentIconPathSpec],
+}
+
+#[derive(Clone, Copy)]
+struct AgentIconPathSpec {
+    data: &'static str,
+    fill: AgentIconFill,
+}
+
+#[derive(Clone, Copy)]
+enum AgentIconFill {
+    CurrentColor,
+    Fixed(AgentIconColor),
+}
+
+#[derive(Clone, Copy)]
+struct AgentIconColor {
+    red: f64,
+    green: f64,
+    blue: f64,
+    alpha: f64,
+}
+
 thread_local! {
-    static AGENT_ICON_TEXTURES: RefCell<HashMap<(&'static str, i32), gdk::Texture>> =
+    static AGENT_ICON_PATHS: RefCell<HashMap<&'static str, Rc<Vec<SimplePathSegment>>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -1181,7 +1219,7 @@ impl UiHandle {
 
         let agent_icon = build_agent_icon(pane.active_surface().and_then(surface_agent_kind), 14);
         agent_icon.add_css_class("pane-agent-icon");
-        header.append(&agent_icon);
+        header.append(agent_icon.widget());
 
         let title = Label::new(Some("Unnamed terminal pane"));
         title.add_css_class("pane-title");
@@ -2224,7 +2262,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                 12,
             );
             agent_icon.add_css_class("workspace-agent-icon");
-            heading.append(&agent_icon);
+            heading.append(agent_icon.widget());
 
             let label = Label::new(Some(&summary.label));
             label.add_css_class("workspace-label");
@@ -2583,7 +2621,7 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
         13,
     );
     agent_icon.add_css_class("activity-agent-icon");
-    heading.append(&agent_icon);
+    heading.append(agent_icon.widget());
 
     let title = model
         .workspaces
@@ -3637,7 +3675,7 @@ fn sync_surface_tabs(
         label_content.set_hexpand(true);
         let agent_icon = build_agent_icon(surface_agent_kind(surface), 12);
         agent_icon.add_css_class("surface-tab-agent-icon");
-        label_content.append(&agent_icon);
+        label_content.append(agent_icon.widget());
         let title = Label::new(Some(&display_surface_title(surface)));
         title.add_css_class("surface-tab-title");
         title.set_xalign(0.0);
@@ -3764,91 +3802,269 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     }
 }
 
-fn build_agent_icon(agent_kind: Option<&str>, size: i32) -> Image {
-    let icon = Image::new();
-    icon.set_halign(Align::Center);
-    icon.set_valign(Align::Center);
-    icon.set_size_request(size, size);
-    configure_agent_icon(&icon, agent_kind, size);
-    icon
+const AGENT_ICON_CLASSES: [&str; 4] = [
+    "agent-icon",
+    "agent-icon-codex",
+    "agent-icon-claude",
+    "agent-icon-opencode",
+];
+
+const CODEX_ICON_PATH: &str = "M239.184 106.203a64.716 64.716 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.716 64.716 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.665 64.665 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.767 64.767 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483Zm-97.56 136.338a48.397 48.397 0 0 1-31.105-11.255l1.535-.87 51.67-29.825a8.595 8.595 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601Zm-104.466-44.61a48.345 48.345 0 0 1-5.781-32.589l1.534.921 51.722 29.826a8.339 8.339 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803ZM23.549 85.38a48.499 48.499 0 0 1 25.58-21.333v61.39a8.288 8.288 0 0 0 4.195 7.316l62.874 36.272-21.845 12.636a.819.819 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405v.256Zm179.466 41.695-63.08-36.63L161.73 77.86a.819.819 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.544 8.544 0 0 0-4.4-7.213Zm21.742-32.69-1.535-.922-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.716.716 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391v.205ZM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87-51.67 29.825a8.595 8.595 0 0 0-4.246 7.367l-.051 72.697Zm11.868-25.58 28.138-16.217 28.188 16.218v32.434l-28.086 16.218-28.188-16.218-.052-32.434Z";
+
+const CLAUDE_CODE_ICON_PATH: &str = "m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z";
+
+const OPENCODE_ICON_FRAME_PATH: &str = "M24 8H8V32H24V8ZM32 40H0V0H32V40Z";
+const OPENCODE_ICON_CORE_PATH: &str = "M24 32H8V16H24V32Z";
+
+const CLAUDE_CODE_ORANGE: AgentIconColor = AgentIconColor {
+    red: 0.850_980_392_156_862_7,
+    green: 0.466_666_666_666_666_7,
+    blue: 0.341_176_470_588_235_3,
+    alpha: 1.0,
+};
+
+const OPENCODE_CORE_GREY: AgentIconColor = AgentIconColor {
+    red: 0.737_254_901_960_784_4,
+    green: 0.733_333_333_333_333_3,
+    blue: 0.733_333_333_333_333_3,
+    alpha: 1.0,
+};
+
+const CODEX_ICON_SPEC: AgentIconSpec = AgentIconSpec {
+    view_box_width: 256.0,
+    view_box_height: 260.0,
+    paths: &[AgentIconPathSpec {
+        data: CODEX_ICON_PATH,
+        fill: AgentIconFill::CurrentColor,
+    }],
+};
+
+const CLAUDE_CODE_ICON_SPEC: AgentIconSpec = AgentIconSpec {
+    view_box_width: 256.0,
+    view_box_height: 257.0,
+    paths: &[AgentIconPathSpec {
+        data: CLAUDE_CODE_ICON_PATH,
+        fill: AgentIconFill::Fixed(CLAUDE_CODE_ORANGE),
+    }],
+};
+
+const OPENCODE_ICON_SPEC: AgentIconSpec = AgentIconSpec {
+    view_box_width: 32.0,
+    view_box_height: 40.0,
+    paths: &[
+        AgentIconPathSpec {
+            data: OPENCODE_ICON_FRAME_PATH,
+            fill: AgentIconFill::CurrentColor,
+        },
+        AgentIconPathSpec {
+            data: OPENCODE_ICON_CORE_PATH,
+            fill: AgentIconFill::Fixed(OPENCODE_CORE_GREY),
+        },
+    ],
+};
+
+impl AgentIconWidget {
+    fn new(agent_kind: Option<&str>, size: i32) -> Self {
+        let root = DrawingArea::new();
+        root.set_halign(Align::Center);
+        root.set_valign(Align::Center);
+
+        let state = Rc::new(RefCell::new(AgentIconState::default()));
+        let draw_state = Rc::clone(&state);
+        root.set_draw_func(move |area, cr, width, height| {
+            let Some(agent_kind) = draw_state.borrow().kind else {
+                return;
+            };
+            render_agent_icon(area, cr, width, height, agent_kind);
+        });
+
+        let icon = Self { root, state };
+        configure_agent_icon(&icon, agent_kind, size);
+        icon
+    }
+
+    fn widget(&self) -> &DrawingArea {
+        &self.root
+    }
+
+    fn add_css_class(&self, class_name: &str) {
+        self.root.add_css_class(class_name);
+    }
 }
 
-fn configure_agent_icon(icon: &Image, agent_kind: Option<&str>, size: i32) {
-    let Some(texture) = agent_kind.and_then(|agent_kind| agent_icon_texture(agent_kind, size))
+fn build_agent_icon(agent_kind: Option<&str>, size: i32) -> AgentIconWidget {
+    AgentIconWidget::new(agent_kind, size)
+}
+
+fn configure_agent_icon(icon: &AgentIconWidget, agent_kind: Option<&str>, size: i32) {
+    icon.root.set_content_width(size);
+    icon.root.set_content_height(size);
+    icon.root.set_size_request(size, size);
+    for class_name in AGENT_ICON_CLASSES {
+        icon.root.remove_css_class(class_name);
+    }
+
+    let Some(agent_kind) =
+        agent_kind.and_then(|agent_kind| normalized_agent_kind(Some(agent_kind)))
     else {
-        icon.set_paintable(None::<&gdk::Texture>);
-        icon.set_tooltip_text(None);
-        icon.set_visible(false);
+        icon.state.borrow_mut().kind = None;
+        icon.root.set_tooltip_text(None);
+        icon.root.set_visible(false);
+        icon.root.queue_draw();
         return;
     };
 
-    icon.set_paintable(Some(&texture));
-    icon.set_tooltip_text(
-        agent_kind
-            .and_then(|agent_kind| normalized_agent_kind(Some(agent_kind)))
-            .map(humanize_agent_kind)
-            .as_deref(),
-    );
-    icon.set_visible(true);
+    if agent_icon_spec(agent_kind).is_none() {
+        icon.state.borrow_mut().kind = None;
+        icon.root.set_tooltip_text(None);
+        icon.root.set_visible(false);
+        icon.root.queue_draw();
+        return;
+    }
+
+    icon.state.borrow_mut().kind = Some(agent_kind);
+    icon.root.add_css_class("agent-icon");
+    icon.root.add_css_class(agent_icon_class(agent_kind));
+    icon.root
+        .set_tooltip_text(Some(&humanize_agent_kind(agent_kind)));
+    icon.root.set_visible(true);
+    icon.root.queue_draw();
 }
 
-fn agent_icon_texture(agent_kind: &str, size: i32) -> Option<gdk::Texture> {
-    let slug = agent_icon_slug(agent_kind)?;
-    AGENT_ICON_TEXTURES.with(|cache| {
-        if let Some(texture) = cache.borrow().get(&(slug, size)).cloned() {
-            return Some(texture);
-        }
-
-        let texture = decode_agent_icon_texture(agent_icon_bytes(slug), size)?;
-        cache.borrow_mut().insert((slug, size), texture.clone());
-        Some(texture)
-    })
+fn agent_icon_class(agent_kind: &str) -> &'static str {
+    match agent_kind {
+        "codex" => "agent-icon-codex",
+        "claude" => "agent-icon-claude",
+        "opencode" => "agent-icon-opencode",
+        _ => "agent-icon",
+    }
 }
 
-fn agent_icon_slug(agent_kind: &str) -> Option<&'static str> {
-    match normalized_agent_kind(Some(agent_kind))? {
-        "codex" => Some("codex"),
-        "claude" => Some("claude"),
-        "opencode" => Some("opencode"),
+fn agent_icon_spec(agent_kind: &str) -> Option<&'static AgentIconSpec> {
+    match agent_kind {
+        "codex" => Some(&CODEX_ICON_SPEC),
+        "claude" => Some(&CLAUDE_CODE_ICON_SPEC),
+        "opencode" => Some(&OPENCODE_ICON_SPEC),
         _ => None,
     }
 }
 
-fn agent_icon_bytes(slug: &str) -> &'static [u8] {
-    match slug {
-        "codex" => include_bytes!("../assets/agent-openai.svg"),
-        "claude" => include_bytes!("../assets/agent-anthropic.svg"),
-        "opencode" => include_bytes!("../assets/agent-opencode.svg"),
-        _ => &[],
+fn render_agent_icon(
+    area: &DrawingArea,
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    agent_kind: &'static str,
+) {
+    let Some(spec) = agent_icon_spec(agent_kind) else {
+        return;
+    };
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    let scale = f64::min(
+        f64::from(width) / spec.view_box_width,
+        f64::from(height) / spec.view_box_height,
+    );
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+
+    let offset_x = (f64::from(width) - (spec.view_box_width * scale)) / 2.0;
+    let offset_y = (f64::from(height) - (spec.view_box_height * scale)) / 2.0;
+
+    let _ = cr.save();
+    cr.set_antialias(gtk::cairo::Antialias::Best);
+    cr.translate(offset_x, offset_y);
+    cr.scale(scale, scale);
+
+    for path in spec.paths {
+        let Some(commands) = agent_icon_commands(path.data) else {
+            continue;
+        };
+        cr.new_path();
+        append_agent_icon_path(cr, commands.as_ref());
+        apply_agent_icon_fill(area, cr, path.fill);
+        let _ = cr.fill();
+    }
+
+    let _ = cr.restore();
+}
+
+fn agent_icon_commands(path_data: &'static str) -> Option<Rc<Vec<SimplePathSegment>>> {
+    AGENT_ICON_PATHS.with(|cache| {
+        if let Some(commands) = cache.borrow().get(path_data).cloned() {
+            return Some(commands);
+        }
+
+        let commands = Rc::new(
+            SimplifyingPathParser::from(path_data)
+                .map(|segment| segment.ok())
+                .collect::<Option<Vec<_>>>()?,
+        );
+        cache.borrow_mut().insert(path_data, Rc::clone(&commands));
+        Some(commands)
+    })
+}
+
+fn append_agent_icon_path(cr: &gtk::cairo::Context, commands: &[SimplePathSegment]) {
+    let mut current = (0.0, 0.0);
+    let mut subpath_start = (0.0, 0.0);
+
+    for command in commands {
+        match *command {
+            SimplePathSegment::MoveTo { x, y } => {
+                cr.move_to(x, y);
+                current = (x, y);
+                subpath_start = (x, y);
+            }
+            SimplePathSegment::LineTo { x, y } => {
+                cr.line_to(x, y);
+                current = (x, y);
+            }
+            SimplePathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
+                cr.curve_to(x1, y1, x2, y2, x, y);
+                current = (x, y);
+            }
+            SimplePathSegment::Quadratic { x1, y1, x, y } => {
+                let cubic_1_x = current.0 + ((2.0 / 3.0) * (x1 - current.0));
+                let cubic_1_y = current.1 + ((2.0 / 3.0) * (y1 - current.1));
+                let cubic_2_x = x + ((2.0 / 3.0) * (x1 - x));
+                let cubic_2_y = y + ((2.0 / 3.0) * (y1 - y));
+                cr.curve_to(cubic_1_x, cubic_1_y, cubic_2_x, cubic_2_y, x, y);
+                current = (x, y);
+            }
+            SimplePathSegment::ClosePath => {
+                cr.close_path();
+                current = subpath_start;
+            }
+        }
     }
 }
 
-fn decode_agent_icon_texture(bytes: &[u8], size: i32) -> Option<gdk::Texture> {
-    let loader = PixbufLoader::new();
-    loader.set_size(size, size);
-    loader.write(bytes).ok()?;
-    loader.close().ok()?;
-    let pixbuf = loader.pixbuf()?;
-    let scaled = scale_agent_icon_pixbuf(&pixbuf, size)?;
-    Some(gdk::Texture::for_pixbuf(&scaled))
-}
+fn apply_agent_icon_fill(area: &DrawingArea, cr: &gtk::cairo::Context, fill: AgentIconFill) {
+    let color = match fill {
+        AgentIconFill::CurrentColor => {
+            let color = area.style_context().color();
+            AgentIconColor {
+                red: f64::from(color.red()),
+                green: f64::from(color.green()),
+                blue: f64::from(color.blue()),
+                alpha: f64::from(color.alpha()),
+            }
+        }
+        AgentIconFill::Fixed(color) => color,
+    };
 
-fn scale_agent_icon_pixbuf(pixbuf: &gdk_pixbuf::Pixbuf, size: i32) -> Option<gdk_pixbuf::Pixbuf> {
-    if size <= 0 {
-        return None;
-    }
-
-    let width = pixbuf.width().max(1);
-    let height = pixbuf.height().max(1);
-    let largest_edge = width.max(height);
-    if largest_edge == size {
-        return Some(pixbuf.clone());
-    }
-
-    let scale = f64::from(size) / f64::from(largest_edge);
-    let scaled_width = (f64::from(width) * scale).round().max(1.0) as i32;
-    let scaled_height = (f64::from(height) * scale).round().max(1.0) as i32;
-    pixbuf.scale_simple(scaled_width, scaled_height, InterpType::Bilinear)
+    cr.set_source_rgba(color.red, color.green, color.blue, color.alpha);
 }
 
 fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<&'static str> {
@@ -3919,7 +4135,7 @@ fn workspace_agent_kind(workspace: &Workspace) -> Option<&'static str> {
 fn humanize_agent_kind(agent: &str) -> String {
     match agent {
         "codex" => "Codex".into(),
-        "claude" => "Claude".into(),
+        "claude" => "Claude Code".into(),
         "opencode" => "OpenCode".into(),
         "aider" => "Aider".into(),
         other => {
@@ -4614,6 +4830,18 @@ fn install_css() {
         .pane-agent-icon,
         .surface-tab-agent-icon {
             opacity: 0.96;
+        }
+
+        .agent-icon-codex {
+            color: #f4f4f5;
+        }
+
+        .agent-icon-claude {
+            color: #d97757;
+        }
+
+        .agent-icon-opencode {
+            color: #c4cad4;
         }
 
         .workspace-preview {
