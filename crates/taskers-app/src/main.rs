@@ -31,9 +31,9 @@ use taskers_control::{
 use taskers_domain::{
     ActivityItem, AppModel, AttentionState, DEFAULT_WORKSPACE_WINDOW_GAP,
     DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, Direction,
-    KEYBOARD_RESIZE_STEP, LayoutNode, MIN_WORKSPACE_WINDOW_HEIGHT, PaneKind, PaneMetadataPatch,
-    PaneRecord, SignalEvent, SignalKind, SurfaceId, SurfaceRecord, WindowFrame, Workspace,
-    WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceViewport, WorkspaceWindowId,
+    KEYBOARD_RESIZE_STEP, LayoutNode, MIN_WORKSPACE_WINDOW_HEIGHT, PaneKind, PaneMetadata,
+    PaneMetadataPatch, PaneRecord, SignalEvent, SignalKind, SurfaceId, SurfaceRecord, WindowFrame,
+    Workspace, WorkspaceAgentState, WorkspaceViewport, WorkspaceWindowId,
 };
 use taskers_ghostty::{
     BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, SurfaceDescriptor, TerminalBackend,
@@ -1346,6 +1346,20 @@ impl UiHandle {
             card.status_dot.remove_css_class(cls);
         }
         let pane_attention = pane.active_attention();
+        for cls in &[
+            "pane-card-state-busy",
+            "pane-card-state-completed",
+            "pane-card-state-waiting",
+            "pane-card-state-error",
+        ] {
+            card.root.remove_css_class(cls);
+        }
+        if pane_attention != AttentionState::Normal {
+            card.root.add_css_class(&format!(
+                "pane-card-state-{}",
+                attention_state_slug(pane_attention)
+            ));
+        }
         card.status_dot
             .add_css_class(&attention_dot_class(pane_attention));
         card.status_dot
@@ -1950,7 +1964,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     let sidebar_scroll = ScrolledWindow::new();
     sidebar_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     sidebar_scroll.set_child(Some(&sidebar));
-    sidebar_scroll.set_size_request(180, -1);
+    sidebar_scroll.set_size_request(224, -1);
     shell.set_start_child(Some(&sidebar_scroll));
     shell.set_resize_start_child(false);
 
@@ -2097,7 +2111,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     content_split.set_shrink_start_child(false);
 
     // --- Attention column ---
-    let attention_panel = GtkBox::new(Orientation::Vertical, 8);
+    let attention_panel = GtkBox::new(Orientation::Vertical, 6);
     attention_panel.add_css_class("attention-panel");
     attention_panel.set_margin_start(8);
     attention_panel.set_margin_end(8);
@@ -2112,19 +2126,19 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     attention_header.append(&attention_label);
     attention_panel.append(&attention_header);
 
-    let activity_empty = Label::new(Some("No panes need attention."));
-    activity_empty.add_css_class("dim-label");
+    let activity_empty = Label::new(Some("No unread items."));
+    activity_empty.add_css_class("empty-state");
     activity_empty.set_wrap(true);
     activity_empty.set_xalign(0.0);
     attention_panel.append(&activity_empty);
 
-    let activity_list = GtkBox::new(Orientation::Vertical, 4);
+    let activity_list = GtkBox::new(Orientation::Vertical, 0);
     activity_list.set_vexpand(true);
     attention_panel.append(&activity_list);
 
     let attention_scroll = ScrolledWindow::new();
     attention_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
-    attention_scroll.set_size_request(280, -1);
+    attention_scroll.set_size_request(264, -1);
     attention_scroll.set_child(Some(&attention_panel));
     content_split.set_end_child(Some(&attention_scroll));
     content_split.set_resize_end_child(false);
@@ -2152,14 +2166,15 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
 
     if let Ok(summaries) = model.workspace_summaries(model.active_window) {
         for summary in summaries {
-            let outer = GtkBox::new(Orientation::Horizontal, 0);
+            let outer = GtkBox::new(Orientation::Horizontal, 4);
+            outer.add_css_class("workspace-row");
 
             let button = Button::new();
             button.add_css_class("flat");
             button.add_css_class("workspace-button");
             button.set_hexpand(true);
 
-            let row = GtkBox::new(Orientation::Horizontal, 8);
+            let row = GtkBox::new(Orientation::Vertical, 4);
             row.add_css_class("workspace-item");
             if summary.display_attention != AttentionState::Normal {
                 row.add_css_class("workspace-item-has-attention");
@@ -2171,48 +2186,45 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             if summary.unread_count > 0 {
                 row.add_css_class("workspace-item-has-unread");
             }
-            row.set_margin_start(6);
-            row.set_margin_end(4);
-            row.set_margin_top(3);
-            row.set_margin_bottom(3);
+            row.set_margin_start(4);
+            row.set_margin_end(0);
+            row.set_margin_top(2);
+            row.set_margin_bottom(2);
 
             if model.active_workspace_id() == Some(summary.workspace_id) {
                 row.add_css_class("workspace-item-active");
             }
 
-            row.append(&build_workspace_status_widget(&summary));
-
-            let text = GtkBox::new(Orientation::Vertical, 2);
-            text.set_hexpand(true);
+            let heading = GtkBox::new(Orientation::Horizontal, 8);
+            heading.set_hexpand(true);
+            heading.append(&build_workspace_status_widget(&summary));
 
             let label = Label::new(Some(&summary.label));
             label.add_css_class("workspace-label");
             label.set_xalign(0.0);
             label.set_hexpand(true);
-            text.append(&label);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            heading.append(&label);
+            row.append(&heading);
 
-            if let Some(subtitle_text) = workspace_subtitle(&summary) {
-                let subtitle = Label::new(Some(&subtitle_text));
-                subtitle.add_css_class("workspace-subtitle");
-                subtitle.set_xalign(0.0);
-                subtitle.set_hexpand(true);
-                subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                text.append(&subtitle);
+            if let Some(preview_text) = workspace_preview_text(&summary) {
+                let preview = Label::new(Some(&preview_text));
+                preview.add_css_class("workspace-preview");
+                preview.set_xalign(0.0);
+                preview.set_hexpand(true);
+                preview.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                row.append(&preview);
             }
 
-            row.append(&text);
-
-            if let Some(badge_text) = workspace_badge_text(&summary) {
-                let badge = Label::new(Some(&badge_text));
-                badge.add_css_class("workspace-pill");
-                badge.add_css_class(&format!(
-                    "workspace-pill-state-{}",
-                    attention_state_slug(summary.display_attention)
-                ));
-                if summary.unread_count > 0 {
-                    badge.add_css_class("workspace-pill-unread");
-                }
-                row.append(&badge);
+            if let Some(workspace) = model.workspaces.get(&summary.workspace_id)
+                && let Some(meta_text) = workspace_metadata_line(workspace)
+            {
+                let meta = Label::new(Some(&meta_text));
+                meta.add_css_class("workspace-meta");
+                meta.set_xalign(0.0);
+                meta.set_hexpand(true);
+                meta.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                row.append(&meta);
             }
 
             button.set_child(Some(&row));
@@ -2319,64 +2331,96 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     }
 }
 
-fn workspace_subtitle(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
+fn build_workspace_status_widget(summary: &taskers_domain::WorkspaceSummary) -> Widget {
+    let status_text = if summary.unread_count > 0 {
+        summary.unread_count.min(9).to_string()
+    } else {
+        "\u{25cf}".into()
+    };
+    let badge = Label::new(Some(&status_text));
+    badge.add_css_class("workspace-status-badge");
+    badge.add_css_class(&format!(
+        "workspace-status-badge-state-{}",
+        attention_state_slug(summary.display_attention)
+    ));
+    if summary.unread_count == 0 {
+        badge.add_css_class("workspace-status-badge-dot");
+    }
+    if summary.display_attention == AttentionState::Normal {
+        badge.add_css_class("workspace-status-badge-idle");
+    }
+    badge.set_valign(Align::Start);
+    badge.set_tooltip_text(Some(&format_workspace_status(summary)));
+    badge.upcast()
+}
+
+fn workspace_preview_text(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
+    if let Some(message) = summary.latest_notification.as_deref() {
+        let preview = compact_preview(message);
+        if !preview.is_empty() {
+            return Some(preview);
+        }
+    }
+
     if let Some(agent_summary) = workspace_agent_subtitle(summary) {
         return Some(agent_summary);
     }
 
-    if let Some(message) = summary.latest_notification.as_ref()
-        && !message.is_empty()
-    {
-        return Some(message.clone());
-    }
-
-    if summary.display_attention != AttentionState::Normal {
-        return Some(format_workspace_attention(summary));
-    }
-
-    summary.repo_hint.clone()
+    (summary.display_attention != AttentionState::Normal)
+        .then(|| format_workspace_attention(summary))
 }
 
-fn workspace_badge_text(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
-    if summary.unread_count > 0 {
-        Some(summary.unread_count.to_string())
-    } else if summary.agent_summaries.is_empty()
-        && summary.display_attention != AttentionState::Normal
+fn workspace_metadata_line(workspace: &Workspace) -> Option<String> {
+    let metadata = workspace_display_metadata(workspace)?;
+    let mut parts = Vec::new();
+
+    if let Some(branch) = metadata
+        .git_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
     {
-        Some(summary.display_attention.label().to_string())
+        parts.push(branch.to_string());
+    }
+
+    if let Some(cwd) = metadata
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+    {
+        parts.push(compact_path(cwd));
+    }
+
+    if !metadata.ports.is_empty() {
+        parts.push(format_ports(&metadata.ports));
+    }
+
+    if parts.is_empty() {
+        metadata
+            .repo_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|repo_name| !repo_name.is_empty())
+            .map(str::to_owned)
     } else {
-        None
+        Some(parts.join("  •  "))
     }
 }
 
-fn build_workspace_status_widget(summary: &taskers_domain::WorkspaceSummary) -> Widget {
-    if summary.agent_summaries.is_empty() {
-        let dot = Label::new(Some("\u{25cf}"));
-        dot.add_css_class("status-dot");
-        dot.add_css_class(&attention_dot_class(summary.display_attention));
-        dot.set_valign(Align::Center);
-        dot.upcast()
-    } else {
-        let strip = GtkBox::new(Orientation::Horizontal, 4);
-        strip.add_css_class("workspace-agent-strip");
-        strip.set_valign(Align::Center);
-
-        for agent in summary.agent_summaries.iter().take(6) {
-            let chip = Label::new(Some(&workspace_agent_chip_label(agent)));
-            chip.add_css_class("workspace-agent-chip");
-            chip.add_css_class(workspace_agent_state_class(agent.state));
-            chip.set_tooltip_text(Some(&workspace_agent_tooltip(agent)));
-            strip.append(&chip);
-        }
-
-        if summary.agent_summaries.len() > 6 {
-            let overflow = Label::new(Some(&format!("+{}", summary.agent_summaries.len() - 6)));
-            overflow.add_css_class("workspace-agent-overflow");
-            strip.append(&overflow);
-        }
-
-        strip.upcast()
-    }
+fn workspace_display_metadata(workspace: &Workspace) -> Option<&PaneMetadata> {
+    workspace
+        .panes
+        .get(&workspace.active_pane)
+        .and_then(PaneRecord::active_metadata)
+        .filter(|metadata| metadata_has_display_context(metadata))
+        .or_else(|| {
+            workspace
+                .panes
+                .values()
+                .filter_map(PaneRecord::active_metadata)
+                .find(|metadata| metadata_has_display_context(metadata))
+        })
 }
 
 fn workspace_agent_subtitle(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
@@ -2414,41 +2458,6 @@ fn workspace_agent_subtitle(summary: &taskers_domain::WorkspaceSummary) -> Optio
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-fn workspace_agent_chip_label(agent: &WorkspaceAgentSummary) -> String {
-    let kind = agent.agent_kind.trim();
-    match kind {
-        "codex" => "CX".into(),
-        "claude" => "CL".into(),
-        "opencode" => "OC".into(),
-        "aider" => "AI".into(),
-        other => other
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric())
-            .take(2)
-            .collect::<String>()
-            .to_uppercase(),
-    }
-}
-
-fn workspace_agent_tooltip(agent: &WorkspaceAgentSummary) -> String {
-    let title = agent
-        .title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| humanize_agent_kind(&agent.agent_kind));
-    format!("{title}  |  {}", agent.state.label())
-}
-
-fn workspace_agent_state_class(state: WorkspaceAgentState) -> &'static str {
-    match state {
-        WorkspaceAgentState::Working => "workspace-agent-chip-working",
-        WorkspaceAgentState::Waiting => "workspace-agent-chip-waiting",
-        WorkspaceAgentState::Inactive => "workspace-agent-chip-inactive",
-    }
-}
-
 fn format_workspace_attention(summary: &taskers_domain::WorkspaceSummary) -> String {
     let count = summary
         .counts_by_attention
@@ -2464,6 +2473,21 @@ fn format_workspace_attention(summary: &taskers_domain::WorkspaceSummary) -> Str
         AttentionState::Completed => format!("{count} {noun} completed"),
         AttentionState::WaitingInput => format!("{count} {noun} waiting"),
         AttentionState::Error => format!("{count} {noun} errored"),
+    }
+}
+
+fn format_workspace_status(summary: &taskers_domain::WorkspaceSummary) -> String {
+    if summary.unread_count > 0 {
+        let noun = if summary.unread_count == 1 {
+            "unread item"
+        } else {
+            "unread items"
+        };
+        format!("{} {noun}", summary.unread_count)
+    } else if let Some(agent_summary) = workspace_agent_subtitle(summary) {
+        agent_summary
+    } else {
+        summary.display_attention.label().to_string()
     }
 }
 
@@ -2510,12 +2534,16 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     button.set_focusable(false);
     button.set_hexpand(true);
 
-    let row = GtkBox::new(Orientation::Vertical, 4);
+    let row = GtkBox::new(Orientation::Vertical, 2);
     row.add_css_class("activity-item");
+    row.add_css_class(&format!(
+        "activity-item-state-{}",
+        attention_state_slug(item.state)
+    ));
     row.set_margin_start(8);
-    row.set_margin_end(8);
-    row.set_margin_top(8);
-    row.set_margin_bottom(8);
+    row.set_margin_end(6);
+    row.set_margin_top(5);
+    row.set_margin_bottom(5);
 
     let heading = GtkBox::new(Orientation::Horizontal, 6);
     let dot = Label::new(Some("\u{25cf}"));
@@ -2538,32 +2566,26 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     title_label.add_css_class("pane-title");
     title_label.set_xalign(0.0);
     title_label.set_hexpand(true);
+    title_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     heading.append(&title_label);
 
     let time_label = Label::new(Some(&item.created_at.time().to_string()));
-    time_label.add_css_class("dim-label");
     time_label.add_css_class("activity-time");
     heading.append(&time_label);
     row.append(&heading);
 
-    let workspace_label = model
-        .workspaces
-        .get(&item.workspace_id)
-        .map(|workspace| workspace.label.clone())
-        .unwrap_or_else(|| "Workspace".into());
-    let meta_label = Label::new(Some(&format!(
-        "{}  |  {}",
-        workspace_label,
-        activity_kind_label(&item.kind)
-    )));
-    meta_label.add_css_class("dim-label");
+    let meta_label = Label::new(Some(&activity_context_line(model, item)));
+    meta_label.add_css_class("activity-meta");
     meta_label.set_xalign(0.0);
+    meta_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     row.append(&meta_label);
 
-    let message = Label::new(Some(&item.message));
-    message.set_wrap(true);
+    let message = Label::new(Some(&compact_preview(&item.message)));
+    message.add_css_class("activity-preview");
     message.set_xalign(0.0);
+    message.set_ellipsize(gtk::pango::EllipsizeMode::End);
     row.append(&message);
+    button.set_tooltip_text(Some(&item.message));
 
     button.set_child(Some(&row));
 
@@ -2584,8 +2606,8 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
 
     outer.append(&button);
 
-    let done_button = Button::with_label("Done");
-    done_button.add_css_class("activity-dismiss");
+    let done_button = Button::with_label("Clear");
+    done_button.add_css_class("activity-action");
     done_button.set_valign(Align::Center);
     done_button.set_tooltip_text(Some("Mark this item addressed"));
     let done_ui = Rc::clone(ui);
@@ -2602,6 +2624,50 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     outer.append(&done_button);
 
     outer.upcast()
+}
+
+fn activity_context_line(model: &AppModel, item: &ActivityItem) -> String {
+    let workspace_label = model
+        .workspaces
+        .get(&item.workspace_id)
+        .map(|workspace| workspace.label.clone())
+        .unwrap_or_else(|| "Workspace".into());
+
+    let mut parts = vec![workspace_label];
+    if let Some(metadata) = activity_metadata(model, item) {
+        if let Some(branch) = metadata
+            .git_branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|branch| !branch.is_empty())
+        {
+            parts.push(branch.to_string());
+        }
+
+        if let Some(cwd) = metadata
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+        {
+            parts.push(compact_path(cwd));
+        }
+    }
+    parts.push(activity_kind_label(&item.kind).to_string());
+    parts.join("  •  ")
+}
+
+fn activity_metadata<'a>(model: &'a AppModel, item: &ActivityItem) -> Option<&'a PaneMetadata> {
+    model
+        .workspaces
+        .get(&item.workspace_id)
+        .and_then(|workspace| workspace.panes.get(&item.pane_id))
+        .and_then(|pane| {
+            pane.surfaces
+                .get(&item.surface_id)
+                .or_else(|| pane.active_surface())
+                .map(|surface| &surface.metadata)
+        })
 }
 
 fn focus_activity_target(
@@ -3033,6 +3099,13 @@ fn build_workspace_window_widget(
 
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class("workspace-window");
+    let window_attention = workspace_window_attention(workspace, window);
+    if window_attention != AttentionState::Normal {
+        root.add_css_class(&format!(
+            "workspace-window-state-{}",
+            attention_state_slug(window_attention)
+        ));
+    }
     if window.id == workspace.active_window {
         root.add_css_class("workspace-window-active");
     }
@@ -3875,6 +3948,20 @@ fn workspace_canvas_metrics(
     }
 }
 
+fn workspace_window_attention(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+) -> AttentionState {
+    window
+        .layout
+        .leaves()
+        .into_iter()
+        .filter_map(|pane_id| workspace.panes.get(&pane_id))
+        .map(PaneRecord::active_attention)
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(AttentionState::Normal)
+}
+
 fn paned_extent(paned: &Paned, axis: taskers_domain::SplitAxis) -> i32 {
     match axis {
         taskers_domain::SplitAxis::Horizontal => paned.allocated_width(),
@@ -4136,6 +4223,48 @@ fn format_pane_meta(pane: &PaneRecord, snapshot: Option<&PaneRuntimeSnapshot>) -
     format!("{agent}  \u{2022}  {cwd}  \u{2022}  {branch}  \u{2022}  {ports}  \u{2022}  {process}")
 }
 
+fn metadata_has_display_context(metadata: &PaneMetadata) -> bool {
+    metadata
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| !cwd.trim().is_empty())
+        || metadata
+            .git_branch
+            .as_deref()
+            .is_some_and(|branch| !branch.trim().is_empty())
+        || metadata
+            .repo_name
+            .as_deref()
+            .is_some_and(|repo_name| !repo_name.trim().is_empty())
+        || !metadata.ports.is_empty()
+}
+
+fn compact_preview(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn compact_path(path: &str) -> String {
+    let home = std::env::var("HOME").ok();
+    if let Some(home) = home {
+        if path == home {
+            return "~".into();
+        }
+        if let Some(suffix) = path.strip_prefix(&(home + "/")) {
+            return format!("~/{suffix}");
+        }
+    }
+
+    path.to_string()
+}
+
+fn format_ports(ports: &[u16]) -> String {
+    match ports {
+        [] => String::new(),
+        [port] => format!(":{port}"),
+        [first, rest @ ..] => format!(":{first} +{}", rest.len()),
+    }
+}
+
 fn sorted_id_strings<I, T>(values: I) -> Vec<String>
 where
     I: IntoIterator<Item = T>,
@@ -4214,36 +4343,38 @@ fn install_css() {
         /* ── Sidebar ── */
 
         .workspace-sidebar {
-            background: #09090b;
+            background: #08090c;
             border-right: 1px solid rgba(255,255,255,0.06);
         }
 
         .sidebar-heading {
             font-weight: 600;
-            font-size: 0.8rem;
+            font-size: 0.72rem;
             color: #71717a;
-            letter-spacing: 0.02em;
+            letter-spacing: 0.10em;
+            text-transform: uppercase;
         }
 
         .workspace-add {
-            background: rgba(99,102,241,0.10);
-            color: #a5b4fc;
-            border: 1px solid rgba(99,102,241,0.15);
-            border-radius: 6px;
-            min-width: 24px;
-            min-height: 24px;
+            background: transparent;
+            color: #71717a;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 999px;
+            min-width: 22px;
+            min-height: 22px;
             padding: 0;
-            font-size: 1rem;
-            transition: background 150ms ease, border-color 150ms ease;
+            font-size: 0.95rem;
+            transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
         }
 
         .workspace-add:hover {
-            background: rgba(99,102,241,0.22);
-            border-color: rgba(99,102,241,0.30);
+            background: rgba(59,130,246,0.10);
+            color: #dbeafe;
+            border-color: rgba(59,130,246,0.24);
         }
 
         .workspace-add:active {
-            background: rgba(99,102,241,0.30);
+            background: rgba(59,130,246,0.16);
         }
 
         .workspace-button {
@@ -4251,123 +4382,105 @@ fn install_css() {
         }
 
         .workspace-button:hover .workspace-item {
-            background: rgba(255,255,255,0.05);
+            background: rgba(255,255,255,0.04);
+            border-color: rgba(255,255,255,0.08);
         }
 
         .workspace-item {
-            padding: 6px 8px;
-            border-radius: 6px;
-            border-left: 2px solid transparent;
-            transition: background 120ms ease;
+            padding: 7px 8px;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            transition: background 120ms ease, border-color 120ms ease;
         }
 
         .workspace-item-active {
-            background: rgba(99,102,241,0.10);
-            border-left: 2px solid #6366f1;
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.10);
         }
 
         .workspace-label {
-            font-weight: 500;
-            color: #d4d4d8;
-            font-size: 0.82rem;
+            font-weight: 600;
+            color: #f4f4f5;
+            font-size: 0.80rem;
         }
 
-        .workspace-subtitle {
-            color: #71717a;
+        .workspace-preview {
+            color: #d4d4d8;
             font-size: 0.72rem;
         }
 
-        .workspace-agent-strip {
-            margin-right: 4px;
+        .workspace-meta {
+            color: #71717a;
+            font-size: 0.68rem;
+            letter-spacing: 0.01em;
         }
 
-        .workspace-agent-chip {
+        .workspace-status-badge {
+            background: rgba(99,102,241,0.14);
+            color: #c7d2fe;
             border-radius: 999px;
-            padding: 2px 6px;
-            min-width: 24px;
+            padding: 0 5px;
+            min-width: 18px;
+            min-height: 18px;
             font-size: 0.62rem;
             font-weight: 700;
             letter-spacing: 0.04em;
         }
 
-        .workspace-agent-chip-working {
-            background: rgba(34,197,94,0.16);
-            color: #bbf7d0;
+        .workspace-status-badge-dot {
+            background: transparent;
+            min-width: 14px;
+            min-height: 14px;
+            padding: 0;
+            font-size: 0.46rem;
         }
 
-        .workspace-agent-chip-waiting {
-            background: rgba(245,158,11,0.18);
-            color: #fde68a;
+        .workspace-status-badge-idle {
+            color: #52525b;
         }
 
-        .workspace-agent-chip-inactive {
-            background: rgba(239,68,68,0.16);
-            color: #fecaca;
-        }
-
-        .workspace-agent-overflow {
-            color: #71717a;
-            font-size: 0.68rem;
-            font-weight: 600;
-        }
-
-        .workspace-pill {
-            background: rgba(255,255,255,0.05);
-            color: #d4d4d8;
-            font-size: 0.7rem;
-            font-weight: 600;
-            border-radius: 999px;
-            padding: 2px 7px;
-            min-height: 0;
-        }
-
-        .workspace-pill-unread {
-            background: rgba(255,255,255,0.08);
-            color: #fafafa;
-        }
-
-        .workspace-pill-state-busy {
-            background: rgba(99,102,241,0.15);
+        .workspace-status-badge-state-busy {
+            background: rgba(99,102,241,0.16);
             color: #c7d2fe;
         }
 
-        .workspace-pill-state-completed {
+        .workspace-status-badge-state-completed {
             background: rgba(34,197,94,0.16);
             color: #bbf7d0;
         }
 
-        .workspace-pill-state-waiting {
-            background: rgba(245,158,11,0.17);
-            color: #fde68a;
+        .workspace-status-badge-state-waiting {
+            background: rgba(59,130,246,0.18);
+            color: #dbeafe;
         }
 
-        .workspace-pill-state-error {
+        .workspace-status-badge-state-error {
             background: rgba(239,68,68,0.16);
             color: #fecaca;
         }
 
         .workspace-item-has-attention {
-            border-left-color: rgba(255,255,255,0.16);
+            border-color: rgba(255,255,255,0.08);
         }
 
         .workspace-item-state-busy {
-            background: rgba(99,102,241,0.06);
-            border-left-color: rgba(99,102,241,0.45);
+            background: rgba(99,102,241,0.05);
+            border-color: rgba(99,102,241,0.16);
         }
 
         .workspace-item-state-completed {
             background: rgba(34,197,94,0.06);
-            border-left-color: rgba(34,197,94,0.45);
+            border-color: rgba(34,197,94,0.16);
         }
 
         .workspace-item-state-waiting {
-            background: rgba(245,158,11,0.08);
-            border-left-color: rgba(245,158,11,0.55);
+            background: rgba(59,130,246,0.08);
+            border-color: rgba(59,130,246,0.20);
         }
 
         .workspace-item-state-error {
             background: rgba(239,68,68,0.08);
-            border-left-color: rgba(239,68,68,0.55);
+            border-color: rgba(239,68,68,0.18);
         }
 
         .workspace-item-has-unread .workspace-label {
@@ -4375,19 +4488,23 @@ fn install_css() {
         }
 
         .workspace-item-active.workspace-item-state-busy {
-            background: rgba(99,102,241,0.14);
+            background: rgba(99,102,241,0.10);
+            border-color: rgba(99,102,241,0.24);
         }
 
         .workspace-item-active.workspace-item-state-completed {
-            background: rgba(34,197,94,0.12);
+            background: rgba(34,197,94,0.09);
+            border-color: rgba(34,197,94,0.22);
         }
 
         .workspace-item-active.workspace-item-state-waiting {
-            background: rgba(245,158,11,0.14);
+            background: rgba(59,130,246,0.12);
+            border-color: rgba(59,130,246,0.30);
         }
 
         .workspace-item-active.workspace-item-state-error {
-            background: rgba(239,68,68,0.14);
+            background: rgba(239,68,68,0.10);
+            border-color: rgba(239,68,68,0.24);
         }
 
         .workspace-close {
@@ -4475,7 +4592,7 @@ fn install_css() {
         /* ── Attention panel ── */
 
         .attention-panel {
-            background: #09090b;
+            background: #08090c;
             border-left: 1px solid rgba(255,255,255,0.06);
         }
 
@@ -4484,36 +4601,62 @@ fn install_css() {
         }
 
         .activity-item {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.05);
-            border-radius: 8px;
+            background: transparent;
+            border-left: 2px solid transparent;
             transition: background 120ms ease, border-color 120ms ease;
         }
 
         .activity-item-button:hover .activity-item {
-            background: rgba(99,102,241,0.08);
-            border-color: rgba(99,102,241,0.16);
+            background: rgba(255,255,255,0.03);
         }
 
-        .activity-dismiss {
-            background: rgba(34,197,94,0.12);
-            color: #bbf7d0;
-            border: 1px solid rgba(34,197,94,0.24);
-            border-radius: 8px;
-            padding: 4px 10px;
-            font-size: 0.72rem;
+        .activity-item-state-busy {
+            border-left-color: rgba(99,102,241,0.55);
+        }
+
+        .activity-item-state-completed {
+            border-left-color: rgba(34,197,94,0.55);
+        }
+
+        .activity-item-state-waiting {
+            border-left-color: rgba(59,130,246,0.70);
+        }
+
+        .activity-item-state-error {
+            border-left-color: rgba(239,68,68,0.65);
+        }
+
+        .activity-meta {
+            color: #71717a;
+            font-size: 0.68rem;
+        }
+
+        .activity-preview {
+            color: #d4d4d8;
+            font-size: 0.74rem;
+        }
+
+        .activity-action {
+            background: transparent;
+            color: #71717a;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 0.68rem;
             font-weight: 600;
             min-height: 0;
-            transition: background 120ms ease, border-color 120ms ease;
+            transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
         }
 
-        .activity-dismiss:hover {
-            background: rgba(34,197,94,0.18);
-            border-color: rgba(34,197,94,0.34);
+        .activity-action:hover {
+            background: rgba(59,130,246,0.10);
+            color: #dbeafe;
+            border-color: rgba(59,130,246,0.25);
         }
 
         .activity-time {
-            font-size: 0.72rem;
+            color: #52525b;
+            font-size: 0.68rem;
         }
 
         /* ── Workspace windows ── */
@@ -4525,7 +4668,39 @@ fn install_css() {
         }
 
         .workspace-window-active {
-            border-color: rgba(99,102,241,0.35);
+            border-color: rgba(255,255,255,0.14);
+        }
+
+        .workspace-window-state-busy {
+            border-color: rgba(99,102,241,0.22);
+        }
+
+        .workspace-window-state-completed {
+            border-color: rgba(34,197,94,0.22);
+        }
+
+        .workspace-window-state-waiting {
+            border-color: rgba(59,130,246,0.30);
+        }
+
+        .workspace-window-state-error {
+            border-color: rgba(239,68,68,0.24);
+        }
+
+        .workspace-window-active.workspace-window-state-busy {
+            border-color: rgba(99,102,241,0.38);
+        }
+
+        .workspace-window-active.workspace-window-state-completed {
+            border-color: rgba(34,197,94,0.34);
+        }
+
+        .workspace-window-active.workspace-window-state-waiting {
+            border-color: rgba(59,130,246,0.48);
+        }
+
+        .workspace-window-active.workspace-window-state-error {
+            border-color: rgba(239,68,68,0.38);
         }
 
         .workspace-window-resize-handle {
@@ -4562,6 +4737,31 @@ fn install_css() {
 
         .pane-card-active .pane-header:hover {
             background: rgba(99,102,241,0.10);
+        }
+
+        .pane-card-state-busy .pane-header {
+            background: rgba(99,102,241,0.04);
+            border-bottom-color: rgba(99,102,241,0.16);
+        }
+
+        .pane-card-state-completed .pane-header {
+            background: rgba(34,197,94,0.04);
+            border-bottom-color: rgba(34,197,94,0.16);
+        }
+
+        .pane-card-state-waiting .pane-header {
+            background: rgba(59,130,246,0.06);
+            border-bottom-color: rgba(59,130,246,0.18);
+        }
+
+        .pane-card-state-error .pane-header {
+            background: rgba(239,68,68,0.05);
+            border-bottom-color: rgba(239,68,68,0.16);
+        }
+
+        .pane-card-active.pane-card-state-waiting .pane-header {
+            background: rgba(59,130,246,0.10);
+            border-bottom-color: rgba(59,130,246,0.24);
         }
 
         .pane-title {
@@ -4623,8 +4823,8 @@ fn install_css() {
         }
 
         .surface-tab-has-attention.surface-tab-state-waiting {
-            background: rgba(245,158,11,0.10);
-            border-color: rgba(245,158,11,0.28);
+            background: rgba(59,130,246,0.10);
+            border-color: rgba(59,130,246,0.28);
         }
 
         .surface-tab-has-attention.surface-tab-state-error {
@@ -4671,7 +4871,7 @@ fn install_css() {
         .status-dot-normal { color: #3f3f46; }
         .status-dot-busy { color: #6366f1; }
         .status-dot-completed { color: #22c55e; }
-        .status-dot-waiting { color: #f59e0b; }
+        .status-dot-waiting { color: #3b82f6; }
         .status-dot-error { color: #ef4444; }
 
         /* ── Empty state ── */
