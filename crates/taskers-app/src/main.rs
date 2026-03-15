@@ -99,11 +99,7 @@ struct UiHandle {
 struct ShellWidgets {
     root: Paned,
     sidebar_list: GtkBox,
-    toolbar_label: Label,
-    btn_window_right: Button,
-    btn_window_down: Button,
-    btn_split_right: Button,
-    btn_split_down: Button,
+    workspace_name_label: Label,
     activity_list: GtkBox,
     activity_empty: Label,
     layout_scroll: ScrolledWindow,
@@ -2060,111 +2056,92 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     // --- Main column ---
     let main_column = GtkBox::new(Orientation::Vertical, 0);
 
-    let toolbar = GtkBox::new(Orientation::Horizontal, 8);
-    toolbar.add_css_class("toolbar");
-    toolbar.set_size_request(-1, 36);
-    toolbar.set_margin_start(10);
-    toolbar.set_margin_end(10);
-    toolbar.set_valign(Align::Center);
+    // --- Workspace header (slim replacement for old toolbar) ---
+    let workspace_header = GtkBox::new(Orientation::Horizontal, 8);
+    workspace_header.add_css_class("workspace-header");
+    workspace_header.set_size_request(-1, 32);
+    workspace_header.set_margin_start(10);
+    workspace_header.set_margin_end(10);
+    workspace_header.set_valign(Align::Center);
 
-    let toolbar_label = Label::new(Some("taskers"));
-    toolbar_label.add_css_class("toolbar-label");
-    toolbar_label.set_xalign(0.0);
-    toolbar_label.set_hexpand(true);
-    toolbar.append(&toolbar_label);
+    let workspace_name_label = Label::new(Some(""));
+    workspace_name_label.add_css_class("workspace-header-label");
+    workspace_name_label.set_xalign(0.0);
+    workspace_name_label.set_hexpand(true);
+    workspace_header.append(&workspace_name_label);
 
-    // --- Window group ---
-    let window_group = GtkBox::new(Orientation::Horizontal, 4);
-    window_group.add_css_class("toolbar-group");
+    // New-window popover button
+    let new_window_btn = Button::with_label("+");
+    new_window_btn.add_css_class("workspace-header-action");
+    new_window_btn.set_tooltip_text(Some("New window"));
+    let nw_parent = new_window_btn.clone();
+    let nw_ui = Rc::clone(ui);
+    new_window_btn.connect_clicked(move |_| {
+        let popover = gtk::Popover::new();
+        popover.set_parent(&nw_parent);
 
-    let btn_window_right = Button::with_label("\u{25eb} Window Right");
-    btn_window_right.add_css_class("toolbar-action");
-    btn_window_right.set_tooltip_text(Some("New window to the right (Ctrl+Alt+Shift+Right)"));
-    let wr_ui = Rc::clone(ui);
-    btn_window_right.connect_clicked(move |_| {
-        let model = wr_ui.app_state.snapshot_model();
-        if let Some(workspace) = model.active_workspace() {
-            wr_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: workspace.id,
-                direction: Direction::Right,
-            });
-        }
+        let content = GtkBox::new(Orientation::Vertical, 2);
+        content.set_margin_start(4);
+        content.set_margin_end(4);
+        content.set_margin_top(4);
+        content.set_margin_bottom(4);
+
+        let new_right = Button::with_label("\u{25eb}");
+        new_right.add_css_class("flat");
+        new_right.add_css_class("context-item");
+        new_right.set_tooltip_text(Some("New window right"));
+        let nr_ui = Rc::clone(&nw_ui);
+        let nr_pop = popover.clone();
+        new_right.connect_clicked(move |_| {
+            nr_pop.popdown();
+            let model = nr_ui.app_state.snapshot_model();
+            if let Some(workspace) = model.active_workspace() {
+                nr_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+                    workspace_id: workspace.id,
+                    direction: Direction::Right,
+                });
+            }
+        });
+        content.append(&new_right);
+
+        let new_below = Button::with_label("\u{2193}");
+        new_below.add_css_class("flat");
+        new_below.add_css_class("context-item");
+        new_below.set_tooltip_text(Some("New window below"));
+        let nb_ui = Rc::clone(&nw_ui);
+        let nb_pop = popover.clone();
+        new_below.connect_clicked(move |_| {
+            nb_pop.popdown();
+            let model = nb_ui.app_state.snapshot_model();
+            if let Some(workspace) = model.active_workspace() {
+                nb_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+                    workspace_id: workspace.id,
+                    direction: Direction::Down,
+                });
+            }
+        });
+        content.append(&new_below);
+
+        popover.set_child(Some(&content));
+        let pop_cleanup = popover.clone();
+        popover.connect_closed(move |_| {
+            pop_cleanup.unparent();
+        });
+        popover.popup();
     });
-    window_group.append(&btn_window_right);
+    workspace_header.append(&new_window_btn);
 
-    let btn_window_down = Button::with_label("\u{2193} Window Down");
-    btn_window_down.add_css_class("toolbar-action");
-    btn_window_down.set_tooltip_text(Some("New window below (Ctrl+Alt+Shift+Down)"));
-    let wd_ui = Rc::clone(ui);
-    btn_window_down.connect_clicked(move |_| {
-        let model = wd_ui.app_state.snapshot_model();
-        if let Some(workspace) = model.active_workspace() {
-            wd_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: workspace.id,
-                direction: Direction::Down,
-            });
-        }
-    });
-    window_group.append(&btn_window_down);
-    toolbar.append(&window_group);
-
-    let sep1 = Separator::new(Orientation::Vertical);
-    sep1.add_css_class("toolbar-separator");
-    toolbar.append(&sep1);
-
-    // --- Pane split group ---
-    let pane_group = GtkBox::new(Orientation::Horizontal, 4);
-    pane_group.add_css_class("toolbar-group");
-
-    let btn_split_right = Button::with_label("\u{25eb} Split Right");
-    btn_split_right.add_css_class("toolbar-action");
-    btn_split_right.set_tooltip_text(Some("Split active pane to the right"));
-    let sr_ui = Rc::clone(ui);
-    btn_split_right.connect_clicked(move |_| {
-        let model = sr_ui.app_state.snapshot_model();
-        if let Some(workspace) = model.active_workspace() {
-            sr_ui.dispatch(ControlCommand::SplitPane {
-                workspace_id: workspace.id,
-                pane_id: Some(workspace.active_pane),
-                axis: taskers_domain::SplitAxis::Horizontal,
-            });
-        }
-    });
-    pane_group.append(&btn_split_right);
-
-    let btn_split_down = Button::with_label("\u{2501} Split Down");
-    btn_split_down.add_css_class("toolbar-action");
-    btn_split_down.set_tooltip_text(Some("Split active pane downward"));
-    let sd_ui = Rc::clone(ui);
-    btn_split_down.connect_clicked(move |_| {
-        let model = sd_ui.app_state.snapshot_model();
-        if let Some(workspace) = model.active_workspace() {
-            sd_ui.dispatch(ControlCommand::SplitPane {
-                workspace_id: workspace.id,
-                pane_id: Some(workspace.active_pane),
-                axis: taskers_domain::SplitAxis::Vertical,
-            });
-        }
-    });
-    pane_group.append(&btn_split_down);
-    toolbar.append(&pane_group);
-
-    let sep2 = Separator::new(Orientation::Vertical);
-    sep2.add_css_class("toolbar-separator");
-    toolbar.append(&sep2);
-
-    // --- Settings ---
-    let settings_button = Button::with_label("\u{2699} Settings");
-    settings_button.add_css_class("toolbar-action");
-    settings_button.add_css_class("toolbar-action-subtle");
-    settings_button.set_tooltip_text(Some("Keyboard settings"));
+    // Settings button
+    let settings_button = Button::with_label("\u{2699}");
+    settings_button.add_css_class("workspace-header-action");
+    settings_button.set_tooltip_text(Some("Settings"));
     let settings_ui = Rc::clone(ui);
     settings_button.connect_clicked(move |_| {
         settings_ui.present_settings_dialog();
     });
-    toolbar.append(&settings_button);
+    workspace_header.append(&settings_button);
 
-    main_column.append(&toolbar);
+    main_column.append(&workspace_header);
 
     let layout_host = Fixed::new();
     layout_host.set_hexpand(true);
@@ -2232,11 +2209,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     ShellWidgets {
         root: shell,
         sidebar_list,
-        toolbar_label,
-        btn_window_right,
-        btn_window_down,
-        btn_split_right,
-        btn_split_down,
+        workspace_name_label,
         activity_list,
         activity_empty,
         layout_scroll,
@@ -2591,17 +2564,9 @@ fn update_toolbar(shell: &ShellWidgets, model: &AppModel, overview_mode: bool) {
         } else {
             workspace.label.clone()
         };
-        shell.toolbar_label.set_text(&label);
-        shell.btn_window_right.set_sensitive(true);
-        shell.btn_window_down.set_sensitive(true);
-        shell.btn_split_right.set_sensitive(true);
-        shell.btn_split_down.set_sensitive(true);
+        shell.workspace_name_label.set_text(&label);
     } else {
-        shell.toolbar_label.set_text("No workspace");
-        shell.btn_window_right.set_sensitive(false);
-        shell.btn_window_down.set_sensitive(false);
-        shell.btn_split_right.set_sensitive(false);
-        shell.btn_split_down.set_sensitive(false);
+        shell.workspace_name_label.set_text("");
     }
 }
 
@@ -5006,55 +4971,33 @@ fn install_css() {
             border-color: rgba(99,102,241,0.55);
         }
 
-        /* ── Toolbar ── */
+        /* ── Workspace header ── */
 
-        .toolbar {
+        .workspace-header {
             border-bottom: 1px solid rgba(255,255,255,0.06);
             padding: 4px 0;
         }
 
-        .toolbar-label {
+        .workspace-header-label {
             font-weight: 600;
-            font-size: 0.9rem;
+            font-size: 0.82rem;
             color: #fafafa;
         }
 
-        .toolbar-separator {
-            background: rgba(255,255,255,0.08);
-            margin: 4px 6px;
-            min-width: 1px;
-        }
-
-        .toolbar-action {
-            background: rgba(255,255,255,0.04);
-            color: #a1a1aa;
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 6px;
-            padding: 4px 10px;
-            font-size: 0.75rem;
-            font-weight: 500;
-            transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
-        }
-
-        .toolbar-action:hover {
-            background: rgba(99,102,241,0.10);
-            color: #c7d2fe;
-            border-color: rgba(99,102,241,0.25);
-        }
-
-        .toolbar-action:active {
-            background: rgba(99,102,241,0.18);
-        }
-
-        .toolbar-action-subtle {
+        .workspace-header-action {
             background: transparent;
-            border-color: transparent;
+            color: #3f3f46;
+            border-radius: 4px;
+            min-width: 24px;
+            min-height: 24px;
+            padding: 0;
+            font-size: 0.85rem;
+            transition: background 150ms ease, color 150ms ease;
         }
 
-        .toolbar-action-subtle:hover {
+        .workspace-header-action:hover {
             background: rgba(255,255,255,0.06);
-            border-color: rgba(255,255,255,0.08);
-            color: #d4d4d8;
+            color: #a1a1aa;
         }
 
         /* ── Attention panel ── */
