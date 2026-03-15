@@ -1173,10 +1173,7 @@ impl UiHandle {
         header.set_margin_top(1);
         header.set_margin_bottom(1);
 
-        let agent_icon = build_agent_icon(
-            pane.active_surface()
-                .and_then(|surface| surface.metadata.agent_kind.as_deref()),
-        );
+        let agent_icon = build_agent_icon(pane.active_surface().and_then(surface_agent_kind));
         agent_icon.add_css_class("pane-agent-icon");
         header.append(&agent_icon);
 
@@ -1337,8 +1334,7 @@ impl UiHandle {
             .unwrap_or_else(|| "Unnamed terminal pane".into());
         configure_agent_icon(
             &card.agent_icon,
-            pane.active_surface()
-                .and_then(|surface| surface.metadata.agent_kind.as_deref()),
+            pane.active_surface().and_then(surface_agent_kind),
         );
         card.title.set_text(&display_title);
         card.title
@@ -2217,14 +2213,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                 model
                     .workspaces
                     .get(&summary.workspace_id)
-                    .and_then(workspace_display_metadata)
-                    .and_then(|metadata| metadata.agent_kind.as_deref())
-                    .or_else(|| {
-                        summary
-                            .agent_summaries
-                            .first()
-                            .map(|agent| agent.agent_kind.as_str())
-                    }),
+                    .and_then(|workspace| workspace_agent_kind(workspace, &summary)),
             );
             agent_icon.add_css_class("workspace-agent-icon");
             heading.append(&agent_icon);
@@ -2581,9 +2570,7 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     dot.add_css_class(&attention_dot_class(item.state));
     heading.append(&dot);
 
-    let agent_icon = build_agent_icon(
-        activity_metadata(model, item).and_then(|metadata| metadata.agent_kind.as_deref()),
-    );
+    let agent_icon = build_agent_icon(activity_surface(model, item).and_then(surface_agent_kind));
     agent_icon.add_css_class("activity-agent-icon");
     heading.append(&agent_icon);
 
@@ -2693,7 +2680,7 @@ fn activity_context_line(model: &AppModel, item: &ActivityItem) -> String {
     parts.join("  •  ")
 }
 
-fn activity_metadata<'a>(model: &'a AppModel, item: &ActivityItem) -> Option<&'a PaneMetadata> {
+fn activity_surface<'a>(model: &'a AppModel, item: &ActivityItem) -> Option<&'a SurfaceRecord> {
     model
         .workspaces
         .get(&item.workspace_id)
@@ -2702,8 +2689,11 @@ fn activity_metadata<'a>(model: &'a AppModel, item: &ActivityItem) -> Option<&'a
             pane.surfaces
                 .get(&item.surface_id)
                 .or_else(|| pane.active_surface())
-                .map(|surface| &surface.metadata)
         })
+}
+
+fn activity_metadata<'a>(model: &'a AppModel, item: &ActivityItem) -> Option<&'a PaneMetadata> {
+    activity_surface(model, item).map(|surface| &surface.metadata)
 }
 
 fn focus_activity_target(
@@ -3634,7 +3624,7 @@ fn sync_surface_tabs(
         label.add_css_class("surface-tab-label");
         let label_content = GtkBox::new(Orientation::Horizontal, 4);
         label_content.set_hexpand(true);
-        let agent_icon = build_agent_icon(surface.metadata.agent_kind.as_deref());
+        let agent_icon = build_agent_icon(surface_agent_kind(surface));
         agent_icon.add_css_class("surface-tab-agent-icon");
         label_content.append(&agent_icon);
         let title = Label::new(Some(&display_surface_title(surface)));
@@ -3753,7 +3743,7 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
         return title.to_string();
     }
 
-    if let Some(agent) = surface.metadata.agent_kind.as_deref() {
+    if let Some(agent) = surface_agent_kind(surface) {
         return humanize_agent_kind(agent);
     }
 
@@ -3797,7 +3787,58 @@ fn configure_agent_icon(icon: &Label, agent_kind: Option<&str>) {
 fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<&str> {
     agent_kind
         .map(str::trim)
-        .filter(|agent_kind| !agent_kind.is_empty())
+        .filter(|agent_kind| !agent_kind.is_empty() && *agent_kind != "shell")
+}
+
+fn infer_agent_kind(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.contains("codex") {
+        Some("codex")
+    } else if normalized.contains("claude") {
+        Some("claude")
+    } else if normalized.contains("opencode") {
+        Some("opencode")
+    } else if normalized.contains("aider") {
+        Some("aider")
+    } else {
+        None
+    }
+}
+
+fn surface_agent_kind(surface: &SurfaceRecord) -> Option<&str> {
+    normalized_agent_kind(surface.metadata.agent_kind.as_deref())
+        .or_else(|| surface.metadata.title.as_deref().and_then(infer_agent_kind))
+        .or_else(|| {
+            surface
+                .command
+                .as_ref()
+                .and_then(|command| command.first())
+                .and_then(|command| infer_agent_kind(command))
+        })
+}
+
+fn workspace_agent_kind<'a>(
+    workspace: &'a Workspace,
+    summary: &'a taskers_domain::WorkspaceSummary,
+) -> Option<&'a str> {
+    workspace
+        .panes
+        .get(&workspace.active_pane)
+        .and_then(PaneRecord::active_surface)
+        .and_then(surface_agent_kind)
+        .or_else(|| {
+            workspace
+                .panes
+                .values()
+                .filter_map(PaneRecord::active_surface)
+                .find_map(surface_agent_kind)
+        })
+        .or_else(|| {
+            summary
+                .agent_summaries
+                .first()
+                .map(|agent| agent.agent_kind.as_str())
+        })
 }
 
 fn agent_icon_text(agent_kind: &str) -> &'static str {
@@ -5002,10 +5043,10 @@ fn install_css() {
 
         .agent-icon {
             border-radius: 999px;
-            padding: 0 5px;
-            min-width: 18px;
-            min-height: 16px;
-            font-size: 0.58rem;
+            padding: 0 6px;
+            min-width: 20px;
+            min-height: 18px;
+            font-size: 0.62rem;
             font-weight: 700;
             letter-spacing: 0.06em;
         }
@@ -5042,10 +5083,10 @@ fn install_css() {
 
         .activity-agent-icon,
         .surface-tab-agent-icon {
-            min-width: 16px;
-            min-height: 14px;
+            min-width: 18px;
+            min-height: 16px;
             padding: 0 4px;
-            font-size: 0.54rem;
+            font-size: 0.58rem;
         }
 
         /* ── Empty state ── */
