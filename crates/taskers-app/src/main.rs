@@ -112,6 +112,7 @@ struct ShellWidgets {
 #[derive(Clone)]
 struct PaneCardWidgets {
     root: GtkBox,
+    agent_icon: Label,
     title: Label,
     status_dot: Label,
     surface_tabs: GtkBox,
@@ -1172,6 +1173,13 @@ impl UiHandle {
         header.set_margin_top(1);
         header.set_margin_bottom(1);
 
+        let agent_icon = build_agent_icon(
+            pane.active_surface()
+                .and_then(|surface| surface.metadata.agent_kind.as_deref()),
+        );
+        agent_icon.add_css_class("pane-agent-icon");
+        header.append(&agent_icon);
+
         let title = Label::new(Some("Unnamed terminal pane"));
         title.add_css_class("pane-title");
         title.set_xalign(0.0);
@@ -1296,6 +1304,7 @@ impl UiHandle {
         let card = PaneCardWidgets {
             focus_target: root.clone().upcast(),
             root,
+            agent_icon,
             title,
             status_dot,
             surface_tabs,
@@ -1326,6 +1335,11 @@ impl UiHandle {
             .active_surface()
             .map(display_surface_title)
             .unwrap_or_else(|| "Unnamed terminal pane".into());
+        configure_agent_icon(
+            &card.agent_icon,
+            pane.active_surface()
+                .and_then(|surface| surface.metadata.agent_kind.as_deref()),
+        );
         card.title.set_text(&display_title);
         card.title
             .set_tooltip_text(Some(&format_pane_meta(pane, snapshot.as_ref())));
@@ -2199,6 +2213,22 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             heading.set_hexpand(true);
             heading.append(&build_workspace_status_widget(&summary));
 
+            let agent_icon = build_agent_icon(
+                model
+                    .workspaces
+                    .get(&summary.workspace_id)
+                    .and_then(workspace_display_metadata)
+                    .and_then(|metadata| metadata.agent_kind.as_deref())
+                    .or_else(|| {
+                        summary
+                            .agent_summaries
+                            .first()
+                            .map(|agent| agent.agent_kind.as_str())
+                    }),
+            );
+            agent_icon.add_css_class("workspace-agent-icon");
+            heading.append(&agent_icon);
+
             let label = Label::new(Some(&summary.label));
             label.add_css_class("workspace-label");
             label.set_xalign(0.0);
@@ -2550,6 +2580,12 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     dot.add_css_class("status-dot");
     dot.add_css_class(&attention_dot_class(item.state));
     heading.append(&dot);
+
+    let agent_icon = build_agent_icon(
+        activity_metadata(model, item).and_then(|metadata| metadata.agent_kind.as_deref()),
+    );
+    agent_icon.add_css_class("activity-agent-icon");
+    heading.append(&agent_icon);
 
     let title = model
         .workspaces
@@ -3593,9 +3629,21 @@ fn sync_surface_tabs(
         dot.set_tooltip_text(Some(surface.attention.label()));
         tab.append(&dot);
 
-        let label = Button::with_label(&display_surface_title(surface));
+        let label = Button::new();
         label.add_css_class("flat");
         label.add_css_class("surface-tab-label");
+        let label_content = GtkBox::new(Orientation::Horizontal, 4);
+        label_content.set_hexpand(true);
+        let agent_icon = build_agent_icon(surface.metadata.agent_kind.as_deref());
+        agent_icon.add_css_class("surface-tab-agent-icon");
+        label_content.append(&agent_icon);
+        let title = Label::new(Some(&display_surface_title(surface)));
+        title.add_css_class("surface-tab-title");
+        title.set_xalign(0.0);
+        title.set_hexpand(true);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label_content.append(&title);
+        label.set_child(Some(&label_content));
         let focus_ui = Rc::clone(ui);
         let pane_id = pane.id;
         let surface_id = surface.id;
@@ -3712,6 +3760,63 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     match surface.kind {
         PaneKind::Terminal => "Terminal".into(),
         PaneKind::Browser => "Browser".into(),
+    }
+}
+
+fn build_agent_icon(agent_kind: Option<&str>) -> Label {
+    let icon = Label::new(None);
+    icon.add_css_class("agent-icon");
+    configure_agent_icon(&icon, agent_kind);
+    icon
+}
+
+fn configure_agent_icon(icon: &Label, agent_kind: Option<&str>) {
+    for class in &[
+        "agent-icon-codex",
+        "agent-icon-claude",
+        "agent-icon-opencode",
+        "agent-icon-aider",
+        "agent-icon-generic",
+    ] {
+        icon.remove_css_class(class);
+    }
+
+    let Some(agent_kind) = normalized_agent_kind(agent_kind) else {
+        icon.set_text("");
+        icon.set_tooltip_text(None);
+        icon.set_visible(false);
+        return;
+    };
+
+    icon.set_text(agent_icon_text(agent_kind));
+    icon.set_tooltip_text(Some(&humanize_agent_kind(agent_kind)));
+    icon.add_css_class(&format!("agent-icon-{}", agent_icon_slug(agent_kind)));
+    icon.set_visible(true);
+}
+
+fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<&str> {
+    agent_kind
+        .map(str::trim)
+        .filter(|agent_kind| !agent_kind.is_empty())
+}
+
+fn agent_icon_text(agent_kind: &str) -> &'static str {
+    match agent_kind {
+        "codex" => "CX",
+        "claude" => "CL",
+        "opencode" => "OC",
+        "aider" => "AI",
+        _ => "AG",
+    }
+}
+
+fn agent_icon_slug(agent_kind: &str) -> &'static str {
+    match agent_kind {
+        "codex" => "codex",
+        "claude" => "claude",
+        "opencode" => "opencode",
+        "aider" => "aider",
+        _ => "generic",
     }
 }
 
@@ -4236,6 +4341,10 @@ fn metadata_has_display_context(metadata: &PaneMetadata) -> bool {
             .repo_name
             .as_deref()
             .is_some_and(|repo_name| !repo_name.trim().is_empty())
+        || metadata
+            .agent_kind
+            .as_deref()
+            .is_some_and(|agent_kind| !agent_kind.trim().is_empty())
         || !metadata.ports.is_empty()
 }
 
@@ -4402,6 +4511,10 @@ fn install_css() {
             font-weight: 600;
             color: #f4f4f5;
             font-size: 0.80rem;
+        }
+
+        .workspace-agent-icon {
+            margin-top: 1px;
         }
 
         .workspace-preview {
@@ -4770,6 +4883,10 @@ fn install_css() {
             font-size: 0.72rem;
         }
 
+        .pane-agent-icon {
+            margin-right: 2px;
+        }
+
         .pane-card-active .pane-title {
             color: #e4e4e7;
         }
@@ -4848,6 +4965,15 @@ fn install_css() {
             color: #fafafa;
         }
 
+        .surface-tab-title {
+            color: #a1a1aa;
+            font-size: 0.74rem;
+        }
+
+        .surface-tab-active .surface-tab-title {
+            color: #fafafa;
+        }
+
         .surface-tab-close,
         .surface-tab-add {
             color: #71717a;
@@ -4873,6 +4999,54 @@ fn install_css() {
         .status-dot-completed { color: #22c55e; }
         .status-dot-waiting { color: #3b82f6; }
         .status-dot-error { color: #ef4444; }
+
+        .agent-icon {
+            border-radius: 999px;
+            padding: 0 5px;
+            min-width: 18px;
+            min-height: 16px;
+            font-size: 0.58rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+        }
+
+        .agent-icon-codex {
+            background: rgba(59,130,246,0.16);
+            color: #dbeafe;
+            border: 1px solid rgba(59,130,246,0.26);
+        }
+
+        .agent-icon-claude {
+            background: rgba(245,158,11,0.16);
+            color: #fef3c7;
+            border: 1px solid rgba(245,158,11,0.26);
+        }
+
+        .agent-icon-opencode {
+            background: rgba(16,185,129,0.16);
+            color: #d1fae5;
+            border: 1px solid rgba(16,185,129,0.26);
+        }
+
+        .agent-icon-aider {
+            background: rgba(168,85,247,0.16);
+            color: #f3e8ff;
+            border: 1px solid rgba(168,85,247,0.26);
+        }
+
+        .agent-icon-generic {
+            background: rgba(255,255,255,0.08);
+            color: #e4e4e7;
+            border: 1px solid rgba(255,255,255,0.12);
+        }
+
+        .activity-agent-icon,
+        .surface-tab-agent-icon {
+            min-width: 16px;
+            min-height: 14px;
+            padding: 0 4px;
+            font-size: 0.54rem;
+        }
 
         /* ── Empty state ── */
 
