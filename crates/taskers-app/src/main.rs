@@ -2859,7 +2859,7 @@ fn begin_inline_rename(
 
 // ── Animation helpers ──
 //
-// Smooth slide animations for new windows and panes.
+// Smooth slide animations for window/pane creation and removal.
 // Uses the widget's frame clock (add_tick_callback) for jank-free rendering.
 
 const ANIM_DURATION_US: i64 = 200_000; // 200ms
@@ -2870,36 +2870,20 @@ fn ease_out_cubic(t: f64) -> f64 {
     1.0 - inv * inv * inv
 }
 
-/// Animate a workspace window sliding into its final position on a Fixed
-/// canvas. The window slides in from the direction it was created —
-/// right for horizontal, below for vertical.
-fn animate_window_slide_in(
-    ui: &UiHandle,
-    canvas: &Fixed,
-    widget: &Widget,
-    final_x: f64,
-    final_y: f64,
-    display_frame: WindowFrame,
-) {
-    if !ui.settings.borrow().animations_enabled {
-        return;
-    }
-
-    let slide_px: f64 = 60.0;
-    let (offset_x, offset_y) = if display_frame.y > 0 {
-        (0.0, slide_px)
-    } else {
-        (slide_px, 0.0)
-    };
-
-    canvas.move_(widget, final_x + offset_x, final_y + offset_y);
-    widget.set_opacity(0.0);
-
+/// Animate all windows in a layout transition simultaneously. Each entry
+/// slides from (start_x, start_y) to (end_x, end_y). This creates the
+/// Niri-style "push" effect where existing windows shift to make room
+/// and new windows slide in as part of the same motion.
+fn animate_layout_transition(canvas: &Fixed, entries: Vec<(Widget, f64, f64, f64, f64)>) {
     let c = canvas.clone();
     let start_time: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+    let entries = Rc::new(entries);
+    let entries_ref = Rc::clone(&entries);
 
-    widget.add_tick_callback(move |w, clock| {
-        let now = clock.frame_time(); // microseconds, monotonic
+    // Use the canvas itself for the tick callback so it outlives any
+    // individual widget that might get removed mid-animation.
+    canvas.add_tick_callback(move |_, clock| {
+        let now = clock.frame_time();
         let t0 = start_time.get();
         if t0 == 0 {
             start_time.set(now);
@@ -2910,12 +2894,22 @@ fn animate_window_slide_in(
         let t = (elapsed as f64 / ANIM_DURATION_US as f64).min(1.0);
         let e = ease_out_cubic(t);
 
-        c.move_(w, final_x + offset_x * (1.0 - e), final_y + offset_y * (1.0 - e));
-        w.set_opacity(e);
+        for (widget, sx, sy, ex, ey) in entries_ref.iter() {
+            let x = sx + (ex - sx) * e;
+            let y = sy + (ey - sy) * e;
+            c.move_(widget, x, y);
+        }
 
         if t >= 1.0 {
-            c.move_(w, final_x, final_y);
-            w.set_opacity(1.0);
+            // Snap to final positions and remove any ghost widgets.
+            for (widget, _, _, ex, ey) in entries_ref.iter() {
+                c.move_(widget, *ex, *ey);
+                // Ghost widgets (removed windows) have negative end positions
+                // placing them off-screen; remove them from the canvas.
+                if *ex < 0.0 || *ey < 0.0 {
+                    c.remove(widget);
+                }
+            }
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
@@ -2930,8 +2924,6 @@ fn animate_pane_slide_in(ui: &UiHandle, widget: &Widget) {
     }
 
     let slide_px: i32 = 32;
-
-    widget.set_opacity(0.0);
     widget.set_margin_start(slide_px);
 
     let start_time: Rc<Cell<i64>> = Rc::new(Cell::new(0));
@@ -2949,11 +2941,9 @@ fn animate_pane_slide_in(ui: &UiHandle, widget: &Widget) {
         let e = ease_out_cubic(t);
 
         w.set_margin_start(((1.0 - e) * slide_px as f64).round() as i32);
-        w.set_opacity(e);
 
         if t >= 1.0 {
             w.set_margin_start(0);
-            w.set_opacity(1.0);
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
@@ -3013,13 +3003,36 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     let overview_mode = ui.overview_mode.get();
 
     if needs_rebuild {
-        let previous_window_ids: HashSet<WorkspaceWindowId> = previous_model
+        let previous_workspace = previous_model
             .as_ref()
-            .and_then(AppModel::active_workspace)
+            .and_then(AppModel::active_workspace);
+        // Map of old window ID → old frame, used for transition animation.
+        let old_window_frames: HashMap<WorkspaceWindowId, WindowFrame> = previous_workspace
+            .map(|ws| {
+                ws.windows
+                    .iter()
+                    .map(|(id, w)| (*id, w.frame))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let current_window_ids: HashSet<WorkspaceWindowId> = model
+            .active_workspace()
             .map(|ws| ws.windows.keys().copied().collect())
             .unwrap_or_default();
+        let removed_window_frames: Vec<WindowFrame> = previous_workspace
+            .into_iter()
+            .flat_map(|ws| ws.windows.values())
+            .filter(|w| !current_window_ids.contains(&w.id))
+            .map(|w| w.frame)
+            .collect();
         let new_content: Widget = if let Some(workspace) = model.active_workspace() {
-            build_workspace_canvas_widget(ui, shell, workspace, &previous_window_ids)
+            build_workspace_canvas_widget(
+                ui,
+                shell,
+                workspace,
+                &old_window_frames,
+                &removed_window_frames,
+            )
         } else {
             let empty = Label::new(Some("No workspace selected"));
             empty.add_css_class("empty-state");
@@ -3126,7 +3139,8 @@ fn build_workspace_canvas_widget(
     ui: &Rc<UiHandle>,
     shell: &ShellWidgets,
     workspace: &Workspace,
-    previous_window_ids: &HashSet<WorkspaceWindowId>,
+    old_window_frames: &HashMap<WorkspaceWindowId, WindowFrame>,
+    removed_window_frames: &[WindowFrame],
 ) -> gtk::Widget {
     let canvas = Fixed::new();
     canvas.set_halign(Align::Start);
@@ -3145,22 +3159,73 @@ fn build_workspace_canvas_widget(
     let metrics = workspace_canvas_metrics(workspace, render_context);
     canvas.set_size_request(metrics.width, metrics.height);
 
+    let animations_enabled = ui.settings.borrow().animations_enabled;
+    let has_layout_change = !old_window_frames.is_empty()
+        && (workspace.windows.len() != old_window_frames.len()
+            || workspace
+                .windows
+                .keys()
+                .any(|id| !old_window_frames.contains_key(id)));
+
+    // Collect all widgets and their start/end positions for a coordinated animation.
+    let mut anim_entries: Vec<(Widget, f64, f64, f64, f64)> = Vec::new();
+
     for window in workspace.windows.values() {
         let display_frame = display_window_frame(window.frame, render_context);
         let window_widget = build_workspace_window_widget(ui, workspace, window, display_frame);
         let final_x = f64::from(display_frame.x + metrics.offset_x);
         let final_y = f64::from(display_frame.y + metrics.offset_y);
-        canvas.put(&window_widget, final_x, final_y);
-        if !previous_window_ids.contains(&window.id) {
-            animate_window_slide_in(
-                ui.as_ref(),
-                &canvas,
-                &window_widget,
-                final_x,
-                final_y,
-                display_frame,
-            );
+
+        if animations_enabled && has_layout_change {
+            let (start_x, start_y) = if let Some(old_frame) = old_window_frames.get(&window.id) {
+                // Existing window: start from old position.
+                let old_display = display_window_frame(*old_frame, render_context);
+                (
+                    f64::from(old_display.x + metrics.offset_x),
+                    f64::from(old_display.y + metrics.offset_y),
+                )
+            } else {
+                // New window: start from just off the right/bottom edge.
+                if display_frame.y > 0 {
+                    (final_x, final_y + f64::from(display_frame.height))
+                } else {
+                    (final_x + f64::from(display_frame.width), final_y)
+                }
+            };
+
+            canvas.put(&window_widget, start_x, start_y);
+            if start_x != final_x || start_y != final_y {
+                anim_entries.push((window_widget.clone(), start_x, start_y, final_x, final_y));
+            }
+        } else {
+            canvas.put(&window_widget, final_x, final_y);
         }
+    }
+
+    // Ghost widgets for removed windows: start at old position, slide out.
+    if animations_enabled && has_layout_change {
+        for frame in removed_window_frames {
+            let display_frame = display_window_frame(*frame, render_context);
+            let ghost = GtkBox::new(Orientation::Vertical, 0);
+            ghost.add_css_class("workspace-window");
+            ghost.set_size_request(display_frame.width, display_frame.height);
+
+            let start_x = f64::from(display_frame.x + metrics.offset_x);
+            let start_y = f64::from(display_frame.y + metrics.offset_y);
+            let (end_x, end_y) = if display_frame.y > 0 {
+                (start_x, start_y - f64::from(display_frame.height))
+            } else {
+                (start_x - f64::from(display_frame.width), start_y)
+            };
+
+            canvas.put(&ghost, start_x, start_y);
+            anim_entries.push((ghost.upcast(), start_x, start_y, end_x, end_y));
+        }
+    }
+
+    // Run one coordinated animation for all windows moving together.
+    if !anim_entries.is_empty() {
+        animate_layout_transition(&canvas, anim_entries);
     }
 
     canvas.upcast()
