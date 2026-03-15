@@ -1179,7 +1179,7 @@ impl UiHandle {
         header.set_margin_top(1);
         header.set_margin_bottom(1);
 
-        let agent_icon = build_agent_icon(pane.active_surface().and_then(surface_agent_kind), 13);
+        let agent_icon = build_agent_icon(pane.active_surface().and_then(surface_agent_kind), 14);
         agent_icon.add_css_class("pane-agent-icon");
         header.append(&agent_icon);
 
@@ -1341,7 +1341,7 @@ impl UiHandle {
         configure_agent_icon(
             &card.agent_icon,
             pane.active_surface().and_then(surface_agent_kind),
-            13,
+            14,
         );
         card.title.set_text(&display_title);
         card.title
@@ -2221,7 +2221,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                     .workspaces
                     .get(&summary.workspace_id)
                     .and_then(workspace_agent_kind),
-                11,
+                12,
             );
             agent_icon.add_css_class("workspace-agent-icon");
             heading.append(&agent_icon);
@@ -2580,7 +2580,7 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
 
     let agent_icon = build_agent_icon(
         activity_surface(model, item).and_then(surface_agent_kind),
-        12,
+        13,
     );
     agent_icon.add_css_class("activity-agent-icon");
     heading.append(&agent_icon);
@@ -3635,7 +3635,7 @@ fn sync_surface_tabs(
         label.add_css_class("surface-tab-label");
         let label_content = GtkBox::new(Orientation::Horizontal, 4);
         label_content.set_hexpand(true);
-        let agent_icon = build_agent_icon(surface_agent_kind(surface), 11);
+        let agent_icon = build_agent_icon(surface_agent_kind(surface), 12);
         agent_icon.add_css_class("surface-tab-agent-icon");
         label_content.append(&agent_icon);
         let title = Label::new(Some(&display_surface_title(surface)));
@@ -3807,8 +3807,8 @@ fn agent_icon_texture(agent_kind: &str, size: i32) -> Option<gdk::Texture> {
 
 fn agent_icon_slug(agent_kind: &str) -> Option<&'static str> {
     match normalized_agent_kind(Some(agent_kind))? {
-        "codex" => Some("openai"),
-        "claude" => Some("anthropic"),
+        "codex" => Some("codex"),
+        "claude" => Some("claude"),
         "opencode" => Some("opencode"),
         _ => None,
     }
@@ -3816,15 +3816,16 @@ fn agent_icon_slug(agent_kind: &str) -> Option<&'static str> {
 
 fn agent_icon_bytes(slug: &str) -> &'static [u8] {
     match slug {
-        "openai" => include_bytes!("../assets/agent-openai.png"),
-        "anthropic" => include_bytes!("../assets/agent-anthropic.png"),
-        "opencode" => include_bytes!("../assets/agent-opencode.png"),
+        "codex" => include_bytes!("../assets/agent-openai.svg"),
+        "claude" => include_bytes!("../assets/agent-anthropic.svg"),
+        "opencode" => include_bytes!("../assets/agent-opencode.svg"),
         _ => &[],
     }
 }
 
 fn decode_agent_icon_texture(bytes: &[u8], size: i32) -> Option<gdk::Texture> {
     let loader = PixbufLoader::new();
+    loader.set_size(size, size);
     loader.write(bytes).ok()?;
     loader.close().ok()?;
     let pixbuf = loader.pixbuf()?;
