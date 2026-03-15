@@ -120,7 +120,6 @@ struct PaneCardWidgets {
 #[derive(Clone, PartialEq, Eq)]
 enum LayoutRenderKey {
     WorkspaceWindows {
-        active_window: WorkspaceWindowId,
         windows: Vec<WorkspaceWindowRenderKey>,
     },
 }
@@ -2860,23 +2859,20 @@ fn begin_inline_rename(
 
 // ── Animation helpers ──
 //
-// Niri-style slide + fade using a manual frame timer (~60fps).
-// This bypasses adw animation APIs which don't reliably fire on
-// freshly-created widgets that haven't been fully realized yet.
+// Smooth slide animations for new windows and panes.
+// Uses the widget's frame clock (add_tick_callback) for jank-free rendering.
 
-const ANIM_SLIDE_PX: f64 = 80.0;
-const ANIM_DURATION_MS: u64 = 350;
-const ANIM_FRAME_MS: u64 = 16;
+const ANIM_DURATION_US: i64 = 200_000; // 200ms
 
-/// Ease-out cubic: starts fast, decelerates to a smooth stop.
+/// Cubic ease-out: fast start, smooth deceleration, no overshoot.
 fn ease_out_cubic(t: f64) -> f64 {
-    let t1 = 1.0 - t;
-    1.0 - t1 * t1 * t1
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
 }
 
-/// Animate a workspace window sliding into position on a Fixed canvas.
-/// Widget starts at offset position with opacity 0 and slides to final
-/// position over ANIM_DURATION_MS with an ease-out curve.
+/// Animate a workspace window sliding into its final position on a Fixed
+/// canvas. The window slides in from the direction it was created —
+/// right for horizontal, below for vertical.
 fn animate_window_slide_in(
     ui: &UiHandle,
     canvas: &Fixed,
@@ -2885,53 +2881,41 @@ fn animate_window_slide_in(
     final_y: f64,
     display_frame: WindowFrame,
 ) {
-    if !ui.settings.borrow().animations_enabled || ui.backend_choice == BackendChoice::Ghostty {
+    if !ui.settings.borrow().animations_enabled {
         return;
     }
 
-    // Determine slide direction from frame position.
-    let (offset_x, offset_y) = if display_frame.x > 0 {
-        (ANIM_SLIDE_PX, 0.0)
-    } else if display_frame.y > 0 {
-        (0.0, ANIM_SLIDE_PX)
+    let slide_px: f64 = 60.0;
+    let (offset_x, offset_y) = if display_frame.y > 0 {
+        (0.0, slide_px)
     } else {
-        (ANIM_SLIDE_PX, 0.0)
+        (slide_px, 0.0)
     };
 
-    let start_x = final_x + offset_x;
-    let start_y = final_y + offset_y;
-
-    // Place at start and hide.
-    canvas.move_(widget, start_x, start_y);
+    canvas.move_(widget, final_x + offset_x, final_y + offset_y);
     widget.set_opacity(0.0);
 
-    // Drive animation with a frame timer.
-    let w = widget.clone();
     let c = canvas.clone();
-    let start_time = Rc::new(Cell::new(None::<u64>));
-    glib::timeout_add_local(Duration::from_millis(ANIM_FRAME_MS), move || {
-        let now = glib::monotonic_time() as u64; // microseconds
-        let started = start_time.get();
-        let t0 = match started {
-            Some(t0) => t0,
-            None => {
-                start_time.set(Some(now));
-                now
-            }
-        };
+    let start_time: Rc<Cell<i64>> = Rc::new(Cell::new(0));
 
-        let elapsed_ms = (now.saturating_sub(t0)) / 1000;
-        let progress = (elapsed_ms as f64 / ANIM_DURATION_MS as f64).min(1.0);
-        let eased = ease_out_cubic(progress);
+    widget.add_tick_callback(move |w, clock| {
+        let now = clock.frame_time(); // microseconds, monotonic
+        let t0 = start_time.get();
+        if t0 == 0 {
+            start_time.set(now);
+            return glib::ControlFlow::Continue;
+        }
 
-        let x = start_x + (final_x - start_x) * eased;
-        let y = start_y + (final_y - start_y) * eased;
-        c.move_(&w, x, y);
-        w.set_opacity(eased);
+        let elapsed = now - t0;
+        let t = (elapsed as f64 / ANIM_DURATION_US as f64).min(1.0);
+        let e = ease_out_cubic(t);
 
-        if progress >= 1.0 {
+        c.move_(w, final_x + offset_x * (1.0 - e), final_y + offset_y * (1.0 - e));
+        w.set_opacity(e);
+
+        if t >= 1.0 {
+            c.move_(w, final_x, final_y);
             w.set_opacity(1.0);
-            c.move_(&w, final_x, final_y);
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
@@ -2939,37 +2923,37 @@ fn animate_window_slide_in(
     });
 }
 
-/// Animate a pane card sliding in from the right.
+/// Animate a pane card sliding in from the right with a simple ease-out.
 fn animate_pane_slide_in(ui: &UiHandle, widget: &Widget) {
-    if !ui.settings.borrow().animations_enabled || ui.backend_choice == BackendChoice::Ghostty {
+    if !ui.settings.borrow().animations_enabled {
         return;
     }
 
+    let slide_px: i32 = 32;
+
     widget.set_opacity(0.0);
-    widget.set_margin_start(40);
+    widget.set_margin_start(slide_px);
 
-    let w = widget.clone();
-    let start_time = Rc::new(Cell::new(None::<u64>));
-    glib::timeout_add_local(Duration::from_millis(ANIM_FRAME_MS), move || {
-        let now = glib::monotonic_time() as u64;
-        let t0 = match start_time.get() {
-            Some(t0) => t0,
-            None => {
-                start_time.set(Some(now));
-                now
-            }
-        };
+    let start_time: Rc<Cell<i64>> = Rc::new(Cell::new(0));
 
-        let elapsed_ms = (now.saturating_sub(t0)) / 1000;
-        let progress = (elapsed_ms as f64 / ANIM_DURATION_MS as f64).min(1.0);
-        let eased = ease_out_cubic(progress);
+    widget.add_tick_callback(move |w, clock| {
+        let now = clock.frame_time();
+        let t0 = start_time.get();
+        if t0 == 0 {
+            start_time.set(now);
+            return glib::ControlFlow::Continue;
+        }
 
-        w.set_opacity(eased);
-        w.set_margin_start(((1.0 - eased) * 40.0).round() as i32);
+        let elapsed = now - t0;
+        let t = (elapsed as f64 / ANIM_DURATION_US as f64).min(1.0);
+        let e = ease_out_cubic(t);
 
-        if progress >= 1.0 {
-            w.set_opacity(1.0);
+        w.set_margin_start(((1.0 - e) * slide_px as f64).round() as i32);
+        w.set_opacity(e);
+
+        if t >= 1.0 {
             w.set_margin_start(0);
+            w.set_opacity(1.0);
             glib::ControlFlow::Break
         } else {
             glib::ControlFlow::Continue
@@ -2981,8 +2965,10 @@ fn layout_render_key(
     workspace: &Workspace,
     render_context: WorkspaceRenderContext,
 ) -> LayoutRenderKey {
+    // active_window is intentionally excluded so that focus switches
+    // don't trigger a full canvas rebuild. Active window styling is synced
+    // separately in update_layout().
     LayoutRenderKey::WorkspaceWindows {
-        active_window: workspace.active_window,
         windows: workspace
             .windows
             .values()
@@ -3049,6 +3035,10 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     }
 
     if let Some(workspace) = model.active_workspace() {
+        // Sync active window CSS class without a full rebuild.
+        let active_name = format!("ww-{}", workspace.active_window);
+        sync_active_window_class(&shell.layout_host, &active_name);
+
         for pane in workspace.panes.values() {
             ui.sync_pane_card(workspace.id, workspace.active_pane, pane);
         }
@@ -3110,6 +3100,28 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     }
 }
 
+/// Walk the layout host tree to toggle `.workspace-window-active` on the
+/// correct window widget, identified by its widget name.
+fn sync_active_window_class(layout_host: &Fixed, active_name: &str) {
+    // layout_host -> canvas (Fixed child at index 0) -> overlay children
+    let Some(canvas) = layout_host.first_child() else {
+        return;
+    };
+    let mut child = canvas.first_child();
+    while let Some(widget) = child {
+        // Each child of the canvas is an Overlay; the workspace-window box
+        // is the Overlay's child.
+        if let Some(inner) = widget.first_child() {
+            if inner.widget_name().as_str() == active_name {
+                inner.add_css_class("workspace-window-active");
+            } else {
+                inner.remove_css_class("workspace-window-active");
+            }
+        }
+        child = widget.next_sibling();
+    }
+}
+
 fn build_workspace_canvas_widget(
     ui: &Rc<UiHandle>,
     shell: &ShellWidgets,
@@ -3167,6 +3179,7 @@ fn build_workspace_window_widget(
 
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class("workspace-window");
+    root.set_widget_name(&format!("ww-{}", window.id));
     let window_attention = workspace_window_attention(workspace, window);
     if window_attention != AttentionState::Normal {
         root.add_css_class(&format!(
@@ -4735,20 +4748,20 @@ fn install_css() {
         /* ── Base ── */
 
         window {
-            background: #09090b;
-            color: #e4e4e7;
+            background: #0f1117;
+            color: #e2e4ea;
         }
 
         headerbar {
-            background: #09090b;
-            border-bottom: 1px solid rgba(255,255,255,0.06);
+            background: #0f1117;
+            border-bottom: 1px solid rgba(255,255,255,0.07);
             box-shadow: none;
         }
 
         /* ── Paned separators ── */
 
         paned > separator {
-            background: rgba(255,255,255,0.08);
+            background: rgba(255,255,255,0.07);
             min-width: 1px;
             min-height: 1px;
             padding: 0;
@@ -4757,38 +4770,38 @@ fn install_css() {
         /* ── Sidebar ── */
 
         .workspace-sidebar {
-            background: #08090c;
-            border-right: 1px solid rgba(255,255,255,0.06);
+            background: #0d0f15;
+            border-right: 1px solid rgba(255,255,255,0.07);
         }
 
         .sidebar-heading {
             font-weight: 600;
             font-size: 0.72rem;
-            color: #71717a;
+            color: #5c6178;
             letter-spacing: 0.10em;
             text-transform: uppercase;
         }
 
         .workspace-add {
             background: transparent;
-            color: #71717a;
-            border: 1px solid rgba(255,255,255,0.08);
+            color: #5c6178;
+            border: 1px solid rgba(255,255,255,0.10);
             border-radius: 999px;
             min-width: 22px;
             min-height: 22px;
             padding: 0;
             font-size: 0.95rem;
-            transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+            transition: background 180ms ease-in-out, color 180ms ease-in-out, border-color 180ms ease-in-out;
         }
 
         .workspace-add:hover {
-            background: rgba(59,130,246,0.10);
-            color: #dbeafe;
-            border-color: rgba(59,130,246,0.24);
+            background: rgba(96,165,250,0.10);
+            color: #e2e4ea;
+            border-color: rgba(96,165,250,0.24);
         }
 
         .workspace-add:active {
-            background: rgba(59,130,246,0.16);
+            background: rgba(96,165,250,0.16);
         }
 
         .workspace-button {
@@ -4797,14 +4810,14 @@ fn install_css() {
 
         .workspace-button:hover .workspace-item {
             background: rgba(255,255,255,0.04);
-            border-color: rgba(255,255,255,0.08);
+            border-color: rgba(255,255,255,0.10);
         }
 
         .workspace-item {
             padding: 7px 8px;
             border-radius: 8px;
             border: 1px solid transparent;
-            transition: background 120ms ease, border-color 120ms ease;
+            transition: background 160ms ease-in-out, border-color 160ms ease-in-out;
         }
 
         .workspace-item-active {
@@ -4814,7 +4827,7 @@ fn install_css() {
 
         .workspace-label {
             font-weight: 600;
-            color: #f4f4f5;
+            color: #f0f2f8;
             font-size: 0.80rem;
         }
 
@@ -4826,7 +4839,7 @@ fn install_css() {
         }
 
         .agent-icon-codex {
-            color: #f4f4f5;
+            color: #f0f2f8;
         }
 
         .agent-icon-claude {
@@ -4838,18 +4851,18 @@ fn install_css() {
         }
 
         .workspace-preview {
-            color: #d4d4d8;
+            color: #b0b4c4;
             font-size: 0.72rem;
         }
 
         .workspace-meta {
-            color: #71717a;
+            color: #5c6178;
             font-size: 0.68rem;
             letter-spacing: 0.01em;
         }
 
         .workspace-status-badge {
-            background: rgba(99,102,241,0.14);
+            background: rgba(124,138,255,0.14);
             color: #c7d2fe;
             border-radius: 999px;
             padding: 0 5px;
@@ -4869,97 +4882,97 @@ fn install_css() {
         }
 
         .workspace-status-badge-idle {
-            color: #52525b;
+            color: #3d4259;
         }
 
         .workspace-status-badge-state-busy {
-            background: rgba(99,102,241,0.16);
+            background: rgba(124,138,255,0.16);
             color: #c7d2fe;
         }
 
         .workspace-status-badge-state-completed {
-            background: rgba(34,197,94,0.16);
-            color: #bbf7d0;
+            background: rgba(52,211,153,0.16);
+            color: #a7f3d0;
         }
 
         .workspace-status-badge-state-waiting {
-            background: rgba(59,130,246,0.18);
+            background: rgba(96,165,250,0.18);
             color: #dbeafe;
         }
 
         .workspace-status-badge-state-error {
-            background: rgba(239,68,68,0.16);
+            background: rgba(248,113,113,0.16);
             color: #fecaca;
         }
 
         .workspace-item-has-attention {
-            border-color: rgba(255,255,255,0.08);
+            border-color: rgba(255,255,255,0.10);
         }
 
         .workspace-item-state-busy {
-            background: rgba(99,102,241,0.05);
-            border-color: rgba(99,102,241,0.16);
+            background: rgba(124,138,255,0.05);
+            border-color: rgba(124,138,255,0.16);
         }
 
         .workspace-item-state-completed {
-            background: rgba(34,197,94,0.06);
-            border-color: rgba(34,197,94,0.16);
+            background: rgba(52,211,153,0.06);
+            border-color: rgba(52,211,153,0.16);
         }
 
         .workspace-item-state-waiting {
-            background: rgba(59,130,246,0.08);
-            border-color: rgba(59,130,246,0.20);
+            background: rgba(96,165,250,0.08);
+            border-color: rgba(96,165,250,0.20);
         }
 
         .workspace-item-state-error {
-            background: rgba(239,68,68,0.08);
-            border-color: rgba(239,68,68,0.18);
+            background: rgba(248,113,113,0.08);
+            border-color: rgba(248,113,113,0.18);
         }
 
         .workspace-item-has-unread .workspace-label {
-            color: #fafafa;
+            color: #f0f2f8;
         }
 
         .workspace-item-active.workspace-item-state-busy {
-            background: rgba(99,102,241,0.10);
-            border-color: rgba(99,102,241,0.24);
+            background: rgba(124,138,255,0.10);
+            border-color: rgba(124,138,255,0.24);
         }
 
         .workspace-item-active.workspace-item-state-completed {
-            background: rgba(34,197,94,0.09);
-            border-color: rgba(34,197,94,0.22);
+            background: rgba(52,211,153,0.09);
+            border-color: rgba(52,211,153,0.22);
         }
 
         .workspace-item-active.workspace-item-state-waiting {
-            background: rgba(59,130,246,0.12);
-            border-color: rgba(59,130,246,0.30);
+            background: rgba(96,165,250,0.12);
+            border-color: rgba(96,165,250,0.30);
         }
 
         .workspace-item-active.workspace-item-state-error {
-            background: rgba(239,68,68,0.10);
-            border-color: rgba(239,68,68,0.24);
+            background: rgba(248,113,113,0.10);
+            border-color: rgba(248,113,113,0.24);
         }
 
         .workspace-close {
             background: transparent;
-            color: #3f3f46;
+            color: #3d4259;
             border-radius: 4px;
             min-width: 22px;
             min-height: 22px;
             padding: 0;
             font-size: 0.85rem;
-            transition: background 120ms ease, color 120ms ease;
+            transition: background 160ms ease-in-out, color 160ms ease-in-out;
         }
 
         .workspace-close:hover {
-            background: rgba(239,68,68,0.15);
-            color: #ef4444;
+            background: rgba(248,113,113,0.15);
+            color: #f87171;
         }
 
         .workspace-rename-entry {
-            background: rgba(99,102,241,0.08);
-            color: #e4e4e7;
-            border: 1px solid rgba(99,102,241,0.30);
+            background: rgba(124,138,255,0.08);
+            color: #e2e4ea;
+            border: 1px solid rgba(124,138,255,0.30);
             border-radius: 4px;
             padding: 4px 6px;
             font-size: 0.82rem;
@@ -4968,43 +4981,43 @@ fn install_css() {
         }
 
         .workspace-rename-entry:focus {
-            border-color: rgba(99,102,241,0.55);
+            border-color: rgba(124,138,255,0.55);
         }
 
         /* ── Workspace header ── */
 
         .workspace-header {
-            border-bottom: 1px solid rgba(255,255,255,0.06);
+            border-bottom: 1px solid rgba(255,255,255,0.07);
             padding: 4px 0;
         }
 
         .workspace-header-label {
             font-weight: 600;
             font-size: 0.82rem;
-            color: #fafafa;
+            color: #f0f2f8;
         }
 
         .workspace-header-action {
             background: transparent;
-            color: #3f3f46;
+            color: #3d4259;
             border-radius: 4px;
             min-width: 24px;
             min-height: 24px;
             padding: 0;
             font-size: 0.85rem;
-            transition: background 150ms ease, color 150ms ease;
+            transition: background 180ms ease-in-out, color 180ms ease-in-out;
         }
 
         .workspace-header-action:hover {
             background: rgba(255,255,255,0.06);
-            color: #a1a1aa;
+            color: #8b8fa3;
         }
 
         /* ── Attention panel ── */
 
         .attention-panel {
-            background: #08090c;
-            border-left: 1px solid rgba(255,255,255,0.06);
+            background: #0d0f15;
+            border-left: 1px solid rgba(255,255,255,0.07);
         }
 
         .activity-item-button {
@@ -5014,7 +5027,7 @@ fn install_css() {
         .activity-item {
             background: transparent;
             border-left: 2px solid transparent;
-            transition: background 120ms ease, border-color 120ms ease;
+            transition: background 160ms ease-in-out, border-color 160ms ease-in-out;
         }
 
         .activity-item-button:hover .activity-item {
@@ -5022,60 +5035,60 @@ fn install_css() {
         }
 
         .activity-item-state-busy {
-            border-left-color: rgba(99,102,241,0.55);
+            border-left-color: rgba(124,138,255,0.55);
         }
 
         .activity-item-state-completed {
-            border-left-color: rgba(34,197,94,0.55);
+            border-left-color: rgba(52,211,153,0.55);
         }
 
         .activity-item-state-waiting {
-            border-left-color: rgba(59,130,246,0.70);
+            border-left-color: rgba(96,165,250,0.70);
         }
 
         .activity-item-state-error {
-            border-left-color: rgba(239,68,68,0.65);
+            border-left-color: rgba(248,113,113,0.65);
         }
 
         .activity-meta {
-            color: #71717a;
+            color: #5c6178;
             font-size: 0.68rem;
         }
 
         .activity-preview {
-            color: #d4d4d8;
+            color: #b0b4c4;
             font-size: 0.74rem;
         }
 
         .activity-action {
             background: transparent;
-            color: #71717a;
-            border: 1px solid rgba(255,255,255,0.08);
+            color: #5c6178;
+            border: 1px solid rgba(255,255,255,0.10);
             border-radius: 999px;
             padding: 2px 8px;
             font-size: 0.68rem;
             font-weight: 600;
             min-height: 0;
-            transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+            transition: background 160ms ease-in-out, color 160ms ease-in-out, border-color 160ms ease-in-out;
         }
 
         .activity-action:hover {
-            background: rgba(59,130,246,0.10);
+            background: rgba(96,165,250,0.10);
             color: #dbeafe;
-            border-color: rgba(59,130,246,0.25);
+            border-color: rgba(96,165,250,0.25);
         }
 
         .activity-time {
-            color: #52525b;
+            color: #3d4259;
             font-size: 0.68rem;
         }
 
         /* ── Workspace windows ── */
 
         .workspace-window {
-            background: #0b0b0f;
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 0;
+            background: #12141c;
+            border: 1px solid rgba(255,255,255,0.07);
+            border-radius: 6px;
         }
 
         .workspace-window-active {
@@ -5083,45 +5096,45 @@ fn install_css() {
         }
 
         .workspace-window-state-busy {
-            border-color: rgba(99,102,241,0.22);
+            border-color: rgba(124,138,255,0.22);
         }
 
         .workspace-window-state-completed {
-            border-color: rgba(34,197,94,0.22);
+            border-color: rgba(52,211,153,0.22);
         }
 
         .workspace-window-state-waiting {
-            border-color: rgba(59,130,246,0.30);
+            border-color: rgba(96,165,250,0.30);
         }
 
         .workspace-window-state-error {
-            border-color: rgba(239,68,68,0.24);
+            border-color: rgba(248,113,113,0.24);
         }
 
         .workspace-window-active.workspace-window-state-busy {
-            border-color: rgba(99,102,241,0.38);
+            border-color: rgba(124,138,255,0.38);
         }
 
         .workspace-window-active.workspace-window-state-completed {
-            border-color: rgba(34,197,94,0.34);
+            border-color: rgba(52,211,153,0.34);
         }
 
         .workspace-window-active.workspace-window-state-waiting {
-            border-color: rgba(59,130,246,0.48);
+            border-color: rgba(96,165,250,0.48);
         }
 
         .workspace-window-active.workspace-window-state-error {
-            border-color: rgba(239,68,68,0.38);
+            border-color: rgba(248,113,113,0.38);
         }
 
         .workspace-window-resize-handle {
             background: transparent;
-            transition: background 120ms ease;
+            transition: background 160ms ease-in-out;
         }
 
         .workspace-window-resize-handle-right:hover,
         .workspace-window-resize-handle-bottom:hover {
-            background: rgba(99,102,241,0.14);
+            background: rgba(124,138,255,0.14);
         }
 
         /* ── Pane cards ── */
@@ -5132,9 +5145,9 @@ fn install_css() {
 
         .pane-header {
             background: rgba(255,255,255,0.02);
-            border-bottom: 1px solid rgba(255,255,255,0.04);
+            border-bottom: 1px solid rgba(255,255,255,0.05);
             padding: 2px 0;
-            transition: background 120ms ease;
+            transition: background 160ms ease-in-out;
         }
 
         .pane-header:hover {
@@ -5142,75 +5155,75 @@ fn install_css() {
         }
 
         .pane-card-active .pane-header {
-            background: rgba(99,102,241,0.06);
-            border-bottom: 1px solid rgba(99,102,241,0.15);
+            background: rgba(124,138,255,0.06);
+            border-bottom: 1px solid rgba(124,138,255,0.15);
         }
 
         .pane-card-active .pane-header:hover {
-            background: rgba(99,102,241,0.10);
+            background: rgba(124,138,255,0.10);
         }
 
         .pane-card-state-busy .pane-header {
-            background: rgba(99,102,241,0.04);
-            border-bottom-color: rgba(99,102,241,0.16);
+            background: rgba(124,138,255,0.04);
+            border-bottom-color: rgba(124,138,255,0.16);
         }
 
         .pane-card-state-completed .pane-header {
-            background: rgba(34,197,94,0.04);
-            border-bottom-color: rgba(34,197,94,0.16);
+            background: rgba(52,211,153,0.04);
+            border-bottom-color: rgba(52,211,153,0.16);
         }
 
         .pane-card-state-waiting .pane-header {
-            background: rgba(59,130,246,0.06);
-            border-bottom-color: rgba(59,130,246,0.18);
+            background: rgba(96,165,250,0.06);
+            border-bottom-color: rgba(96,165,250,0.18);
         }
 
         .pane-card-state-error .pane-header {
-            background: rgba(239,68,68,0.05);
-            border-bottom-color: rgba(239,68,68,0.16);
+            background: rgba(248,113,113,0.05);
+            border-bottom-color: rgba(248,113,113,0.16);
         }
 
         .pane-card-active.pane-card-state-waiting .pane-header {
-            background: rgba(59,130,246,0.10);
-            border-bottom-color: rgba(59,130,246,0.24);
+            background: rgba(96,165,250,0.10);
+            border-bottom-color: rgba(96,165,250,0.24);
         }
 
         .pane-title {
             font-weight: 500;
-            color: #a1a1aa;
+            color: #8b8fa3;
             font-size: 0.72rem;
         }
 
         .pane-card-active .pane-title {
-            color: #e4e4e7;
+            color: #e2e4ea;
         }
 
         .pane-close {
             background: transparent;
-            color: #3f3f46;
+            color: #3d4259;
             border-radius: 3px;
             min-width: 18px;
             min-height: 18px;
             padding: 0;
             font-size: 0.75rem;
-            transition: background 120ms ease, color 120ms ease;
+            transition: background 160ms ease-in-out, color 160ms ease-in-out;
         }
 
         .pane-close:hover {
-            background: rgba(239,68,68,0.15);
-            color: #ef4444;
+            background: rgba(248,113,113,0.15);
+            color: #f87171;
         }
 
         .pane-action {
             background: transparent;
-            color: #3f3f46;
+            color: #3d4259;
             border-radius: 3px;
             min-width: 18px;
             min-height: 18px;
             padding: 0;
             font-size: 0.75rem;
             opacity: 0;
-            transition: opacity 150ms ease, background 120ms ease, color 120ms ease;
+            transition: opacity 180ms ease-in-out, background 160ms ease-in-out, color 160ms ease-in-out;
         }
 
         .pane-header:hover .pane-action {
@@ -5219,12 +5232,12 @@ fn install_css() {
 
         .pane-action:hover {
             opacity: 1;
-            background: rgba(99,102,241,0.12);
-            color: #a1a1aa;
+            background: rgba(124,138,255,0.12);
+            color: #8b8fa3;
         }
 
         .pane-meta {
-            color: #52525b;
+            color: #3d4259;
             font-size: 0.75rem;
         }
 
@@ -5234,35 +5247,35 @@ fn install_css() {
 
         .surface-tab {
             background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.07);
+            border-radius: 6px;
             padding: 2px 6px;
-            transition: background 120ms ease, border-color 120ms ease;
+            transition: background 160ms ease-in-out, border-color 160ms ease-in-out;
         }
 
         .surface-tab-active {
-            background: rgba(99,102,241,0.14);
-            border-color: rgba(99,102,241,0.35);
+            background: rgba(124,138,255,0.14);
+            border-color: rgba(124,138,255,0.35);
         }
 
         .surface-tab-has-attention.surface-tab-state-busy {
-            background: rgba(99,102,241,0.08);
-            border-color: rgba(99,102,241,0.22);
+            background: rgba(124,138,255,0.08);
+            border-color: rgba(124,138,255,0.22);
         }
 
         .surface-tab-has-attention.surface-tab-state-completed {
-            background: rgba(34,197,94,0.08);
-            border-color: rgba(34,197,94,0.22);
+            background: rgba(52,211,153,0.08);
+            border-color: rgba(52,211,153,0.22);
         }
 
         .surface-tab-has-attention.surface-tab-state-waiting {
-            background: rgba(59,130,246,0.10);
-            border-color: rgba(59,130,246,0.28);
+            background: rgba(96,165,250,0.10);
+            border-color: rgba(96,165,250,0.28);
         }
 
         .surface-tab-has-attention.surface-tab-state-error {
-            background: rgba(239,68,68,0.10);
-            border-color: rgba(239,68,68,0.28);
+            background: rgba(248,113,113,0.10);
+            border-color: rgba(248,113,113,0.28);
         }
 
         .surface-tab-label,
@@ -5273,26 +5286,26 @@ fn install_css() {
         }
 
         .surface-tab-label {
-            color: #a1a1aa;
+            color: #8b8fa3;
             font-size: 0.74rem;
         }
 
         .surface-tab-active .surface-tab-label {
-            color: #fafafa;
+            color: #f0f2f8;
         }
 
         .surface-tab-title {
-            color: #a1a1aa;
+            color: #8b8fa3;
             font-size: 0.74rem;
         }
 
         .surface-tab-active .surface-tab-title {
-            color: #fafafa;
+            color: #f0f2f8;
         }
 
         .surface-tab-close,
         .surface-tab-add {
-            color: #71717a;
+            color: #5c6178;
             border-radius: 4px;
             min-width: 18px;
             min-height: 18px;
@@ -5301,7 +5314,7 @@ fn install_css() {
         .surface-tab-close:hover,
         .surface-tab-add:hover {
             background: rgba(255,255,255,0.06);
-            color: #d4d4d8;
+            color: #b0b4c4;
         }
 
         /* ── Status dots ── */
@@ -5310,16 +5323,16 @@ fn install_css() {
             font-size: 0.5rem;
         }
 
-        .status-dot-normal { color: #3f3f46; }
-        .status-dot-busy { color: #6366f1; }
-        .status-dot-completed { color: #22c55e; }
-        .status-dot-waiting { color: #3b82f6; }
-        .status-dot-error { color: #ef4444; }
+        .status-dot-normal { color: #3d4259; }
+        .status-dot-busy { color: #7c8aff; }
+        .status-dot-completed { color: #34d399; }
+        .status-dot-waiting { color: #60a5fa; }
+        .status-dot-error { color: #f87171; }
 
         /* ── Empty state ── */
 
         .empty-state {
-            color: #3f3f46;
+            color: #3d4259;
             font-size: 0.85rem;
         }
 
@@ -5328,8 +5341,8 @@ fn install_css() {
         .terminal-output,
         .terminal-entry {
             border-radius: 0;
-            background: #09090b;
-            color: #e4e4e7;
+            background: #0f1117;
+            color: #e2e4ea;
             font-family: Monospace;
         }
 
@@ -5339,17 +5352,17 @@ fn install_css() {
 
         .terminal-entry {
             padding: 6px 8px;
-            border-top: 1px solid rgba(255,255,255,0.06);
+            border-top: 1px solid rgba(255,255,255,0.07);
         }
 
         .terminal-entry:focus {
-            border-top: 1px solid rgba(99,102,241,0.4);
+            border-top: 1px solid rgba(124,138,255,0.4);
         }
 
         /* ── Popover / context menus ── */
 
         popover > contents {
-            background: #1a1a1e;
+            background: #1a1d28;
             border: 1px solid rgba(255,255,255,0.10);
             border-radius: 8px;
             padding: 4px;
@@ -5357,36 +5370,36 @@ fn install_css() {
         }
 
         .context-item {
-            color: #d4d4d8;
+            color: #b0b4c4;
             font-size: 0.8rem;
             padding: 6px 12px;
             border-radius: 4px;
             min-height: 0;
-            transition: background 100ms ease;
+            transition: background 160ms ease-in-out;
         }
 
         .context-item:hover {
-            background: rgba(99,102,241,0.12);
-            color: #e4e4e7;
+            background: rgba(124,138,255,0.12);
+            color: #e2e4ea;
         }
 
         .context-separator {
-            background: rgba(255,255,255,0.06);
+            background: rgba(255,255,255,0.07);
             margin: 4px 8px;
             min-height: 1px;
         }
 
         popover .destructive-action {
-            color: #ef4444;
+            color: #f87171;
             font-size: 0.8rem;
             padding: 6px 12px;
             border-radius: 4px;
             min-height: 0;
-            transition: background 100ms ease;
+            transition: background 160ms ease-in-out;
         }
 
         popover .destructive-action:hover {
-            background: rgba(239,68,68,0.12);
+            background: rgba(248,113,113,0.12);
         }
         ",
     );
