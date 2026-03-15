@@ -1,4 +1,5 @@
 mod app_state;
+mod crash_reporter;
 mod pane_runtime;
 mod session_store;
 mod settings_store;
@@ -18,6 +19,7 @@ use std::{
 use adw::prelude::*;
 use app_state::AppState;
 use clap::Parser;
+use crash_reporter::CrashReporter;
 use gtk::{
     Align, Box as GtkBox, Button, CssProvider, DrawingArea, Entry, Fixed, Label, Orientation,
     Overlay, Paned, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator,
@@ -73,6 +75,7 @@ struct StartupContext {
     backend_choice: BackendChoice,
     config_path: PathBuf,
     app_config: AppConfig,
+    crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
     shell_launch: ShellLaunchSpec,
     startup_toast: Option<String>,
@@ -84,6 +87,7 @@ struct UiHandle {
     application: adw::Application,
     window: adw::ApplicationWindow,
     overlay: adw::ToastOverlay,
+    crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
     shell_launch: ShellLaunchSpec,
     ghostty_surfaces: RefCell<HashMap<SurfaceId, Widget>>,
@@ -362,6 +366,7 @@ impl UiHandle {
         application: adw::Application,
         window: adw::ApplicationWindow,
         overlay: adw::ToastOverlay,
+        crash_reporter: CrashReporter,
         ghostty_host: Option<GhosttyHost>,
         shell_launch: ShellLaunchSpec,
     ) -> Rc<Self> {
@@ -371,6 +376,7 @@ impl UiHandle {
             application,
             window,
             overlay,
+            crash_reporter,
             ghostty_host,
             shell_launch,
             ghostty_surfaces: RefCell::new(HashMap::new()),
@@ -1110,9 +1116,7 @@ impl UiHandle {
     }
 
     fn write_ui_integrity_snapshot(&self, model: &AppModel) {
-        let Some(path) = std::env::var_os("TASKERS_UI_INTEGRITY_PATH").map(PathBuf::from) else {
-            return;
-        };
+        let path = self.crash_reporter.ui_integrity_path().to_path_buf();
         let live_layout_host = self
             .shell
             .borrow()
@@ -1723,6 +1727,18 @@ fn main() -> gtk::glib::ExitCode {
         .session
         .unwrap_or_else(session_store::default_session_path);
     let config_path = settings_store::default_config_path();
+    let crash_reporter = CrashReporter::for_session(&session_path, &config_path);
+    crash_reporter.install_panic_hook();
+    let recovered_crash_report = match crash_reporter.recover_previous_run() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to recover previous taskers crash report: {error}");
+            None
+        }
+    };
+    if let Err(error) = crash_reporter.mark_launch() {
+        eprintln!("failed to write taskers run marker: {error}");
+    }
     let ghostty_runtime_toast = match ensure_runtime_installed() {
         Ok(Some(runtime)) => Some(format!(
             "Installed Ghostty runtime assets to {}",
@@ -1780,7 +1796,7 @@ fn main() -> gtk::glib::ExitCode {
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
     let (backend_choice, _backend_note, ghostty_host, backend_toast) =
         initialize_terminal_backend(&probe);
-    let startup_toast = merge_startup_toasts(
+    let runtime_toast = merge_startup_toasts(
         merge_startup_toasts(
             merge_startup_toasts(ghostty_runtime_toast, shell_integration_toast),
             cli.clean_shell
@@ -1791,6 +1807,11 @@ fn main() -> gtk::glib::ExitCode {
             backend_toast,
         ),
     );
+    let startup_toast = merge_startup_toasts(
+        recovered_crash_report
+            .map(|path| format!("Recovered an unclean shutdown report at {}", path.display())),
+        runtime_toast,
+    );
     let app_state = match AppState::new(
         initial_model,
         session_path,
@@ -1799,6 +1820,7 @@ fn main() -> gtk::glib::ExitCode {
     ) {
         Ok(state) => state,
         Err(error) => {
+            let _ = crash_reporter.mark_clean_shutdown();
             eprintln!("failed to initialize app state: {error}");
             return gtk::glib::ExitCode::FAILURE;
         }
@@ -1810,6 +1832,7 @@ fn main() -> gtk::glib::ExitCode {
         backend_choice,
         config_path,
         app_config,
+        crash_reporter,
         ghostty_host,
         shell_launch,
         startup_toast,
@@ -1871,6 +1894,13 @@ fn build_ui(
     root.append(&overlay);
     window.set_content(Some(&root));
 
+    let crash_reporter_for_shutdown = startup.crash_reporter.clone();
+    app.connect_shutdown(move |_| {
+        if let Err(error) = crash_reporter_for_shutdown.mark_clean_shutdown() {
+            eprintln!("failed to clear taskers run marker: {error}");
+        }
+    });
+
     let ui = UiHandle::new(
         startup.app_state,
         startup.backend_choice,
@@ -1879,6 +1909,7 @@ fn build_ui(
         app.clone(),
         window.clone(),
         overlay,
+        startup.crash_reporter.clone(),
         startup.ghostty_host,
         startup.shell_launch,
     );
