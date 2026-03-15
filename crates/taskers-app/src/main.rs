@@ -17,10 +17,11 @@ use std::{
 use adw::prelude::*;
 use app_state::AppState;
 use clap::Parser;
+use gdk_pixbuf::{PixbufLoader, prelude::PixbufLoaderExt};
 use gtk::{
-    Align, Box as GtkBox, Button, CssProvider, Entry, Fixed, Label, Orientation, Overlay, Paned,
-    PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator, TextView, Widget,
-    WrapMode, gdk, glib,
+    Align, Box as GtkBox, Button, CssProvider, Entry, Fixed, Image, Label, Orientation, Overlay,
+    Paned, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator, TextView,
+    Widget, WrapMode, gdk, glib,
 };
 use pane_runtime::PaneRuntimeSnapshot;
 use serde_json::json;
@@ -112,7 +113,7 @@ struct ShellWidgets {
 #[derive(Clone)]
 struct PaneCardWidgets {
     root: GtkBox,
-    agent_icon: Label,
+    agent_icon: Image,
     title: Label,
     status_dot: Label,
     surface_tabs: GtkBox,
@@ -159,6 +160,11 @@ struct WorkspaceRenderContext {
     viewport_height: i32,
     overview_mode: bool,
     overview_scale: f64,
+}
+
+thread_local! {
+    static AGENT_ICON_TEXTURES: RefCell<HashMap<&'static str, gdk::Texture>> =
+        RefCell::new(HashMap::new());
 }
 
 impl UiHandle {
@@ -3753,35 +3759,26 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     }
 }
 
-fn build_agent_icon(agent_kind: Option<&str>) -> Label {
-    let icon = Label::new(None);
+fn build_agent_icon(agent_kind: Option<&str>) -> Image {
+    let icon = Image::new();
     icon.add_css_class("agent-icon");
+    icon.set_valign(Align::Center);
+    icon.set_size_request(16, 16);
     configure_agent_icon(&icon, agent_kind);
     icon
 }
 
-fn configure_agent_icon(icon: &Label, agent_kind: Option<&str>) {
-    for class in &[
-        "agent-icon-codex",
-        "agent-icon-claude",
-        "agent-icon-opencode",
-        "agent-icon-aider",
-        "agent-icon-generic",
-    ] {
-        icon.remove_css_class(class);
-    }
-
+fn configure_agent_icon(icon: &Image, agent_kind: Option<&str>) {
     let Some(agent_kind) = normalized_agent_kind(agent_kind) else {
-        icon.set_text("");
+        icon.set_paintable(Option::<&gdk::Texture>::None);
         icon.set_tooltip_text(None);
         icon.set_visible(false);
         return;
     };
 
-    icon.set_text(agent_icon_text(agent_kind));
+    icon.set_paintable(agent_icon_texture(agent_kind).as_ref());
     icon.set_tooltip_text(Some(&humanize_agent_kind(agent_kind)));
-    icon.add_css_class(&format!("agent-icon-{}", agent_icon_slug(agent_kind)));
-    icon.set_visible(true);
+    icon.set_visible(icon.paintable().is_some());
 }
 
 fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<&str> {
@@ -3841,16 +3838,6 @@ fn workspace_agent_kind<'a>(
         })
 }
 
-fn agent_icon_text(agent_kind: &str) -> &'static str {
-    match agent_kind {
-        "codex" => "CX",
-        "claude" => "CL",
-        "opencode" => "OC",
-        "aider" => "AI",
-        _ => "AG",
-    }
-}
-
 fn agent_icon_slug(agent_kind: &str) -> &'static str {
     match agent_kind {
         "codex" => "codex",
@@ -3858,6 +3845,34 @@ fn agent_icon_slug(agent_kind: &str) -> &'static str {
         "opencode" => "opencode",
         "aider" => "aider",
         _ => "generic",
+    }
+}
+
+fn agent_icon_texture(agent_kind: &str) -> Option<gdk::Texture> {
+    let slug = agent_icon_slug(agent_kind);
+    AGENT_ICON_TEXTURES.with(|textures| {
+        if let Some(texture) = textures.borrow().get(slug) {
+            return Some(texture.clone());
+        }
+
+        let loader = PixbufLoader::with_type("svg").ok()?;
+        loader.set_size(16, 16);
+        loader.write(agent_icon_svg(slug).as_bytes()).ok()?;
+        loader.close().ok()?;
+        let pixbuf = loader.pixbuf()?;
+        let texture = gdk::Texture::for_pixbuf(&pixbuf);
+        textures.borrow_mut().insert(slug, texture.clone());
+        Some(texture)
+    })
+}
+
+fn agent_icon_svg(slug: &str) -> &'static str {
+    match slug {
+        "codex" => include_str!("../assets/agent-codex.svg"),
+        "claude" => include_str!("../assets/agent-claude.svg"),
+        "opencode" => include_str!("../assets/agent-opencode.svg"),
+        "aider" => include_str!("../assets/agent-aider.svg"),
+        _ => include_str!("../assets/agent-generic.svg"),
     }
 }
 
@@ -5042,51 +5057,12 @@ fn install_css() {
         .status-dot-error { color: #ef4444; }
 
         .agent-icon {
-            border-radius: 999px;
-            padding: 0 6px;
-            min-width: 20px;
-            min-height: 18px;
-            font-size: 0.62rem;
-            font-weight: 700;
-            letter-spacing: 0.06em;
-        }
-
-        .agent-icon-codex {
-            background: rgba(59,130,246,0.16);
-            color: #dbeafe;
-            border: 1px solid rgba(59,130,246,0.26);
-        }
-
-        .agent-icon-claude {
-            background: rgba(245,158,11,0.16);
-            color: #fef3c7;
-            border: 1px solid rgba(245,158,11,0.26);
-        }
-
-        .agent-icon-opencode {
-            background: rgba(16,185,129,0.16);
-            color: #d1fae5;
-            border: 1px solid rgba(16,185,129,0.26);
-        }
-
-        .agent-icon-aider {
-            background: rgba(168,85,247,0.16);
-            color: #f3e8ff;
-            border: 1px solid rgba(168,85,247,0.26);
-        }
-
-        .agent-icon-generic {
-            background: rgba(255,255,255,0.08);
-            color: #e4e4e7;
-            border: 1px solid rgba(255,255,255,0.12);
+            opacity: 0.96;
         }
 
         .activity-agent-icon,
         .surface-tab-agent-icon {
-            min-width: 18px;
-            min-height: 16px;
-            padding: 0 4px;
-            font-size: 0.58rem;
+            opacity: 0.92;
         }
 
         /* ── Empty state ── */

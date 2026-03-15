@@ -1392,6 +1392,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
+ "gdk-pixbuf",
  "gtk4",
  "libadwaita",
  "serde",
