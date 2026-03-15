@@ -1172,10 +1172,15 @@ impl UiHandle {
         header.set_margin_top(1);
         header.set_margin_bottom(1);
 
-        let title = Label::new(Some("Unnamed terminal pane"));
+        let title = Label::new(None);
         title.add_css_class("pane-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
+        set_agent_glyph_label(
+            &title,
+            pane.active_surface().and_then(surface_agent_kind),
+            "Unnamed terminal pane",
+        );
         header.append(&title);
 
         let status_dot = Label::new(Some("\u{25cf}"));
@@ -1326,7 +1331,11 @@ impl UiHandle {
             .active_surface()
             .map(display_surface_title)
             .unwrap_or_else(|| "Unnamed terminal pane".into());
-        card.title.set_text(&display_title);
+        set_agent_glyph_label(
+            &card.title,
+            pane.active_surface().and_then(surface_agent_kind),
+            &display_title,
+        );
         card.title
             .set_tooltip_text(Some(&format_pane_meta(pane, snapshot.as_ref())));
 
@@ -2199,11 +2208,19 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             heading.set_hexpand(true);
             heading.append(&build_workspace_status_widget(&summary));
 
-            let label = Label::new(Some(&summary.label));
+            let label = Label::new(None);
             label.add_css_class("workspace-label");
             label.set_xalign(0.0);
             label.set_hexpand(true);
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            set_agent_glyph_label(
+                &label,
+                model
+                    .workspaces
+                    .get(&summary.workspace_id)
+                    .and_then(workspace_agent_kind),
+                &summary.label,
+            );
             heading.append(&label);
             row.append(&heading);
 
@@ -2562,11 +2579,16 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
                 .map(display_surface_title)
         })
         .unwrap_or_else(|| "Terminal pane".into());
-    let title_label = Label::new(Some(&title));
+    let title_label = Label::new(None);
     title_label.add_css_class("pane-title");
     title_label.set_xalign(0.0);
     title_label.set_hexpand(true);
     title_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    set_agent_glyph_label(
+        &title_label,
+        activity_surface(model, item).and_then(surface_agent_kind),
+        &title,
+    );
     heading.append(&title_label);
 
     let time_label = Label::new(Some(&item.created_at.time().to_string()));
@@ -3601,11 +3623,16 @@ fn sync_surface_tabs(
         label.add_css_class("surface-tab-label");
         let label_content = GtkBox::new(Orientation::Horizontal, 4);
         label_content.set_hexpand(true);
-        let title = Label::new(Some(&display_surface_title(surface)));
+        let title = Label::new(None);
         title.add_css_class("surface-tab-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        set_agent_glyph_label(
+            &title,
+            surface_agent_kind(surface),
+            &display_surface_title(surface),
+        );
         label_content.append(&title);
         label.set_child(Some(&label_content));
         let focus_ui = Rc::clone(ui);
@@ -3727,6 +3754,31 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     }
 }
 
+const AGENT_GLYPH_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
+
+fn set_agent_glyph_label(label: &Label, agent_kind: Option<&str>, text: &str) {
+    let escaped = glib::markup_escape_text(text);
+    let Some((glyph, color)) = agent_glyph(agent_kind) else {
+        label.set_text(text);
+        return;
+    };
+
+    let glyph = glib::markup_escape_text(&glyph.to_string());
+    label.set_markup(&format!(
+        "<span font_family=\"{AGENT_GLYPH_FONT_FAMILY}\" foreground=\"{color}\">{glyph}</span> {escaped}"
+    ));
+}
+
+fn agent_glyph(agent_kind: Option<&str>) -> Option<(char, &'static str)> {
+    match normalized_agent_kind(agent_kind)? {
+        "codex" => Some(('\u{ec10}', "#7cb4ff")),
+        "claude" => Some(('\u{ee0d}', "#f59e63")),
+        "opencode" => Some(('\u{f0169}', "#6ee7b7")),
+        "aider" => Some(('\u{f09d1}', "#c9a7ff")),
+        _ => None,
+    }
+}
+
 fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<&str> {
     agent_kind
         .map(str::trim)
@@ -3757,6 +3809,21 @@ fn surface_agent_kind(surface: &SurfaceRecord) -> Option<&str> {
                 .as_ref()
                 .and_then(|command| command.first())
                 .and_then(|command| infer_agent_kind(command))
+        })
+}
+
+fn workspace_agent_kind(workspace: &Workspace) -> Option<&str> {
+    workspace
+        .panes
+        .get(&workspace.active_pane)
+        .and_then(PaneRecord::active_surface)
+        .and_then(surface_agent_kind)
+        .or_else(|| {
+            workspace
+                .panes
+                .values()
+                .filter_map(PaneRecord::active_surface)
+                .find_map(surface_agent_kind)
         })
 }
 
