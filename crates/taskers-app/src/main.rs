@@ -1404,6 +1404,7 @@ impl UiHandle {
 
         let split_right_btn = Button::with_label("\u{25eb}");
         split_right_btn.add_css_class("pane-action");
+        split_right_btn.add_css_class("pane-split-action");
         split_right_btn.set_tooltip_text(Some("Split right"));
         let sr_ui = Rc::clone(self);
         let sr_pane_id = pane.id;
@@ -1418,6 +1419,7 @@ impl UiHandle {
 
         let split_down_btn = Button::with_label("\u{2501}");
         split_down_btn.add_css_class("pane-action");
+        split_down_btn.add_css_class("pane-split-action");
         split_down_btn.set_tooltip_text(Some("Split down"));
         let sd_ui = Rc::clone(self);
         let sd_pane_id = pane.id;
@@ -1432,6 +1434,7 @@ impl UiHandle {
 
         let close_button = Button::with_label("\u{00d7}");
         close_button.add_css_class("pane-close");
+        close_button.add_css_class("pane-close-action");
         close_button.set_tooltip_text(Some("Close pane"));
         let close_ui = Rc::clone(self);
         let close_pane_id = pane.id;
@@ -6641,6 +6644,16 @@ fn install_css() {
             color: #f87171;
         }
 
+        .pane-card-active .pane-close-action {
+            background: rgba(248,113,113,0.10);
+            color: #f9a8a8;
+        }
+
+        .pane-card-active .pane-close-action:hover {
+            background: rgba(248,113,113,0.18);
+            color: #fecaca;
+        }
+
         .pane-action {
             background: transparent;
             color: #3d4259;
@@ -6661,10 +6674,30 @@ fn install_css() {
             opacity: 0.62;
         }
 
+        .pane-card-active .pane-window-action {
+            background: rgba(96,165,250,0.12);
+            color: #7dd3fc;
+        }
+
+        .pane-card-active .pane-split-action {
+            background: rgba(45,212,191,0.11);
+            color: #5eead4;
+        }
+
         .pane-action:hover {
             opacity: 1;
             background: rgba(124,138,255,0.12);
             color: #8b8fa3;
+        }
+
+        .pane-card-active .pane-window-action:hover {
+            background: rgba(96,165,250,0.20);
+            color: #d8f4ff;
+        }
+
+        .pane-card-active .pane-split-action:hover {
+            background: rgba(45,212,191,0.18);
+            color: #ccfbf1;
         }
 
         .pane-meta {
