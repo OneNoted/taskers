@@ -92,14 +92,14 @@ impl ShortcutAction {
             Self::NewWindowRight => "New window right",
             Self::NewWindowUp => "New window up",
             Self::NewWindowDown => "New window down",
-            Self::ResizeWindowLeft => "Resize window left",
-            Self::ResizeWindowRight => "Resize window right",
-            Self::ResizeWindowUp => "Resize window up",
-            Self::ResizeWindowDown => "Resize window down",
-            Self::ResizeSplitLeft => "Resize split left",
-            Self::ResizeSplitRight => "Resize split right",
-            Self::ResizeSplitUp => "Resize split up",
-            Self::ResizeSplitDown => "Resize split down",
+            Self::ResizeWindowLeft => "Make window narrower",
+            Self::ResizeWindowRight => "Make window wider",
+            Self::ResizeWindowUp => "Make window shorter",
+            Self::ResizeWindowDown => "Make window taller",
+            Self::ResizeSplitLeft => "Make split narrower",
+            Self::ResizeSplitRight => "Make split wider",
+            Self::ResizeSplitUp => "Make split shorter",
+            Self::ResizeSplitDown => "Make split taller",
             Self::SplitRight => "Split right",
             Self::SplitDown => "Split down",
         }
@@ -123,14 +123,14 @@ impl ShortcutAction {
             Self::NewWindowRight => "Create a top-level window in a new column on the right.",
             Self::NewWindowUp => "Create a stacked top-level window above the active window.",
             Self::NewWindowDown => "Create a stacked top-level window below the active window.",
-            Self::ResizeWindowLeft => "Shrink the active column from the left edge.",
-            Self::ResizeWindowRight => "Grow the active column toward the right.",
-            Self::ResizeWindowUp => "Shrink the active top-level window height.",
-            Self::ResizeWindowDown => "Grow the active top-level window height.",
-            Self::ResizeSplitLeft => "Move the active pane split toward the left.",
-            Self::ResizeSplitRight => "Move the active pane split toward the right.",
-            Self::ResizeSplitUp => "Move the active pane split upward.",
-            Self::ResizeSplitDown => "Move the active pane split downward.",
+            Self::ResizeWindowLeft => "Reduce the active column width.",
+            Self::ResizeWindowRight => "Increase the active column width.",
+            Self::ResizeWindowUp => "Reduce the active top-level window height.",
+            Self::ResizeWindowDown => "Increase the active top-level window height.",
+            Self::ResizeSplitLeft => "Reduce the active split width.",
+            Self::ResizeSplitRight => "Increase the active split width.",
+            Self::ResizeSplitUp => "Reduce the active split height.",
+            Self::ResizeSplitDown => "Increase the active split height.",
             Self::SplitRight => "Split the active pane to the right inside the current window.",
             Self::SplitDown => "Split the active pane downward inside the current window.",
         }
@@ -143,16 +143,16 @@ impl ShortcutAction {
             Self::NewWindowLeft
             | Self::NewWindowRight
             | Self::NewWindowUp
-            | Self::NewWindowDown => "New window",
+            | Self::NewWindowDown => "Top-level windows",
+            Self::SplitRight | Self::SplitDown => "Pane splits",
             Self::ResizeWindowLeft
             | Self::ResizeWindowRight
             | Self::ResizeWindowUp
-            | Self::ResizeWindowDown => "Resize window",
-            Self::ResizeSplitLeft
+            | Self::ResizeWindowDown
+            | Self::ResizeSplitLeft
             | Self::ResizeSplitRight
             | Self::ResizeSplitUp
-            | Self::ResizeSplitDown => "Resize split",
-            Self::SplitRight | Self::SplitDown => "Split",
+            | Self::ResizeSplitDown => "Advanced resize",
         }
     }
 
@@ -164,28 +164,20 @@ impl ShortcutAction {
             Self::FocusRight => &["<Control><Alt>l", "<Control><Alt>Right"],
             Self::FocusUp => &["<Control><Alt>k", "<Control><Alt>Up"],
             Self::FocusDown => &["<Control><Alt>j", "<Control><Alt>Down"],
-            Self::NewWindowLeft => &["<Control><Alt><Shift>h", "<Control><Alt><Shift>Left"],
-            Self::NewWindowRight => &[
-                "<Control><Alt>t",
-                "<Control><Alt><Shift>l",
-                "<Control><Alt><Shift>Right",
-            ],
-            Self::NewWindowUp => &["<Control><Alt><Shift>k", "<Control><Alt><Shift>Up"],
-            Self::NewWindowDown => &[
-                "<Control><Alt>g",
-                "<Control><Alt><Shift>j",
-                "<Control><Alt><Shift>Down",
-            ],
-            Self::ResizeWindowLeft => &["<Control><Alt>Home"],
-            Self::ResizeWindowRight => &["<Control><Alt>End"],
-            Self::ResizeWindowUp => &["<Control><Alt>Page_Up"],
-            Self::ResizeWindowDown => &["<Control><Alt>Page_Down"],
-            Self::ResizeSplitLeft => &["<Control><Alt><Shift>Home"],
-            Self::ResizeSplitRight => &["<Control><Alt><Shift>End"],
-            Self::ResizeSplitUp => &["<Control><Alt><Shift>Page_Up"],
-            Self::ResizeSplitDown => &["<Control><Alt><Shift>Page_Down"],
-            Self::SplitRight => &["<Control><Alt>backslash"],
-            Self::SplitDown => &["<Control><Alt>minus"],
+            Self::NewWindowLeft => &[],
+            Self::NewWindowRight => &["<Control><Alt>t"],
+            Self::NewWindowUp => &[],
+            Self::NewWindowDown => &["<Control><Alt>g"],
+            Self::ResizeWindowLeft => &[],
+            Self::ResizeWindowRight => &[],
+            Self::ResizeWindowUp => &[],
+            Self::ResizeWindowDown => &[],
+            Self::ResizeSplitLeft => &[],
+            Self::ResizeSplitRight => &[],
+            Self::ResizeSplitUp => &[],
+            Self::ResizeSplitDown => &[],
+            Self::SplitRight => &["<Control><Alt><Shift>t"],
+            Self::SplitDown => &["<Control><Alt><Shift>g"],
         }
     }
 }
@@ -347,6 +339,46 @@ mod tests {
                 .iter()
                 .map(|binding| (*binding).to_string())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn balanced_defaults_leave_advanced_actions_unbound() {
+        assert!(
+            ShortcutAction::NewWindowLeft
+                .default_accelerators()
+                .is_empty()
+        );
+        assert!(ShortcutAction::NewWindowUp.default_accelerators().is_empty());
+        assert!(
+            ShortcutAction::ResizeWindowLeft
+                .default_accelerators()
+                .is_empty()
+        );
+        assert!(
+            ShortcutAction::ResizeSplitDown
+                .default_accelerators()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn balanced_defaults_prefer_direct_window_and_split_shortcuts() {
+        assert_eq!(
+            ShortcutAction::NewWindowRight.default_accelerators(),
+            ["<Control><Alt>t"]
+        );
+        assert_eq!(
+            ShortcutAction::NewWindowDown.default_accelerators(),
+            ["<Control><Alt>g"]
+        );
+        assert_eq!(
+            ShortcutAction::SplitRight.default_accelerators(),
+            ["<Control><Alt><Shift>t"]
+        );
+        assert_eq!(
+            ShortcutAction::SplitDown.default_accelerators(),
+            ["<Control><Alt><Shift>g"]
         );
     }
 }
