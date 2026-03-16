@@ -125,9 +125,11 @@ struct ShellWidgets {
 #[derive(Clone)]
 struct PaneCardWidgets {
     root: GtkBox,
+    header: GtkBox,
     agent_icon: AgentIconWidget,
     title: Label,
     status_dot: Label,
+    header_tabs: GtkBox,
     resize_button: Button,
     surface_tabs: SurfaceTabStripWidgets,
     terminal_host: GtkBox,
@@ -1307,6 +1309,12 @@ impl UiHandle {
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         header.append(&title);
 
+        let header_tabs = GtkBox::new(Orientation::Horizontal, 2);
+        header_tabs.add_css_class("pane-header-tabs");
+        header_tabs.set_hexpand(true);
+        header_tabs.set_visible(false);
+        header.append(&header_tabs);
+
         let status_dot = Label::new(Some("\u{25cf}"));
         status_dot.add_css_class("status-dot");
         let pane_attention = pane.active_attention();
@@ -1554,9 +1562,11 @@ impl UiHandle {
             displayed_surface_id: Rc::new(Cell::new(None)),
             focus_target: root.clone().upcast(),
             root,
+            header: header.clone(),
             agent_icon,
             title,
             status_dot,
+            header_tabs,
             resize_button,
             surface_tabs,
             terminal_host,
@@ -4782,10 +4792,105 @@ fn sync_surface_tabs(
     set_surface_tab_layout(&card.surface_tabs, layout, animations_enabled);
     apply_surface_tab_widgets(&card.surface_tabs);
 
-    // Auto-hide the tab strip when there is only one surface
-    card.surface_tabs
-        .root
-        .set_visible(pane.surfaces.len() > 1);
+    // Decide between inline tabs (in pane-header) vs. standalone strip vs. hidden (single surface)
+    let surface_count = pane.surfaces.len();
+    if surface_count <= 1 {
+        // Single surface: hide both tab displays, show title
+        card.surface_tabs.root.set_visible(false);
+        card.header_tabs.set_visible(false);
+        card.title.set_visible(true);
+    } else {
+        // Estimate whether tabs fit inline in the header.
+        // Reserve ~200px for the action buttons on the right side of the header.
+        let header_width = card.header.allocated_width();
+        let action_buttons_width = 200;
+        let available_for_tabs = (header_width - action_buttons_width).max(0);
+        let tab_width_estimate = SURFACE_TAB_MIN_WIDTH + SURFACE_TAB_GAP;
+        let max_inline_tabs = available_for_tabs / tab_width_estimate;
+
+        if surface_count as i32 <= max_inline_tabs && surface_count <= 6 {
+            // Inline mode: show tabs in the header row
+            sync_inline_header_tabs(ui, workspace_id, pane, card);
+            card.header_tabs.set_visible(true);
+            card.title.set_visible(false);
+            card.surface_tabs.root.set_visible(false);
+        } else {
+            // Overflow: use the standalone tab strip
+            card.header_tabs.set_visible(false);
+            card.title.set_visible(true);
+            card.surface_tabs.root.set_visible(true);
+        }
+    }
+}
+
+fn sync_inline_header_tabs(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane: &PaneRecord,
+    card: &PaneCardWidgets,
+) {
+    clear_box(&card.header_tabs);
+    let active_surface_id = pane.active_surface;
+    for surface in pane.surfaces.values() {
+        let tab_title = display_surface_title(surface);
+        let tab_btn = Button::new();
+        tab_btn.add_css_class("flat");
+        tab_btn.add_css_class("inline-tab");
+        if surface.id == active_surface_id {
+            tab_btn.add_css_class("inline-tab-active");
+        }
+        if surface.attention != AttentionState::Normal {
+            tab_btn.add_css_class(&format!(
+                "inline-tab-state-{}",
+                attention_state_slug(surface.attention)
+            ));
+        }
+        let tab_content = GtkBox::new(Orientation::Horizontal, 4);
+        let label = Label::new(Some(&tab_title));
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_max_width_chars(16);
+        tab_content.append(&label);
+        let close = Button::with_label("\u{00d7}");
+        close.add_css_class("flat");
+        close.add_css_class("inline-tab-close");
+        let close_ui = Rc::clone(ui);
+        let close_surface_id = surface.id;
+        let close_pane_id = pane.id;
+        close.connect_clicked(move |_| {
+            close_ui.dispatch(ControlCommand::CloseSurface {
+                workspace_id,
+                pane_id: close_pane_id,
+                surface_id: close_surface_id,
+            });
+        });
+        tab_content.append(&close);
+        tab_btn.set_child(Some(&tab_content));
+        let focus_ui = Rc::clone(ui);
+        let focus_surface_id = surface.id;
+        let focus_pane_id = pane.id;
+        tab_btn.connect_clicked(move |_| {
+            focus_ui.dispatch(ControlCommand::FocusSurface {
+                workspace_id,
+                pane_id: focus_pane_id,
+                surface_id: focus_surface_id,
+            });
+        });
+        card.header_tabs.append(&tab_btn);
+    }
+    // Add "+" button for creating new surface
+    let add_btn = Button::with_label("+");
+    add_btn.add_css_class("flat");
+    add_btn.add_css_class("inline-tab-add");
+    let add_ui = Rc::clone(ui);
+    let add_pane_id = pane.id;
+    add_btn.connect_clicked(move |_| {
+        add_ui.dispatch(ControlCommand::CreateSurface {
+            workspace_id,
+            pane_id: add_pane_id,
+            kind: PaneKind::Terminal,
+        });
+    });
+    card.header_tabs.append(&add_btn);
 }
 
 fn build_surface_tab_strip(

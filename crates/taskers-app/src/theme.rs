@@ -1235,6 +1235,78 @@ pub fn generate_css(p: &ThemePalette) -> String {
         error_28 = rgba(p.error, 0.28),
     );
 
+    // ── Inline header tabs ──
+    let _ = write!(
+        w,
+        "
+        .pane-header-tabs {{
+            margin: 0 2px;
+        }}
+
+        .inline-tab {{
+            background: {inline_bg};
+            border: 1px solid {inline_border};
+            border-radius: 4px;
+            padding: 0 4px;
+            min-height: 20px;
+            font-size: 0.74rem;
+            color: {text_dim};
+            transition: background 120ms ease-in-out;
+        }}
+
+        .inline-tab:hover {{
+            background: {inline_hover};
+        }}
+
+        .inline-tab-active {{
+            background: {inline_active_bg};
+            border-color: {inline_active_border};
+            color: {text_bright};
+        }}
+
+        .inline-tab-close {{
+            min-width: 14px;
+            min-height: 14px;
+            padding: 0;
+            margin: 0;
+            font-size: 0.65rem;
+            color: {text_faint};
+            background: transparent;
+            border-radius: 3px;
+        }}
+
+        .inline-tab-close:hover {{
+            background: {inline_close_hover};
+            color: {text_subtle};
+        }}
+
+        .inline-tab-add {{
+            min-width: 20px;
+            min-height: 20px;
+            padding: 0;
+            font-size: 0.74rem;
+            color: {text_faint};
+            background: transparent;
+            border-radius: 4px;
+        }}
+
+        .inline-tab-add:hover {{
+            background: {inline_close_hover};
+            color: {text_subtle};
+        }}
+        ",
+        inline_bg = rgba(p.border, 0.03),
+        inline_border = rgba(p.border, 0.07),
+        inline_hover = rgba(p.border, 0.06),
+        inline_active_bg = rgba(p.accent, 0.14),
+        inline_active_border = rgba(p.accent, 0.35),
+        inline_close_hover = rgba(p.border, 0.06),
+        text_bright = p.text_bright.to_hex(),
+        text_dim = p.text_dim.to_hex(),
+        text_faint = p.text_faint.to_hex(),
+        text_subtle = p.text_subtle.to_hex(),
+    );
+
     // ── Status dots ──
     let _ = write!(
         w,
