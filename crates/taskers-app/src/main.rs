@@ -1261,27 +1261,17 @@ impl UiHandle {
         status_dot.set_tooltip_text(Some(pane_attention.label()));
         header.append(&status_dot);
 
-        let new_window_right_btn = Button::with_label("\u{2192}");
-        new_window_right_btn.add_css_class("pane-action");
-        new_window_right_btn.add_css_class("pane-window-action");
-        new_window_right_btn.set_tooltip_text(Some("New window right"));
-        let nwr_ui = Rc::clone(self);
-        let nwr_pane_id = pane.id;
-        new_window_right_btn.connect_clicked(move |_| {
-            create_workspace_window_from_pane(&nwr_ui, workspace_id, nwr_pane_id, Direction::Right);
+        let new_window_btn = Button::with_label("New");
+        new_window_btn.add_css_class("pane-action");
+        new_window_btn.add_css_class("pane-window-action");
+        new_window_btn.set_tooltip_text(Some("Create a new top-level window"));
+        let nw_ui = Rc::clone(self);
+        let nw_btn = new_window_btn.clone();
+        let nw_pane_id = pane.id;
+        new_window_btn.connect_clicked(move |_| {
+            show_new_window_popover(&nw_btn, &nw_ui, workspace_id, Some(nw_pane_id));
         });
-        header.append(&new_window_right_btn);
-
-        let new_window_down_btn = Button::with_label("\u{2193}");
-        new_window_down_btn.add_css_class("pane-action");
-        new_window_down_btn.add_css_class("pane-window-action");
-        new_window_down_btn.set_tooltip_text(Some("New window below"));
-        let nwd_ui = Rc::clone(self);
-        let nwd_pane_id = pane.id;
-        new_window_down_btn.connect_clicked(move |_| {
-            create_workspace_window_from_pane(&nwd_ui, workspace_id, nwd_pane_id, Direction::Down);
-        });
-        header.append(&new_window_down_btn);
+        header.append(&new_window_btn);
 
         let split_right_btn = Button::with_label("\u{25eb}");
         split_right_btn.add_css_class("pane-action");
@@ -2223,63 +2213,16 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     workspace_header.append(&workspace_name_label);
 
     // New-window popover button
-    let new_window_btn = Button::with_label("+");
+    let new_window_btn = Button::with_label("New Window");
     new_window_btn.add_css_class("workspace-header-action");
-    new_window_btn.set_tooltip_text(Some("New window"));
+    new_window_btn.set_tooltip_text(Some("Create a new top-level window"));
     let nw_parent = new_window_btn.clone();
     let nw_ui = Rc::clone(ui);
     new_window_btn.connect_clicked(move |_| {
-        let popover = gtk::Popover::new();
-        popover.set_parent(&nw_parent);
-
-        let content = GtkBox::new(Orientation::Vertical, 2);
-        content.set_margin_start(4);
-        content.set_margin_end(4);
-        content.set_margin_top(4);
-        content.set_margin_bottom(4);
-
-        let new_right = Button::with_label("\u{25eb}");
-        new_right.add_css_class("flat");
-        new_right.add_css_class("context-item");
-        new_right.set_tooltip_text(Some("New window right"));
-        let nr_ui = Rc::clone(&nw_ui);
-        let nr_pop = popover.clone();
-        new_right.connect_clicked(move |_| {
-            nr_pop.popdown();
-            let model = nr_ui.app_state.snapshot_model();
-            if let Some(workspace) = model.active_workspace() {
-                nr_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                    workspace_id: workspace.id,
-                    direction: Direction::Right,
-                });
-            }
-        });
-        content.append(&new_right);
-
-        let new_below = Button::with_label("\u{2193}");
-        new_below.add_css_class("flat");
-        new_below.add_css_class("context-item");
-        new_below.set_tooltip_text(Some("New window below"));
-        let nb_ui = Rc::clone(&nw_ui);
-        let nb_pop = popover.clone();
-        new_below.connect_clicked(move |_| {
-            nb_pop.popdown();
-            let model = nb_ui.app_state.snapshot_model();
-            if let Some(workspace) = model.active_workspace() {
-                nb_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                    workspace_id: workspace.id,
-                    direction: Direction::Down,
-                });
-            }
-        });
-        content.append(&new_below);
-
-        popover.set_child(Some(&content));
-        let pop_cleanup = popover.clone();
-        popover.connect_closed(move |_| {
-            pop_cleanup.unparent();
-        });
-        popover.popup();
+        let Some(workspace_id) = nw_ui.app_state.snapshot_model().active_workspace_id() else {
+            return;
+        };
+        show_new_window_popover(&nw_parent, &nw_ui, workspace_id, None);
     });
     workspace_header.append(&new_window_btn);
 
@@ -4267,6 +4210,127 @@ fn create_workspace_window_from_pane(
         workspace_id,
         direction,
     });
+}
+
+fn show_new_window_popover(
+    parent: &Button,
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: Option<taskers_domain::PaneId>,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_parent(parent);
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
+    content.set_margin_start(4);
+    content.set_margin_end(4);
+    content.set_margin_top(4);
+    content.set_margin_bottom(4);
+
+    append_new_window_direction_button(
+        &content,
+        &popover,
+        ui,
+        workspace_id,
+        pane_id,
+        Direction::Left,
+    );
+    append_new_window_direction_button(
+        &content,
+        &popover,
+        ui,
+        workspace_id,
+        pane_id,
+        Direction::Right,
+    );
+    append_new_window_direction_button(
+        &content,
+        &popover,
+        ui,
+        workspace_id,
+        pane_id,
+        Direction::Up,
+    );
+    append_new_window_direction_button(
+        &content,
+        &popover,
+        ui,
+        workspace_id,
+        pane_id,
+        Direction::Down,
+    );
+
+    popover.set_child(Some(&content));
+    let pop_cleanup = popover.clone();
+    popover.connect_closed(move |_| {
+        pop_cleanup.unparent();
+    });
+    popover.popup();
+}
+
+fn append_new_window_direction_button(
+    content: &GtkBox,
+    popover: &gtk::Popover,
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: Option<taskers_domain::PaneId>,
+    direction: Direction,
+) {
+    let button = Button::with_label(new_window_direction_label(direction));
+    button.add_css_class("flat");
+    button.add_css_class("context-item");
+
+    let shortcut = ui.shortcut_label(new_window_direction_action(direction));
+    if shortcut == "Unbound" {
+        button.set_tooltip_text(Some(new_window_direction_tooltip(direction)));
+    } else {
+        button.set_tooltip_text(Some(&format!(
+            "{} ({shortcut})",
+            new_window_direction_tooltip(direction)
+        )));
+    }
+
+    let local_ui = Rc::clone(ui);
+    let local_popover = popover.clone();
+    button.connect_clicked(move |_| {
+        local_popover.popdown();
+        if let Some(pane_id) = pane_id {
+            create_workspace_window_from_pane(&local_ui, workspace_id, pane_id, direction);
+        } else {
+            local_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+                workspace_id,
+                direction,
+            });
+        }
+    });
+    content.append(&button);
+}
+
+fn new_window_direction_label(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "\u{2190} Left",
+        Direction::Right => "\u{2192} Right",
+        Direction::Up => "\u{2191} Above",
+        Direction::Down => "\u{2193} Below",
+    }
+}
+
+fn new_window_direction_tooltip(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "Create a new window to the left",
+        Direction::Right => "Create a new window to the right",
+        Direction::Up => "Create a new window above",
+        Direction::Down => "Create a new window below",
+    }
+}
+
+fn new_window_direction_action(direction: Direction) -> ShortcutAction {
+    match direction {
+        Direction::Left => ShortcutAction::NewWindowLeft,
+        Direction::Right => ShortcutAction::NewWindowRight,
+        Direction::Up => ShortcutAction::NewWindowUp,
+        Direction::Down => ShortcutAction::NewWindowDown,
+    }
 }
 
 fn sync_surface_tabs(
