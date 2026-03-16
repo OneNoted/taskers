@@ -1384,6 +1384,86 @@ pub fn generate_css(p: &ThemePalette) -> String {
         accent_40 = rgba(p.accent, 0.40),
     );
 
+    // ── Settings navigation ──
+    let _ = write!(
+        w,
+        "
+        .settings-nav {{
+            margin: 10px 18px 2px 18px;
+            padding: 2px;
+            background: {border_03};
+            border-radius: 7px;
+            border: 1px solid {border_07};
+        }}
+
+        .settings-nav button {{
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            padding: 5px 16px;
+            border-radius: 5px;
+            min-height: 0;
+            min-width: 0;
+            background: transparent;
+            color: {text_dim};
+            border: 1px solid transparent;
+            transition: background 120ms ease-in-out,
+                        color 120ms ease-in-out,
+                        border-color 120ms ease-in-out;
+            box-shadow: none;
+            outline: none;
+        }}
+
+        .settings-nav button:hover {{
+            background: {border_06};
+            color: {text_muted};
+        }}
+
+        .settings-nav button:checked {{
+            background: {accent_10};
+            color: {accent};
+            border-color: {accent_20};
+            box-shadow: 0 1px 3px rgba(0,0,0,0.18);
+        }}
+
+        .settings-nav button:checked:hover {{
+            background: {accent_14};
+        }}
+
+        .settings-keybind-category {{
+            font-weight: 700;
+            font-size: 0.68rem;
+            color: {text_faint};
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            margin-top: 14px;
+            margin-bottom: 2px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid {border_07};
+        }}
+
+        .settings-theme-family {{
+            font-weight: 700;
+            font-size: 0.68rem;
+            color: {text_faint};
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            margin-top: 12px;
+            margin-bottom: 4px;
+        }}
+        ",
+        border_03 = rgba(p.border, 0.03),
+        border_06 = rgba(p.border, 0.06),
+        border_07 = rgba(p.border, 0.07),
+        text_dim = p.text_dim.to_hex(),
+        text_muted = p.text_muted.to_hex(),
+        text_faint = p.text_faint.to_hex(),
+        accent = p.accent.to_hex(),
+        accent_10 = rgba(p.accent, 0.10),
+        accent_14 = rgba(p.accent, 0.14),
+        accent_20 = rgba(p.accent, 0.20),
+    );
+
     css
 }
 
