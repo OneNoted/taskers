@@ -1432,36 +1432,78 @@ pub fn generate_css(p: &ThemePalette) -> String {
 
         .settings-keybind-category {{
             font-weight: 700;
-            font-size: 0.68rem;
-            color: {text_faint};
+            font-size: 0.70rem;
+            color: {accent_60};
             letter-spacing: 0.07em;
             text-transform: uppercase;
-            margin-top: 14px;
-            margin-bottom: 2px;
+            margin-top: 16px;
+            margin-bottom: 4px;
             padding-bottom: 5px;
-            border-bottom: 1px solid {border_07};
+            border-bottom: 1px solid {border_10};
         }}
 
         .settings-theme-family {{
             font-weight: 700;
-            font-size: 0.68rem;
-            color: {text_faint};
+            font-size: 0.70rem;
+            color: {accent_60};
             letter-spacing: 0.07em;
             text-transform: uppercase;
             margin-top: 12px;
             margin-bottom: 4px;
         }}
+
+        .settings-search {{
+            font-size: 0.78rem;
+            padding: 4px 8px;
+            border-radius: 6px;
+            background: {border_03};
+            border: 1px solid {border_07};
+        }}
+
+        .settings-keybind-btn {{
+            padding: 2px 10px;
+            min-height: 0;
+            min-width: 0;
+            border-radius: 5px;
+            border: 1px solid {border_07};
+            background: {border_03};
+            transition: background 120ms ease-in-out, border-color 120ms ease-in-out;
+        }}
+
+        .settings-keybind-btn:hover {{
+            background: {border_06};
+            border-color: {border_12};
+        }}
+
+        .settings-keybind-value {{
+            font-size: 0.72rem;
+        }}
+
+        .settings-reset-btn {{
+            padding: 2px 4px;
+            min-height: 0;
+            min-width: 0;
+            font-size: 0.72rem;
+            opacity: 0.4;
+            transition: opacity 120ms ease-in-out;
+        }}
+
+        .settings-reset-btn:hover {{
+            opacity: 1.0;
+        }}
         ",
         border_03 = rgba(p.border, 0.03),
         border_06 = rgba(p.border, 0.06),
         border_07 = rgba(p.border, 0.07),
+        border_10 = rgba(p.border, 0.10),
+        border_12 = rgba(p.border, 0.12),
         text_dim = p.text_dim.to_hex(),
         text_muted = p.text_muted.to_hex(),
-        text_faint = p.text_faint.to_hex(),
         accent = p.accent.to_hex(),
         accent_10 = rgba(p.accent, 0.10),
         accent_14 = rgba(p.accent, 0.14),
         accent_20 = rgba(p.accent, 0.20),
+        accent_60 = rgba(p.accent, 0.60),
     );
 
     css

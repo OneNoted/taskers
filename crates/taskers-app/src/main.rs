@@ -636,7 +636,7 @@ impl UiHandle {
             gtk::DialogFlags::MODAL,
             &[("Close", gtk::ResponseType::Close)],
         );
-        dialog.set_default_size(640, 560);
+        dialog.set_default_size(760, 660);
         dialog.connect_response(|dialog, _| dialog.close());
 
         let stack = gtk::Stack::new();
@@ -6357,37 +6357,53 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     scroll.set_vexpand(true);
 
-    let content = GtkBox::new(Orientation::Vertical, 6);
+    let outer = GtkBox::new(Orientation::Vertical, 0);
+
+    // Search bar (pinned above scroll).
+    let search_entry = Entry::new();
+    search_entry.set_placeholder_text(Some("Filter shortcuts\u{2026}"));
+    search_entry.add_css_class("settings-search");
+    search_entry.set_margin_start(18);
+    search_entry.set_margin_end(18);
+    search_entry.set_margin_top(10);
+    search_entry.set_margin_bottom(6);
+    outer.append(&search_entry);
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
     content.set_margin_start(18);
     content.set_margin_end(18);
-    content.set_margin_top(14);
+    content.set_margin_top(4);
     content.set_margin_bottom(18);
 
-    let intro = Label::new(Some(
-        "Workspace navigation, top-level window management, split actions, and overview are all configurable here.",
-    ));
-    intro.set_wrap(true);
-    intro.set_xalign(0.0);
-    intro.add_css_class("dim-label");
-    content.append(&intro);
+    // Build rows, collecting widgets for search filtering.
+    struct ShortcutRow {
+        heading: Option<Widget>,
+        row: GtkBox,
+        search_text: String,
+        category: &'static str,
+    }
+    let rows: Rc<RefCell<Vec<ShortcutRow>>> = Rc::new(RefCell::new(Vec::new()));
 
     let mut prev_category = "";
 
     for action in ShortcutAction::ALL {
         let category = action.category();
 
-        if category != prev_category {
+        let heading_widget = if category != prev_category {
             let heading = Label::new(Some(category));
             heading.set_xalign(0.0);
             heading.add_css_class("settings-keybind-category");
             content.append(&heading);
             prev_category = category;
-        }
+            Some(heading.upcast::<Widget>())
+        } else {
+            None
+        };
 
-        let row = GtkBox::new(Orientation::Horizontal, 12);
+        let row = GtkBox::new(Orientation::Horizontal, 8);
         row.add_css_class("settings-row");
 
-        let details = GtkBox::new(Orientation::Vertical, 4);
+        let details = GtkBox::new(Orientation::Vertical, 2);
         details.set_hexpand(true);
 
         let title = Label::new(Some(action.label()));
@@ -6403,21 +6419,31 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
 
         row.append(&details);
 
+        // Clickable keybind label — opens the capture dialog directly.
         let shortcut_label = Label::new(Some(&ui.shortcut_label(action)));
-        shortcut_label.set_width_chars(28);
         shortcut_label.set_xalign(1.0);
         shortcut_label.add_css_class("monospace");
-        row.append(&shortcut_label);
+        shortcut_label.add_css_class("settings-keybind-value");
 
-        let change_button = Button::with_label("Change");
+        let keybind_button = Button::new();
+        keybind_button.set_child(Some(&shortcut_label));
+        keybind_button.add_css_class("flat");
+        keybind_button.add_css_class("settings-keybind-btn");
+        keybind_button.set_valign(Align::Center);
+
         let change_ui = Rc::clone(ui);
         let change_label = shortcut_label.clone();
-        change_button.connect_clicked(move |_| {
+        keybind_button.connect_clicked(move |_| {
             change_ui.present_shortcut_capture_dialog(action, &change_label);
         });
-        row.append(&change_button);
+        row.append(&keybind_button);
 
-        let reset_button = Button::with_label("Reset");
+        // Tiny reset button.
+        let reset_button = Button::with_label("\u{21ba}");
+        reset_button.add_css_class("flat");
+        reset_button.add_css_class("settings-reset-btn");
+        reset_button.set_valign(Align::Center);
+        reset_button.set_tooltip_text(Some("Reset to default"));
         let reset_ui = Rc::clone(ui);
         let reset_label = shortcut_label.clone();
         reset_button.connect_clicked(move |_| {
@@ -6429,10 +6455,65 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
         row.append(&reset_button);
 
         content.append(&row);
+
+        let search_text = format!(
+            "{} {} {}",
+            action.label(),
+            action.detail(),
+            action.category()
+        )
+        .to_lowercase();
+
+        rows.borrow_mut().push(ShortcutRow {
+            heading: heading_widget,
+            row,
+            search_text,
+            category,
+        });
     }
 
+    // Search filtering.
+    let filter_rows = Rc::clone(&rows);
+    search_entry.connect_changed(move |entry| {
+        let query = entry.text().to_string().to_lowercase();
+        let rows = filter_rows.borrow();
+
+        // First pass: determine which rows match.
+        let visible: Vec<bool> = rows
+            .iter()
+            .map(|r| query.is_empty() || r.search_text.contains(&query))
+            .collect();
+
+        // Second pass: show/hide rows and category headings.
+        // A heading is visible if any row in its category is visible.
+        let mut category_visible: HashMap<&str, bool> = HashMap::new();
+        for (i, r) in rows.iter().enumerate() {
+            let entry = category_visible.entry(r.category).or_insert(false);
+            if visible[i] {
+                *entry = true;
+            }
+        }
+
+        for (i, r) in rows.iter().enumerate() {
+            r.row.set_visible(visible[i]);
+            if let Some(heading) = &r.heading {
+                heading.set_visible(*category_visible.get(r.category).unwrap_or(&false));
+            }
+        }
+    });
+
     scroll.set_child(Some(&content));
-    scroll
+    outer.append(&scroll);
+
+    // Wrap in an outer ScrolledWindow that doesn't scroll (the inner one does),
+    // so the Stack page has the right type. Actually, return the outer box inside a scroll.
+    let page_scroll = ScrolledWindow::new();
+    page_scroll.set_policy(PolicyType::Never, PolicyType::Never);
+    page_scroll.set_vexpand(true);
+    page_scroll.set_child(Some(&outer));
+    // Let the inner scroll handle scrolling; the outer just wraps for the Stack.
+    scroll.set_vexpand(true);
+    page_scroll
 }
 
 fn build_theme_swatch(color: theme::Color, size: i32) -> DrawingArea {
