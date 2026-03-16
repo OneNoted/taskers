@@ -435,26 +435,34 @@ impl UiHandle {
         self.overlay.add_toast(adw::Toast::new(message));
     }
 
-    fn shortcut_spec(&self, action: ShortcutAction) -> Option<(gdk::Key, gdk::ModifierType)> {
-        let accelerator = self
-            .settings
+    fn shortcut_specs(&self, action: ShortcutAction) -> Vec<(gdk::Key, gdk::ModifierType)> {
+        self.settings
             .borrow()
             .keybindings
-            .accelerator(action)
-            .to_string();
-        gtk::accelerator_parse(&accelerator)
+            .accelerators(action)
+            .into_iter()
+            .filter_map(|accelerator| gtk::accelerator_parse(&accelerator))
+            .collect()
     }
 
     fn shortcut_label(&self, action: ShortcutAction) -> String {
-        self.shortcut_spec(action)
-            .map(|(key, modifiers)| gtk::accelerator_get_label(key, modifiers).to_string())
-            .unwrap_or_else(|| {
-                self.settings
-                    .borrow()
-                    .keybindings
-                    .accelerator(action)
-                    .to_string()
+        let labels = self
+            .settings
+            .borrow()
+            .keybindings
+            .accelerators(action)
+            .into_iter()
+            .map(|accelerator| {
+                gtk::accelerator_parse(&accelerator)
+                    .map(|(key, modifiers)| gtk::accelerator_get_label(key, modifiers).to_string())
+                    .unwrap_or(accelerator)
             })
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            "Unbound".into()
+        } else {
+            labels.join(", ")
+        }
     }
 
     fn shortcut_matches(
@@ -463,8 +471,9 @@ impl UiHandle {
         key: gdk::Key,
         state: gdk::ModifierType,
     ) -> bool {
-        self.shortcut_spec(action)
-            .is_some_and(|(expected_key, expected_modifiers)| {
+        self.shortcut_specs(action)
+            .into_iter()
+            .any(|(expected_key, expected_modifiers)| {
                 key == expected_key && normalize_shortcut_modifiers(state) == expected_modifiers
             })
     }
@@ -481,20 +490,16 @@ impl UiHandle {
         if normalize_shortcut_modifiers(modifiers).is_empty() {
             return Err("shortcut must include at least one modifier".into());
         }
-        if reserved_direction_shortcut(key, modifiers) {
-            return Err("shortcut conflicts with the built-in directional bindings".into());
-        }
-
         for other_action in ShortcutAction::ALL {
             if other_action == action {
                 continue;
             }
-            if self
-                .shortcut_spec(other_action)
-                .is_some_and(|(other_key, other_modifiers)| {
-                    other_key == key && other_modifiers == normalize_shortcut_modifiers(modifiers)
-                })
-            {
+            if self.shortcut_specs(other_action).into_iter().any(
+                |(other_key, other_modifiers)| {
+                    other_key == key
+                        && other_modifiers == normalize_shortcut_modifiers(modifiers)
+                },
+            ) {
                 return Err(format!(
                     "shortcut is already assigned to {}",
                     other_action.label()
@@ -505,14 +510,30 @@ impl UiHandle {
         let next_label =
             gtk::accelerator_get_label(key, normalize_shortcut_modifiers(modifiers)).to_string();
         let mut next_settings = self.settings.borrow().clone();
-        next_settings.keybindings.set_accelerator(
+        next_settings.keybindings.set_accelerators(
             action,
-            gtk::accelerator_name(key, normalize_shortcut_modifiers(modifiers)).to_string(),
+            vec![gtk::accelerator_name(key, normalize_shortcut_modifiers(modifiers)).to_string()],
         );
         settings_store::save_config(&self.config_path, &next_settings)
             .map_err(|error| format!("failed to save settings: {error}"))?;
         *self.settings.borrow_mut() = next_settings;
         Ok(next_label)
+    }
+
+    fn reset_shortcuts(self: &Rc<Self>, action: ShortcutAction) -> Result<String, String> {
+        let mut next_settings = self.settings.borrow().clone();
+        next_settings.keybindings.set_accelerators(
+            action,
+            action
+                .default_accelerators()
+                .iter()
+                .map(|binding| (*binding).to_string())
+                .collect(),
+        );
+        settings_store::save_config(&self.config_path, &next_settings)
+            .map_err(|error| format!("failed to save settings: {error}"))?;
+        *self.settings.borrow_mut() = next_settings;
+        Ok(self.shortcut_label(action))
     }
 
     fn save_settings(&self, next_settings: AppConfig) -> Result<(), String> {
@@ -562,7 +583,7 @@ impl UiHandle {
         content.append(&prompt);
 
         let detail = Label::new(Some(
-            "Esc cancels. Built-in directional chords stay reserved so navigation remains predictable.",
+            "Esc cancels. The new shortcut replaces the current bindings for this action.",
         ));
         detail.set_xalign(0.0);
         detail.set_wrap(true);
@@ -852,7 +873,7 @@ impl UiHandle {
         content.append(&kb_heading);
 
         let intro = Label::new(Some(
-            "Directional navigation and resize chords stay fixed.",
+            "Workspace navigation, top-level window management, split actions, and overview are all configurable here.",
         ));
         intro.set_wrap(true);
         intro.set_xalign(0.0);
@@ -880,7 +901,7 @@ impl UiHandle {
             row.append(&details);
 
             let shortcut_label = Label::new(Some(&self.shortcut_label(action)));
-            shortcut_label.set_width_chars(14);
+            shortcut_label.set_width_chars(28);
             shortcut_label.set_xalign(1.0);
             shortcut_label.add_css_class("monospace");
             row.append(&shortcut_label);
@@ -897,7 +918,7 @@ impl UiHandle {
             let reset_ui = Rc::clone(self);
             let reset_label = shortcut_label.clone();
             reset_button.connect_clicked(move |_| {
-                match reset_ui.set_shortcut(action, action.default_accelerator().to_string()) {
+                match reset_ui.reset_shortcuts(action) {
                     Ok(next_label) => reset_label.set_text(&next_label),
                     Err(error) => reset_ui.toast(&error),
                 }
@@ -1598,6 +1619,22 @@ impl UiHandle {
             });
             content.append(&new_right);
 
+            let new_left = Button::with_label("\u{2190} New Window Left");
+            new_left.add_css_class("flat");
+            new_left.add_css_class("context-item");
+            let nl_ui = Rc::clone(&ctx_ui);
+            let nl_pop = popover.clone();
+            new_left.connect_clicked(move |_| {
+                nl_pop.popdown();
+                create_workspace_window_from_pane(
+                    &nl_ui,
+                    workspace_id,
+                    ctx_pane_id,
+                    Direction::Left,
+                );
+            });
+            content.append(&new_left);
+
             let new_below = Button::with_label("\u{2193} New Window Below");
             new_below.add_css_class("flat");
             new_below.add_css_class("context-item");
@@ -1613,6 +1650,22 @@ impl UiHandle {
                 );
             });
             content.append(&new_below);
+
+            let new_above = Button::with_label("\u{2191} New Window Above");
+            new_above.add_css_class("flat");
+            new_above.add_css_class("context-item");
+            let na_ui = Rc::clone(&ctx_ui);
+            let na_pop = popover.clone();
+            new_above.connect_clicked(move |_| {
+                na_pop.popdown();
+                create_workspace_window_from_pane(
+                    &na_ui,
+                    workspace_id,
+                    ctx_pane_id,
+                    Direction::Up,
+                );
+            });
+            content.append(&new_above);
 
             let new_window_sep = Separator::new(Orientation::Horizontal);
             new_window_sep.add_css_class("context-separator");
@@ -2254,40 +2307,6 @@ fn is_modifier_key(key: gdk::Key) -> bool {
     )
 }
 
-fn directional_shortcut_key(key: gdk::Key) -> bool {
-    matches!(
-        key,
-        gdk::Key::Left
-            | gdk::Key::Right
-            | gdk::Key::Up
-            | gdk::Key::Down
-            | gdk::Key::h
-            | gdk::Key::H
-            | gdk::Key::j
-            | gdk::Key::J
-            | gdk::Key::k
-            | gdk::Key::K
-            | gdk::Key::l
-            | gdk::Key::L
-    )
-}
-
-fn reserved_direction_shortcut(key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
-    if !directional_shortcut_key(key) {
-        return false;
-    }
-
-    let normalized = normalize_shortcut_modifiers(modifiers);
-    let base = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
-
-    normalized == base
-        || normalized == (base | gdk::ModifierType::SHIFT_MASK)
-        || normalized == (base | gdk::ModifierType::SUPER_MASK)
-        || normalized == (base | gdk::ModifierType::SUPER_MASK | gdk::ModifierType::SHIFT_MASK)
-        || normalized == (base | gdk::ModifierType::META_MASK)
-        || normalized == (base | gdk::ModifierType::META_MASK | gdk::ModifierType::SHIFT_MASK)
-}
-
 fn connect_navigation_shortcuts(ui: &Rc<UiHandle>) {
     let controller = gtk::EventControllerKey::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -2303,14 +2322,6 @@ fn connect_navigation_shortcuts(ui: &Rc<UiHandle>) {
             return glib::Propagation::Proceed;
         };
 
-        if shortcuts_ui.shortcut_matches(ShortcutAction::NewTerminal, key, state) {
-            shortcuts_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: workspace.id,
-                direction: Direction::Right,
-            });
-            return glib::Propagation::Stop;
-        }
-
         if shortcuts_ui.shortcut_matches(ShortcutAction::CloseTerminal, key, state) {
             shortcuts_ui.dispatch(ControlCommand::ClosePane {
                 workspace_id: workspace.id,
@@ -2319,53 +2330,87 @@ fn connect_navigation_shortcuts(ui: &Rc<UiHandle>) {
             return glib::Propagation::Stop;
         }
 
-        let normalized = normalize_shortcut_modifiers(state);
-        let alt_pressed = normalized.contains(gdk::ModifierType::ALT_MASK);
-        let control_pressed = normalized.contains(gdk::ModifierType::CONTROL_MASK);
-        if !(alt_pressed && control_pressed) {
-            return glib::Propagation::Proceed;
+        for (action, direction) in [
+            (ShortcutAction::FocusLeft, Direction::Left),
+            (ShortcutAction::FocusRight, Direction::Right),
+            (ShortcutAction::FocusUp, Direction::Up),
+            (ShortcutAction::FocusDown, Direction::Down),
+        ] {
+            if shortcuts_ui.shortcut_matches(action, key, state) {
+                shortcuts_ui.dispatch(ControlCommand::FocusPaneDirection {
+                    workspace_id: workspace.id,
+                    direction,
+                });
+                return glib::Propagation::Stop;
+            }
         }
 
-        let shift_pressed = normalized.contains(gdk::ModifierType::SHIFT_MASK);
-        let super_pressed = normalized.contains(gdk::ModifierType::SUPER_MASK)
-            || normalized.contains(gdk::ModifierType::META_MASK);
-
-        let direction = match key {
-            gdk::Key::Left | gdk::Key::h | gdk::Key::H => Some(Direction::Left),
-            gdk::Key::Right | gdk::Key::l | gdk::Key::L => Some(Direction::Right),
-            gdk::Key::Up | gdk::Key::k | gdk::Key::K => Some(Direction::Up),
-            gdk::Key::Down | gdk::Key::j | gdk::Key::J => Some(Direction::Down),
-            _ => None,
-        };
-        let Some(direction) = direction else {
-            return glib::Propagation::Proceed;
-        };
-
-        if super_pressed && shift_pressed {
-            shortcuts_ui.dispatch(ControlCommand::ResizeActivePaneSplit {
-                workspace_id: workspace.id,
-                direction,
-                amount: KEYBOARD_RESIZE_STEP,
-            });
-        } else if super_pressed {
-            shortcuts_ui.dispatch(ControlCommand::ResizeActiveWindow {
-                workspace_id: workspace.id,
-                direction,
-                amount: KEYBOARD_RESIZE_STEP,
-            });
-        } else if shift_pressed {
-            shortcuts_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: workspace.id,
-                direction,
-            });
-        } else {
-            shortcuts_ui.dispatch(ControlCommand::FocusPaneDirection {
-                workspace_id: workspace.id,
-                direction,
-            });
+        for (action, direction) in [
+            (ShortcutAction::NewWindowLeft, Direction::Left),
+            (ShortcutAction::NewWindowRight, Direction::Right),
+            (ShortcutAction::NewWindowUp, Direction::Up),
+            (ShortcutAction::NewWindowDown, Direction::Down),
+        ] {
+            if shortcuts_ui.shortcut_matches(action, key, state) {
+                shortcuts_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+                    workspace_id: workspace.id,
+                    direction,
+                });
+                return glib::Propagation::Stop;
+            }
         }
 
-        glib::Propagation::Stop
+        for (action, direction) in [
+            (ShortcutAction::ResizeWindowLeft, Direction::Left),
+            (ShortcutAction::ResizeWindowRight, Direction::Right),
+            (ShortcutAction::ResizeWindowUp, Direction::Up),
+            (ShortcutAction::ResizeWindowDown, Direction::Down),
+        ] {
+            if shortcuts_ui.shortcut_matches(action, key, state) {
+                shortcuts_ui.dispatch(ControlCommand::ResizeActiveWindow {
+                    workspace_id: workspace.id,
+                    direction,
+                    amount: KEYBOARD_RESIZE_STEP,
+                });
+                return glib::Propagation::Stop;
+            }
+        }
+
+        for (action, direction) in [
+            (ShortcutAction::ResizeSplitLeft, Direction::Left),
+            (ShortcutAction::ResizeSplitRight, Direction::Right),
+            (ShortcutAction::ResizeSplitUp, Direction::Up),
+            (ShortcutAction::ResizeSplitDown, Direction::Down),
+        ] {
+            if shortcuts_ui.shortcut_matches(action, key, state) {
+                shortcuts_ui.dispatch(ControlCommand::ResizeActivePaneSplit {
+                    workspace_id: workspace.id,
+                    direction,
+                    amount: KEYBOARD_RESIZE_STEP,
+                });
+                return glib::Propagation::Stop;
+            }
+        }
+
+        if shortcuts_ui.shortcut_matches(ShortcutAction::SplitRight, key, state) {
+            shortcuts_ui.dispatch(ControlCommand::SplitPane {
+                workspace_id: workspace.id,
+                pane_id: Some(workspace.active_pane),
+                axis: taskers_domain::SplitAxis::Horizontal,
+            });
+            return glib::Propagation::Stop;
+        }
+
+        if shortcuts_ui.shortcut_matches(ShortcutAction::SplitDown, key, state) {
+            shortcuts_ui.dispatch(ControlCommand::SplitPane {
+                workspace_id: workspace.id,
+                pane_id: Some(workspace.active_pane),
+                axis: taskers_domain::SplitAxis::Vertical,
+            });
+            return glib::Propagation::Stop;
+        }
+
+        glib::Propagation::Proceed
     });
     ui.window.add_controller(controller);
 }
@@ -3932,6 +3977,20 @@ fn build_workspace_window_widget(
         });
         content.append(&new_right);
 
+        let new_left = Button::with_label("\u{2190} New Window Left");
+        new_left.add_css_class("flat");
+        new_left.add_css_class("context-item");
+        let nl_ui = Rc::clone(&wctx_ui);
+        let nl_pop = popover.clone();
+        new_left.connect_clicked(move |_| {
+            nl_pop.popdown();
+            nl_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+                workspace_id: wctx_ws_id,
+                direction: Direction::Left,
+            });
+        });
+        content.append(&new_left);
+
         let new_below = Button::with_label("\u{2193} New Window Below");
         new_below.add_css_class("flat");
         new_below.add_css_class("context-item");
@@ -3945,6 +4004,20 @@ fn build_workspace_window_widget(
             });
         });
         content.append(&new_below);
+
+        let new_above = Button::with_label("\u{2191} New Window Above");
+        new_above.add_css_class("flat");
+        new_above.add_css_class("context-item");
+        let na_ui = Rc::clone(&wctx_ui);
+        let na_pop = popover.clone();
+        new_above.connect_clicked(move |_| {
+            na_pop.popdown();
+            na_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+                workspace_id: wctx_ws_id,
+                direction: Direction::Up,
+            });
+        });
+        content.append(&new_above);
 
         let sep = Separator::new(Orientation::Horizontal);
         sep.add_css_class("context-separator");

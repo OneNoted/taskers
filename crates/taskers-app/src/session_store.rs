@@ -55,9 +55,9 @@ pub fn load_session(path: &Path) -> Result<AppModel> {
     let data = fs::read_to_string(path)?;
     let session: PersistedSession = serde_json::from_str(&data)?;
 
-    if session.schema_version != 1 && session.schema_version != SESSION_SCHEMA_VERSION {
+    if session.schema_version != SESSION_SCHEMA_VERSION {
         bail!(
-            "unsupported session schema version {}, expected 1 or {}",
+            "unsupported session schema version {}, expected {}",
             session.schema_version,
             SESSION_SCHEMA_VERSION
         );
