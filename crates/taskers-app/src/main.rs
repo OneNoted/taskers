@@ -313,6 +313,7 @@ const WORKSPACE_WINDOW_HEADER_HEIGHT: i32 = 30;
 const SURFACE_TAB_GAP: i32 = 4;
 const SURFACE_TAB_MIN_WIDTH: i32 = 72;
 const SURFACE_TAB_MAX_WIDTH: i32 = 220;
+const SIDEBAR_MIN_WIDTH: i32 = 224;
 
 #[derive(Clone, Copy)]
 struct WorkspaceRenderContext {
@@ -2294,9 +2295,18 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     let sidebar_scroll = ScrolledWindow::new();
     sidebar_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     sidebar_scroll.set_child(Some(&sidebar));
-    sidebar_scroll.set_size_request(224, -1);
+    sidebar_scroll.set_min_content_width(SIDEBAR_MIN_WIDTH);
+    sidebar_scroll.set_size_request(SIDEBAR_MIN_WIDTH, -1);
     shell.set_start_child(Some(&sidebar_scroll));
+    shell.set_position(SIDEBAR_MIN_WIDTH);
     shell.set_resize_start_child(false);
+    shell.set_shrink_start_child(false);
+    shell.connect_position_notify(|paned| {
+        let clamped = clamp_sidebar_split_position(paned.position());
+        if clamped != paned.position() {
+            paned.set_position(clamped);
+        }
+    });
 
     // --- Main content split ---
     let content_split = Paned::builder()
@@ -3172,6 +3182,10 @@ fn begin_inline_rename(
         glib::Propagation::Proceed
     });
     entry.add_controller(key_controller);
+}
+
+fn clamp_sidebar_split_position(position: i32) -> i32 {
+    position.max(SIDEBAR_MIN_WIDTH)
 }
 
 fn begin_surface_title_rename(ui: &Rc<UiHandle>, parent: &Widget, pane_id: taskers_domain::PaneId) {
@@ -7555,5 +7569,17 @@ mod tests {
         let surface = SurfaceRecord::new(PaneKind::Terminal);
 
         assert_eq!(editable_surface_title(&surface), "");
+    }
+
+    #[test]
+    fn sidebar_split_position_stays_above_minimum_width() {
+        assert_eq!(
+            clamp_sidebar_split_position(SIDEBAR_MIN_WIDTH - 80),
+            SIDEBAR_MIN_WIDTH
+        );
+        assert_eq!(
+            clamp_sidebar_split_position(SIDEBAR_MIN_WIDTH + 32),
+            SIDEBAR_MIN_WIDTH + 32
+        );
     }
 }
