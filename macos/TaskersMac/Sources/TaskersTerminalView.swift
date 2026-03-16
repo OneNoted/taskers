@@ -88,10 +88,14 @@ final class TaskersTerminalView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if let characters = event.characters, !characters.isEmpty {
-            sendText(characters)
-        } else {
+        if !sendKey(event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS) {
             super.keyDown(with: event)
+        }
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if !sendKey(event, action: GHOSTTY_ACTION_RELEASE) {
+            super.keyUp(with: event)
         }
     }
 
@@ -163,18 +167,6 @@ final class TaskersTerminalView: NSView {
         ghostty_surface_set_content_scale(surface, scale, scale)
     }
 
-    private func sendText(_ text: String) {
-        guard let surface else {
-            return
-        }
-
-        let length = text.utf8.count
-        text.withCString { pointer in
-            ghostty_surface_text(surface, pointer, UInt(length))
-        }
-        refresh()
-    }
-
     private func sendMouseButton(_ event: NSEvent, action: ghostty_input_mouse_state_e) {
         guard let surface else {
             return
@@ -202,6 +194,60 @@ final class TaskersTerminalView: NSView {
             Self.modifiers(from: event.modifierFlags)
         )
         refresh()
+    }
+
+    private func sendKey(_ event: NSEvent, action: ghostty_input_action_e) -> Bool {
+        guard let surface else {
+            return false
+        }
+
+        let translatedModifiers = Self.modifierFlags(
+            from: ghostty_surface_key_translation_mods(
+                surface,
+                Self.modifiers(from: event.modifierFlags)
+            )
+        )
+
+        let translationEvent: NSEvent
+        if translatedModifiers == event.modifierFlags {
+            translationEvent = event
+        } else {
+            translationEvent = NSEvent.keyEvent(
+                with: event.type,
+                location: event.locationInWindow,
+                modifierFlags: translatedModifiers,
+                timestamp: event.timestamp,
+                windowNumber: event.windowNumber,
+                context: nil,
+                characters: event.characters(byApplyingModifiers: translatedModifiers) ?? "",
+                charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "",
+                isARepeat: event.isARepeat,
+                keyCode: event.keyCode
+            ) ?? event
+        }
+
+        var keyEvent = event.taskersGhosttyKeyEvent(
+            action,
+            translationMods: translationEvent.modifierFlags
+        )
+
+        let handled: Bool
+        if let text = translationEvent.taskersGhosttyCharacters,
+           !text.isEmpty,
+           let codepoint = text.utf8.first,
+           codepoint >= 0x20 {
+            handled = text.withCString { pointer in
+                keyEvent.text = pointer
+                return ghostty_surface_key(surface, keyEvent)
+            }
+        } else {
+            handled = ghostty_surface_key(surface, keyEvent)
+        }
+
+        if handled {
+            refresh()
+        }
+        return handled
     }
 
     private static func createSurface(
@@ -312,7 +358,7 @@ final class TaskersTerminalView: NSView {
         }
     }
 
-    private static func modifiers(from flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
+    fileprivate static func modifiers(from flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
         var mods = Int32(GHOSTTY_MODS_NONE.rawValue)
         if flags.contains(.shift) {
             mods |= Int32(GHOSTTY_MODS_SHIFT.rawValue)
@@ -329,6 +375,24 @@ final class TaskersTerminalView: NSView {
         return ghostty_input_mods_e(mods)
     }
 
+    private static func modifierFlags(from mods: ghostty_input_mods_e) -> NSEvent.ModifierFlags {
+        let raw = Int32(mods.rawValue)
+        var flags: NSEvent.ModifierFlags = []
+        if raw & Int32(GHOSTTY_MODS_SHIFT.rawValue) != 0 {
+            flags.insert(.shift)
+        }
+        if raw & Int32(GHOSTTY_MODS_CTRL.rawValue) != 0 {
+            flags.insert(.control)
+        }
+        if raw & Int32(GHOSTTY_MODS_ALT.rawValue) != 0 {
+            flags.insert(.option)
+        }
+        if raw & Int32(GHOSTTY_MODS_SUPER.rawValue) != 0 {
+            flags.insert(.command)
+        }
+        return flags
+    }
+
     static func from(surface: ghostty_surface_t) -> TaskersTerminalView? {
         from(userdata: ghostty_surface_userdata(surface))
     }
@@ -339,5 +403,51 @@ final class TaskersTerminalView: NSView {
         }
 
         return Unmanaged<TaskersTerminalView>.fromOpaque(userdata).takeUnretainedValue()
+    }
+}
+
+private extension NSEvent {
+    func taskersGhosttyKeyEvent(
+        _ action: ghostty_input_action_e,
+        translationMods: NSEvent.ModifierFlags? = nil
+    ) -> ghostty_input_key_s {
+        var keyEvent: ghostty_input_key_s = .init()
+        keyEvent.action = action
+        keyEvent.keycode = UInt32(keyCode)
+        keyEvent.text = nil
+        keyEvent.composing = false
+        keyEvent.mods = TaskersTerminalView.modifiers(from: modifierFlags)
+        keyEvent.consumed_mods = TaskersTerminalView.modifiers(
+            from: (translationMods ?? modifierFlags).subtracting([.control, .command])
+        )
+
+        if type == .keyDown || type == .keyUp,
+           let chars = characters(byApplyingModifiers: []),
+           let codepoint = chars.unicodeScalars.first {
+            keyEvent.unshifted_codepoint = codepoint.value
+        } else {
+            keyEvent.unshifted_codepoint = 0
+        }
+
+        return keyEvent
+    }
+
+    var taskersGhosttyCharacters: String? {
+        guard let characters else {
+            return nil
+        }
+
+        if characters.count == 1,
+           let scalar = characters.unicodeScalars.first {
+            if scalar.value < 0x20 {
+                return self.characters(byApplyingModifiers: modifierFlags.subtracting(.control))
+            }
+
+            if scalar.value >= 0xF700 && scalar.value <= 0xF8FF {
+                return nil
+            }
+        }
+
+        return characters
     }
 }

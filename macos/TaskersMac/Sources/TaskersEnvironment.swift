@@ -20,7 +20,7 @@ enum TaskersEnvironment {
             sessionPath: nil,
             socketPath: nil,
             configuredShell: nil,
-            demo: isSmokeTestEnabled,
+            demo: false,
             backend: "ghostty_embedded"
         )
     }
