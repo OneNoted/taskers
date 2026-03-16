@@ -4,6 +4,7 @@ mod pane_runtime;
 mod session_store;
 mod settings_store;
 mod terminal_transitions;
+mod theme;
 
 use std::{
     cell::{Cell, RefCell},
