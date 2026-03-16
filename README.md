@@ -8,11 +8,11 @@ It keeps per-agent status visible in the workspace strip, routes attention-worth
 
 Agent-aware workspace navigation and attention handling:
 
-![Taskers demo showing workspace status chips and attention cards](docs/screenshots/demo-attention.png)
+![Taskers demo showing workspace cards and the attention sidebar](docs/screenshots/demo-attention.png)
 
-Split workspace layout with grouped panes inside a top-level workspace window:
+Grouped panes inside a workspace window, with visible top-level controls and release-tracking context:
 
-![Taskers demo showing a multi-window terminal layout](docs/screenshots/demo-layout.png)
+![Taskers demo showing a split workspace window with visible top-level controls](docs/screenshots/demo-layout.png)
 
 ## Tiling model
 
@@ -85,6 +85,10 @@ When refreshing `vendor/ghostty`, run the large-file check before pushing:
 
 This fails if new files over 1 MiB appear outside the approved Ghostty allowlist, or if an
 approved file grows past the repo-local `jj` limit.
+
+## Release Prep
+
+For the publish checklist and screenshot refresh workflow, see [docs/release.md](docs/release.md).
 
 ## UI smoke test
 
