@@ -5,29 +5,10 @@ use std::{
 
 use anyhow::{Result, bail};
 use taskers_domain::{AppModel, PersistedSession, SESSION_SCHEMA_VERSION};
+use taskers_paths::default_session_path as shared_default_session_path;
 
 pub fn default_session_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("TASKERS_SESSION_PATH").map(PathBuf::from) {
-        return path;
-    }
-
-    if let Some(path) = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join("taskers").join("session.json"))
-    {
-        return path;
-    }
-
-    if let Some(path) = std::env::var_os("HOME").map(PathBuf::from).map(|path| {
-        path.join(".local")
-            .join("state")
-            .join("taskers")
-            .join("session.json")
-    }) {
-        return path;
-    }
-
-    PathBuf::from("/tmp/taskers-session.json")
+    shared_default_session_path()
 }
 
 pub fn load_or_bootstrap(path: &Path, demo: bool) -> Result<AppModel> {

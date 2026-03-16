@@ -270,16 +270,14 @@ fn sanitize_terminal_output(input: &str) -> String {
                         index += 1;
                         while index < bytes.len() {
                             let byte = bytes[index];
+                            index += 1;
                             if byte == 0x07 {
+                                break;
+                            }
+                            if byte == 0x1b && bytes.get(index) == Some(&b'\\') {
                                 index += 1;
                                 break;
                             }
-                            if byte == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'\\'
-                            {
-                                index += 2;
-                                break;
-                            }
-                            index += 1;
                         }
                     }
                     _ => {
@@ -287,9 +285,22 @@ fn sanitize_terminal_output(input: &str) -> String {
                     }
                 }
             }
-            _ => {
-                result.push(bytes[index] as char);
+            byte if byte.is_ascii_control() && byte != b'\n' && byte != b'\t' => {
                 index += 1;
+            }
+            _ => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && bytes[index] != 0x1b
+                    && bytes[index] != b'\r'
+                    && (!bytes[index].is_ascii_control()
+                        || bytes[index] == b'\n'
+                        || bytes[index] == b'\t')
+                {
+                    index += 1;
+                }
+                result.push_str(&input[start..index]);
             }
         }
     }
@@ -302,10 +313,8 @@ mod tests {
     use super::sanitize_terminal_output;
 
     #[test]
-    fn strips_common_terminal_escape_sequences() {
-        let cleaned = sanitize_terminal_output(
-            "\u{1b}[32mgreen\u{1b}[0m text \u{1b}]777;taskers;kind=completed;message=done\u{7}",
-        );
-        assert_eq!(cleaned, "green text ");
+    fn strips_control_sequences_from_terminal_output() {
+        let input = "\u{1b}[31mhello\u{1b}[0m\r\nworld\u{1b}]2;title\u{7}";
+        assert_eq!(sanitize_terminal_output(input), "hello\nworld");
     }
 }

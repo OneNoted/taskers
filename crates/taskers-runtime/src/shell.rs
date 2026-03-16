@@ -276,21 +276,7 @@ fn prepend_path_entry(entry: &Path) -> String {
 }
 
 fn runtime_root() -> PathBuf {
-    if let Some(path) = std::env::var_os("TASKERS_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        return path.join("shell");
-    }
-
-    if let Some(path) = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        return path.join("taskers").join("shell");
-    }
-
-    std::env::temp_dir().join("taskers-runtime").join("shell")
+    taskers_paths::default_shell_runtime_dir()
 }
 
 fn write_asset(path: &Path, content: &str, executable: bool) -> Result<()> {

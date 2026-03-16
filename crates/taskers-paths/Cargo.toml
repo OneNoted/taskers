@@ -1,0 +1,11 @@
+[package]
+name = "taskers-paths"
+description = "Platform-aware path defaults for taskers."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+version.workspace = true
+
+[dependencies]

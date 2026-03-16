@@ -333,25 +333,7 @@ impl KeybindingConfig {
 }
 
 pub fn default_config_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("TASKERS_CONFIG_PATH").map(PathBuf::from) {
-        return path;
-    }
-
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join("taskers").join("config.json"))
-    {
-        return path;
-    }
-
-    if let Some(path) = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join(".config").join("taskers").join("config.json"))
-    {
-        return path;
-    }
-
-    PathBuf::from("/tmp/taskers-config.json")
+    taskers_paths::default_config_path()
 }
 
 pub fn load_or_default(path: &Path) -> Result<AppConfig> {

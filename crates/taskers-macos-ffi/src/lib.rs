@@ -1,0 +1,413 @@
+use std::{
+    cell::RefCell,
+    ffi::{CStr, CString, c_char},
+    path::PathBuf,
+    ptr,
+    str::FromStr,
+};
+
+use taskers_control::{ControlCommand, default_socket_path};
+use taskers_core::{AppState, default_session_path, load_or_bootstrap};
+use taskers_domain::{PaneId, WorkspaceId};
+use taskers_ghostty::{BackendChoice, DefaultBackend, TerminalBackend};
+use taskers_runtime::{ShellLaunchSpec, install_shell_integration};
+
+pub struct TaskersMacosCore {
+    app_state: AppState,
+    revision: u64,
+    _socket_path: PathBuf,
+}
+
+thread_local! {
+    static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn set_last_error(message: impl Into<String>) {
+    LAST_ERROR.with(|slot| {
+        *slot.borrow_mut() = Some(message.into());
+    });
+}
+
+fn clear_last_error() {
+    LAST_ERROR.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+impl TaskersMacosCore {
+    fn new(
+        session_path: Option<PathBuf>,
+        socket_path: Option<PathBuf>,
+        configured_shell: Option<&str>,
+        demo: bool,
+    ) -> Result<Self, String> {
+        let session_path = session_path.unwrap_or_else(default_session_path);
+        let socket_path = socket_path.unwrap_or_else(default_socket_path);
+        let model = load_or_bootstrap(&session_path, demo)
+            .map_err(|error| format!("failed to initialize session state: {error}"))?;
+
+        let (mut shell_launch, shell_integration_error) =
+            match install_shell_integration(configured_shell) {
+                Ok(integration) => (integration.launch_spec(), None),
+                Err(error) => (
+                    ShellLaunchSpec::fallback(),
+                    Some(format!("shell integration unavailable: {error}")),
+                ),
+            };
+        shell_launch
+            .env
+            .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
+
+        let probe = DefaultBackend::probe(BackendChoice::Auto);
+        let backend_choice = if probe.selected == BackendChoice::Ghostty {
+            BackendChoice::Ghostty
+        } else {
+            BackendChoice::Mock
+        };
+        let app_state = AppState::new(model, session_path, backend_choice, shell_launch)
+            .map_err(|error| format!("failed to create shared app state: {error}"))?;
+
+        if let Some(error) = shell_integration_error {
+            set_last_error(error);
+        } else {
+            clear_last_error();
+        }
+
+        Ok(Self {
+            app_state,
+            revision: 0,
+            _socket_path: socket_path,
+        })
+    }
+
+    fn snapshot_json(&self) -> Result<String, String> {
+        serde_json::to_string(&self.app_state.snapshot_model())
+            .map_err(|error| format!("failed to serialize snapshot: {error}"))
+    }
+
+    fn dispatch_json(&mut self, command_json: &str) -> Result<String, String> {
+        let command = serde_json::from_str::<ControlCommand>(command_json)
+            .map_err(|error| format!("failed to decode command JSON: {error}"))?;
+        let response = self
+            .app_state
+            .dispatch(command)
+            .map_err(|error| format!("command failed: {error}"))?;
+        self.revision = self.revision.saturating_add(1);
+        serde_json::to_string(&response)
+            .map_err(|error| format!("failed to serialize response: {error}"))
+    }
+
+    fn surface_descriptor_json(
+        &self,
+        workspace_id: &str,
+        pane_id: &str,
+    ) -> Result<String, String> {
+        let workspace_id = WorkspaceId::from_str(workspace_id)
+            .map_err(|error| format!("invalid workspace id: {error}"))?;
+        let pane_id =
+            PaneId::from_str(pane_id).map_err(|error| format!("invalid pane id: {error}"))?;
+        let descriptor = self
+            .app_state
+            .surface_descriptor_for_pane(workspace_id, pane_id)
+            .map_err(|error| format!("failed to build surface descriptor: {error}"))?;
+        serde_json::to_string(&descriptor)
+            .map_err(|error| format!("failed to serialize surface descriptor: {error}"))
+    }
+}
+
+fn optional_path_from_ptr(value: *const c_char) -> Result<Option<PathBuf>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .map_err(|error| format!("argument contained invalid UTF-8: {error}"))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(PathBuf::from(value)))
+    }
+}
+
+fn optional_string_from_ptr(value: *const c_char) -> Result<Option<String>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .map_err(|error| format!("argument contained invalid UTF-8: {error}"))?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn string_into_ptr(value: String) -> *mut c_char {
+    match CString::new(value) {
+        Ok(value) => value.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+fn with_core_mut<R>(
+    core: *mut TaskersMacosCore,
+    f: impl FnOnce(&mut TaskersMacosCore) -> Result<R, String>,
+) -> Option<R> {
+    if core.is_null() {
+        set_last_error("taskers macOS core handle was null");
+        return None;
+    }
+
+    let core = unsafe { &mut *core };
+    match f(core) {
+        Ok(value) => {
+            clear_last_error();
+            Some(value)
+        }
+        Err(error) => {
+            set_last_error(error);
+            None
+        }
+    }
+}
+
+fn with_core<R>(
+    core: *const TaskersMacosCore,
+    f: impl FnOnce(&TaskersMacosCore) -> Result<R, String>,
+) -> Option<R> {
+    if core.is_null() {
+        set_last_error("taskers macOS core handle was null");
+        return None;
+    }
+
+    let core = unsafe { &*core };
+    match f(core) {
+        Ok(value) => {
+            clear_last_error();
+            Some(value)
+        }
+        Err(error) => {
+            set_last_error(error);
+            None
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_core_new(
+    session_path: *const c_char,
+    socket_path: *const c_char,
+    configured_shell: *const c_char,
+    demo: bool,
+) -> *mut TaskersMacosCore {
+    let session_path = match optional_path_from_ptr(session_path) {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_error(error);
+            return ptr::null_mut();
+        }
+    };
+    let socket_path = match optional_path_from_ptr(socket_path) {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_error(error);
+            return ptr::null_mut();
+        }
+    };
+    let configured_shell = match optional_string_from_ptr(configured_shell) {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_error(error);
+            return ptr::null_mut();
+        }
+    };
+
+    match TaskersMacosCore::new(
+        session_path,
+        socket_path,
+        configured_shell.as_deref(),
+        demo,
+    ) {
+        Ok(core) => Box::into_raw(Box::new(core)),
+        Err(error) => {
+            set_last_error(error);
+            ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_core_free(core: *mut TaskersMacosCore) {
+    if core.is_null() {
+        return;
+    }
+
+    unsafe {
+        drop(Box::from_raw(core));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_core_snapshot_json(
+    core: *const TaskersMacosCore,
+) -> *mut c_char {
+    with_core(core, TaskersMacosCore::snapshot_json)
+        .map(string_into_ptr)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_core_dispatch_json(
+    core: *mut TaskersMacosCore,
+    command_json: *const c_char,
+) -> *mut c_char {
+    let command_json = match optional_string_from_ptr(command_json) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            set_last_error("command JSON must not be empty");
+            return ptr::null_mut();
+        }
+        Err(error) => {
+            set_last_error(error);
+            return ptr::null_mut();
+        }
+    };
+
+    with_core_mut(core, |core| core.dispatch_json(&command_json))
+        .map(string_into_ptr)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_core_surface_descriptor_json(
+    core: *const TaskersMacosCore,
+    workspace_id: *const c_char,
+    pane_id: *const c_char,
+) -> *mut c_char {
+    let workspace_id = match optional_string_from_ptr(workspace_id) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            set_last_error("workspace id must not be empty");
+            return ptr::null_mut();
+        }
+        Err(error) => {
+            set_last_error(error);
+            return ptr::null_mut();
+        }
+    };
+    let pane_id = match optional_string_from_ptr(pane_id) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            set_last_error("pane id must not be empty");
+            return ptr::null_mut();
+        }
+        Err(error) => {
+            set_last_error(error);
+            return ptr::null_mut();
+        }
+    };
+
+    with_core(core, |core| core.surface_descriptor_json(&workspace_id, &pane_id))
+        .map(string_into_ptr)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_core_revision(core: *const TaskersMacosCore) -> u64 {
+    with_core(core, |core| Ok(core.revision)).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_last_error_message() -> *mut c_char {
+    LAST_ERROR
+        .with(|slot| slot.borrow().clone())
+        .map(string_into_ptr)
+        .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_string_free(value: *mut c_char) {
+    if value.is_null() {
+        return;
+    }
+
+    unsafe {
+        drop(CString::from_raw(value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+    use tempfile::tempdir;
+
+    use super::TaskersMacosCore;
+
+    #[test]
+    fn core_roundtrips_snapshot_and_dispatch_json() {
+        let temp = tempdir().expect("tempdir");
+        let session_path = temp.path().join("session.json");
+        let socket_path = temp.path().join("taskers.sock");
+        let mut core = TaskersMacosCore::new(
+            Some(session_path),
+            Some(socket_path),
+            Some("/bin/sh"),
+            false,
+        )
+        .expect("core");
+
+        let snapshot = core.snapshot_json().expect("snapshot");
+        let snapshot: Value = serde_json::from_str(&snapshot).expect("snapshot json");
+        assert!(snapshot.get("workspaces").is_some());
+
+        let response = core
+            .dispatch_json(r#"{"command":"create_workspace","label":"Docs"}"#)
+            .expect("dispatch");
+        let response: Value = serde_json::from_str(&response).expect("response json");
+        assert_eq!(
+            response.get("status").and_then(Value::as_str),
+            Some("workspace_created")
+        );
+        assert_eq!(core.revision, 1);
+    }
+
+    #[test]
+    fn surface_descriptor_json_includes_shell_command() {
+        let temp = tempdir().expect("tempdir");
+        let session_path = temp.path().join("session.json");
+        let socket_path = temp.path().join("taskers.sock");
+        let core = TaskersMacosCore::new(
+            Some(session_path),
+            Some(socket_path),
+            Some("/bin/sh"),
+            false,
+        )
+        .expect("core");
+
+        let model = core.app_state.snapshot_model();
+        let workspace_id = model.active_workspace_id().expect("workspace").to_string();
+        let pane_id = model.active_workspace().expect("workspace").active_pane.to_string();
+
+        let descriptor = core
+            .surface_descriptor_json(&workspace_id, &pane_id)
+            .expect("descriptor");
+        let descriptor: Value = serde_json::from_str(&descriptor).expect("descriptor json");
+        let command_argv = descriptor
+            .get("command_argv")
+            .and_then(Value::as_array)
+            .expect("command argv array");
+        assert!(!command_argv.is_empty());
+        assert_eq!(
+            descriptor
+                .get("env")
+                .and_then(Value::as_object)
+                .and_then(|env| env.get("TASKERS_SOCKET"))
+                .and_then(Value::as_str),
+            Some(temp.path().join("taskers.sock").to_str().expect("utf-8 socket path"))
+        );
+    }
+}

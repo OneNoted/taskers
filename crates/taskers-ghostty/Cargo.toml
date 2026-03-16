@@ -14,6 +14,7 @@ gtk.workspace = true
 libloading = "0.8"
 serde.workspace = true
 tar = "0.4"
+taskers-paths.workspace = true
 thiserror.workspace = true
 ureq = "2.12"
 xz2 = "0.1"

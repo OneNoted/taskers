@@ -1,7 +1,4 @@
-mod app_state;
 mod crash_reporter;
-mod pane_runtime;
-mod session_store;
 mod settings_store;
 mod terminal_transitions;
 mod theme;
@@ -20,17 +17,16 @@ use std::{
 };
 
 use adw::prelude::*;
-use app_state::AppState;
 use clap::Parser;
 use crash_reporter::CrashReporter;
 use gtk::{
     Align, Box as GtkBox, Button, DrawingArea, Entry, Fixed, Label, Orientation, Overlay, Paned,
     PolicyType, ScrolledWindow, Separator, TextView, Widget, WrapMode, gdk, glib,
 };
-use pane_runtime::PaneRuntimeSnapshot;
 use serde_json::json;
 use settings_store::{AppConfig, ShortcutAction, ShortcutPreset};
 use svgtypes::{SimplePathSegment, SimplifyingPathParser};
+use taskers_core::{AppState, PaneRuntimeSnapshot, default_session_path, load_or_bootstrap};
 use taskers_control::{
     ControlCommand, InMemoryController, bind_socket, default_socket_path, serve,
 };
@@ -43,7 +39,7 @@ use taskers_domain::{
     WorkspaceViewport, WorkspaceWindowId,
 };
 use taskers_ghostty::{
-    BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, SurfaceDescriptor, TerminalBackend,
+    BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, TerminalBackend,
     ensure_runtime_installed,
 };
 use taskers_runtime::{
@@ -80,7 +76,6 @@ struct StartupContext {
     app_config: AppConfig,
     crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
-    shell_launch: ShellLaunchSpec,
     startup_toast: Option<String>,
 }
 
@@ -92,7 +87,6 @@ struct UiHandle {
     overlay: adw::ToastOverlay,
     crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
-    shell_launch: ShellLaunchSpec,
     ghostty_surfaces: RefCell<HashMap<SurfaceId, Widget>>,
     shell: RefCell<Option<ShellWidgets>>,
     pane_cards: RefCell<HashMap<taskers_domain::PaneId, PaneCardWidgets>>,
@@ -394,7 +388,6 @@ impl UiHandle {
         overlay: adw::ToastOverlay,
         crash_reporter: CrashReporter,
         ghostty_host: Option<GhosttyHost>,
-        shell_launch: ShellLaunchSpec,
     ) -> Rc<Self> {
         Rc::new(Self {
             app_state,
@@ -404,7 +397,6 @@ impl UiHandle {
             overlay,
             crash_reporter,
             ghostty_host,
-            shell_launch,
             ghostty_surfaces: RefCell::new(HashMap::new()),
             shell: RefCell::new(None),
             pane_cards: RefCell::new(HashMap::new()),
@@ -787,22 +779,13 @@ impl UiHandle {
         }
 
         let host = self.ghostty_host.as_ref()?;
-        let mut env = self.shell_launch.env.clone();
-        env.insert("TASKERS_PANE_ID".into(), pane.id.to_string());
-        env.insert("TASKERS_WORKSPACE_ID".into(), workspace_id.to_string());
-        env.insert("TASKERS_SURFACE_ID".into(), surface.id.to_string());
-        let widget = match host.create_surface(&SurfaceDescriptor {
-            cols: 120,
-            rows: 40,
-            cwd: surface.metadata.cwd.clone(),
-            title: surface.metadata.title.clone(),
-            command_argv: self
-                .shell_launch
-                .program_and_args()
-                .into_iter()
-                .collect::<Vec<_>>(),
-            env,
-        }) {
+        let widget = match self
+            .app_state
+            .surface_descriptor_for_pane(workspace_id, pane.id)
+            .and_then(|descriptor| {
+                host.create_surface(&descriptor)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))
+            }) {
             Ok(widget) => widget,
             Err(error) => {
                 self.toast(&error.to_string());
@@ -1887,9 +1870,7 @@ fn main() -> gtk::glib::ExitCode {
         || cli.session.is_some()
         || std::env::var_os("TASKERS_NON_UNIQUE").is_some();
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
-    let session_path = cli
-        .session
-        .unwrap_or_else(session_store::default_session_path);
+    let session_path = cli.session.unwrap_or_else(default_session_path);
     let config_path = settings_store::default_config_path();
     let crash_reporter = CrashReporter::for_session(&session_path, &config_path);
     crash_reporter.install_panic_hook();
@@ -1923,7 +1904,7 @@ fn main() -> gtk::glib::ExitCode {
             std::env::set_var("TASKERS_DISABLE_SHELL_INTEGRATION", "1");
         }
     }
-    let initial_model = match session_store::load_or_bootstrap(&session_path, cli.demo) {
+    let initial_model = match load_or_bootstrap(&session_path, cli.demo) {
         Ok(model) => model,
         Err(error) => {
             eprintln!(
@@ -2001,7 +1982,6 @@ fn main() -> gtk::glib::ExitCode {
         app_config,
         crash_reporter,
         ghostty_host,
-        shell_launch,
         startup_toast,
     };
 
@@ -2073,7 +2053,6 @@ fn build_ui(
         overlay,
         startup.crash_reporter.clone(),
         startup.ghostty_host,
-        startup.shell_launch,
     );
     connect_navigation_shortcuts(&ui);
     ui.refresh(true);

@@ -15,6 +15,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+taskers-paths.workspace = true
 taskers-domain = { version = "0.2.1", path = "../taskers-domain" }
 
 [dev-dependencies]

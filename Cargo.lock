@@ -1458,8 +1458,10 @@ dependencies = [
  "serde_json",
  "svgtypes",
  "taskers-control",
+ "taskers-core",
  "taskers-domain",
  "taskers-ghostty",
+ "taskers-paths",
  "taskers-runtime",
  "tempfile",
  "time",
@@ -1488,10 +1490,26 @@ dependencies = [
  "serde",
  "serde_json",
  "taskers-domain",
+ "taskers-paths",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "taskers-core"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "taskers-control",
+ "taskers-domain",
+ "taskers-ghostty",
+ "taskers-paths",
+ "taskers-runtime",
+ "tempfile",
 ]
 
 [[package]]
@@ -1514,11 +1532,30 @@ dependencies = [
  "libloading",
  "serde",
  "tar",
+ "taskers-paths",
  "tempfile",
  "thiserror 2.0.18",
  "ureq",
  "xz2",
 ]
+
+[[package]]
+name = "taskers-macos-ffi"
+version = "0.2.1"
+dependencies = [
+ "serde_json",
+ "taskers-control",
+ "taskers-core",
+ "taskers-domain",
+ "taskers-ghostty",
+ "taskers-paths",
+ "taskers-runtime",
+ "tempfile",
+]
+
+[[package]]
+name = "taskers-paths"
+version = "0.2.1"
 
 [[package]]
 name = "taskers-runtime"
@@ -1529,6 +1566,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "taskers-domain",
+ "taskers-paths",
 ]
 
 [[package]]

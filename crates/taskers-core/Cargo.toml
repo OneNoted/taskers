@@ -1,6 +1,6 @@
 [package]
-name = "taskers"
-description = "Agent-first terminal workspace app with a Niri-like tiling model."
+name = "taskers-core"
+description = "Shared application orchestration and runtime state for taskers."
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true
@@ -8,27 +8,15 @@ readme = "../../README.md"
 repository.workspace = true
 version.workspace = true
 
-[[bin]]
-name = "taskers"
-path = "src/main.rs"
-
 [dependencies]
-adw.workspace = true
 anyhow.workspace = true
-clap.workspace = true
-gtk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-svgtypes.workspace = true
-taskers-core.workspace = true
-taskers-paths.workspace = true
-taskers-runtime = { version = "0.2.1", path = "../taskers-runtime" }
-tokio.workspace = true
 taskers-control = { version = "0.2.1", path = "../taskers-control" }
 taskers-domain = { version = "0.2.1", path = "../taskers-domain" }
 taskers-ghostty = { version = "0.2.1", path = "../taskers-ghostty" }
-time.workspace = true
-toml.workspace = true
+taskers-paths.workspace = true
+taskers-runtime = { version = "0.2.1", path = "../taskers-runtime" }
 
 [dev-dependencies]
 tempfile.workspace = true
