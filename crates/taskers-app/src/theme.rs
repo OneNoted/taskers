@@ -694,9 +694,15 @@ pub fn generate_css(p: &ThemePalette) -> String {
             background: {border_06};
             color: {text_muted};
         }}
+
+        .workspace-header-action-active {{
+            background: {accent_14};
+            color: {text_bright};
+        }}
         ",
         border_06 = rgba(p.border, 0.06),
         border_07 = rgba(p.border, 0.07),
+        accent_14 = rgba(p.accent, 0.14),
         text_bright = p.text_bright.to_hex(),
         text_faint = p.text_faint.to_hex(),
         text_muted = p.text_muted.to_hex(),
@@ -837,6 +843,36 @@ pub fn generate_css(p: &ThemePalette) -> String {
             border-color: {error_38};
         }}
 
+        .workspace-window-toolbar {{
+            background: {border_03};
+            border-bottom: 1px solid {border_06};
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            padding: 2px 0;
+        }}
+
+        .workspace-window-toolbar-title {{
+            font-size: 0.82rem;
+            font-weight: 600;
+            color: {text_bright};
+        }}
+
+        .workspace-window-toolbar-action {{
+            background: transparent;
+            color: {text_faint};
+            border-radius: 4px;
+            min-width: 24px;
+            min-height: 22px;
+            padding: 0 6px;
+            font-size: 0.77rem;
+            transition: background 160ms ease-in-out, color 160ms ease-in-out;
+        }}
+
+        .workspace-window-toolbar-action:hover {{
+            background: {border_06};
+            color: {text_muted};
+        }}
+
         .workspace-window-ghost {{
             background: {elevated_78};
             border-style: dashed;
@@ -870,7 +906,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
         }}
 
         .workspace-window-resize-handle {{
-            background: transparent;
+            background: {border_03};
             transition: background 160ms ease-in-out;
         }}
 
@@ -878,16 +914,25 @@ pub fn generate_css(p: &ThemePalette) -> String {
         .workspace-window-resize-handle-bottom:hover {{
             background: {accent_14};
         }}
+
+        .workspace-window-resize-handle-active {{
+            background: {accent_24};
+        }}
         ",
         elevated = p.elevated.to_hex(),
         elevated_78 = rgba(p.elevated, 0.78),
         border_03 = rgba(p.border, 0.03),
         border_04 = rgba(p.border, 0.04),
         border_05 = rgba(p.border, 0.05),
+        border_06 = rgba(p.border, 0.06),
         border_07 = rgba(p.border, 0.07),
         border_10 = rgba(p.border, 0.10),
         border_14 = rgba(p.border, 0.14),
         accent_14 = rgba(p.accent, 0.14),
+        accent_24 = rgba(p.accent, 0.24),
+        text_bright = p.text_bright.to_hex(),
+        text_faint = p.text_faint.to_hex(),
+        text_muted = p.text_muted.to_hex(),
         busy_22 = rgba(p.busy, 0.22),
         busy_38 = rgba(p.busy, 0.38),
         completed_22 = rgba(p.completed, 0.22),

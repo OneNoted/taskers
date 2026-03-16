@@ -113,6 +113,7 @@ struct ShellWidgets {
     root: Paned,
     sidebar_list: GtkBox,
     workspace_name_label: Label,
+    overview_button: Button,
     activity_list: GtkBox,
     activity_empty: Label,
     layout_scroll: ScrolledWindow,
@@ -305,6 +306,7 @@ struct CanvasMetrics {
 }
 
 const WORKSPACE_CANVAS_PADDING: i32 = 2;
+const WORKSPACE_WINDOW_HEADER_HEIGHT: i32 = 30;
 const SURFACE_TAB_GAP: i32 = 4;
 const SURFACE_TAB_MIN_WIDTH: i32 = 72;
 const SURFACE_TAB_MAX_WIDTH: i32 = 220;
@@ -495,12 +497,13 @@ impl UiHandle {
             if other_action == action {
                 continue;
             }
-            if self.shortcut_specs(other_action).into_iter().any(
-                |(other_key, other_modifiers)| {
-                    other_key == key
-                        && other_modifiers == normalize_shortcut_modifiers(modifiers)
-                },
-            ) {
+            if self
+                .shortcut_specs(other_action)
+                .into_iter()
+                .any(|(other_key, other_modifiers)| {
+                    other_key == key && other_modifiers == normalize_shortcut_modifiers(modifiers)
+                })
+            {
                 return Err(format!(
                     "shortcut is already assigned to {}",
                     other_action.label()
@@ -654,11 +657,7 @@ impl UiHandle {
         stack.set_transition_duration(150);
         stack.set_vexpand(true);
 
-        stack.add_titled(
-            &build_settings_theme_page(self),
-            Some("theme"),
-            "Theme",
-        );
+        stack.add_titled(&build_settings_theme_page(self), Some("theme"), "Theme");
         stack.add_titled(
             &build_settings_general_page(self),
             Some("general"),
@@ -1071,12 +1070,15 @@ impl UiHandle {
         let focused_widget_type = gtk::prelude::GtkWindowExt::focus(&self.window)
             .map(|widget| widget.type_().name().to_string());
         let active_pane_focus_widget_type = model.active_workspace().and_then(|workspace| {
-            self.pane_cards.borrow().get(&workspace.active_pane).map(|card| {
-                pane_focus_target(self, workspace, workspace.active_pane, card)
-                    .type_()
-                    .name()
-                    .to_string()
-            })
+            self.pane_cards
+                .borrow()
+                .get(&workspace.active_pane)
+                .map(|card| {
+                    pane_focus_target(self, workspace, workspace.active_pane, card)
+                        .type_()
+                        .name()
+                        .to_string()
+                })
         });
         let active_pane_focus_has_focus = model.active_workspace().is_some_and(|workspace| {
             self.pane_cards
@@ -1174,21 +1176,21 @@ impl UiHandle {
                         .into_iter()
                         .filter_map(|placement| {
                             workspace.windows.get(&placement.window_id).map(|window| {
-                            json!({
-                                "id": window.id.to_string(),
-                                "column_id": placement.column_id.to_string(),
-                                "x": placement.frame.x,
-                                "y": placement.frame.y,
-                                "width": placement.frame.width,
-                                "height": placement.frame.height,
-                                "active_pane": window.active_pane.to_string(),
-                                "leaf_pane_ids": window
-                                    .layout
-                                    .leaves()
-                                    .into_iter()
-                                    .map(|pane_id| pane_id.to_string())
-                                    .collect::<Vec<_>>(),
-                            })
+                                json!({
+                                    "id": window.id.to_string(),
+                                    "column_id": placement.column_id.to_string(),
+                                    "x": placement.frame.x,
+                                    "y": placement.frame.y,
+                                    "width": placement.frame.width,
+                                    "height": placement.frame.height,
+                                    "active_pane": window.active_pane.to_string(),
+                                    "leaf_pane_ids": window
+                                        .layout
+                                        .leaves()
+                                        .into_iter()
+                                        .map(|pane_id| pane_id.to_string())
+                                        .collect::<Vec<_>>(),
+                                })
                             })
                         })
                         .collect(),
@@ -1316,7 +1318,7 @@ impl UiHandle {
         let nw_btn = new_window_btn.clone();
         let nw_pane_id = pane.id;
         new_window_btn.connect_clicked(move |_| {
-            show_new_window_popover(&nw_btn, &nw_ui, workspace_id, Some(nw_pane_id));
+            show_new_window_popover(&nw_btn, &nw_ui, workspace_id, Some(nw_pane_id), None);
         });
         header.append(&new_window_btn);
 
@@ -1435,12 +1437,7 @@ impl UiHandle {
             let na_pop = popover.clone();
             new_above.connect_clicked(move |_| {
                 na_pop.popdown();
-                create_workspace_window_from_pane(
-                    &na_ui,
-                    workspace_id,
-                    ctx_pane_id,
-                    Direction::Up,
-                );
+                create_workspace_window_from_pane(&na_ui, workspace_id, ctx_pane_id, Direction::Up);
             });
             content.append(&new_above);
 
@@ -2256,6 +2253,15 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     workspace_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     workspace_header.append(&workspace_name_label);
 
+    let overview_button = Button::with_label("Overview");
+    overview_button.add_css_class("workspace-header-action");
+    overview_button.set_tooltip_text(Some("Zoom out to the full workspace strip"));
+    let overview_ui = Rc::clone(ui);
+    overview_button.connect_clicked(move |_| {
+        overview_ui.toggle_overview();
+    });
+    workspace_header.append(&overview_button);
+
     // New-window popover button
     let new_window_btn = Button::with_label("New Window");
     new_window_btn.add_css_class("workspace-header-action");
@@ -2266,7 +2272,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
         let Some(workspace_id) = nw_ui.app_state.snapshot_model().active_workspace_id() else {
             return;
         };
-        show_new_window_popover(&nw_parent, &nw_ui, workspace_id, None);
+        show_new_window_popover(&nw_parent, &nw_ui, workspace_id, None, None);
     });
     workspace_header.append(&new_window_btn);
 
@@ -2364,6 +2370,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
         root: shell,
         sidebar_list,
         workspace_name_label,
+        overview_button,
         activity_list,
         activity_empty,
         layout_scroll,
@@ -2428,8 +2435,8 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             heading.append(&label);
             row.append(&heading);
 
-            if let Some(preview_text) = workspace_preview_text(&summary)
-                .filter(|text| text.len() > 2)
+            if let Some(preview_text) =
+                workspace_preview_text(&summary).filter(|text| text.len() > 2)
             {
                 let preview = Label::new(Some(&preview_text));
                 preview.add_css_class("workspace-preview");
@@ -2440,8 +2447,8 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             }
 
             if let Some(workspace) = model.workspaces.get(&summary.workspace_id)
-                && let Some(meta_text) = workspace_metadata_line(workspace)
-                    .filter(|text| text.len() > 2)
+                && let Some(meta_text) =
+                    workspace_metadata_line(workspace).filter(|text| text.len() > 2)
             {
                 let meta = Label::new(Some(&meta_text));
                 meta.add_css_class("workspace-meta");
@@ -2724,8 +2731,33 @@ fn update_toolbar(shell: &ShellWidgets, model: &AppModel, overview_mode: bool) {
             workspace.label.clone()
         };
         shell.workspace_name_label.set_text(&label);
+        shell.overview_button.set_label(if overview_mode {
+            "Exit Overview"
+        } else {
+            "Overview"
+        });
+        shell
+            .overview_button
+            .set_tooltip_text(Some(if overview_mode {
+                "Return to the focused workspace view"
+            } else {
+                "Zoom out to the full workspace strip"
+            }));
+        if overview_mode {
+            shell
+                .overview_button
+                .add_css_class("workspace-header-action-active");
+        } else {
+            shell
+                .overview_button
+                .remove_css_class("workspace-header-action-active");
+        }
     } else {
         shell.workspace_name_label.set_text("");
+        shell.overview_button.set_label("Overview");
+        shell
+            .overview_button
+            .remove_css_class("workspace-header-action-active");
     }
 }
 
@@ -3028,13 +3060,14 @@ fn layout_render_key(
         windows: workspace_display_window_placements(workspace, render_context)
             .into_iter()
             .filter_map(|placement| {
-                workspace.windows.get(&placement.window_id).map(|window| {
-                    WorkspaceWindowRenderKey {
+                workspace
+                    .windows
+                    .get(&placement.window_id)
+                    .map(|window| WorkspaceWindowRenderKey {
                         window_id: placement.window_id,
                         frame: placement.frame,
                         layout: window.layout.clone(),
-                    }
-                })
+                    })
             })
             .collect(),
     }
@@ -3260,16 +3293,14 @@ fn build_workspace_scene_snapshot(
     let placements = workspace_display_window_placements(workspace, render_context);
     let windows = placements
         .iter()
-        .map(|placement| {
-            WorkspaceWindowSnapshot {
-                id: placement.window_id,
-                rect: WindowFrame {
-                    x: placement.frame.x + metrics.offset_x,
-                    y: placement.frame.y + metrics.offset_y,
-                    width: placement.frame.width,
-                    height: placement.frame.height,
-                },
-            }
+        .map(|placement| WorkspaceWindowSnapshot {
+            id: placement.window_id,
+            rect: WindowFrame {
+                x: placement.frame.x + metrics.offset_x,
+                y: placement.frame.y + metrics.offset_y,
+                width: placement.frame.width,
+                height: placement.frame.height,
+            },
         })
         .collect::<Vec<_>>();
     let panes = placements
@@ -3661,10 +3692,80 @@ fn build_workspace_window_widget(
     root.set_hexpand(true);
     root.set_vexpand(true);
 
-    // Focus click on the window root (no separate header bar)
-    let focus_ui = Rc::clone(ui);
+    let window_title = workspace_window_title(workspace, window);
+    let window_header = GtkBox::new(Orientation::Horizontal, 6);
+    window_header.add_css_class("workspace-window-toolbar");
+    window_header.set_size_request(-1, WORKSPACE_WINDOW_HEADER_HEIGHT);
+    window_header.set_margin_start(8);
+    window_header.set_margin_end(8);
+    window_header.set_margin_top(6);
+    window_header.set_margin_bottom(4);
+
+    let header_title = Label::new(Some(&window_title));
+    header_title.add_css_class("workspace-window-toolbar-title");
+    header_title.set_xalign(0.0);
+    header_title.set_hexpand(true);
+    header_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    header_title.set_tooltip_text(Some(&window_title));
+    window_header.append(&header_title);
+
+    let attention_dot = Label::new(Some("\u{25cf}"));
+    attention_dot.add_css_class("status-dot");
+    attention_dot.add_css_class(&attention_dot_class(window_attention));
+    attention_dot.set_tooltip_text(Some(window_attention.label()));
+    window_header.append(&attention_dot);
+
     let workspace_id = workspace.id;
     let window_id = window.id;
+
+    if window.id != workspace.active_window {
+        let focus_button = Button::with_label("Focus");
+        focus_button.add_css_class("workspace-window-toolbar-action");
+        focus_button.set_tooltip_text(Some("Focus this top-level window"));
+        let focus_header_ui = Rc::clone(ui);
+        focus_button.connect_clicked(move |_| {
+            focus_header_ui.dispatch(ControlCommand::FocusWorkspaceWindow {
+                workspace_id,
+                workspace_window_id: window_id,
+            });
+        });
+        window_header.append(&focus_button);
+    }
+
+    let new_button = Button::with_label("New");
+    new_button.add_css_class("workspace-window-toolbar-action");
+    new_button.set_tooltip_text(Some("Create a new top-level window from this one"));
+    let new_button_parent = new_button.clone();
+    let new_header_ui = Rc::clone(ui);
+    new_button.connect_clicked(move |_| {
+        show_new_window_popover(
+            &new_button_parent,
+            &new_header_ui,
+            workspace_id,
+            None,
+            Some(window_id),
+        );
+    });
+    window_header.append(&new_button);
+
+    let resize_button = Button::with_label("Resize");
+    resize_button.add_css_class("workspace-window-toolbar-action");
+    resize_button.set_tooltip_text(Some("Resize this top-level window"));
+    let resize_button_parent = resize_button.clone();
+    let resize_header_ui = Rc::clone(ui);
+    resize_button.connect_clicked(move |_| {
+        show_resize_window_popover(
+            &resize_button_parent,
+            &resize_header_ui,
+            workspace_id,
+            window_id,
+        );
+    });
+    window_header.append(&resize_button);
+    root.append(&window_header);
+
+    // Focus click on the window root (no separate header bar)
+    let focus_ui = Rc::clone(ui);
     let focus_click = gtk::GestureClick::new();
     focus_click.connect_pressed(move |_, _, _, _| {
         focus_ui.dispatch(ControlCommand::FocusWorkspaceWindow {
@@ -3699,10 +3800,7 @@ fn build_workspace_window_widget(
         let nr_pop = popover.clone();
         new_right.connect_clicked(move |_| {
             nr_pop.popdown();
-            nr_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: wctx_ws_id,
-                direction: Direction::Right,
-            });
+            create_workspace_window_from_window(&nr_ui, wctx_ws_id, wctx_win_id, Direction::Right);
         });
         content.append(&new_right);
 
@@ -3713,10 +3811,7 @@ fn build_workspace_window_widget(
         let nl_pop = popover.clone();
         new_left.connect_clicked(move |_| {
             nl_pop.popdown();
-            nl_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: wctx_ws_id,
-                direction: Direction::Left,
-            });
+            create_workspace_window_from_window(&nl_ui, wctx_ws_id, wctx_win_id, Direction::Left);
         });
         content.append(&new_left);
 
@@ -3727,10 +3822,7 @@ fn build_workspace_window_widget(
         let nb_pop = popover.clone();
         new_below.connect_clicked(move |_| {
             nb_pop.popdown();
-            nb_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: wctx_ws_id,
-                direction: Direction::Down,
-            });
+            create_workspace_window_from_window(&nb_ui, wctx_ws_id, wctx_win_id, Direction::Down);
         });
         content.append(&new_below);
 
@@ -3741,16 +3833,35 @@ fn build_workspace_window_widget(
         let na_pop = popover.clone();
         new_above.connect_clicked(move |_| {
             na_pop.popdown();
-            na_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: wctx_ws_id,
-                direction: Direction::Up,
-            });
+            create_workspace_window_from_window(&na_ui, wctx_ws_id, wctx_win_id, Direction::Up);
         });
         content.append(&new_above);
 
         let sep = Separator::new(Orientation::Horizontal);
         sep.add_css_class("context-separator");
         content.append(&sep);
+
+        for (label, direction) in [
+            ("Resize Narrower", Direction::Left),
+            ("Resize Wider", Direction::Right),
+            ("Resize Shorter", Direction::Up),
+            ("Resize Taller", Direction::Down),
+        ] {
+            let resize_button = Button::with_label(label);
+            resize_button.add_css_class("flat");
+            resize_button.add_css_class("context-item");
+            let resize_ui = Rc::clone(&wctx_ui);
+            let resize_pop = popover.clone();
+            resize_button.connect_clicked(move |_| {
+                resize_pop.popdown();
+                resize_workspace_window_from_window(&resize_ui, wctx_ws_id, wctx_win_id, direction);
+            });
+            content.append(&resize_button);
+        }
+
+        let focus_sep = Separator::new(Orientation::Horizontal);
+        focus_sep.add_css_class("context-separator");
+        content.append(&focus_sep);
 
         let focus_btn = Button::with_label("Focus Window");
         focus_btn.add_css_class("flat");
@@ -3776,12 +3887,18 @@ fn build_workspace_window_widget(
     });
     root.add_controller(wctx_click);
 
+    let body_frame = WindowFrame {
+        y: display_frame.y + WORKSPACE_WINDOW_HEADER_HEIGHT,
+        height: (display_frame.height - WORKSPACE_WINDOW_HEADER_HEIGHT).max(1),
+        ..display_frame
+    };
+
     let body = build_split_layout_widget(
         ui,
         workspace,
         window.id,
         &window.layout,
-        display_frame,
+        body_frame,
         Vec::new(),
     );
     body.set_hexpand(true);
@@ -3800,6 +3917,18 @@ fn build_workspace_window_widget(
         );
     }
     overlay.upcast()
+}
+
+fn workspace_window_title(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+) -> String {
+    workspace
+        .panes
+        .get(&window.active_pane)
+        .and_then(|pane| pane.active_surface())
+        .map(display_surface_title)
+        .unwrap_or_else(|| "Top-level window".into())
 }
 
 fn build_split_layout_widget(
@@ -3912,14 +4041,18 @@ fn build_workspace_window_resize_handle(
             handle.set_halign(Align::End);
             handle.set_valign(Align::Fill);
             handle.set_vexpand(true);
-            handle.set_size_request(8, -1);
+            handle.set_size_request(12, -1);
+            handle.set_tooltip_text(Some("Drag to resize this column"));
+            handle.set_cursor_from_name(Some("ew-resize"));
         }
         ResizeHandleEdge::Bottom => {
             handle.add_css_class("workspace-window-resize-handle-bottom");
             handle.set_halign(Align::Fill);
             handle.set_valign(Align::End);
             handle.set_hexpand(true);
-            handle.set_size_request(-1, 8);
+            handle.set_size_request(-1, 12);
+            handle.set_tooltip_text(Some("Drag to resize this stacked window"));
+            handle.set_cursor_from_name(Some("ns-resize"));
         }
     }
 
@@ -3938,6 +4071,8 @@ fn build_workspace_window_resize_handle(
     let drag = gtk::GestureDrag::new();
     let start_size_for_begin = Rc::clone(&start_size);
     let current_size_for_begin = Rc::clone(&current_size);
+    let active_handle_for_begin = handle.clone();
+    let active_handle_for_end = handle.clone();
     drag.connect_drag_begin(move |_, _, _| {
         let start = drag_begin_ui
             .app_state
@@ -3962,6 +4097,7 @@ fn build_workspace_window_resize_handle(
             });
         start_size_for_begin.set(start);
         current_size_for_begin.set(start);
+        active_handle_for_begin.add_css_class("workspace-window-resize-handle-active");
         drag_begin_ui.dispatch(ControlCommand::FocusWorkspaceWindow {
             workspace_id,
             workspace_window_id,
@@ -3978,8 +4114,7 @@ fn build_workspace_window_resize_handle(
         current_size_for_update.set(next);
         match edge {
             ResizeHandleEdge::Right => {
-                if let Some(overlay) = handle_widget_for_update.parent().and_downcast::<Overlay>()
-                {
+                if let Some(overlay) = handle_widget_for_update.parent().and_downcast::<Overlay>() {
                     overlay.set_size_request(next, display_frame.height);
                     if let Some(child) = overlay.child() {
                         child.set_size_request(next, display_frame.height);
@@ -3987,8 +4122,7 @@ fn build_workspace_window_resize_handle(
                 }
             }
             ResizeHandleEdge::Bottom => {
-                if let Some(overlay) = handle_widget_for_update.parent().and_downcast::<Overlay>()
-                {
+                if let Some(overlay) = handle_widget_for_update.parent().and_downcast::<Overlay>() {
                     overlay.set_size_request(display_frame.width, next);
                     if let Some(child) = overlay.child() {
                         child.set_size_request(display_frame.width, next);
@@ -3998,6 +4132,7 @@ fn build_workspace_window_resize_handle(
         };
     });
     drag.connect_drag_end(move |_, _, _| {
+        active_handle_for_end.remove_css_class("workspace-window-resize-handle-active");
         let command = match edge {
             ResizeHandleEdge::Right => ControlCommand::SetWorkspaceColumnWidth {
                 workspace_id,
@@ -4277,11 +4412,65 @@ fn create_workspace_window_from_pane(
     });
 }
 
+fn create_workspace_window_from_window(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_window_id: WorkspaceWindowId,
+    direction: Direction,
+) {
+    let should_focus_window = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .is_some_and(|workspace| workspace.active_window != workspace_window_id);
+
+    if should_focus_window {
+        ui.dispatch(ControlCommand::FocusWorkspaceWindow {
+            workspace_id,
+            workspace_window_id,
+        });
+    }
+
+    ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+        workspace_id,
+        direction,
+    });
+}
+
+fn resize_workspace_window_from_window(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_window_id: WorkspaceWindowId,
+    direction: Direction,
+) {
+    let should_focus_window = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .is_some_and(|workspace| workspace.active_window != workspace_window_id);
+
+    if should_focus_window {
+        ui.dispatch(ControlCommand::FocusWorkspaceWindow {
+            workspace_id,
+            workspace_window_id,
+        });
+    }
+
+    ui.dispatch(ControlCommand::ResizeActiveWindow {
+        workspace_id,
+        direction,
+        amount: KEYBOARD_RESIZE_STEP,
+    });
+}
+
 fn show_new_window_popover(
     parent: &Button,
     ui: &Rc<UiHandle>,
     workspace_id: taskers_domain::WorkspaceId,
     pane_id: Option<taskers_domain::PaneId>,
+    workspace_window_id: Option<WorkspaceWindowId>,
 ) {
     let popover = gtk::Popover::new();
     popover.set_parent(parent);
@@ -4298,6 +4487,7 @@ fn show_new_window_popover(
         ui,
         workspace_id,
         pane_id,
+        workspace_window_id,
         Direction::Left,
     );
     append_new_window_direction_button(
@@ -4306,6 +4496,7 @@ fn show_new_window_popover(
         ui,
         workspace_id,
         pane_id,
+        workspace_window_id,
         Direction::Right,
     );
     append_new_window_direction_button(
@@ -4314,6 +4505,7 @@ fn show_new_window_popover(
         ui,
         workspace_id,
         pane_id,
+        workspace_window_id,
         Direction::Up,
     );
     append_new_window_direction_button(
@@ -4322,6 +4514,7 @@ fn show_new_window_popover(
         ui,
         workspace_id,
         pane_id,
+        workspace_window_id,
         Direction::Down,
     );
 
@@ -4339,6 +4532,7 @@ fn append_new_window_direction_button(
     ui: &Rc<UiHandle>,
     workspace_id: taskers_domain::WorkspaceId,
     pane_id: Option<taskers_domain::PaneId>,
+    workspace_window_id: Option<WorkspaceWindowId>,
     direction: Direction,
 ) {
     let button = Button::with_label(new_window_direction_label(direction));
@@ -4361,6 +4555,13 @@ fn append_new_window_direction_button(
         local_popover.popdown();
         if let Some(pane_id) = pane_id {
             create_workspace_window_from_pane(&local_ui, workspace_id, pane_id, direction);
+        } else if let Some(workspace_window_id) = workspace_window_id {
+            create_workspace_window_from_window(
+                &local_ui,
+                workspace_id,
+                workspace_window_id,
+                direction,
+            );
         } else {
             local_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
                 workspace_id,
@@ -4395,6 +4596,89 @@ fn new_window_direction_action(direction: Direction) -> ShortcutAction {
         Direction::Right => ShortcutAction::NewWindowRight,
         Direction::Up => ShortcutAction::NewWindowUp,
         Direction::Down => ShortcutAction::NewWindowDown,
+    }
+}
+
+fn show_resize_window_popover(
+    parent: &Button,
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_window_id: WorkspaceWindowId,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_parent(parent);
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
+    content.set_margin_start(4);
+    content.set_margin_end(4);
+    content.set_margin_top(4);
+    content.set_margin_bottom(4);
+
+    for direction in [
+        Direction::Left,
+        Direction::Right,
+        Direction::Up,
+        Direction::Down,
+    ] {
+        let button = Button::with_label(resize_window_direction_label(direction));
+        button.add_css_class("flat");
+        button.add_css_class("context-item");
+        let shortcut = ui.shortcut_label(resize_window_direction_action(direction));
+        if shortcut == "Unbound" {
+            button.set_tooltip_text(Some(resize_window_direction_tooltip(direction)));
+        } else {
+            button.set_tooltip_text(Some(&format!(
+                "{} ({shortcut})",
+                resize_window_direction_tooltip(direction)
+            )));
+        }
+
+        let local_ui = Rc::clone(ui);
+        let local_popover = popover.clone();
+        button.connect_clicked(move |_| {
+            local_popover.popdown();
+            resize_workspace_window_from_window(
+                &local_ui,
+                workspace_id,
+                workspace_window_id,
+                direction,
+            );
+        });
+        content.append(&button);
+    }
+
+    popover.set_child(Some(&content));
+    let pop_cleanup = popover.clone();
+    popover.connect_closed(move |_| {
+        pop_cleanup.unparent();
+    });
+    popover.popup();
+}
+
+fn resize_window_direction_label(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "Narrower",
+        Direction::Right => "Wider",
+        Direction::Up => "Shorter",
+        Direction::Down => "Taller",
+    }
+}
+
+fn resize_window_direction_tooltip(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "Reduce the active window width",
+        Direction::Right => "Increase the active window width",
+        Direction::Up => "Reduce the active window height",
+        Direction::Down => "Increase the active window height",
+    }
+}
+
+fn resize_window_direction_action(direction: Direction) -> ShortcutAction {
+    match direction {
+        Direction::Left => ShortcutAction::ResizeWindowLeft,
+        Direction::Right => ShortcutAction::ResizeWindowRight,
+        Direction::Up => ShortcutAction::ResizeWindowUp,
+        Direction::Down => ShortcutAction::ResizeWindowDown,
     }
 }
 
@@ -5386,7 +5670,6 @@ const CLAUDE_CODE_ICON_PATH: &str = "m50.228 170.321 50.357-28.257.843-2.463-.84
 const OPENCODE_ICON_FRAME_PATH: &str = "M24 8H8V32H24V8ZM32 40H0V0H32V40Z";
 const OPENCODE_ICON_CORE_PATH: &str = "M24 32H8V16H24V32Z";
 
-
 const CODEX_ICON_SPEC: AgentIconSpec = AgentIconSpec {
     view_box_width: 256.0,
     view_box_height: 260.0,
@@ -5618,17 +5901,15 @@ fn apply_agent_icon_fill(area: &DrawingArea, cr: &gtk::cairo::Context, fill: Age
                 alpha: f64::from(color.alpha()),
             }
         }
-        AgentIconFill::Agent(kind) => {
-            theme::resolve_agent_icon_color(kind).unwrap_or_else(|| {
-                let color = area.style_context().color();
-                AgentIconColor {
-                    red: f64::from(color.red()),
-                    green: f64::from(color.green()),
-                    blue: f64::from(color.blue()),
-                    alpha: f64::from(color.alpha()),
-                }
-            })
-        }
+        AgentIconFill::Agent(kind) => theme::resolve_agent_icon_color(kind).unwrap_or_else(|| {
+            let color = area.style_context().color();
+            AgentIconColor {
+                red: f64::from(color.red()),
+                green: f64::from(color.green()),
+                blue: f64::from(color.blue()),
+                alpha: f64::from(color.alpha()),
+            }
+        }),
     };
 
     cr.set_source_rgba(color.red, color.green, color.blue, color.alpha);
@@ -5827,7 +6108,8 @@ fn workspace_display_window_placements(
         .into_iter()
         .map(|mut placement| {
             if render_context.overview_mode {
-                placement.frame = scale_window_frame(placement.frame, render_context.overview_scale);
+                placement.frame =
+                    scale_window_frame(placement.frame, render_context.overview_scale);
             }
             placement
         })
@@ -6349,9 +6631,7 @@ fn build_settings_theme_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
             };
             let mut next_settings = click_ui.settings.borrow().clone();
             next_settings.theme = theme_value;
-            if let Err(error) =
-                settings_store::save_config(&click_ui.config_path, &next_settings)
-            {
+            if let Err(error) = settings_store::save_config(&click_ui.config_path, &next_settings) {
                 click_ui.toast(&format!("Failed to save theme: {error}"));
                 return;
             }
@@ -6362,9 +6642,7 @@ fn build_settings_theme_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
                 let mut idx = 0;
                 while let Some(child) = flow.child_at_index(idx) {
                     if let Some(b) = child.child().and_then(|w| w.downcast::<Button>().ok()) {
-                        if let Some(inner) =
-                            b.child().and_then(|w| w.downcast::<GtkBox>().ok())
-                        {
+                        if let Some(inner) = b.child().and_then(|w| w.downcast::<GtkBox>().ok()) {
                             inner.remove_css_class("theme-card-active");
                         }
                     }
@@ -6653,23 +6931,16 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
         reset_button.set_tooltip_text(Some("Reset to default"));
         let reset_ui = Rc::clone(ui);
         let reset_label = shortcut_label.clone();
-        reset_button.connect_clicked(move |_| {
-            match reset_ui.reset_shortcuts(action) {
-                Ok(next_label) => reset_label.set_text(&next_label),
-                Err(error) => reset_ui.toast(&error),
-            }
+        reset_button.connect_clicked(move |_| match reset_ui.reset_shortcuts(action) {
+            Ok(next_label) => reset_label.set_text(&next_label),
+            Err(error) => reset_ui.toast(&error),
         });
         row.append(&reset_button);
 
         content.append(&row);
 
-        let search_text = format!(
-            "{} {} {}",
-            action.label(),
-            detail_text,
-            action.category()
-        )
-        .to_lowercase();
+        let search_text =
+            format!("{} {} {}", action.label(), detail_text, action.category()).to_lowercase();
 
         rows.borrow_mut().push(ShortcutRow {
             action,
@@ -6684,16 +6955,14 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
     for (button, preset) in preset_buttons {
         let preset_ui = Rc::clone(ui);
         let preset_rows = Rc::clone(&rows);
-        button.connect_clicked(move |_| {
-            match preset_ui.apply_shortcut_preset(preset) {
-                Ok(()) => {
-                    for row in preset_rows.borrow().iter() {
-                        row.shortcut_label
-                            .set_text(&preset_ui.shortcut_label(row.action));
-                    }
+        button.connect_clicked(move |_| match preset_ui.apply_shortcut_preset(preset) {
+            Ok(()) => {
+                for row in preset_rows.borrow().iter() {
+                    row.shortcut_label
+                        .set_text(&preset_ui.shortcut_label(row.action));
                 }
-                Err(error) => preset_ui.toast(&error),
             }
+            Err(error) => preset_ui.toast(&error),
         });
     }
 
@@ -6753,7 +7022,13 @@ fn build_theme_swatch(color: theme::Color, size: i32) -> DrawingArea {
         let radius = 3.0;
         let (w, h) = (f64::from(w), f64::from(h));
         cr.new_sub_path();
-        cr.arc(w - radius, radius, radius, -std::f64::consts::FRAC_PI_2, 0.0);
+        cr.arc(
+            w - radius,
+            radius,
+            radius,
+            -std::f64::consts::FRAC_PI_2,
+            0.0,
+        );
         cr.arc(
             w - radius,
             h - radius,
