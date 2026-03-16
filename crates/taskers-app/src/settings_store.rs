@@ -182,6 +182,93 @@ impl ShortcutAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutPreset {
+    Balanced,
+    PowerUser,
+}
+
+impl ShortcutPreset {
+    pub const ALL: [Self; 2] = [Self::Balanced, Self::PowerUser];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Balanced => "Apply Balanced Defaults",
+            Self::PowerUser => "Apply Power User Defaults",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::Balanced => {
+                "Keep common focus, top-level window, split, overview, and close actions bound."
+            }
+            Self::PowerUser => {
+                "Restore the dense direction and resize bindings for full keyboard-driven control."
+            }
+        }
+    }
+
+    pub fn accelerators(self, action: ShortcutAction) -> &'static [&'static str] {
+        match self {
+            Self::Balanced => action.default_accelerators(),
+            Self::PowerUser => match action {
+                ShortcutAction::ToggleOverview => &["<Control><Alt>o"],
+                ShortcutAction::CloseTerminal => &["<Control><Alt>x"],
+                ShortcutAction::FocusLeft => &["<Control><Alt>h", "<Control><Alt>Left"],
+                ShortcutAction::FocusRight => &["<Control><Alt>l", "<Control><Alt>Right"],
+                ShortcutAction::FocusUp => &["<Control><Alt>k", "<Control><Alt>Up"],
+                ShortcutAction::FocusDown => &["<Control><Alt>j", "<Control><Alt>Down"],
+                ShortcutAction::NewWindowLeft => {
+                    &["<Control><Alt><Shift>h", "<Control><Alt><Shift>Left"]
+                }
+                ShortcutAction::NewWindowRight => &[
+                    "<Control><Alt>t",
+                    "<Control><Alt><Shift>l",
+                    "<Control><Alt><Shift>Right",
+                ],
+                ShortcutAction::NewWindowUp => {
+                    &["<Control><Alt><Shift>k", "<Control><Alt><Shift>Up"]
+                }
+                ShortcutAction::NewWindowDown => &[
+                    "<Control><Alt>g",
+                    "<Control><Alt><Shift>j",
+                    "<Control><Alt><Shift>Down",
+                ],
+                ShortcutAction::ResizeWindowLeft => &["<Control><Alt>Home"],
+                ShortcutAction::ResizeWindowRight => &["<Control><Alt>End"],
+                ShortcutAction::ResizeWindowUp => &["<Control><Alt>Page_Up"],
+                ShortcutAction::ResizeWindowDown => &["<Control><Alt>Page_Down"],
+                ShortcutAction::ResizeSplitLeft => &["<Control><Alt><Shift>Home"],
+                ShortcutAction::ResizeSplitRight => &["<Control><Alt><Shift>End"],
+                ShortcutAction::ResizeSplitUp => &["<Control><Alt><Shift>Page_Up"],
+                ShortcutAction::ResizeSplitDown => &["<Control><Alt><Shift>Page_Down"],
+                ShortcutAction::SplitRight => &["<Control><Alt>backslash"],
+                ShortcutAction::SplitDown => &["<Control><Alt>minus"],
+            },
+        }
+    }
+
+    pub fn keybindings(self) -> KeybindingConfig {
+        if self == Self::Balanced {
+            return KeybindingConfig::default();
+        }
+
+        let mut actions = BTreeMap::new();
+        for action in ShortcutAction::ALL {
+            let accelerators = self
+                .accelerators(action)
+                .iter()
+                .map(|binding| (*binding).to_string())
+                .collect::<Vec<_>>();
+            if !accelerators.is_empty() {
+                actions.insert(action.id().into(), accelerators);
+            }
+        }
+        KeybindingConfig { actions }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -239,6 +326,10 @@ impl KeybindingConfig {
     pub fn set_accelerators(&mut self, action: ShortcutAction, accelerators: Vec<String>) {
         self.actions.insert(action.id().into(), accelerators);
     }
+
+    pub fn replace_with_preset(&mut self, preset: ShortcutPreset) {
+        *self = preset.keybindings();
+    }
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -290,7 +381,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<()> {
 mod tests {
     use tempfile::tempdir;
 
-    use super::{AppConfig, ShortcutAction, load_or_default, save_config};
+    use super::{AppConfig, ShortcutAction, ShortcutPreset, load_or_default, save_config};
 
     #[test]
     fn roundtrips_config_files() {
@@ -379,6 +470,35 @@ mod tests {
         assert_eq!(
             ShortcutAction::SplitDown.default_accelerators(),
             ["<Control><Alt><Shift>g"]
+        );
+    }
+
+    #[test]
+    fn balanced_preset_matches_default_config_shape() {
+        assert_eq!(
+            ShortcutPreset::Balanced.keybindings(),
+            AppConfig::default().keybindings
+        );
+    }
+
+    #[test]
+    fn power_user_preset_restores_dense_bindings() {
+        let preset = ShortcutPreset::PowerUser.keybindings();
+
+        assert_eq!(
+            preset.accelerators(ShortcutAction::NewWindowLeft),
+            vec![
+                String::from("<Control><Alt><Shift>h"),
+                String::from("<Control><Alt><Shift>Left")
+            ]
+        );
+        assert_eq!(
+            preset.accelerators(ShortcutAction::ResizeWindowRight),
+            vec![String::from("<Control><Alt>End")]
+        );
+        assert_eq!(
+            preset.accelerators(ShortcutAction::SplitDown),
+            vec![String::from("<Control><Alt>minus")]
         );
     }
 }

@@ -29,7 +29,7 @@ use gtk::{
 };
 use pane_runtime::PaneRuntimeSnapshot;
 use serde_json::json;
-use settings_store::{AppConfig, ShortcutAction};
+use settings_store::{AppConfig, ShortcutAction, ShortcutPreset};
 use svgtypes::{SimplePathSegment, SimplifyingPathParser};
 use taskers_control::{
     ControlCommand, InMemoryController, bind_socket, default_socket_path, serve,
@@ -535,6 +535,15 @@ impl UiHandle {
             .map_err(|error| format!("failed to save settings: {error}"))?;
         *self.settings.borrow_mut() = next_settings;
         Ok(self.shortcut_label(action))
+    }
+
+    fn apply_shortcut_preset(self: &Rc<Self>, preset: ShortcutPreset) -> Result<(), String> {
+        let mut next_settings = self.settings.borrow().clone();
+        next_settings.keybindings.replace_with_preset(preset);
+        settings_store::save_config(&self.config_path, &next_settings)
+            .map_err(|error| format!("failed to save settings: {error}"))?;
+        *self.settings.borrow_mut() = next_settings;
+        Ok(())
     }
 
     fn save_settings(&self, next_settings: AppConfig) -> Result<(), String> {
@@ -6525,6 +6534,31 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
 
     let outer = GtkBox::new(Orientation::Vertical, 0);
 
+    let intro = Label::new(Some(
+        "Balanced defaults keep the common window-management actions bound. Advanced resize actions stay available, but start unbound by default.",
+    ));
+    intro.set_xalign(0.0);
+    intro.set_wrap(true);
+    intro.add_css_class("dim-label");
+    intro.set_margin_start(18);
+    intro.set_margin_end(18);
+    intro.set_margin_top(10);
+    intro.set_margin_bottom(8);
+    outer.append(&intro);
+
+    let preset_row = GtkBox::new(Orientation::Horizontal, 8);
+    preset_row.set_margin_start(18);
+    preset_row.set_margin_end(18);
+    preset_row.set_margin_bottom(8);
+    let mut preset_buttons = Vec::new();
+    for preset in ShortcutPreset::ALL {
+        let button = Button::with_label(preset.label());
+        button.set_tooltip_text(Some(preset.detail()));
+        preset_row.append(&button);
+        preset_buttons.push((button, preset));
+    }
+    outer.append(&preset_row);
+
     // Search bar (pinned above scroll).
     let search_entry = Entry::new();
     search_entry.set_placeholder_text(Some("Filter shortcuts\u{2026}"));
@@ -6543,8 +6577,10 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
 
     // Build rows, collecting widgets for search filtering.
     struct ShortcutRow {
+        action: ShortcutAction,
         heading: Option<Widget>,
         row: GtkBox,
+        shortcut_label: Label,
         search_text: String,
         category: &'static str,
     }
@@ -6577,7 +6613,12 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
         title.add_css_class("pane-title");
         details.append(&title);
 
-        let detail = Label::new(Some(action.detail()));
+        let detail_text = if action.default_accelerators().is_empty() {
+            format!("{} Unbound by default.", action.detail())
+        } else {
+            action.detail().to_string()
+        };
+        let detail = Label::new(Some(&detail_text));
         detail.set_xalign(0.0);
         detail.set_wrap(true);
         detail.add_css_class("dim-label");
@@ -6625,16 +6666,34 @@ fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
         let search_text = format!(
             "{} {} {}",
             action.label(),
-            action.detail(),
+            detail_text,
             action.category()
         )
         .to_lowercase();
 
         rows.borrow_mut().push(ShortcutRow {
+            action,
             heading: heading_widget,
             row,
+            shortcut_label: shortcut_label.clone(),
             search_text,
             category,
+        });
+    }
+
+    for (button, preset) in preset_buttons {
+        let preset_ui = Rc::clone(ui);
+        let preset_rows = Rc::clone(&rows);
+        button.connect_clicked(move |_| {
+            match preset_ui.apply_shortcut_preset(preset) {
+                Ok(()) => {
+                    for row in preset_rows.borrow().iter() {
+                        row.shortcut_label
+                            .set_text(&preset_ui.shortcut_label(row.action));
+                    }
+                }
+                Err(error) => preset_ui.toast(&error),
+            }
         });
     }
 
