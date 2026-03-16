@@ -2526,27 +2526,30 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             button.add_css_class("workspace-button");
             button.set_hexpand(true);
 
-            let row = GtkBox::new(Orientation::Vertical, 4);
-            row.add_css_class("workspace-item");
+            let item_shell = GtkBox::new(Orientation::Vertical, 0);
+            item_shell.add_css_class("workspace-item");
+            item_shell.set_hexpand(true);
             if summary.display_attention != AttentionState::Normal {
-                row.add_css_class("workspace-item-has-attention");
-                row.add_css_class(&format!(
+                item_shell.add_css_class("workspace-item-has-attention");
+                item_shell.add_css_class(&format!(
                     "workspace-item-state-{}",
                     attention_state_slug(summary.display_attention)
                 ));
             }
             if summary.unread_count > 0 {
-                row.add_css_class("workspace-item-has-unread");
+                item_shell.add_css_class("workspace-item-has-unread");
             }
-            row.set_margin_start(4);
-            row.set_margin_end(28);
-            row.set_margin_top(2);
-            row.set_margin_bottom(2);
+            item_shell.set_margin_start(4);
+            item_shell.set_margin_end(0);
+            item_shell.set_margin_top(2);
+            item_shell.set_margin_bottom(2);
 
             if model.active_workspace_id() == Some(summary.workspace_id) {
-                row.add_css_class("workspace-item-active");
+                item_shell.add_css_class("workspace-item-active");
             }
 
+            let row = GtkBox::new(Orientation::Vertical, 4);
+            row.set_margin_end(28);
             let heading = GtkBox::new(Orientation::Horizontal, 8);
             heading.set_hexpand(true);
             heading.append(&build_workspace_status_widget(&summary));
@@ -2592,7 +2595,8 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                 row.append(&meta);
             }
 
-            button.set_child(Some(&row));
+            item_shell.append(&row);
+            button.set_child(Some(&item_shell));
 
             let switch_ui = Rc::clone(ui);
             let workspace_id = summary.workspace_id;
