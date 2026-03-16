@@ -1712,6 +1712,7 @@ impl UiHandle {
         } else {
             card.root.remove_css_class("pane-card-active");
         }
+        card.header.set_visible(pane.id == active_pane);
         card.header_actions.set_visible(pane.id == active_pane);
 
         for cls in &[
