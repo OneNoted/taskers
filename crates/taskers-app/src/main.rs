@@ -1332,6 +1332,10 @@ impl UiHandle {
         status_dot.set_tooltip_text(Some(pane_attention.label()));
         header.append(&status_dot);
 
+        let header_actions = GtkBox::new(Orientation::Horizontal, 3);
+        header_actions.add_css_class("pane-action-cluster");
+        header.append(&header_actions);
+
         let new_window_btn = Button::with_label("New");
         new_window_btn.add_css_class("pane-action");
         new_window_btn.add_css_class("pane-window-action");
@@ -1342,7 +1346,7 @@ impl UiHandle {
         new_window_btn.connect_clicked(move |_| {
             show_new_window_popover(&nw_btn, &nw_ui, workspace_id, Some(nw_pane_id), None);
         });
-        header.append(&new_window_btn);
+        header_actions.append(&new_window_btn);
 
         let split_right_btn = Button::with_label("\u{25eb}");
         split_right_btn.add_css_class("pane-action");
@@ -1357,7 +1361,7 @@ impl UiHandle {
                 axis: taskers_domain::SplitAxis::Horizontal,
             });
         });
-        header.append(&split_right_btn);
+        header_actions.append(&split_right_btn);
 
         let split_down_btn = Button::with_label("\u{2501}");
         split_down_btn.add_css_class("pane-action");
@@ -1372,7 +1376,7 @@ impl UiHandle {
                 axis: taskers_domain::SplitAxis::Vertical,
             });
         });
-        header.append(&split_down_btn);
+        header_actions.append(&split_down_btn);
 
         let resize_button = Button::with_label("Resize");
         resize_button.add_css_class("pane-action");
@@ -1390,7 +1394,7 @@ impl UiHandle {
                 }
             }
         });
-        header.append(&resize_button);
+        header_actions.append(&resize_button);
 
         let close_button = Button::with_label("\u{00d7}");
         close_button.add_css_class("pane-close");
@@ -1404,7 +1408,7 @@ impl UiHandle {
                 pane_id: close_pane_id,
             });
         });
-        header.append(&close_button);
+        header_actions.append(&close_button);
 
         // Right-click context menu on pane header
         let header_for_ctx = header.clone();
@@ -3962,6 +3966,10 @@ fn build_workspace_window_widget(
     attention_dot.set_tooltip_text(Some(window_attention.label()));
     window_header.append(&attention_dot);
 
+    let toolbar_actions = GtkBox::new(Orientation::Horizontal, 4);
+    toolbar_actions.add_css_class("workspace-window-toolbar-actions");
+    window_header.append(&toolbar_actions);
+
     let workspace_id = workspace.id;
     let window_id = window.id;
 
@@ -3976,7 +3984,7 @@ fn build_workspace_window_widget(
                 workspace_window_id: window_id,
             });
         });
-        window_header.append(&focus_button);
+        toolbar_actions.append(&focus_button);
     }
 
     let new_button = Button::with_label("New");
@@ -3993,7 +4001,7 @@ fn build_workspace_window_widget(
             Some(window_id),
         );
     });
-    window_header.append(&new_button);
+    toolbar_actions.append(&new_button);
 
     let resize_button = Button::with_label("Resize");
     resize_button.add_css_class("workspace-window-toolbar-action");
@@ -4008,7 +4016,7 @@ fn build_workspace_window_widget(
             window_id,
         );
     });
-    window_header.append(&resize_button);
+    toolbar_actions.append(&resize_button);
     root.append(&window_header);
 
     // Focus click on the window root (no separate header bar)

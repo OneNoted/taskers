@@ -866,7 +866,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
             border-bottom: 1px solid {border_06};
             border-top-left-radius: 6px;
             border-top-right-radius: 6px;
-            padding: 2px 0;
+            padding: 3px 0;
         }}
 
         .workspace-window-toolbar-title {{
@@ -875,20 +875,30 @@ pub fn generate_css(p: &ThemePalette) -> String {
             color: {text_bright};
         }}
 
+        .workspace-window-toolbar-actions {{
+            background: {border_04};
+            border: 1px solid {border_06};
+            border-radius: 999px;
+            padding: 2px;
+        }}
+
         .workspace-window-toolbar-action {{
             background: transparent;
             color: {text_faint};
-            border-radius: 4px;
+            border: 1px solid transparent;
+            border-radius: 999px;
             min-width: 24px;
             min-height: 22px;
-            padding: 0 6px;
-            font-size: 0.77rem;
-            transition: background 160ms ease-in-out, color 160ms ease-in-out;
+            padding: 0 8px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            transition: background 160ms ease-in-out, color 160ms ease-in-out, border-color 160ms ease-in-out;
         }}
 
         .workspace-window-toolbar-action:hover {{
-            background: {border_06};
-            color: {text_muted};
+            background: {border_08};
+            border-color: {border_10};
+            color: {text_bright};
         }}
 
         .workspace-window-ghost {{
@@ -943,6 +953,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
         border_04 = rgba(p.border, 0.04),
         border_05 = rgba(p.border, 0.05),
         border_06 = rgba(p.border, 0.06),
+        border_08 = rgba(p.border, 0.08),
         border_07 = rgba(p.border, 0.07),
         border_10 = rgba(p.border, 0.10),
         border_14 = rgba(p.border, 0.14),
@@ -950,7 +961,6 @@ pub fn generate_css(p: &ThemePalette) -> String {
         accent_24 = rgba(p.accent, 0.24),
         text_bright = p.text_bright.to_hex(),
         text_faint = p.text_faint.to_hex(),
-        text_muted = p.text_muted.to_hex(),
         busy_22 = rgba(p.busy, 0.22),
         busy_38 = rgba(p.busy, 0.38),
         completed_22 = rgba(p.completed, 0.22),
@@ -1040,59 +1050,91 @@ pub fn generate_css(p: &ThemePalette) -> String {
             color: {error};
         }}
 
+        .pane-action-cluster {{
+            background: {border_04};
+            border: 1px solid {border_05};
+            border-radius: 999px;
+            padding: 2px;
+            transition: background 160ms ease-in-out, border-color 160ms ease-in-out;
+        }}
+
+        .pane-header:hover .pane-action-cluster {{
+            background: {border_05};
+            border-color: {border_06};
+        }}
+
+        .pane-card-active .pane-action-cluster {{
+            background: {accent_06};
+            border-color: {accent_12};
+        }}
+
+        .pane-card-active .pane-header:hover .pane-action-cluster {{
+            background: {accent_10};
+            border-color: {accent_15};
+        }}
+
         .pane-card-active .pane-close-action {{
             background: {error_10};
+            border-color: {error_16};
             color: {error_soft};
         }}
 
         .pane-card-active .pane-close-action:hover {{
             background: {error_18};
+            border-color: {error_18};
             color: {error_text};
         }}
 
         .pane-action {{
             background: transparent;
             color: {text_faint};
-            border-radius: 3px;
-            min-width: 18px;
-            min-height: 18px;
-            padding: 0;
-            font-size: 0.75rem;
+            border: 1px solid transparent;
+            border-radius: 999px;
+            min-width: 20px;
+            min-height: 20px;
+            padding: 0 6px;
+            font-size: 0.72rem;
+            font-weight: 600;
             opacity: 0;
-            transition: opacity 180ms ease-in-out, background 160ms ease-in-out, color 160ms ease-in-out;
+            transition: opacity 180ms ease-in-out, background 160ms ease-in-out, color 160ms ease-in-out, border-color 160ms ease-in-out;
         }}
 
         .pane-header:hover .pane-action {{
-            opacity: 0.7;
+            opacity: 0.76;
         }}
 
         .pane-card-active .pane-action {{
-            opacity: 0.62;
+            opacity: 0.86;
         }}
 
         .pane-card-active .pane-window-action {{
-            background: {waiting_12};
+            background: {waiting_10};
+            border-color: {waiting_18};
             color: {action_window};
         }}
 
         .pane-card-active .pane-split-action {{
             background: {teal_11};
+            border-color: {teal_18};
             color: {action_split};
         }}
 
         .pane-action:hover {{
             opacity: 1;
             background: {accent_12};
-            color: {text_muted};
+            border-color: {accent_15};
+            color: {text};
         }}
 
         .pane-card-active .pane-window-action:hover {{
             background: {waiting_20};
+            border-color: {waiting_24};
             color: {action_window_hover};
         }}
 
         .pane-card-active .pane-split-action:hover {{
             background: {teal_18};
+            border-color: {teal_18};
             color: {action_split_hover};
         }}
 
@@ -1104,6 +1146,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
         border_02 = rgba(p.border, 0.02),
         border_04 = rgba(p.border, 0.04),
         border_05 = rgba(p.border, 0.05),
+        border_06 = rgba(p.border, 0.06),
         text = p.text.to_hex(),
         text_muted = p.text_muted.to_hex(),
         text_faint = p.text_faint.to_hex(),
@@ -1121,7 +1164,6 @@ pub fn generate_css(p: &ThemePalette) -> String {
         completed_16 = rgba(p.completed, 0.16),
         waiting_06 = rgba(p.waiting, 0.06),
         waiting_10 = rgba(p.waiting, 0.10),
-        waiting_12 = rgba(p.waiting, 0.12),
         waiting_18 = rgba(p.waiting, 0.18),
         waiting_20 = rgba(p.waiting, 0.20),
         waiting_24 = rgba(p.waiting, 0.24),
