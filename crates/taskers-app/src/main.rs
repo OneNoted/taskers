@@ -5,6 +5,7 @@ mod session_store;
 mod settings_store;
 mod terminal_transitions;
 mod theme;
+mod themes;
 
 use std::{
     cell::{Cell, RefCell},
@@ -1876,7 +1877,8 @@ fn main() -> gtk::glib::ExitCode {
     };
     let _server_note = spawn_control_server(app_state.controller(), socket_path);
 
-    let (_theme_name, theme_palette) = theme::load_theme(app_config.theme.as_deref());
+    let (_theme_name, theme_palette) =
+        theme::load_theme(app_config.theme.as_deref(), themes::builtin_theme);
     theme::set_active_palette(theme_palette.clone());
 
     let startup = StartupContext {

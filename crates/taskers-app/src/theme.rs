@@ -243,7 +243,10 @@ fn theme_dir() -> Option<PathBuf> {
     None
 }
 
-pub fn load_theme(theme_name: Option<&str>) -> (String, ThemePalette) {
+pub fn load_theme(
+    theme_name: Option<&str>,
+    builtin_lookup: impl Fn(&str) -> Option<ThemePalette>,
+) -> (String, ThemePalette) {
     let default = default_dark();
 
     let Some(name) = theme_name else {
@@ -254,6 +257,12 @@ pub fn load_theme(theme_name: Option<&str>) -> (String, ThemePalette) {
         return ("dark".into(), default);
     }
 
+    // Check built-in themes first.
+    if let Some(palette) = builtin_lookup(name) {
+        return (name.into(), palette);
+    }
+
+    // Fall back to TOML file on disk.
     let Some(dir) = theme_dir() else {
         eprintln!("warning: cannot determine theme directory");
         return ("dark".into(), default);
