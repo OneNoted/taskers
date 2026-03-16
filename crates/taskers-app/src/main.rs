@@ -2517,8 +2517,9 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
 
     if let Ok(summaries) = model.workspace_summaries(model.active_window) {
         for summary in summaries {
-            let outer = GtkBox::new(Orientation::Horizontal, 4);
+            let outer = Overlay::new();
             outer.add_css_class("workspace-row");
+            outer.set_hexpand(true);
 
             let button = Button::new();
             button.add_css_class("flat");
@@ -2538,7 +2539,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                 row.add_css_class("workspace-item-has-unread");
             }
             row.set_margin_start(4);
-            row.set_margin_end(0);
+            row.set_margin_end(28);
             row.set_margin_top(2);
             row.set_margin_bottom(2);
 
@@ -2601,7 +2602,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                     workspace_id,
                 });
             });
-            outer.append(&button);
+            outer.set_child(Some(&button));
 
             let close_btn = Button::with_label("\u{00d7}");
             close_btn.add_css_class("workspace-close");
@@ -2609,7 +2610,9 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                 close_btn.add_css_class("workspace-close-visible");
             }
             close_btn.set_tooltip_text(Some("Delete workspace"));
+            close_btn.set_halign(Align::End);
             close_btn.set_valign(Align::Center);
+            close_btn.set_margin_end(10);
             let close_ui = Rc::clone(ui);
             let close_ws_id = summary.workspace_id;
             close_btn.connect_clicked(move |_| {
@@ -2617,7 +2620,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                     workspace_id: close_ws_id,
                 });
             });
-            outer.append(&close_btn);
+            outer.add_overlay(&close_btn);
 
             // Double-click to rename workspace
             let dbl_click = gtk::GestureClick::new();
