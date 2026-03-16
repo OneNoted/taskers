@@ -593,6 +593,10 @@ pub fn generate_css(p: &ThemePalette) -> String {
             opacity: 1;
         }}
 
+        .workspace-close-visible {{
+            opacity: 1;
+        }}
+
         .workspace-close:hover {{
             background: {error_15};
             color: {error};

@@ -1304,6 +1304,18 @@ impl UiHandle {
         title.set_xalign(0.0);
         title.set_hexpand(true);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        title.set_cursor_from_name(Some("text"));
+        title.set_tooltip_text(Some("Click to rename terminal"));
+        let title_parent: Widget = title.clone().upcast();
+        let rename_title_ui = Rc::clone(self);
+        let rename_title_pane_id = pane.id;
+        let rename_title_click = gtk::GestureClick::new();
+        rename_title_click.set_button(1);
+        rename_title_click.connect_pressed(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            begin_surface_title_rename(&rename_title_ui, &title_parent, rename_title_pane_id);
+        });
+        title.add_controller(rename_title_click);
         header.append(&title);
 
         let header_tabs = GtkBox::new(Orientation::Horizontal, 2);
@@ -1408,6 +1420,22 @@ impl UiHandle {
             content.set_margin_end(4);
             content.set_margin_top(4);
             content.set_margin_bottom(4);
+
+            let rename_terminal = Button::with_label("Rename terminal");
+            rename_terminal.add_css_class("flat");
+            rename_terminal.add_css_class("context-item");
+            let rename_ui = Rc::clone(&ctx_ui);
+            let rename_parent: Widget = header_for_ctx.clone().upcast();
+            let rename_pop = popover.clone();
+            rename_terminal.connect_clicked(move |_| {
+                rename_pop.popdown();
+                begin_surface_title_rename(&rename_ui, &rename_parent, ctx_pane_id);
+            });
+            content.append(&rename_terminal);
+
+            let rename_sep = Separator::new(Orientation::Horizontal);
+            rename_sep.add_css_class("context-separator");
+            content.append(&rename_sep);
 
             let new_right = Button::with_label("\u{2192} New Window Right");
             new_right.add_css_class("flat");
@@ -1593,8 +1621,10 @@ impl UiHandle {
             14,
         );
         card.title.set_text(&display_title);
-        card.title
-            .set_tooltip_text(Some(&format_pane_meta(pane, snapshot.as_ref())));
+        card.title.set_tooltip_text(Some(&format!(
+            "{}\nClick to rename terminal",
+            format_pane_meta(pane, snapshot.as_ref())
+        )));
 
         if pane.id == active_pane {
             card.root.add_css_class("pane-card-active");
@@ -2565,9 +2595,11 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
 
             let close_btn = Button::with_label("\u{00d7}");
             close_btn.add_css_class("workspace-close");
+            if model.active_workspace_id() == Some(summary.workspace_id) {
+                close_btn.add_css_class("workspace-close-visible");
+            }
             close_btn.set_tooltip_text(Some("Delete workspace"));
             close_btn.set_valign(Align::Center);
-            close_btn.set_opacity(0.0);
             let close_ui = Rc::clone(ui);
             let close_ws_id = summary.workspace_id;
             close_btn.connect_clicked(move |_| {
@@ -3140,6 +3172,99 @@ fn begin_inline_rename(
         glib::Propagation::Proceed
     });
     entry.add_controller(key_controller);
+}
+
+fn begin_surface_title_rename(ui: &Rc<UiHandle>, parent: &Widget, pane_id: taskers_domain::PaneId) {
+    let Some((surface_id, current_title, placeholder_title)) = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .values()
+        .find_map(|workspace| {
+            workspace.panes.get(&pane_id).and_then(|pane| {
+                pane.active_surface().map(|surface| {
+                    (
+                        surface.id,
+                        editable_surface_title(surface),
+                        display_surface_title(surface),
+                    )
+                })
+            })
+        })
+    else {
+        return;
+    };
+
+    let popover = gtk::Popover::new();
+    popover.set_parent(parent);
+
+    let entry = Entry::new();
+    entry.set_text(&current_title);
+    entry.set_placeholder_text(Some(&placeholder_title));
+    entry.add_css_class("workspace-rename-entry");
+    entry.set_width_chars(24);
+    popover.set_child(Some(&entry));
+
+    let committed = Rc::new(Cell::new(false));
+
+    let commit_ui = Rc::clone(ui);
+    let commit_popover = popover.clone();
+    let committed_for_activate = Rc::clone(&committed);
+    entry.connect_activate(move |entry| {
+        if committed_for_activate.get() {
+            return;
+        }
+        committed_for_activate.set(true);
+        commit_popover.popdown();
+        commit_ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+            surface_id,
+            patch: PaneMetadataPatch {
+                title: Some(entry.text().trim().to_string()),
+                ..PaneMetadataPatch::default()
+            },
+        });
+    });
+
+    let focus_ui = Rc::clone(ui);
+    let focus_popover = popover.clone();
+    let committed_for_focus = Rc::clone(&committed);
+    entry.connect_notify_local(Some("has-focus"), move |entry, _| {
+        if entry.has_focus() || committed_for_focus.get() {
+            return;
+        }
+
+        committed_for_focus.set(true);
+        focus_popover.popdown();
+        focus_ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+            surface_id,
+            patch: PaneMetadataPatch {
+                title: Some(entry.text().trim().to_string()),
+                ..PaneMetadataPatch::default()
+            },
+        });
+    });
+
+    let escape_popover = popover.clone();
+    let committed_for_escape = Rc::clone(&committed);
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_, key, _, _| {
+        if key == gdk::Key::Escape {
+            committed_for_escape.set(true);
+            escape_popover.popdown();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    entry.add_controller(key_controller);
+
+    let pop_cleanup = popover.clone();
+    popover.connect_closed(move |_| {
+        pop_cleanup.unparent();
+    });
+
+    popover.popup();
+    entry.grab_focus();
+    entry.select_region(0, -1);
 }
 
 fn layout_render_key(
@@ -5913,6 +6038,17 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     }
 }
 
+fn editable_surface_title(surface: &SurfaceRecord) -> String {
+    surface
+        .metadata
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
 const AGENT_ICON_CLASSES: [&str; 4] = [
     "agent-icon",
     "agent-icon-codex",
@@ -7404,5 +7540,20 @@ mod tests {
             surface_tab_presentation(3, 0),
             SurfaceTabPresentation::Inline
         );
+    }
+
+    #[test]
+    fn editable_surface_title_prefers_explicit_metadata_title() {
+        let mut surface = SurfaceRecord::new(PaneKind::Terminal);
+        surface.metadata.title = Some("  inbox  ".into());
+
+        assert_eq!(editable_surface_title(&surface), "inbox");
+    }
+
+    #[test]
+    fn editable_surface_title_keeps_default_terminal_label_unset() {
+        let surface = SurfaceRecord::new(PaneKind::Terminal);
+
+        assert_eq!(editable_surface_title(&surface), "");
     }
 }
