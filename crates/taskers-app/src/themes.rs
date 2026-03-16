@@ -19,6 +19,17 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "kanagawa",
 ];
 
+/// Map a theme name to its display family for grouped presentation.
+pub fn theme_family(name: &str) -> &'static str {
+    match name {
+        "dark" => "Default",
+        n if n.starts_with("catppuccin-") => "Catppuccin",
+        n if n.starts_with("tokyo-night") => "Tokyo Night",
+        n if n.starts_with("rose-pine") => "Rose Pine",
+        _ => "Other",
+    }
+}
+
 /// Look up a built-in theme by config key. Returns `None` for unknown names.
 pub fn builtin_theme(name: &str) -> Option<ThemePalette> {
     match name {

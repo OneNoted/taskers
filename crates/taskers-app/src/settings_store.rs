@@ -136,6 +136,26 @@ impl ShortcutAction {
         }
     }
 
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::ToggleOverview | Self::CloseTerminal => "General",
+            Self::FocusLeft | Self::FocusRight | Self::FocusUp | Self::FocusDown => "Focus",
+            Self::NewWindowLeft
+            | Self::NewWindowRight
+            | Self::NewWindowUp
+            | Self::NewWindowDown => "New window",
+            Self::ResizeWindowLeft
+            | Self::ResizeWindowRight
+            | Self::ResizeWindowUp
+            | Self::ResizeWindowDown => "Resize window",
+            Self::ResizeSplitLeft
+            | Self::ResizeSplitRight
+            | Self::ResizeSplitUp
+            | Self::ResizeSplitDown => "Resize split",
+            Self::SplitRight | Self::SplitDown => "Split",
+        }
+    }
+
     pub fn default_accelerators(self) -> &'static [&'static str] {
         match self {
             Self::ToggleOverview => &["<Control><Alt>o"],
