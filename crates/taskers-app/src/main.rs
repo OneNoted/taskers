@@ -130,6 +130,7 @@ struct PaneCardWidgets {
     agent_icon: AgentIconWidget,
     title: Label,
     status_dot: Label,
+    header_actions: GtkBox,
     header_tabs: GtkBox,
     resize_button: Button,
     surface_tabs: SurfaceTabStripWidgets,
@@ -1665,6 +1666,7 @@ impl UiHandle {
             agent_icon,
             title,
             status_dot,
+            header_actions,
             header_tabs,
             resize_button,
             surface_tabs,
@@ -1710,6 +1712,7 @@ impl UiHandle {
         } else {
             card.root.remove_css_class("pane-card-active");
         }
+        card.header_actions.set_visible(pane.id == active_pane);
 
         for cls in &[
             "status-dot-normal",
