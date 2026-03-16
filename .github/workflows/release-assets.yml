@@ -1,0 +1,180 @@
+name: Release Assets
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  linux-bundle:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux bundle tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zig xvfb libgtk-4-dev libadwaita-1-dev
+
+      - name: Build Linux bundle
+        run: bash scripts/build_linux_bundle.sh
+
+      - name: Run Linux smoke checks
+        run: |
+          bash scripts/smoke_taskers_ui.sh
+          bash scripts/smoke_taskers_focus_churn.sh
+
+      - name: Upload Linux bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundle
+          path: dist/taskers-linux-bundle-v*.tar.xz
+
+  macos-preview:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-15
+          - macos-15-intel
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install macOS build tools
+        run: |
+          brew update
+          brew install xcodegen zig
+
+      - name: Generate Xcode project
+        run: bash scripts/generate_macos_project.sh
+
+      - name: Run AppKit tests
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project macos/Taskers.xcodeproj \
+            -scheme TaskersMac \
+            -configuration Debug \
+            -derivedDataPath build/macos/DerivedData \
+            -resultBundlePath build/macos/Taskers-${{ matrix.runner }}.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            | tee build/macos/xcodebuild-test-${{ matrix.runner }}.log
+
+      - name: Build Taskers.app
+        run: |
+          xcodebuild build \
+            -project macos/Taskers.xcodeproj \
+            -scheme TaskersMac \
+            -configuration Release \
+            -derivedDataPath build/macos/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Sign Taskers.app
+        run: bash scripts/sign_macos_app.sh
+
+      - name: Package macOS app zip
+        run: bash scripts/package_macos_app_zip.sh
+
+      - name: Upload macOS app zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-app-${{ matrix.runner }}
+          path: |
+            dist/taskers-macos-app-v*.zip
+            build/macos/Taskers-${{ matrix.runner }}.xcresult
+            build/macos/xcodebuild-test-${{ matrix.runner }}.log
+
+  macos-universal-dmg:
+    runs-on: macos-15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install macOS build tools
+        run: |
+          brew update
+          brew install xcodegen zig
+
+      - name: Generate Xcode project
+        run: bash scripts/generate_macos_project.sh
+
+      - name: Build universal Taskers.app
+        run: |
+          xcodebuild build \
+            -project macos/Taskers.xcodeproj \
+            -scheme TaskersMac \
+            -configuration Release \
+            -derivedDataPath build/macos/DerivedData \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Sign universal Taskers.app
+        run: bash scripts/sign_macos_app.sh
+
+      - name: Build universal DMG
+        run: bash scripts/build_macos_dmg.sh
+
+      - name: Upload universal DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal-dmg
+          path: dist/Taskers-v*-universal2.dmg
+
+  release-manifest:
+    needs:
+      - linux-bundle
+      - macos-preview
+      - macos-universal-dmg
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download built assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten downloaded artifacts
+        run: |
+          mkdir -p dist/release
+          find dist -type f -exec cp {} dist/release/ \;
+
+      - name: Build release manifest
+        run: python3 scripts/build_release_manifest.py --dist-dir dist/release
+
+      - name: Upload release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: dist/release/taskers-manifest-v*.json

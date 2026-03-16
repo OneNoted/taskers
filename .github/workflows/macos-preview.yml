@@ -13,6 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         runner:
+          - macos-14
           - macos-15
           - macos-15-intel
     runs-on: ${{ matrix.runner }}
@@ -38,7 +39,7 @@ jobs:
           cargo check --workspace
 
       - name: Generate Xcode project
-        run: ./scripts/generate_macos_project.sh
+        run: bash scripts/generate_macos_project.sh
 
       - name: Build and test Taskers.app
         run: |
@@ -52,6 +53,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             | tee build/macos/xcodebuild-test-${{ matrix.runner }}.log
+
+      - name: Sign debug app bundle
+        run: bash scripts/sign_macos_app.sh build/macos/DerivedData build/macos/DerivedData/Build/Products/Debug/Taskers.app
 
       - name: Smoke launch bundled app
         run: |

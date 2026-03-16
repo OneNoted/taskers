@@ -1,5 +1,5 @@
 [package]
-name = "taskers"
+name = "taskers-gtk"
 description = "Agent-first terminal workspace app with a Niri-like tiling model."
 edition.workspace = true
 homepage.workspace = true
@@ -7,9 +7,10 @@ license.workspace = true
 readme = "../../README.md"
 repository.workspace = true
 version.workspace = true
+publish = false
 
 [[bin]]
-name = "taskers"
+name = "taskers-gtk"
 path = "src/main.rs"
 
 [dependencies]

@@ -15,7 +15,7 @@ Use this checklist before publishing a new `taskers` release.
 - Regenerate the README screenshots:
 
 ```bash
-./scripts/capture_demo_screenshots.sh
+bash scripts/capture_demo_screenshots.sh
 ```
 
 - Review the updated files in `docs/screenshots/`.
@@ -32,20 +32,45 @@ cargo test
 - Run the GTK smoke checks:
 
 ```bash
-./scripts/smoke_taskers_ui.sh
-./scripts/smoke_taskers_focus_churn.sh
+bash scripts/smoke_taskers_ui.sh
+bash scripts/smoke_taskers_focus_churn.sh
 ```
 
-- Build the Ghostty runtime asset that the published crate expects:
+- Build the Linux app bundle that the published launcher expects:
 
 ```bash
-./scripts/build_ghostty_runtime_bundle.sh
+bash scripts/build_linux_bundle.sh
 ```
 
 The output asset name must match:
 
 ```text
-taskers-ghostty-runtime-v<version>-<target>.tar.xz
+taskers-linux-bundle-v<version>-<target>.tar.xz
+```
+
+- Build the macOS release assets on macOS:
+
+```bash
+bash scripts/generate_macos_project.sh
+xcodebuild build \
+  -project macos/Taskers.xcodeproj \
+  -scheme TaskersMac \
+  -configuration Release \
+  -derivedDataPath build/macos/DerivedData \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO
+bash scripts/sign_macos_app.sh
+bash scripts/package_macos_app_zip.sh
+bash scripts/build_macos_dmg.sh
+```
+
+- By default `scripts/sign_macos_app.sh` applies an ad hoc signature so the published launcher can verify the app bundle before launch.
+- Set `TASKERS_MACOS_CODESIGN_IDENTITY` to a Developer ID Application certificate name when producing release assets you intend to distribute outside local testing.
+
+- Build the release manifest from the generated assets:
+
+```bash
+python3 scripts/build_release_manifest.py
 ```
 
 - Dry-run crate publishing in dependency order:
@@ -62,7 +87,12 @@ cargo publish --dry-run -p taskers
 ## 4. Publish
 
 - Create a GitHub release draft tagged `v<version>`.
-- Upload the matching Ghostty runtime bundle from `dist/`.
+- Upload the generated assets from `dist/`:
+  - `taskers-manifest-v<version>.json`
+  - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
+  - `taskers-macos-app-v<version>-aarch64-apple-darwin.zip`
+  - `taskers-macos-app-v<version>-x86_64-apple-darwin.zip`
+  - `Taskers-v<version>-universal2.dmg`
 - Publish the crates to crates.io in the same order as the dry-run:
 
 ```bash
@@ -76,11 +106,12 @@ cargo publish -p taskers
 
 ## 5. Post-Publish Check
 
-- Verify a clean install path:
+- Verify clean launcher installs:
 
 ```bash
 cargo install taskers --locked
 taskers --demo
 ```
 
-- Confirm the published crate can bootstrap the matching runtime asset on first launch.
+- Confirm the published launcher downloads the exact version-matched bundle on first launch.
+- Confirm `cargo install taskers-cli --bin taskersctl --locked` still works as the standalone helper path.

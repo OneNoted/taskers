@@ -211,6 +211,15 @@ pub fn default_ghostty_runtime_dir() -> PathBuf {
     TaskersPaths::detect().ghostty_runtime_dir
 }
 
+pub fn default_release_install_root() -> PathBuf {
+    TaskersPaths::detect().data_dir.join("releases")
+}
+
+pub fn default_macos_applications_link_path() -> Option<PathBuf> {
+    (HostPlatform::detect() == HostPlatform::Macos)
+        .then_some(home_applications_link_path(&EnvPaths::current()))
+}
+
 fn platform_config_dir(platform: HostPlatform, env_paths: &EnvPaths) -> PathBuf {
     match platform {
         HostPlatform::Macos => home_library_dir(env_paths, "Application Support"),
@@ -338,6 +347,14 @@ fn home_library_cache_dir(env_paths: &EnvPaths) -> PathBuf {
         .unwrap_or_else(|| temp_root().join("cache"))
 }
 
+fn home_applications_link_path(env_paths: &EnvPaths) -> PathBuf {
+    env_paths
+        .home
+        .clone()
+        .map(|path| path.join("Applications").join("Taskers.app"))
+        .unwrap_or_else(|| temp_root().join("applications").join("Taskers.app"))
+}
+
 fn temp_root() -> PathBuf {
     env::temp_dir().join("taskers")
 }
@@ -431,5 +448,46 @@ mod tests {
             &PathBuf::from("/work/runtime/shell")
         );
         assert_eq!(paths.ghostty_runtime_dir(), &PathBuf::from("/work/ghostty"));
+    }
+
+    #[test]
+    fn release_install_roots_follow_platform_defaults() {
+        let mac = EnvPaths {
+            home: Some(PathBuf::from("/Users/notes")),
+            ..EnvPaths::default()
+        };
+        let linux = EnvPaths {
+            home: Some(PathBuf::from("/home/notes")),
+            xdg_data_home: Some(PathBuf::from("/tmp/data")),
+            ..EnvPaths::default()
+        };
+
+        assert_eq!(
+            TaskersPaths::from_env(HostPlatform::Macos, &mac)
+                .data_dir()
+                .join("releases"),
+            PathBuf::from(format!(
+                "/Users/notes/Library/Application Support/{APP_ID}/releases"
+            ))
+        );
+        assert_eq!(
+            TaskersPaths::from_env(HostPlatform::Linux, &linux)
+                .data_dir()
+                .join("releases"),
+            PathBuf::from("/tmp/data/taskers/releases")
+        );
+    }
+
+    #[test]
+    fn macos_applications_link_uses_home_applications() {
+        let env = EnvPaths {
+            home: Some(PathBuf::from("/Users/notes")),
+            ..EnvPaths::default()
+        };
+
+        assert_eq!(
+            super::home_applications_link_path(&env),
+            PathBuf::from("/Users/notes/Applications/Taskers.app")
+        );
     }
 }
