@@ -8,6 +8,7 @@ Use this checklist before publishing a new `taskers` release.
 - Describe the current change with `jj desc -m "<type>: <summary>"` if needed.
 - Split unrelated work into separate changes before publishing.
 - Bump the workspace version in `Cargo.toml` and update any internal dependency version pins that still reference the previous release.
+- Do not run the publish dry-runs until the version bump is done everywhere. Re-running `cargo publish --dry-run` against an already-published version will verify packaged siblings against crates.io's existing releases instead of your local unpublished changes.
 
 ## 2. Refresh Release Assets
 
