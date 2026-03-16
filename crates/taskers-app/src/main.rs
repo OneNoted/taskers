@@ -5050,6 +5050,12 @@ fn sync_surface_tabs(
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) {
+    let pane_is_active = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .is_some_and(|workspace| workspace.active_pane == pane.id);
     let desired_surface_ids = pane.surface_ids().collect::<HashSet<_>>();
     let model_order = pane.surface_ids().collect::<Vec<_>>();
     let animations_enabled = ui.settings.borrow().animations_enabled;
@@ -5118,6 +5124,15 @@ fn sync_surface_tabs(
     let layout = compute_surface_tab_strip_layout(&card.surface_tabs, &display_order);
     set_surface_tab_layout(&card.surface_tabs, layout, animations_enabled);
     apply_surface_tab_widgets(&card.surface_tabs);
+
+    if !pane_is_active {
+        clear_box(&card.header_tabs);
+        card.header_tabs.set_visible(false);
+        card.header_tabs.set_hexpand(false);
+        card.title.set_visible(true);
+        card.surface_tabs.root.set_visible(false);
+        return;
+    }
 
     // Decide between inline tabs (in pane-header) vs. standalone strip vs. hidden (single surface)
     let surface_count = pane.surfaces.len();
