@@ -128,6 +128,7 @@ struct PaneCardWidgets {
     status_dot: Label,
     surface_tabs: SurfaceTabStripWidgets,
     terminal_host: GtkBox,
+    displayed_surface_id: Rc<Cell<Option<SurfaceId>>>,
     focus_target: Widget,
 }
 
@@ -1487,6 +1488,7 @@ impl UiHandle {
         root.add_controller(click);
 
         let card = PaneCardWidgets {
+            displayed_surface_id: Rc::new(Cell::new(None)),
             focus_target: root.clone().upcast(),
             root,
             agent_icon,
@@ -1500,7 +1502,7 @@ impl UiHandle {
         let card = PaneCardWidgets { ..card };
         self.pane_cards.borrow_mut().insert(pane.id, card.clone());
         sync_surface_tabs(self, workspace_id, pane, &card);
-        refresh_terminal_body(self, workspace_id, pane, &card);
+        sync_terminal_body(self, workspace_id, pane, &card);
         card
     }
 
@@ -1563,7 +1565,7 @@ impl UiHandle {
         card.status_dot
             .set_tooltip_text(Some(pane_attention.label()));
         sync_surface_tabs(self, workspace_id, pane, &card);
-        refresh_terminal_body(self, workspace_id, pane, &card);
+        sync_terminal_body(self, workspace_id, pane, &card);
     }
 
     fn try_focus_pane_input(
@@ -4088,6 +4090,9 @@ fn initialize_terminal_body(
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) -> Widget {
+    card.displayed_surface_id
+        .set(pane.active_surface().map(|surface| surface.id));
+
     if let Some(widget) = ui.terminal_widget(workspace_id, pane) {
         widget.set_focusable(true);
         card.terminal_host.append(&widget);
@@ -4174,14 +4179,30 @@ fn initialize_terminal_body(
     entry.upcast()
 }
 
-fn refresh_terminal_body(
+fn sync_terminal_body(
     ui: &Rc<UiHandle>,
     workspace_id: taskers_domain::WorkspaceId,
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) {
+    if !terminal_body_needs_refresh(
+        card.displayed_surface_id.get(),
+        pane.active_surface().map(|surface| surface.id),
+        card.terminal_host.first_child().is_some(),
+    ) {
+        return;
+    }
+
     clear_box(&card.terminal_host);
     let _ = initialize_terminal_body(ui, workspace_id, pane, card);
+}
+
+fn terminal_body_needs_refresh(
+    displayed_surface_id: Option<SurfaceId>,
+    next_surface_id: Option<SurfaceId>,
+    has_child: bool,
+) -> bool {
+    !has_child || displayed_surface_id != next_surface_id
 }
 
 fn create_workspace_window_from_pane(
@@ -6691,4 +6712,21 @@ fn humanize_theme_name(name: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_body_refreshes_when_surface_changes_or_child_is_missing() {
+        let first = SurfaceId::new();
+        let second = SurfaceId::new();
+
+        assert!(!terminal_body_needs_refresh(Some(first), Some(first), true));
+        assert!(terminal_body_needs_refresh(Some(first), Some(second), true));
+        assert!(terminal_body_needs_refresh(Some(first), Some(first), false));
+        assert!(terminal_body_needs_refresh(None, Some(first), true));
+        assert!(!terminal_body_needs_refresh(None, None, true));
+    }
 }
