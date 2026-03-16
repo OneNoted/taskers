@@ -88,6 +88,7 @@ struct UiHandle {
     backend_choice: BackendChoice,
     application: adw::Application,
     window: adw::ApplicationWindow,
+    header_bar: adw::HeaderBar,
     overlay: adw::ToastOverlay,
     crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
@@ -362,6 +363,7 @@ impl UiHandle {
         app_config: AppConfig,
         application: adw::Application,
         window: adw::ApplicationWindow,
+        header_bar: adw::HeaderBar,
         overlay: adw::ToastOverlay,
         crash_reporter: CrashReporter,
         ghostty_host: Option<GhosttyHost>,
@@ -372,6 +374,7 @@ impl UiHandle {
             backend_choice,
             application,
             window,
+            header_bar,
             overlay,
             crash_reporter,
             ghostty_host,
@@ -1894,8 +1897,7 @@ fn build_ui(
     });
 
     let header = adw::HeaderBar::new();
-    let title = adw::WindowTitle::builder().title("taskers").build();
-    header.set_title_widget(Some(&title));
+    header.add_css_class("workspace-headerbar");
 
     let overlay = adw::ToastOverlay::new();
     overlay.set_vexpand(true);
@@ -1918,6 +1920,7 @@ fn build_ui(
         startup.app_config,
         app.clone(),
         window.clone(),
+        header,
         overlay,
         startup.crash_reporter.clone(),
         startup.ghostty_host,
@@ -2238,20 +2241,11 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     // --- Main column ---
     let main_column = GtkBox::new(Orientation::Vertical, 0);
 
-    // --- Workspace header (slim replacement for old toolbar) ---
-    let workspace_header = GtkBox::new(Orientation::Horizontal, 8);
-    workspace_header.add_css_class("workspace-header");
-    workspace_header.set_size_request(-1, 32);
-    workspace_header.set_margin_start(10);
-    workspace_header.set_margin_end(10);
-    workspace_header.set_valign(Align::Center);
-
+    // --- Pack workspace controls into the CSD HeaderBar ---
     let workspace_name_label = Label::new(Some(""));
     workspace_name_label.add_css_class("workspace-header-label");
-    workspace_name_label.set_xalign(0.0);
-    workspace_name_label.set_hexpand(true);
     workspace_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    workspace_header.append(&workspace_name_label);
+    ui.header_bar.set_title_widget(Some(&workspace_name_label));
 
     let overview_button = Button::with_label("Overview");
     overview_button.add_css_class("workspace-header-action");
@@ -2260,23 +2254,9 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     overview_button.connect_clicked(move |_| {
         overview_ui.toggle_overview();
     });
-    workspace_header.append(&overview_button);
+    ui.header_bar.pack_end(&overview_button);
 
-    // New-window popover button
-    let new_window_btn = Button::with_label("New Window");
-    new_window_btn.add_css_class("workspace-header-action");
-    new_window_btn.set_tooltip_text(Some("Create a new top-level window"));
-    let nw_parent = new_window_btn.clone();
-    let nw_ui = Rc::clone(ui);
-    new_window_btn.connect_clicked(move |_| {
-        let Some(workspace_id) = nw_ui.app_state.snapshot_model().active_workspace_id() else {
-            return;
-        };
-        show_new_window_popover(&nw_parent, &nw_ui, workspace_id, None, None);
-    });
-    workspace_header.append(&new_window_btn);
-
-    // Settings button
+    // Settings button (pack first so it appears rightmost)
     let settings_button = Button::with_label("\u{2699}");
     settings_button.add_css_class("workspace-header-action");
     settings_button.set_tooltip_text(Some("Settings"));
@@ -2284,9 +2264,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     settings_button.connect_clicked(move |_| {
         settings_ui.present_settings_dialog();
     });
-    workspace_header.append(&settings_button);
-
-    main_column.append(&workspace_header);
+    ui.header_bar.pack_end(&settings_button);
 
     let layout_host = Fixed::new();
     layout_host.set_hexpand(true);

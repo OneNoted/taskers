@@ -664,13 +664,14 @@ pub fn generate_css(p: &ThemePalette) -> String {
         error_24 = rgba(p.error, 0.24),
     );
 
-    // ── Workspace header ──
+    // ── Workspace headerbar ──
     let _ = write!(
         w,
         "
-        .workspace-header {{
+        .workspace-headerbar {{
+            background: {bg};
             border-bottom: 1px solid {border_07};
-            padding: 6px 0;
+            min-height: 32px;
         }}
 
         .workspace-header-label {{
@@ -700,6 +701,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
             color: {text_bright};
         }}
         ",
+        bg = p.base.to_hex(),
         border_06 = rgba(p.border, 0.06),
         border_07 = rgba(p.border, 0.07),
         accent_14 = rgba(p.accent, 0.14),
