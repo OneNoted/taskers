@@ -49,6 +49,8 @@ pub struct AppConfig {
     pub shell: ShellConfig,
     #[serde(default = "default_animations_enabled")]
     pub animations_enabled: bool,
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -57,6 +59,7 @@ impl Default for AppConfig {
             keybindings: KeybindingConfig::default(),
             shell: ShellConfig::default(),
             animations_enabled: true,
+            theme: None,
         }
     }
 }
