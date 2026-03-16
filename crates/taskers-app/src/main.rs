@@ -88,7 +88,6 @@ struct UiHandle {
     backend_choice: BackendChoice,
     application: adw::Application,
     window: adw::ApplicationWindow,
-    header_bar: adw::HeaderBar,
     overlay: adw::ToastOverlay,
     crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
@@ -366,7 +365,6 @@ impl UiHandle {
         app_config: AppConfig,
         application: adw::Application,
         window: adw::ApplicationWindow,
-        header_bar: adw::HeaderBar,
         overlay: adw::ToastOverlay,
         crash_reporter: CrashReporter,
         ghostty_host: Option<GhosttyHost>,
@@ -377,7 +375,6 @@ impl UiHandle {
             backend_choice,
             application,
             window,
-            header_bar,
             overlay,
             crash_reporter,
             ghostty_host,
@@ -1376,12 +1373,7 @@ impl UiHandle {
             let model = resize_ui.app_state.snapshot_model();
             if let Some(ws) = model.workspaces.get(&workspace_id) {
                 if let Some(win_id) = ws.window_for_pane(resize_pane_id) {
-                    show_resize_window_popover(
-                        &resize_btn_ref,
-                        &resize_ui,
-                        workspace_id,
-                        win_id,
-                    );
+                    show_resize_window_popover(&resize_btn_ref, &resize_ui, workspace_id, win_id);
                 }
             }
         });
@@ -1945,13 +1937,9 @@ fn build_ui(
         glib::Propagation::Proceed
     });
 
-    let header = adw::HeaderBar::new();
-    header.add_css_class("workspace-headerbar");
-
     let overlay = adw::ToastOverlay::new();
     overlay.set_vexpand(true);
     let root = GtkBox::new(Orientation::Vertical, 0);
-    root.append(&header);
     root.append(&overlay);
     window.set_content(Some(&root));
 
@@ -1969,7 +1957,6 @@ fn build_ui(
         startup.app_config,
         app.clone(),
         window.clone(),
-        header,
         overlay,
         startup.crash_reporter.clone(),
         startup.ghostty_host,
@@ -2290,11 +2277,63 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     // --- Main column ---
     let main_column = GtkBox::new(Orientation::Vertical, 0);
 
-    // --- Pack workspace controls into the CSD HeaderBar ---
+    // --- Workspace header bar (custom, not adw::HeaderBar) ---
+    let workspace_header = GtkBox::new(Orientation::Horizontal, 8);
+    workspace_header.add_css_class("workspace-header");
+    workspace_header.set_size_request(-1, 32);
+    workspace_header.set_margin_start(10);
+    workspace_header.set_margin_end(10);
+    workspace_header.set_margin_top(4);
+    workspace_header.set_margin_bottom(2);
+
+    let workspace_name_button = Button::new();
+    workspace_name_button.add_css_class("flat");
+    workspace_name_button.add_css_class("workspace-header-title-btn");
     let workspace_name_label = Label::new(Some(""));
     workspace_name_label.add_css_class("workspace-header-label");
     workspace_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    ui.header_bar.set_title_widget(Some(&workspace_name_label));
+    workspace_name_button.set_child(Some(&workspace_name_label));
+    workspace_name_button.set_tooltip_text(Some("Click to rename workspace"));
+    let rename_ui = Rc::clone(ui);
+    let rename_parent = workspace_name_button.clone();
+    workspace_name_button.connect_clicked(move |_| {
+        let model = rename_ui.app_state.snapshot_model();
+        let Some(ws) = model.active_workspace() else {
+            return;
+        };
+        let workspace_id = ws.id;
+        let popover = gtk::Popover::new();
+        popover.set_parent(&rename_parent);
+        let entry = Entry::new();
+        entry.set_text(&ws.label);
+        entry.add_css_class("workspace-rename-entry");
+        popover.set_child(Some(&entry));
+        let commit_ui = Rc::clone(&rename_ui);
+        let commit_pop = popover.clone();
+        entry.connect_activate(move |entry| {
+            let new_label = entry.text().to_string();
+            commit_pop.popdown();
+            if !new_label.is_empty() {
+                commit_ui.dispatch(ControlCommand::RenameWorkspace {
+                    workspace_id,
+                    label: new_label,
+                });
+            }
+        });
+        let pop_cleanup = popover.clone();
+        popover.connect_closed(move |_| {
+            pop_cleanup.unparent();
+        });
+        popover.popup();
+        entry.grab_focus();
+        entry.select_region(0, -1);
+    });
+    workspace_header.append(&workspace_name_button);
+
+    // Spacer
+    let spacer = Label::new(None);
+    spacer.set_hexpand(true);
+    workspace_header.append(&spacer);
 
     let overview_button = Button::with_label("Overview");
     overview_button.add_css_class("workspace-header-action");
@@ -2303,9 +2342,21 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     overview_button.connect_clicked(move |_| {
         overview_ui.toggle_overview();
     });
-    ui.header_bar.pack_end(&overview_button);
+    workspace_header.append(&overview_button);
 
-    // Settings button (pack first so it appears rightmost)
+    let new_window_btn = Button::with_label("New Window");
+    new_window_btn.add_css_class("workspace-header-action");
+    new_window_btn.set_tooltip_text(Some("Create a new top-level window"));
+    let nw_parent = new_window_btn.clone();
+    let nw_ui = Rc::clone(ui);
+    new_window_btn.connect_clicked(move |_| {
+        let Some(workspace_id) = nw_ui.app_state.snapshot_model().active_workspace_id() else {
+            return;
+        };
+        show_new_window_popover(&nw_parent, &nw_ui, workspace_id, None, None);
+    });
+    workspace_header.append(&new_window_btn);
+
     let settings_button = Button::with_label("\u{2699}");
     settings_button.add_css_class("workspace-header-action");
     settings_button.set_tooltip_text(Some("Settings"));
@@ -2313,7 +2364,22 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     settings_button.connect_clicked(move |_| {
         settings_ui.present_settings_dialog();
     });
-    ui.header_bar.pack_end(&settings_button);
+    workspace_header.append(&settings_button);
+
+    // Explicit close button (CSD window controls are hidden under prefer-no-csd)
+    let close_button = Button::with_label("\u{00d7}");
+    close_button.add_css_class("workspace-header-action");
+    close_button.add_css_class("workspace-header-close");
+    close_button.set_tooltip_text(Some("Close window"));
+    let close_window = ui.window.clone();
+    close_button.connect_clicked(move |_| {
+        close_window.close();
+    });
+    workspace_header.append(&close_button);
+
+    let workspace_handle = gtk::WindowHandle::new();
+    workspace_handle.set_child(Some(&workspace_header));
+    main_column.append(&workspace_handle);
 
     let layout_host = Fixed::new();
     layout_host.set_hexpand(true);
@@ -4794,33 +4860,85 @@ fn sync_surface_tabs(
 
     // Decide between inline tabs (in pane-header) vs. standalone strip vs. hidden (single surface)
     let surface_count = pane.surfaces.len();
-    if surface_count <= 1 {
-        // Single surface: hide both tab displays, show title
-        card.surface_tabs.root.set_visible(false);
-        card.header_tabs.set_visible(false);
-        card.title.set_visible(true);
-    } else {
-        // Estimate whether tabs fit inline in the header.
-        // Reserve ~200px for the action buttons on the right side of the header.
-        let header_width = card.header.allocated_width();
-        let action_buttons_width = 200;
-        let available_for_tabs = (header_width - action_buttons_width).max(0);
-        let tab_width_estimate = SURFACE_TAB_MIN_WIDTH + SURFACE_TAB_GAP;
-        let max_inline_tabs = available_for_tabs / tab_width_estimate;
-
-        if surface_count as i32 <= max_inline_tabs && surface_count <= 6 {
-            // Inline mode: show tabs in the header row
+    match surface_tab_presentation(surface_count, card.header.allocated_width()) {
+        SurfaceTabPresentation::AddOnly => {
+            sync_single_surface_add_button(ui, workspace_id, pane, card);
+            card.header_tabs.set_hexpand(false);
+            card.header_tabs.set_visible(true);
+            card.title.set_visible(true);
+            card.surface_tabs.root.set_visible(false);
+        }
+        SurfaceTabPresentation::Inline => {
             sync_inline_header_tabs(ui, workspace_id, pane, card);
+            card.header_tabs.set_hexpand(true);
             card.header_tabs.set_visible(true);
             card.title.set_visible(false);
             card.surface_tabs.root.set_visible(false);
-        } else {
-            // Overflow: use the standalone tab strip
+        }
+        SurfaceTabPresentation::Strip => {
+            clear_box(&card.header_tabs);
             card.header_tabs.set_visible(false);
+            card.header_tabs.set_hexpand(false);
             card.title.set_visible(true);
             card.surface_tabs.root.set_visible(true);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceTabPresentation {
+    AddOnly,
+    Inline,
+    Strip,
+}
+
+fn surface_tab_presentation(surface_count: usize, header_width: i32) -> SurfaceTabPresentation {
+    if surface_count <= 1 {
+        return SurfaceTabPresentation::AddOnly;
+    }
+
+    let effective_header_width = if header_width > 0 {
+        header_width
+    } else {
+        DEFAULT_WORKSPACE_WINDOW_WIDTH
+    };
+
+    // Reserve space for status + pane/window action buttons on the right side
+    // of the header so inline tabs only appear when they comfortably fit.
+    let action_buttons_width = 200;
+    let available_for_tabs = (effective_header_width - action_buttons_width).max(0);
+    let tab_width_estimate = SURFACE_TAB_MIN_WIDTH + SURFACE_TAB_GAP;
+    let max_inline_tabs = available_for_tabs / tab_width_estimate;
+
+    if surface_count <= 6 && surface_count as i32 <= max_inline_tabs {
+        SurfaceTabPresentation::Inline
+    } else {
+        SurfaceTabPresentation::Strip
+    }
+}
+
+fn sync_single_surface_add_button(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane: &PaneRecord,
+    card: &PaneCardWidgets,
+) {
+    clear_box(&card.header_tabs);
+
+    let add_btn = Button::with_label("+");
+    add_btn.add_css_class("flat");
+    add_btn.add_css_class("inline-tab-add");
+    add_btn.set_tooltip_text(Some("Open another surface"));
+    let add_ui = Rc::clone(ui);
+    let add_pane_id = pane.id;
+    add_btn.connect_clicked(move |_| {
+        add_ui.dispatch(ControlCommand::CreateSurface {
+            workspace_id,
+            pane_id: add_pane_id,
+            kind: PaneKind::Terminal,
+        });
+    });
+    card.header_tabs.append(&add_btn);
 }
 
 fn sync_inline_header_tabs(
@@ -4833,23 +4951,38 @@ fn sync_inline_header_tabs(
     let active_surface_id = pane.active_surface;
     for surface in pane.surfaces.values() {
         let tab_title = display_surface_title(surface);
-        let tab_btn = Button::new();
-        tab_btn.add_css_class("flat");
-        tab_btn.add_css_class("inline-tab");
+        let tab_root = GtkBox::new(Orientation::Horizontal, 4);
+        tab_root.add_css_class("inline-tab");
         if surface.id == active_surface_id {
-            tab_btn.add_css_class("inline-tab-active");
+            tab_root.add_css_class("inline-tab-active");
         }
         if surface.attention != AttentionState::Normal {
-            tab_btn.add_css_class(&format!(
+            tab_root.add_css_class(&format!(
                 "inline-tab-state-{}",
                 attention_state_slug(surface.attention)
             ));
         }
-        let tab_content = GtkBox::new(Orientation::Horizontal, 4);
+
+        let focus_button = Button::new();
+        focus_button.add_css_class("flat");
+        focus_button.add_css_class("inline-tab-button");
         let label = Label::new(Some(&tab_title));
+        label.add_css_class("inline-tab-label");
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         label.set_max_width_chars(16);
-        tab_content.append(&label);
+        focus_button.set_child(Some(&label));
+        let focus_ui = Rc::clone(ui);
+        let focus_surface_id = surface.id;
+        let focus_pane_id = pane.id;
+        focus_button.connect_clicked(move |_| {
+            focus_ui.dispatch(ControlCommand::FocusSurface {
+                workspace_id,
+                pane_id: focus_pane_id,
+                surface_id: focus_surface_id,
+            });
+        });
+        tab_root.append(&focus_button);
+
         let close = Button::with_label("\u{00d7}");
         close.add_css_class("flat");
         close.add_css_class("inline-tab-close");
@@ -4863,19 +4996,8 @@ fn sync_inline_header_tabs(
                 surface_id: close_surface_id,
             });
         });
-        tab_content.append(&close);
-        tab_btn.set_child(Some(&tab_content));
-        let focus_ui = Rc::clone(ui);
-        let focus_surface_id = surface.id;
-        let focus_pane_id = pane.id;
-        tab_btn.connect_clicked(move |_| {
-            focus_ui.dispatch(ControlCommand::FocusSurface {
-                workspace_id,
-                pane_id: focus_pane_id,
-                surface_id: focus_surface_id,
-            });
-        });
-        card.header_tabs.append(&tab_btn);
+        tab_root.append(&close);
+        card.header_tabs.append(&tab_root);
     }
     // Add "+" button for creating new surface
     let add_btn = Button::with_label("+");
@@ -7250,5 +7372,37 @@ mod tests {
         assert!(terminal_body_needs_refresh(Some(first), Some(first), false));
         assert!(terminal_body_needs_refresh(None, Some(first), true));
         assert!(!terminal_body_needs_refresh(None, None, true));
+    }
+
+    #[test]
+    fn surface_tab_presentation_preserves_single_surface_add_affordance() {
+        assert_eq!(
+            surface_tab_presentation(1, 720),
+            SurfaceTabPresentation::AddOnly
+        );
+    }
+
+    #[test]
+    fn surface_tab_presentation_only_inlines_when_tabs_fit() {
+        assert_eq!(
+            surface_tab_presentation(3, 640),
+            SurfaceTabPresentation::Inline
+        );
+        assert_eq!(
+            surface_tab_presentation(3, 320),
+            SurfaceTabPresentation::Strip
+        );
+        assert_eq!(
+            surface_tab_presentation(7, 1600),
+            SurfaceTabPresentation::Strip
+        );
+    }
+
+    #[test]
+    fn surface_tab_presentation_uses_default_width_before_header_is_allocated() {
+        assert_eq!(
+            surface_tab_presentation(3, 0),
+            SurfaceTabPresentation::Inline
+        );
     }
 }

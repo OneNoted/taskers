@@ -367,15 +367,9 @@ pub fn generate_css(p: &ThemePalette) -> String {
             line-height: 1.35;
         }}
 
-        headerbar {{
-            background: {base};
-            border-bottom: 1px solid {border_07};
-            box-shadow: none;
-        }}
         ",
         base = p.base.to_hex(),
         text = p.text.to_hex(),
-        border_07 = rgba(p.border, 0.07),
     );
 
     // ── Paned separators ──
@@ -664,14 +658,12 @@ pub fn generate_css(p: &ThemePalette) -> String {
         error_24 = rgba(p.error, 0.24),
     );
 
-    // ── Workspace headerbar ──
+    // ── Workspace header ──
     let _ = write!(
         w,
         "
-        .workspace-headerbar {{
-            background: {bg};
+        .workspace-header {{
             border-bottom: 1px solid {border_07};
-            min-height: 32px;
         }}
 
         .workspace-header-label {{
@@ -700,11 +692,31 @@ pub fn generate_css(p: &ThemePalette) -> String {
             background: {accent_14};
             color: {text_bright};
         }}
+
+        .workspace-header-title-btn {{
+            background: transparent;
+            padding: 0 6px;
+            min-height: 24px;
+        }}
+
+        .workspace-header-title-btn:hover {{
+            background: {border_06};
+        }}
+
+        .workspace-header-close {{
+            color: {text_faint};
+        }}
+
+        .workspace-header-close:hover {{
+            background: {error_15};
+            color: {error};
+        }}
         ",
-        bg = p.base.to_hex(),
         border_06 = rgba(p.border, 0.06),
         border_07 = rgba(p.border, 0.07),
         accent_14 = rgba(p.accent, 0.14),
+        error = p.error.to_hex(),
+        error_15 = rgba(p.error, 0.15),
         text_bright = p.text_bright.to_hex(),
         text_faint = p.text_faint.to_hex(),
         text_muted = p.text_muted.to_hex(),
@@ -1261,6 +1273,26 @@ pub fn generate_css(p: &ThemePalette) -> String {
         .inline-tab-active {{
             background: {inline_active_bg};
             border-color: {inline_active_border};
+            color: {text_bright};
+        }}
+
+        .inline-tab-button {{
+            padding: 0;
+            min-height: 0;
+            background: transparent;
+            color: inherit;
+        }}
+
+        .inline-tab-button:hover {{
+            background: transparent;
+        }}
+
+        .inline-tab-label {{
+            color: {text_dim};
+            font-size: 0.74rem;
+        }}
+
+        .inline-tab-active .inline-tab-label {{
             color: {text_bright};
         }}
 
