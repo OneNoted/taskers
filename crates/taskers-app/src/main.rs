@@ -1061,16 +1061,23 @@ impl UiHandle {
         let focused_widget_type = gtk::prelude::GtkWindowExt::focus(&self.window)
             .map(|widget| widget.type_().name().to_string());
         let active_pane_focus_widget_type = model.active_workspace().and_then(|workspace| {
-            self.pane_cards
-                .borrow()
-                .get(&workspace.active_pane)
-                .map(|card| card.focus_target.type_().name().to_string())
+            self.pane_cards.borrow().get(&workspace.active_pane).map(|card| {
+                pane_focus_target(self, workspace, workspace.active_pane, card)
+                    .type_()
+                    .name()
+                    .to_string()
+            })
         });
         let active_pane_focus_has_focus = model.active_workspace().is_some_and(|workspace| {
             self.pane_cards
                 .borrow()
                 .get(&workspace.active_pane)
-                .is_some_and(|card| widget_contains_window_focus(&self.window, &card.focus_target))
+                .is_some_and(|card| {
+                    widget_contains_window_focus(
+                        &self.window,
+                        &pane_focus_target(self, workspace, workspace.active_pane, card),
+                    )
+                })
         });
         let active_pane_card_has_focus = model.active_workspace().is_some_and(|workspace| {
             self.pane_cards
@@ -1576,11 +1583,7 @@ impl UiHandle {
             return false;
         };
 
-        let target = if card.focus_target.parent().is_some() {
-            card.focus_target
-        } else {
-            card.root.upcast()
-        };
+        let target = pane_focus_target(self, active_workspace, pane_id, &card);
 
         // Skip focus grab when the target (or a descendant like a Ghostty
         // surface) already holds window focus.  Prevents GTK4 ScrolledWindow
@@ -5227,6 +5230,31 @@ fn widget_contains_window_focus(window: &adw::ApplicationWindow, target: &Widget
         current = widget.parent();
     }
     false
+}
+
+fn pane_focus_target(
+    ui: &UiHandle,
+    workspace: &Workspace,
+    pane_id: taskers_domain::PaneId,
+    card: &PaneCardWidgets,
+) -> Widget {
+    let active_surface_widget = workspace
+        .panes
+        .get(&pane_id)
+        .and_then(|pane| pane.active_surface().map(|surface| surface.id))
+        .and_then(|surface_id| ui.ghostty_surfaces.borrow().get(&surface_id).cloned())
+        .filter(|widget| widget.parent().is_some());
+
+    active_surface_widget
+        .or_else(|| card.terminal_host.first_child())
+        .or_else(|| {
+            if card.focus_target.parent().is_some() {
+                Some(card.focus_target.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| card.root.clone().upcast())
 }
 
 fn widget_is_descendant_of(widget: &Widget, ancestor: &Widget) -> bool {
