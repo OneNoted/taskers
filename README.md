@@ -19,7 +19,6 @@ The first launch bootstraps the matching Ghostty runtime bundle when needed.
 
 ```bash
 cargo run -p taskers -- --demo
-./scripts/smoke_taskers_ui.sh
 ```
 
 Release checklist: [docs/release.md](docs/release.md)
