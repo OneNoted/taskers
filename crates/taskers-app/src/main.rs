@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -37,9 +37,10 @@ use taskers_control::{
 use taskers_domain::{
     ActivityItem, AppModel, AttentionState, DEFAULT_WORKSPACE_WINDOW_GAP,
     DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, Direction,
-    KEYBOARD_RESIZE_STEP, LayoutNode, MIN_WORKSPACE_WINDOW_HEIGHT, PaneKind, PaneMetadata,
-    PaneMetadataPatch, PaneRecord, SignalEvent, SignalKind, SurfaceId, SurfaceRecord, WindowFrame,
-    Workspace, WorkspaceAgentState, WorkspaceColumnId, WorkspaceViewport, WorkspaceWindowId,
+    KEYBOARD_RESIZE_STEP, LayoutNode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH,
+    PaneKind, PaneMetadata, PaneMetadataPatch, PaneRecord, SignalEvent, SignalKind, SurfaceId,
+    SurfaceRecord, WindowFrame, Workspace, WorkspaceAgentState, WorkspaceColumnId,
+    WorkspaceViewport, WorkspaceWindowId,
 };
 use taskers_ghostty::{
     BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, SurfaceDescriptor, TerminalBackend,
@@ -105,6 +106,7 @@ struct UiHandle {
     pending_focus_source: RefCell<Option<glib::SourceId>>,
     desktop_notifications: RefCell<HashSet<String>>,
     overview_mode: Cell<bool>,
+    top_level_resize_preview: RefCell<Option<TopLevelResizePreview>>,
     workspace_transition_state: RefCell<WorkspaceTransitionState>,
 }
 
@@ -149,6 +151,24 @@ struct WorkspaceTransitionState {
     tick_running: bool,
     target_canvas_width: i32,
     target_canvas_height: i32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TopLevelResizePreview {
+    workspace_id: taskers_domain::WorkspaceId,
+    target: TopLevelResizePreviewTarget,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TopLevelResizePreviewTarget {
+    ColumnWidth {
+        workspace_column_id: WorkspaceColumnId,
+        width: i32,
+    },
+    WindowHeight {
+        workspace_window_id: WorkspaceWindowId,
+        height: i32,
+    },
 }
 
 #[derive(Clone)]
@@ -322,6 +342,7 @@ const TOOLBAR_ACTION_FOCUS_GLYPH: &str = "\u{25ce}";
 struct WorkspaceRenderContext {
     overview_mode: bool,
     overview_scale: f64,
+    top_level_resize_preview: Option<TopLevelResizePreview>,
 }
 
 #[derive(Clone)]
@@ -396,6 +417,7 @@ impl UiHandle {
             pending_focus_source: RefCell::new(None),
             desktop_notifications: RefCell::new(HashSet::new()),
             overview_mode: Cell::new(false),
+            top_level_resize_preview: RefCell::new(None),
             workspace_transition_state: RefCell::new(WorkspaceTransitionState::default()),
         })
     }
@@ -439,6 +461,52 @@ impl UiHandle {
         }
         let after = self.app_state.snapshot_model();
         self.refresh(before != after);
+    }
+
+    fn active_top_level_resize_preview(
+        &self,
+        workspace_id: taskers_domain::WorkspaceId,
+    ) -> Option<TopLevelResizePreview> {
+        self.top_level_resize_preview
+            .borrow()
+            .as_ref()
+            .copied()
+            .filter(|preview| preview.workspace_id == workspace_id)
+    }
+
+    fn top_level_resize_preview_active(&self) -> bool {
+        self.top_level_resize_preview.borrow().is_some()
+    }
+
+    fn set_top_level_resize_preview(&self, preview: Option<TopLevelResizePreview>) {
+        *self.top_level_resize_preview.borrow_mut() = preview;
+    }
+
+    fn sync_layout_state(&self, model: &AppModel) {
+        *self.layout_state.borrow_mut() = compute_layout_render_state(self, model);
+    }
+
+    fn apply_top_level_resize_preview(self: &Rc<Self>, model: &AppModel) {
+        let Some(workspace) = model.active_workspace() else {
+            return;
+        };
+        if self.active_top_level_resize_preview(workspace.id).is_none() {
+            return;
+        }
+        let Some(shell) = self.shell.borrow().as_ref().cloned() else {
+            return;
+        };
+
+        let render_context = workspace_render_context(
+            self.as_ref(),
+            Some(&shell),
+            workspace,
+            self.overview_mode.get(),
+            workspace_viewport_width(self.as_ref(), Some(&shell)),
+            workspace_viewport_height(self.as_ref(), Some(&shell)),
+        );
+        apply_workspace_preview_placements(&shell, workspace, render_context);
+        self.sync_layout_state(model);
     }
 
     fn toast(&self, message: &str) {
@@ -919,7 +987,10 @@ impl UiHandle {
     }
 
     fn queue_active_workspace_viewport_persist(self: &Rc<Self>) {
-        if *self.suppress_viewport_events.borrow() || self.overview_mode.get() {
+        if *self.suppress_viewport_events.borrow()
+            || self.overview_mode.get()
+            || self.top_level_resize_preview_active()
+        {
             return;
         }
 
@@ -3350,6 +3421,7 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     let previous_layout_state = ui.layout_state.borrow().clone();
     let needs_rebuild = previous_layout_state != next_state;
     let overview_mode = ui.overview_mode.get();
+    let top_level_resize_preview_active = ui.top_level_resize_preview_active();
 
     if needs_rebuild {
         if let Some(workspace) = model.active_workspace() {
@@ -3365,6 +3437,7 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                 .filter(|candidate| candidate.id == workspace.id);
             let should_animate_transition = ui.settings.borrow().animations_enabled
                 && !overview_mode
+                && !top_level_resize_preview_active
                 && !previous_layout_state.overview_mode
                 && previous_workspace
                     .map(|previous| has_terminal_lifecycle_change(previous, workspace))
@@ -3444,16 +3517,19 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             .as_ref()
             .and_then(AppModel::active_workspace)
             .map(|workspace| workspace.active_pane);
-        let should_restore_viewport = previous_workspace_id != Some(workspace.id);
-        let should_focus_input = needs_rebuild
-            || previous_workspace_id != Some(workspace.id)
-            || previous_active_window != Some(workspace.active_window)
-            || previous_active_pane != Some(workspace.active_pane);
-        let should_reveal = needs_rebuild
-            || previous_workspace_id != Some(workspace.id)
-            || previous_active_window != Some(workspace.active_window);
-        let should_recover_scroller_focus =
-            active_pane_needs_scroller_focus_recovery(ui.as_ref(), shell, workspace);
+        let should_restore_viewport =
+            !top_level_resize_preview_active && previous_workspace_id != Some(workspace.id);
+        let should_focus_input = !top_level_resize_preview_active
+            && (needs_rebuild
+                || previous_workspace_id != Some(workspace.id)
+                || previous_active_window != Some(workspace.active_window)
+                || previous_active_pane != Some(workspace.active_pane));
+        let should_reveal = !top_level_resize_preview_active
+            && (needs_rebuild
+                || previous_workspace_id != Some(workspace.id)
+                || previous_active_window != Some(workspace.active_window));
+        let should_recover_scroller_focus = !top_level_resize_preview_active
+            && active_pane_needs_scroller_focus_recovery(ui.as_ref(), shell, workspace);
         if should_focus_input || should_recover_scroller_focus {
             ui.queue_focus_active_pane_input(model);
         }
@@ -3507,6 +3583,53 @@ fn set_workspace_stage_size(shell: &ShellWidgets, width: i32, height: i32) {
         .ghost_layer
         .set_size_request(width, height);
     shell.layout_host.set_size_request(width, height);
+}
+
+fn apply_workspace_preview_placements(
+    shell: &ShellWidgets,
+    workspace: &Workspace,
+    render_context: WorkspaceRenderContext,
+) {
+    let Some(canvas): Option<Fixed> = shell.workspace_stage.root.child().and_downcast::<Fixed>()
+    else {
+        return;
+    };
+
+    let metrics = workspace_canvas_metrics(workspace, render_context);
+    let placements = workspace_display_window_placements(workspace, render_context)
+        .into_iter()
+        .map(|placement| (format!("ww-{}", placement.window_id), placement.frame))
+        .collect::<HashMap<_, _>>();
+
+    set_workspace_stage_size(shell, metrics.width, metrics.height);
+    canvas.set_size_request(metrics.width, metrics.height);
+
+    let mut child: Option<gtk::Widget> = canvas.first_child();
+    while let Some(widget) = child {
+        let next: Option<gtk::Widget> = widget.next_sibling();
+        let Ok(overlay) = widget.clone().downcast::<Overlay>() else {
+            child = next;
+            continue;
+        };
+        let Some(inner): Option<gtk::Widget> = overlay.child() else {
+            child = next;
+            continue;
+        };
+        let Some(frame) = placements.get(inner.widget_name().as_str()) else {
+            child = next;
+            continue;
+        };
+
+        overlay.set_size_request(frame.width, frame.height);
+        inner.set_size_request(frame.width, frame.height);
+        canvas.move_(
+            &overlay,
+            f64::from(frame.x + metrics.offset_x),
+            f64::from(frame.y + metrics.offset_y),
+        );
+
+        child = next;
+    }
 }
 
 fn reset_workspace_transition(ui: &UiHandle, shell: &ShellWidgets, canvas_size: (i32, i32)) {
@@ -4322,9 +4445,6 @@ fn build_workspace_window_resize_handle(
         ResizeHandleEdge::Right => display_frame.width,
         ResizeHandleEdge::Bottom => display_frame.height,
     }));
-    let handle_widget_for_update = handle.clone();
-    let handle_widget_for_end = handle.clone();
-    let drag_ui = Rc::clone(ui);
     let drag_begin_ui = Rc::clone(ui);
     let drag = gtk::GestureDrag::new();
     let start_size_for_begin = Rc::clone(&start_size);
@@ -4356,41 +4476,46 @@ fn build_workspace_window_resize_handle(
         start_size_for_begin.set(start);
         current_size_for_begin.set(start);
         active_handle_for_begin.add_css_class("workspace-window-resize-handle-active");
-        drag_begin_ui.dispatch(ControlCommand::FocusWorkspaceWindow {
-            workspace_id,
-            workspace_window_id,
-        });
     });
     let current_size_for_update = Rc::clone(&current_size);
+    let start_size_for_update = Rc::clone(&start_size);
+    let drag_update_ui = Rc::clone(ui);
     drag.connect_drag_update(move |_, dx, dy| {
-        let next = match edge {
-            ResizeHandleEdge::Right => (start_size.get() + dx.round() as i32).max(720),
-            ResizeHandleEdge::Bottom => {
-                (start_size.get() + dy.round() as i32).max(MIN_WORKSPACE_WINDOW_HEIGHT)
-            }
-        };
+        let next =
+            match edge {
+                ResizeHandleEdge::Right => (start_size_for_update.get() + dx.round() as i32)
+                    .max(MIN_WORKSPACE_WINDOW_WIDTH),
+                ResizeHandleEdge::Bottom => (start_size_for_update.get() + dy.round() as i32)
+                    .max(MIN_WORKSPACE_WINDOW_HEIGHT),
+            };
         current_size_for_update.set(next);
-        match edge {
-            ResizeHandleEdge::Right => {
-                if let Some(overlay) = handle_widget_for_update.parent().and_downcast::<Overlay>() {
-                    overlay.set_size_request(next, display_frame.height);
-                    if let Some(child) = overlay.child() {
-                        child.set_size_request(next, display_frame.height);
-                    }
-                }
-            }
-            ResizeHandleEdge::Bottom => {
-                if let Some(overlay) = handle_widget_for_update.parent().and_downcast::<Overlay>() {
-                    overlay.set_size_request(display_frame.width, next);
-                    if let Some(child) = overlay.child() {
-                        child.set_size_request(display_frame.width, next);
-                    }
-                }
-            }
+        let preview = TopLevelResizePreview {
+            workspace_id,
+            target: match edge {
+                ResizeHandleEdge::Right => TopLevelResizePreviewTarget::ColumnWidth {
+                    workspace_column_id,
+                    width: next,
+                },
+                ResizeHandleEdge::Bottom => TopLevelResizePreviewTarget::WindowHeight {
+                    workspace_window_id,
+                    height: next,
+                },
+            },
         };
+        drag_update_ui.set_top_level_resize_preview(Some(preview));
+        let model = drag_update_ui.app_state.snapshot_model();
+        drag_update_ui.apply_top_level_resize_preview(&model);
     });
+    let start_size_for_end = Rc::clone(&start_size);
+    let drag_end_ui = Rc::clone(ui);
     drag.connect_drag_end(move |_, _, _| {
         active_handle_for_end.remove_css_class("workspace-window-resize-handle-active");
+        drag_end_ui.set_top_level_resize_preview(None);
+        if current_size.get() == start_size_for_end.get() {
+            let model = drag_end_ui.app_state.snapshot_model();
+            drag_end_ui.sync_layout_state(&model);
+            return;
+        }
         let command = match edge {
             ResizeHandleEdge::Right => ControlCommand::SetWorkspaceColumnWidth {
                 workspace_id,
@@ -4403,13 +4528,7 @@ fn build_workspace_window_resize_handle(
                 height: current_size.get(),
             },
         };
-        drag_ui.dispatch(command);
-        if let Some(overlay) = handle_widget_for_end.parent().and_downcast::<Overlay>() {
-            overlay.set_size_request(display_frame.width, display_frame.height);
-            if let Some(child) = overlay.child() {
-                child.set_size_request(display_frame.width, display_frame.height);
-            }
-        }
+        drag_end_ui.dispatch(command);
     });
     handle.add_controller(drag);
 
@@ -4425,21 +4544,9 @@ fn bind_split_ratio_updates(
     path: Vec<bool>,
 ) {
     let path = Arc::new(path);
-    let pending_source = Arc::new(Mutex::new(None::<glib::SourceId>));
-    let app_state = ui.app_state.clone();
-    let pending_for_notify = Arc::clone(&pending_source);
-    let path_for_notify = Arc::clone(&path);
+    let pending_ratio = Rc::new(Cell::new(None::<u16>));
+    let pending_ratio_for_notify = Rc::clone(&pending_ratio);
     paned.connect_position_notify(move |paned| {
-        let previous_source = {
-            let mut pending = pending_for_notify
-                .lock()
-                .expect("split ratio source mutex poisoned");
-            pending.take()
-        };
-        if let Some(source) = previous_source {
-            source.remove();
-        }
-
         let extent = paned_extent(paned, axis);
         if extent <= 0 {
             return;
@@ -4447,33 +4554,27 @@ fn bind_split_ratio_updates(
         let ratio = (((paned.position() as f64) / f64::from(extent)) * 1000.0)
             .round()
             .clamp(0.0, 1000.0) as u16;
-
-        let app_state = app_state.clone();
-        let path = Arc::clone(&path_for_notify);
-        let pending_for_timeout = Arc::clone(&pending_for_notify);
-        let source = glib::timeout_add_once(Duration::from_millis(120), move || {
-            if let Ok(mut pending) = pending_for_timeout.lock() {
-                pending.take();
-            }
-
-            if let Err(error) = app_state.dispatch(ControlCommand::SetWindowSplitRatio {
-                workspace_id,
-                workspace_window_id,
-                path: path.as_ref().clone(),
-                ratio,
-            }) {
-                eprintln!("failed to update window split ratio: {error}");
-            }
+        pending_ratio_for_notify.set(Some(ratio));
+    });
+    let pending_ratio_for_accept = Rc::clone(&pending_ratio);
+    let accept_ui = Rc::clone(ui);
+    let path_for_accept = Arc::clone(&path);
+    paned.connect_accept_position(move |_| {
+        let Some(ratio) = pending_ratio_for_accept.take() else {
+            return false;
+        };
+        accept_ui.dispatch(ControlCommand::SetWindowSplitRatio {
+            workspace_id,
+            workspace_window_id,
+            path: path_for_accept.as_ref().clone(),
+            ratio,
         });
-        let mut pending = pending_for_notify
-            .lock()
-            .expect("split ratio source mutex poisoned");
-        if pending.is_none() {
-            *pending = Some(source);
-        } else {
-            drop(pending);
-            source.remove();
-        }
+        false
+    });
+    let pending_ratio_for_cancel = Rc::clone(&pending_ratio);
+    paned.connect_cancel_position(move |_| {
+        pending_ratio_for_cancel.set(None);
+        false
     });
 }
 
@@ -6497,15 +6598,40 @@ fn scale_window_frame(frame: WindowFrame, scale: f64) -> WindowFrame {
     }
 }
 
-fn workspace_window_placements(workspace: &Workspace) -> Vec<WorkspaceWindowPlacement> {
+fn workspace_window_placements(
+    workspace: &Workspace,
+    top_level_resize_preview: Option<TopLevelResizePreview>,
+) -> Vec<WorkspaceWindowPlacement> {
     let mut placements = Vec::new();
     let mut x = 0;
 
     for column in workspace.columns.values() {
+        let column_width = match top_level_resize_preview {
+            Some(TopLevelResizePreview {
+                workspace_id: _,
+                target:
+                    TopLevelResizePreviewTarget::ColumnWidth {
+                        workspace_column_id,
+                        width,
+                    },
+            }) if workspace_column_id == column.id => width.max(MIN_WORKSPACE_WINDOW_WIDTH),
+            _ => column.width.max(1),
+        };
         let mut y = 0;
         for window_id in &column.window_order {
             let Some(window) = workspace.windows.get(window_id) else {
                 continue;
+            };
+            let window_height = match top_level_resize_preview {
+                Some(TopLevelResizePreview {
+                    workspace_id: _,
+                    target:
+                        TopLevelResizePreviewTarget::WindowHeight {
+                            workspace_window_id,
+                            height,
+                        },
+                }) if workspace_window_id == *window_id => height.max(MIN_WORKSPACE_WINDOW_HEIGHT),
+                _ => window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT),
             };
             placements.push(WorkspaceWindowPlacement {
                 window_id: *window_id,
@@ -6513,13 +6639,13 @@ fn workspace_window_placements(workspace: &Workspace) -> Vec<WorkspaceWindowPlac
                 frame: WindowFrame {
                     x,
                     y,
-                    width: column.width.max(1),
-                    height: window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT),
+                    width: column_width,
+                    height: window_height,
                 },
             });
-            y += window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT) + DEFAULT_WORKSPACE_WINDOW_GAP;
+            y += window_height + DEFAULT_WORKSPACE_WINDOW_GAP;
         }
-        x += column.width + DEFAULT_WORKSPACE_WINDOW_GAP;
+        x += column_width + DEFAULT_WORKSPACE_WINDOW_GAP;
     }
 
     placements
@@ -6529,7 +6655,7 @@ fn workspace_display_window_placements(
     workspace: &Workspace,
     render_context: WorkspaceRenderContext,
 ) -> Vec<WorkspaceWindowPlacement> {
-    workspace_window_placements(workspace)
+    workspace_window_placements(workspace, render_context.top_level_resize_preview)
         .into_iter()
         .map(|mut placement| {
             if render_context.overview_mode {
@@ -6566,7 +6692,7 @@ fn canvas_metrics_from_frames(frames: &[WindowFrame]) -> CanvasMetrics {
 }
 
 fn workspace_render_context(
-    _ui: &UiHandle,
+    ui: &UiHandle,
     _shell: Option<&ShellWidgets>,
     workspace: &Workspace,
     overview_mode: bool,
@@ -6577,10 +6703,11 @@ fn workspace_render_context(
         return WorkspaceRenderContext {
             overview_mode: false,
             overview_scale: 1.0,
+            top_level_resize_preview: ui.active_top_level_resize_preview(workspace.id),
         };
     }
 
-    let base_frames = workspace_window_placements(workspace)
+    let base_frames = workspace_window_placements(workspace, None)
         .into_iter()
         .map(|placement| placement.frame)
         .collect::<Vec<_>>();
@@ -6596,6 +6723,7 @@ fn workspace_render_context(
     WorkspaceRenderContext {
         overview_mode: true,
         overview_scale,
+        top_level_resize_preview: None,
     }
 }
 
@@ -7530,6 +7658,73 @@ fn humanize_theme_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn preview_test_workspace() -> Workspace {
+        let left_pane = PaneRecord::new(PaneKind::Terminal);
+        let top_right_pane = PaneRecord::new(PaneKind::Terminal);
+        let bottom_right_pane = PaneRecord::new(PaneKind::Terminal);
+
+        let left_window = taskers_domain::WorkspaceWindowRecord {
+            id: WorkspaceWindowId::new(),
+            height: 620,
+            layout: LayoutNode::leaf(left_pane.id),
+            active_pane: left_pane.id,
+        };
+        let top_right_window = taskers_domain::WorkspaceWindowRecord {
+            id: WorkspaceWindowId::new(),
+            height: 560,
+            layout: LayoutNode::leaf(top_right_pane.id),
+            active_pane: top_right_pane.id,
+        };
+        let bottom_right_window = taskers_domain::WorkspaceWindowRecord {
+            id: WorkspaceWindowId::new(),
+            height: 540,
+            layout: LayoutNode::leaf(bottom_right_pane.id),
+            active_pane: bottom_right_pane.id,
+        };
+
+        let left_column = taskers_domain::WorkspaceColumnRecord {
+            id: WorkspaceColumnId::new(),
+            width: 840,
+            window_order: vec![left_window.id],
+            active_window: left_window.id,
+        };
+        let right_column = taskers_domain::WorkspaceColumnRecord {
+            id: WorkspaceColumnId::new(),
+            width: 960,
+            window_order: vec![top_right_window.id, bottom_right_window.id],
+            active_window: top_right_window.id,
+        };
+
+        Workspace {
+            id: taskers_domain::WorkspaceId::new(),
+            label: "Preview test".into(),
+            columns: [
+                (left_column.id, left_column),
+                (right_column.id, right_column),
+            ]
+            .into_iter()
+            .collect(),
+            windows: [
+                (left_window.id, left_window.clone()),
+                (top_right_window.id, top_right_window.clone()),
+                (bottom_right_window.id, bottom_right_window.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            active_window: left_window.id,
+            panes: [
+                (left_pane.id, left_pane),
+                (top_right_pane.id, top_right_pane),
+                (bottom_right_pane.id, bottom_right_pane),
+            ]
+            .into_iter()
+            .collect(),
+            active_pane: left_window.active_pane,
+            viewport: WorkspaceViewport::default(),
+            notifications: Vec::new(),
+        }
+    }
+
     #[test]
     fn terminal_body_refreshes_when_surface_changes_or_child_is_missing() {
         let first = SurfaceId::new();
@@ -7587,6 +7782,51 @@ mod tests {
         let surface = SurfaceRecord::new(PaneKind::Terminal);
 
         assert_eq!(editable_surface_title(&surface), "");
+    }
+
+    #[test]
+    fn workspace_window_placements_reflow_following_columns_for_preview_width() {
+        let workspace = preview_test_workspace();
+        let left_column_id = workspace
+            .columns
+            .keys()
+            .copied()
+            .next()
+            .expect("left column");
+        let preview = TopLevelResizePreview {
+            workspace_id: workspace.id,
+            target: TopLevelResizePreviewTarget::ColumnWidth {
+                workspace_column_id: left_column_id,
+                width: 1080,
+            },
+        };
+
+        let placements = workspace_window_placements(&workspace, Some(preview));
+
+        assert_eq!(placements[0].frame.width, 1080);
+        assert_eq!(placements[1].frame.x, 1080 + DEFAULT_WORKSPACE_WINDOW_GAP);
+    }
+
+    #[test]
+    fn workspace_window_placements_reflow_stacked_windows_for_preview_height() {
+        let workspace = preview_test_workspace();
+        let right_column = workspace.columns.values().nth(1).expect("right column");
+        let top_window_id = right_column.window_order[0];
+        let preview = TopLevelResizePreview {
+            workspace_id: workspace.id,
+            target: TopLevelResizePreviewTarget::WindowHeight {
+                workspace_window_id: top_window_id,
+                height: MIN_WORKSPACE_WINDOW_HEIGHT - 40,
+            },
+        };
+
+        let placements = workspace_window_placements(&workspace, Some(preview));
+
+        assert_eq!(placements[1].frame.height, MIN_WORKSPACE_WINDOW_HEIGHT);
+        assert_eq!(
+            placements[2].frame.y,
+            MIN_WORKSPACE_WINDOW_HEIGHT + DEFAULT_WORKSPACE_WINDOW_GAP
+        );
     }
 
     #[test]

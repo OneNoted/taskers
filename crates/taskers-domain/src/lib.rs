@@ -12,10 +12,9 @@ pub use layout::{Direction, LayoutNode, SplitAxis};
 pub use model::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, DEFAULT_WORKSPACE_WINDOW_HEIGHT,
     DEFAULT_WORKSPACE_WINDOW_WIDTH, DomainError, KEYBOARD_RESIZE_STEP, MIN_WORKSPACE_WINDOW_HEIGHT,
-    NotificationItem, PaneKind, PaneMetadata, PaneMetadataPatch, PaneRecord, PersistedSession,
-    SESSION_SCHEMA_VERSION, SurfaceRecord, WindowFrame, WindowRecord, Workspace,
-    WorkspaceColumnRecord,
-    WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceSummary, WorkspaceViewport,
-    WorkspaceWindowRecord,
+    MIN_WORKSPACE_WINDOW_WIDTH, NotificationItem, PaneKind, PaneMetadata, PaneMetadataPatch,
+    PaneRecord, PersistedSession, SESSION_SCHEMA_VERSION, SurfaceRecord, WindowFrame, WindowRecord,
+    Workspace, WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord, WorkspaceSummary,
+    WorkspaceViewport, WorkspaceWindowRecord,
 };
 pub use signal::{SignalEvent, SignalKind, SignalPaneMetadata};
