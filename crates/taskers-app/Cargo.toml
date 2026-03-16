@@ -19,12 +19,14 @@ clap.workspace = true
 gtk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+svgtypes.workspace = true
 taskers-runtime = { version = "0.2.1", path = "../taskers-runtime" }
 tokio.workspace = true
 taskers-control = { version = "0.2.1", path = "../taskers-control" }
 taskers-domain = { version = "0.2.1", path = "../taskers-domain" }
 taskers-ghostty = { version = "0.2.1", path = "../taskers-ghostty" }
 time.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

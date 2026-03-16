@@ -119,14 +119,24 @@ impl InMemoryController {
                     message: "pane split resized".into(),
                 })
             }
-            ControlCommand::SetWorkspaceWindowFrame {
+            ControlCommand::SetWorkspaceColumnWidth {
+                workspace_id,
+                workspace_column_id,
+                width,
+            } => {
+                model.set_workspace_column_width(workspace_id, workspace_column_id, width)?;
+                Ok(ControlResponse::Ack {
+                    message: "workspace column width updated".into(),
+                })
+            }
+            ControlCommand::SetWorkspaceWindowHeight {
                 workspace_id,
                 workspace_window_id,
-                frame,
+                height,
             } => {
-                model.set_workspace_window_frame(workspace_id, workspace_window_id, frame)?;
+                model.set_workspace_window_height(workspace_id, workspace_window_id, height)?;
                 Ok(ControlResponse::Ack {
-                    message: "workspace window frame updated".into(),
+                    message: "workspace window height updated".into(),
                 })
             }
             ControlCommand::SetWindowSplitRatio {
@@ -188,6 +198,17 @@ impl InMemoryController {
                 model.close_surface(workspace_id, pane_id, surface_id)?;
                 Ok(ControlResponse::Ack {
                     message: "surface closed".into(),
+                })
+            }
+            ControlCommand::MoveSurface {
+                workspace_id,
+                pane_id,
+                surface_id,
+                to_index,
+            } => {
+                model.move_surface(workspace_id, pane_id, surface_id, to_index)?;
+                Ok(ControlResponse::Ack {
+                    message: "surface moved".into(),
                 })
             }
             ControlCommand::SetWorkspaceViewport {

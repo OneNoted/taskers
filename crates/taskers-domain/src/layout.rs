@@ -39,6 +39,10 @@ pub enum LayoutNode {
 }
 
 impl LayoutNode {
+    pub fn is_leaf(&self) -> bool {
+        matches!(self, Self::Leaf { .. })
+    }
+
     pub fn leaf(pane_id: PaneId) -> Self {
         Self::Leaf { pane_id }
     }

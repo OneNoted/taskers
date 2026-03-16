@@ -1,7 +1,11 @@
 mod app_state;
+mod crash_reporter;
 mod pane_runtime;
 mod session_store;
 mod settings_store;
+mod terminal_transitions;
+mod theme;
+mod themes;
 
 use std::{
     cell::{Cell, RefCell},
@@ -10,6 +14,7 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     rc::Rc,
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -17,23 +22,25 @@ use std::{
 use adw::prelude::*;
 use app_state::AppState;
 use clap::Parser;
+use crash_reporter::CrashReporter;
 use gtk::{
-    Align, Box as GtkBox, Button, CssProvider, Entry, Fixed, Label, Orientation, Overlay, Paned,
-    PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator, TextView, Widget,
-    WrapMode, gdk, glib,
+    Align, Box as GtkBox, Button, DrawingArea, Entry, Fixed, Label, Orientation, Overlay, Paned,
+    PolicyType, ScrolledWindow, Separator, TextView, Widget, WrapMode, gdk, glib,
 };
 use pane_runtime::PaneRuntimeSnapshot;
 use serde_json::json;
-use settings_store::{AppConfig, ShortcutAction};
+use settings_store::{AppConfig, ShortcutAction, ShortcutPreset};
+use svgtypes::{SimplePathSegment, SimplifyingPathParser};
 use taskers_control::{
     ControlCommand, InMemoryController, bind_socket, default_socket_path, serve,
 };
 use taskers_domain::{
     ActivityItem, AppModel, AttentionState, DEFAULT_WORKSPACE_WINDOW_GAP,
     DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, Direction,
-    KEYBOARD_RESIZE_STEP, LayoutNode, MIN_WORKSPACE_WINDOW_HEIGHT, PaneKind, PaneMetadataPatch,
-    PaneRecord, SignalEvent, SignalKind, SurfaceId, SurfaceRecord, WindowFrame, Workspace,
-    WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceViewport, WorkspaceWindowId,
+    KEYBOARD_RESIZE_STEP, LayoutNode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH,
+    PaneKind, PaneMetadata, PaneMetadataPatch, PaneRecord, SignalEvent, SignalKind, SurfaceId,
+    SurfaceRecord, WindowFrame, Workspace, WorkspaceAgentState, WorkspaceColumnId,
+    WorkspaceViewport, WorkspaceWindowId,
 };
 use taskers_ghostty::{
     BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, SurfaceDescriptor, TerminalBackend,
@@ -41,6 +48,11 @@ use taskers_ghostty::{
 };
 use taskers_runtime::{
     ShellLaunchSpec, default_shell_program, install_shell_integration, validate_shell_program,
+};
+use terminal_transitions::{
+    PaneSceneSnapshot, PresentedTransitionRect, TERMINAL_MOTION_SPEC, TransitionItemId,
+    TransitionItemKind, TransitionPhase, WorkspaceSceneSnapshot, WorkspaceWindowSnapshot,
+    derive_pane_frames, plan_workspace_transition, retarget_transition_plan,
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -66,6 +78,7 @@ struct StartupContext {
     backend_choice: BackendChoice,
     config_path: PathBuf,
     app_config: AppConfig,
+    crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
     shell_launch: ShellLaunchSpec,
     startup_toast: Option<String>,
@@ -77,6 +90,7 @@ struct UiHandle {
     application: adw::Application,
     window: adw::ApplicationWindow,
     overlay: adw::ToastOverlay,
+    crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
     shell_launch: ShellLaunchSpec,
     ghostty_surfaces: RefCell<HashMap<SurfaceId, Widget>>,
@@ -92,37 +106,194 @@ struct UiHandle {
     pending_focus_source: RefCell<Option<glib::SourceId>>,
     desktop_notifications: RefCell<HashSet<String>>,
     overview_mode: Cell<bool>,
+    top_level_resize_preview: RefCell<Option<TopLevelResizePreview>>,
+    workspace_transition_state: RefCell<WorkspaceTransitionState>,
 }
 
 #[derive(Clone)]
 struct ShellWidgets {
     root: Paned,
     sidebar_list: GtkBox,
-    toolbar_label: Label,
-    btn_window_right: Button,
-    btn_window_down: Button,
-    btn_split_right: Button,
-    btn_split_down: Button,
+    workspace_name_label: Label,
+    overview_button: Button,
     activity_list: GtkBox,
     activity_empty: Label,
     layout_scroll: ScrolledWindow,
     layout_host: Fixed,
+    workspace_stage: WorkspaceStageWidgets,
 }
 
 #[derive(Clone)]
 struct PaneCardWidgets {
     root: GtkBox,
+    header: GtkBox,
+    agent_icon: AgentIconWidget,
     title: Label,
     status_dot: Label,
-    surface_tabs: GtkBox,
+    header_actions: GtkBox,
+    header_tabs: GtkBox,
+    resize_button: Button,
+    surface_tabs: SurfaceTabStripWidgets,
     terminal_host: GtkBox,
+    displayed_surface_id: Rc<Cell<Option<SurfaceId>>>,
     focus_target: Widget,
+}
+
+#[derive(Clone)]
+struct WorkspaceStageWidgets {
+    root: Overlay,
+    ghost_layer: Fixed,
+}
+
+#[derive(Default)]
+struct WorkspaceTransitionState {
+    presented: HashMap<TransitionItemId, PresentedTransitionRect>,
+    motion: Option<WorkspaceTransitionMotionState>,
+    tick_running: bool,
+    target_canvas_width: i32,
+    target_canvas_height: i32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TopLevelResizePreview {
+    workspace_id: taskers_domain::WorkspaceId,
+    target: TopLevelResizePreviewTarget,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TopLevelResizePreviewTarget {
+    ColumnWidth {
+        workspace_column_id: WorkspaceColumnId,
+        width: i32,
+    },
+    WindowHeight {
+        workspace_window_id: WorkspaceWindowId,
+        height: i32,
+    },
+}
+
+#[derive(Clone)]
+struct WorkspaceTransitionMotionState {
+    start_time: i64,
+    items: Vec<WorkspaceTransitionMotionItem>,
+}
+
+#[derive(Clone)]
+struct WorkspaceTransitionMotionItem {
+    id: TransitionItemId,
+    widget: Widget,
+    start_rect: PresentedTransitionRect,
+    end_rect: PresentedTransitionRect,
+    duration_us: i64,
+    curve: terminal_transitions::MotionCurve,
+    start_opacity: f64,
+}
+
+#[derive(Clone, Default)]
+struct WorkspaceSceneVisuals {
+    windows: HashMap<WorkspaceWindowId, WindowGhostVisual>,
+}
+
+#[derive(Clone, Copy)]
+struct WindowGhostVisual {
+    active: bool,
+    attention: AttentionState,
+}
+
+#[derive(Clone)]
+struct SurfaceTabStripWidgets {
+    root: Fixed,
+    add_button: Button,
+    tabs: Rc<RefCell<HashMap<SurfaceId, SurfaceTabWidgets>>>,
+    state: Rc<RefCell<SurfaceTabStripState>>,
+}
+
+#[derive(Clone)]
+struct SurfaceTabWidgets {
+    root: GtkBox,
+    dot: Label,
+    agent_icon: AgentIconWidget,
+    title: Label,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SurfaceTabItemKey {
+    Surface(SurfaceId),
+    AddButton,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SurfaceTabStripLayout {
+    items: Vec<SurfaceTabLayoutItem>,
+    add_button: SurfaceTabAuxLayoutItem,
+    height: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SurfaceTabLayoutItem {
+    surface_id: SurfaceId,
+    x: f64,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SurfaceTabAuxLayoutItem {
+    x: f64,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PresentedSurfaceTabItem {
+    x: f64,
+    opacity: f64,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone)]
+struct SurfaceTabMotionState {
+    start_time: i64,
+    duration_us: i64,
+    start_items: HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem>,
+    target_items: HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem>,
+}
+
+#[derive(Clone)]
+struct SurfaceTabExitAnimation {
+    root: GtkBox,
+    start_time: i64,
+    duration_us: i64,
+    start_item: PresentedSurfaceTabItem,
+    end_item: PresentedSurfaceTabItem,
+}
+
+#[derive(Clone)]
+struct SurfaceTabDragState {
+    surface_id: SurfaceId,
+    start_x: f64,
+    current_dx: f64,
+    preview_order: Vec<SurfaceId>,
+    threshold_crossed: bool,
+}
+
+#[derive(Default)]
+struct SurfaceTabStripState {
+    model_order: Vec<SurfaceId>,
+    layout: Option<SurfaceTabStripLayout>,
+    presented: HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem>,
+    motion: Option<SurfaceTabMotionState>,
+    exiting: Vec<SurfaceTabExitAnimation>,
+    drag: Option<SurfaceTabDragState>,
+    tick_running: bool,
+    suppress_click_surface: Option<SurfaceId>,
+    next_animation_duration_us: Option<i64>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 enum LayoutRenderKey {
     WorkspaceWindows {
-        active_window: WorkspaceWindowId,
         windows: Vec<WorkspaceWindowRenderKey>,
     },
 }
@@ -144,6 +315,13 @@ struct WorkspaceWindowRenderKey {
 }
 
 #[derive(Clone, Copy)]
+struct WorkspaceWindowPlacement {
+    window_id: WorkspaceWindowId,
+    column_id: WorkspaceColumnId,
+    frame: WindowFrame,
+}
+
+#[derive(Clone, Copy)]
 struct CanvasMetrics {
     offset_x: i32,
     offset_y: i32,
@@ -152,12 +330,57 @@ struct CanvasMetrics {
 }
 
 const WORKSPACE_CANVAS_PADDING: i32 = 2;
+const WORKSPACE_WINDOW_HEADER_HEIGHT: i32 = 30;
+const SURFACE_TAB_GAP: i32 = 4;
+const SURFACE_TAB_MIN_WIDTH: i32 = 72;
+const SURFACE_TAB_MAX_WIDTH: i32 = 220;
+const SIDEBAR_MIN_WIDTH: i32 = 224;
+const TOOLBAR_ACTION_NEW_GLYPH: &str = "+";
+const TOOLBAR_ACTION_RESIZE_GLYPH: &str = "\u{2922}";
+const TOOLBAR_ACTION_FOCUS_GLYPH: &str = "\u{25ce}";
 
 #[derive(Clone, Copy)]
 struct WorkspaceRenderContext {
-    viewport_height: i32,
     overview_mode: bool,
     overview_scale: f64,
+    top_level_resize_preview: Option<TopLevelResizePreview>,
+}
+
+#[derive(Clone)]
+struct AgentIconWidget {
+    root: DrawingArea,
+    state: Rc<RefCell<AgentIconState>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct AgentIconState {
+    kind: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentIconSpec {
+    view_box_width: f64,
+    view_box_height: f64,
+    paths: &'static [AgentIconPathSpec],
+}
+
+#[derive(Clone, Copy)]
+struct AgentIconPathSpec {
+    data: &'static str,
+    fill: AgentIconFill,
+}
+
+use theme::AgentIconColor;
+
+#[derive(Clone, Copy)]
+enum AgentIconFill {
+    CurrentColor,
+    Agent(&'static str),
+}
+
+thread_local! {
+    static AGENT_ICON_PATHS: RefCell<HashMap<&'static str, Rc<Vec<SimplePathSegment>>>> =
+        RefCell::new(HashMap::new());
 }
 
 impl UiHandle {
@@ -169,6 +392,7 @@ impl UiHandle {
         application: adw::Application,
         window: adw::ApplicationWindow,
         overlay: adw::ToastOverlay,
+        crash_reporter: CrashReporter,
         ghostty_host: Option<GhosttyHost>,
         shell_launch: ShellLaunchSpec,
     ) -> Rc<Self> {
@@ -178,6 +402,7 @@ impl UiHandle {
             application,
             window,
             overlay,
+            crash_reporter,
             ghostty_host,
             shell_launch,
             ghostty_surfaces: RefCell::new(HashMap::new()),
@@ -193,6 +418,8 @@ impl UiHandle {
             pending_focus_source: RefCell::new(None),
             desktop_notifications: RefCell::new(HashSet::new()),
             overview_mode: Cell::new(false),
+            top_level_resize_preview: RefCell::new(None),
+            workspace_transition_state: RefCell::new(WorkspaceTransitionState::default()),
         })
     }
 
@@ -237,30 +464,84 @@ impl UiHandle {
         self.refresh(before != after);
     }
 
+    fn active_top_level_resize_preview(
+        &self,
+        workspace_id: taskers_domain::WorkspaceId,
+    ) -> Option<TopLevelResizePreview> {
+        self.top_level_resize_preview
+            .borrow()
+            .as_ref()
+            .copied()
+            .filter(|preview| preview.workspace_id == workspace_id)
+    }
+
+    fn top_level_resize_preview_active(&self) -> bool {
+        self.top_level_resize_preview.borrow().is_some()
+    }
+
+    fn set_top_level_resize_preview(&self, preview: Option<TopLevelResizePreview>) {
+        *self.top_level_resize_preview.borrow_mut() = preview;
+    }
+
+    fn sync_layout_state(&self, model: &AppModel) {
+        *self.layout_state.borrow_mut() = compute_layout_render_state(self, model);
+    }
+
+    fn apply_top_level_resize_preview(self: &Rc<Self>, model: &AppModel) {
+        let Some(workspace) = model.active_workspace() else {
+            return;
+        };
+        if self.active_top_level_resize_preview(workspace.id).is_none() {
+            return;
+        }
+        let Some(shell) = self.shell.borrow().as_ref().cloned() else {
+            return;
+        };
+
+        let render_context = workspace_render_context(
+            self.as_ref(),
+            Some(&shell),
+            workspace,
+            self.overview_mode.get(),
+            workspace_viewport_width(self.as_ref(), Some(&shell)),
+            workspace_viewport_height(self.as_ref(), Some(&shell)),
+        );
+        apply_workspace_preview_placements(&shell, workspace, render_context);
+        self.sync_layout_state(model);
+    }
+
     fn toast(&self, message: &str) {
         self.overlay.add_toast(adw::Toast::new(message));
     }
 
-    fn shortcut_spec(&self, action: ShortcutAction) -> Option<(gdk::Key, gdk::ModifierType)> {
-        let accelerator = self
-            .settings
+    fn shortcut_specs(&self, action: ShortcutAction) -> Vec<(gdk::Key, gdk::ModifierType)> {
+        self.settings
             .borrow()
             .keybindings
-            .accelerator(action)
-            .to_string();
-        gtk::accelerator_parse(&accelerator)
+            .accelerators(action)
+            .into_iter()
+            .filter_map(|accelerator| gtk::accelerator_parse(&accelerator))
+            .collect()
     }
 
     fn shortcut_label(&self, action: ShortcutAction) -> String {
-        self.shortcut_spec(action)
-            .map(|(key, modifiers)| gtk::accelerator_get_label(key, modifiers).to_string())
-            .unwrap_or_else(|| {
-                self.settings
-                    .borrow()
-                    .keybindings
-                    .accelerator(action)
-                    .to_string()
+        let labels = self
+            .settings
+            .borrow()
+            .keybindings
+            .accelerators(action)
+            .into_iter()
+            .map(|accelerator| {
+                gtk::accelerator_parse(&accelerator)
+                    .map(|(key, modifiers)| gtk::accelerator_get_label(key, modifiers).to_string())
+                    .unwrap_or(accelerator)
             })
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            "Unbound".into()
+        } else {
+            labels.join(", ")
+        }
     }
 
     fn shortcut_matches(
@@ -269,8 +550,9 @@ impl UiHandle {
         key: gdk::Key,
         state: gdk::ModifierType,
     ) -> bool {
-        self.shortcut_spec(action)
-            .is_some_and(|(expected_key, expected_modifiers)| {
+        self.shortcut_specs(action)
+            .into_iter()
+            .any(|(expected_key, expected_modifiers)| {
                 key == expected_key && normalize_shortcut_modifiers(state) == expected_modifiers
             })
     }
@@ -287,17 +569,14 @@ impl UiHandle {
         if normalize_shortcut_modifiers(modifiers).is_empty() {
             return Err("shortcut must include at least one modifier".into());
         }
-        if reserved_direction_shortcut(key, modifiers) {
-            return Err("shortcut conflicts with the built-in directional bindings".into());
-        }
-
         for other_action in ShortcutAction::ALL {
             if other_action == action {
                 continue;
             }
             if self
-                .shortcut_spec(other_action)
-                .is_some_and(|(other_key, other_modifiers)| {
+                .shortcut_specs(other_action)
+                .into_iter()
+                .any(|(other_key, other_modifiers)| {
                     other_key == key && other_modifiers == normalize_shortcut_modifiers(modifiers)
                 })
             {
@@ -311,14 +590,39 @@ impl UiHandle {
         let next_label =
             gtk::accelerator_get_label(key, normalize_shortcut_modifiers(modifiers)).to_string();
         let mut next_settings = self.settings.borrow().clone();
-        next_settings.keybindings.set_accelerator(
+        next_settings.keybindings.set_accelerators(
             action,
-            gtk::accelerator_name(key, normalize_shortcut_modifiers(modifiers)).to_string(),
+            vec![gtk::accelerator_name(key, normalize_shortcut_modifiers(modifiers)).to_string()],
         );
         settings_store::save_config(&self.config_path, &next_settings)
             .map_err(|error| format!("failed to save settings: {error}"))?;
         *self.settings.borrow_mut() = next_settings;
         Ok(next_label)
+    }
+
+    fn reset_shortcuts(self: &Rc<Self>, action: ShortcutAction) -> Result<String, String> {
+        let mut next_settings = self.settings.borrow().clone();
+        next_settings.keybindings.set_accelerators(
+            action,
+            action
+                .default_accelerators()
+                .iter()
+                .map(|binding| (*binding).to_string())
+                .collect(),
+        );
+        settings_store::save_config(&self.config_path, &next_settings)
+            .map_err(|error| format!("failed to save settings: {error}"))?;
+        *self.settings.borrow_mut() = next_settings;
+        Ok(self.shortcut_label(action))
+    }
+
+    fn apply_shortcut_preset(self: &Rc<Self>, preset: ShortcutPreset) -> Result<(), String> {
+        let mut next_settings = self.settings.borrow().clone();
+        next_settings.keybindings.replace_with_preset(preset);
+        settings_store::save_config(&self.config_path, &next_settings)
+            .map_err(|error| format!("failed to save settings: {error}"))?;
+        *self.settings.borrow_mut() = next_settings;
+        Ok(())
     }
 
     fn save_settings(&self, next_settings: AppConfig) -> Result<(), String> {
@@ -368,7 +672,7 @@ impl UiHandle {
         content.append(&prompt);
 
         let detail = Label::new(Some(
-            "Esc cancels. Built-in directional chords stay reserved so navigation remains predictable.",
+            "Esc cancels. The new shortcut replaces the current bindings for this action.",
         ));
         detail.set_xalign(0.0);
         detail.set_wrap(true);
@@ -421,181 +725,36 @@ impl UiHandle {
             gtk::DialogFlags::MODAL,
             &[("Close", gtk::ResponseType::Close)],
         );
-        dialog.set_default_size(560, -1);
+        dialog.set_default_size(760, 660);
         dialog.connect_response(|dialog, _| dialog.close());
 
-        let content = dialog.content_area();
-        content.set_margin_start(18);
-        content.set_margin_end(18);
-        content.set_margin_top(18);
-        content.set_margin_bottom(18);
-        content.set_spacing(14);
+        let stack = gtk::Stack::new();
+        stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+        stack.set_transition_duration(150);
+        stack.set_vexpand(true);
 
-        // ── Animations toggle ──
-        let anim_row = GtkBox::new(Orientation::Horizontal, 12);
-        let anim_details = GtkBox::new(Orientation::Vertical, 4);
-        anim_details.set_hexpand(true);
+        stack.add_titled(&build_settings_theme_page(self), Some("theme"), "Theme");
+        stack.add_titled(
+            &build_settings_general_page(self),
+            Some("general"),
+            "General",
+        );
+        stack.add_titled(
+            &build_settings_shortcuts_page(self),
+            Some("shortcuts"),
+            "Keyboard shortcuts",
+        );
 
-        let anim_title = Label::new(Some("Animations"));
-        anim_title.set_xalign(0.0);
-        anim_title.add_css_class("pane-title");
-        anim_details.append(&anim_title);
+        let switcher = gtk::StackSwitcher::new();
+        switcher.set_stack(Some(&stack));
+        switcher.set_halign(Align::Center);
+        switcher.add_css_class("settings-nav");
 
-        let anim_detail = Label::new(Some(
-            "Smooth fade transitions when creating windows, switching workspaces, and splitting panes.",
-        ));
-        anim_detail.set_xalign(0.0);
-        anim_detail.set_wrap(true);
-        anim_detail.add_css_class("dim-label");
-        anim_details.append(&anim_detail);
-        anim_row.append(&anim_details);
+        let layout = GtkBox::new(Orientation::Vertical, 0);
+        layout.append(&switcher);
+        layout.append(&stack);
 
-        let anim_switch = gtk::Switch::new();
-        anim_switch.set_active(self.settings.borrow().animations_enabled);
-        anim_switch.set_valign(Align::Center);
-        let anim_ui = Rc::clone(self);
-        anim_switch.connect_state_set(move |_, active| {
-            let mut next_settings = anim_ui.settings.borrow().clone();
-            next_settings.animations_enabled = active;
-            if let Err(error) = settings_store::save_config(&anim_ui.config_path, &next_settings) {
-                anim_ui.toast(&format!("Failed to save settings: {error}"));
-            }
-            *anim_ui.settings.borrow_mut() = next_settings;
-            glib::Propagation::Proceed
-        });
-        anim_row.append(&anim_switch);
-        content.append(&anim_row);
-
-        let sep = Separator::new(Orientation::Horizontal);
-        sep.add_css_class("context-separator");
-        content.append(&sep);
-
-        let shell_row = GtkBox::new(Orientation::Horizontal, 12);
-        let shell_details = GtkBox::new(Orientation::Vertical, 4);
-        shell_details.set_hexpand(true);
-
-        let shell_title = Label::new(Some("Shell program"));
-        shell_title.set_xalign(0.0);
-        shell_title.add_css_class("pane-title");
-        shell_details.append(&shell_title);
-
-        let system_shell = default_shell_program();
-        let shell_detail = Label::new(Some(&format!(
-            "Optional shell override for new panes. Leave empty to use the system login shell (currently {}). Relaunch Taskers after changing this.",
-            system_shell.display()
-        )));
-        shell_detail.set_xalign(0.0);
-        shell_detail.set_wrap(true);
-        shell_detail.add_css_class("dim-label");
-        shell_details.append(&shell_detail);
-        shell_row.append(&shell_details);
-
-        let shell_entry = Entry::new();
-        shell_entry.set_hexpand(true);
-        shell_entry.set_width_chars(24);
-        shell_entry.set_placeholder_text(Some("System default login shell"));
-        if let Some(program) = self.settings.borrow().shell.program.as_deref() {
-            shell_entry.set_text(program);
-        }
-        let activate_ui = Rc::clone(self);
-        shell_entry.connect_activate(move |entry| {
-            let text = entry.text().to_string();
-            if let Err(error) = activate_ui.set_shell_program(Some(text.clone())) {
-                activate_ui.toast(&error);
-                return;
-            }
-            let normalized = text.trim().to_string();
-            entry.set_text(&normalized);
-            activate_ui.toast("Shell setting saved. Relaunch Taskers to apply.");
-        });
-        let focus_ui = Rc::clone(self);
-        shell_entry.connect_notify_local(Some("has-focus"), move |entry, _| {
-            if entry.has_focus() {
-                return;
-            }
-
-            let text = entry.text().to_string();
-            if let Err(error) = focus_ui.set_shell_program(Some(text.clone())) {
-                focus_ui.toast(&error);
-                return;
-            }
-            entry.set_text(text.trim());
-        });
-        shell_row.append(&shell_entry);
-
-        let reset_shell = Button::with_label("Use system");
-        let reset_ui = Rc::clone(self);
-        let reset_entry = shell_entry.clone();
-        reset_shell.connect_clicked(move |_| {
-            if let Err(error) = reset_ui.set_shell_program(None) {
-                reset_ui.toast(&error);
-                return;
-            }
-            reset_entry.set_text("");
-            reset_ui.toast("Shell setting cleared. Relaunch Taskers to apply.");
-        });
-        shell_row.append(&reset_shell);
-        content.append(&shell_row);
-
-        let sep = Separator::new(Orientation::Horizontal);
-        sep.add_css_class("context-separator");
-        content.append(&sep);
-
-        // ── Keyboard shortcuts ──
-        let intro = Label::new(Some(
-            "Keyboard shortcuts. Directional navigation and resize chords stay fixed.",
-        ));
-        intro.set_wrap(true);
-        intro.set_xalign(0.0);
-        content.append(&intro);
-
-        for action in ShortcutAction::ALL {
-            let row = GtkBox::new(Orientation::Horizontal, 12);
-
-            let details = GtkBox::new(Orientation::Vertical, 4);
-            details.set_hexpand(true);
-
-            let title = Label::new(Some(action.label()));
-            title.set_xalign(0.0);
-            title.add_css_class("pane-title");
-            details.append(&title);
-
-            let detail = Label::new(Some(action.detail()));
-            detail.set_xalign(0.0);
-            detail.set_wrap(true);
-            detail.add_css_class("dim-label");
-            details.append(&detail);
-
-            row.append(&details);
-
-            let shortcut_label = Label::new(Some(&self.shortcut_label(action)));
-            shortcut_label.set_width_chars(14);
-            shortcut_label.set_xalign(1.0);
-            shortcut_label.add_css_class("monospace");
-            row.append(&shortcut_label);
-
-            let change_button = Button::with_label("Change");
-            let change_ui = Rc::clone(self);
-            let change_label = shortcut_label.clone();
-            change_button.connect_clicked(move |_| {
-                change_ui.present_shortcut_capture_dialog(action, &change_label);
-            });
-            row.append(&change_button);
-
-            let reset_button = Button::with_label("Reset");
-            let reset_ui = Rc::clone(self);
-            let reset_label = shortcut_label.clone();
-            reset_button.connect_clicked(move |_| {
-                match reset_ui.set_shortcut(action, action.default_accelerator().to_string()) {
-                    Ok(next_label) => reset_label.set_text(&next_label),
-                    Err(error) => reset_ui.toast(&error),
-                }
-            });
-            row.append(&reset_button);
-
-            content.append(&row);
-        }
-
+        dialog.content_area().append(&layout);
         dialog.present();
     }
 
@@ -709,9 +868,6 @@ impl UiHandle {
         update_activity_panel(self, &shell, model);
         update_layout(self, &shell, model);
         self.sync_desktop_notifications(model);
-        if model.active_workspace().is_some() && !self.overview_mode.get() {
-            self.queue_focus_active_pane_input(model);
-        }
     }
 
     fn sync_desktop_notifications(&self, model: &AppModel) {
@@ -832,7 +988,10 @@ impl UiHandle {
     }
 
     fn queue_active_workspace_viewport_persist(self: &Rc<Self>) {
-        if *self.suppress_viewport_events.borrow() || self.overview_mode.get() {
+        if *self.suppress_viewport_events.borrow()
+            || self.overview_mode.get()
+            || self.top_level_resize_preview_active()
+        {
             return;
         }
 
@@ -859,9 +1018,6 @@ impl UiHandle {
     }
 
     fn reveal_active_window(&self, shell: &ShellWidgets, workspace: &Workspace) {
-        let Some(active_window) = workspace.active_window_record() else {
-            return;
-        };
         let render_context = workspace_render_context(
             self,
             Some(shell),
@@ -871,7 +1027,13 @@ impl UiHandle {
             workspace_viewport_height(self, Some(shell)),
         );
         let metrics = workspace_canvas_metrics(workspace, render_context);
-        let active_frame = display_window_frame(active_window.frame, render_context);
+        let Some(active_frame) = workspace_display_window_placements(workspace, render_context)
+            .into_iter()
+            .find(|placement| placement.window_id == workspace.active_window)
+            .map(|placement| placement.frame)
+        else {
+            return;
+        };
 
         let h_adjustment = shell.layout_scroll.hadjustment();
         let v_adjustment = shell.layout_scroll.vadjustment();
@@ -916,9 +1078,7 @@ impl UiHandle {
     }
 
     fn write_ui_integrity_snapshot(&self, model: &AppModel) {
-        let Some(path) = std::env::var_os("TASKERS_UI_INTEGRITY_PATH").map(PathBuf::from) else {
-            return;
-        };
+        let path = self.crash_reporter.ui_integrity_path().to_path_buf();
         let live_layout_host = self
             .shell
             .borrow()
@@ -992,13 +1152,23 @@ impl UiHandle {
             self.pane_cards
                 .borrow()
                 .get(&workspace.active_pane)
-                .map(|card| card.focus_target.type_().name().to_string())
+                .map(|card| {
+                    pane_focus_target(self, workspace, workspace.active_pane, card)
+                        .type_()
+                        .name()
+                        .to_string()
+                })
         });
         let active_pane_focus_has_focus = model.active_workspace().is_some_and(|workspace| {
             self.pane_cards
                 .borrow()
                 .get(&workspace.active_pane)
-                .is_some_and(|card| widget_contains_window_focus(&self.window, &card.focus_target))
+                .is_some_and(|card| {
+                    widget_contains_window_focus(
+                        &self.window,
+                        &pane_focus_target(self, workspace, workspace.active_pane, card),
+                    )
+                })
         });
         let active_pane_card_has_focus = model.active_workspace().is_some_and(|workspace| {
             self.pane_cards
@@ -1020,6 +1190,10 @@ impl UiHandle {
             active_layout_pane_ids,
             active_workspace_label,
             active_window_id,
+            active_pane_id,
+            active_surface_id,
+            active_displayed_surface_id,
+            active_terminal_child_count,
             workspace_window_ids,
             workspace_windows,
         ) = model.active_workspace().map_or_else(
@@ -1029,6 +1203,10 @@ impl UiHandle {
                     Vec::new(),
                     None,
                     None::<String>,
+                    None::<String>,
+                    None::<String>,
+                    None::<String>,
+                    0usize,
                     Vec::<String>::new(),
                     Vec::<serde_json::Value>::new(),
                 )
@@ -1045,36 +1223,53 @@ impl UiHandle {
                 (
                     sorted_id_strings(workspace.panes.keys().copied()),
                     workspace
-                        .windows
+                        .columns
                         .values()
+                        .flat_map(|column| column.window_order.iter())
+                        .filter_map(|window_id| workspace.windows.get(window_id))
                         .flat_map(|window| window.layout.leaves())
                         .map(|pane_id| pane_id.to_string())
                         .collect(),
                     Some(workspace.label.clone()),
                     Some(workspace.active_window.to_string()),
-                    sorted_id_strings(workspace.windows.keys().copied()),
+                    Some(workspace.active_pane.to_string()),
                     workspace
-                        .windows
-                        .values()
-                        .map(|window| {
-                            let display_frame = display_window_frame(window.frame, render_context);
-                            json!({
-                                "id": window.id.to_string(),
-                                "x": window.frame.x,
-                                "y": window.frame.y,
-                                "width": window.frame.width,
-                                "height": window.frame.height,
-                                "display_x": display_frame.x,
-                                "display_y": display_frame.y,
-                                "display_width": display_frame.width,
-                                "display_height": display_frame.height,
-                                "active_pane": window.active_pane.to_string(),
-                                "leaf_pane_ids": window
-                                    .layout
-                                    .leaves()
-                                    .into_iter()
-                                    .map(|pane_id| pane_id.to_string())
-                                    .collect::<Vec<_>>(),
+                        .panes
+                        .get(&workspace.active_pane)
+                        .map(|pane| pane.active_surface.to_string()),
+                    self.pane_cards
+                        .borrow()
+                        .get(&workspace.active_pane)
+                        .and_then(|card| {
+                            card.displayed_surface_id
+                                .get()
+                                .map(|surface_id| surface_id.to_string())
+                        }),
+                    self.pane_cards
+                        .borrow()
+                        .get(&workspace.active_pane)
+                        .map(|card| count_widget_children(card.terminal_host.upcast_ref()))
+                        .unwrap_or(0),
+                    sorted_id_strings(workspace.windows.keys().copied()),
+                    workspace_display_window_placements(workspace, render_context)
+                        .into_iter()
+                        .filter_map(|placement| {
+                            workspace.windows.get(&placement.window_id).map(|window| {
+                                json!({
+                                    "id": window.id.to_string(),
+                                    "column_id": placement.column_id.to_string(),
+                                    "x": placement.frame.x,
+                                    "y": placement.frame.y,
+                                    "width": placement.frame.width,
+                                    "height": placement.frame.height,
+                                    "active_pane": window.active_pane.to_string(),
+                                    "leaf_pane_ids": window
+                                        .layout
+                                        .leaves()
+                                        .into_iter()
+                                        .map(|pane_id| pane_id.to_string())
+                                        .collect::<Vec<_>>(),
+                                })
                             })
                         })
                         .collect(),
@@ -1092,6 +1287,10 @@ impl UiHandle {
             "active_workspace_id": model.active_workspace_id().map(|id| id.to_string()),
             "active_workspace_label": active_workspace_label,
             "active_workspace_window_id": active_window_id,
+            "active_workspace_pane_id": active_pane_id,
+            "active_workspace_surface_id": active_surface_id,
+            "active_displayed_surface_id": active_displayed_surface_id,
+            "active_terminal_child_count": active_terminal_child_count,
             "active_workspace_window_ids": workspace_window_ids,
             "active_workspace_windows": workspace_windows,
             "all_live_pane_ids": all_live_pane_ids,
@@ -1169,14 +1368,37 @@ impl UiHandle {
         header.add_css_class("pane-header");
         header.set_margin_start(6);
         header.set_margin_end(4);
-        header.set_margin_top(1);
-        header.set_margin_bottom(1);
+        header.set_margin_top(2);
+        header.set_margin_bottom(2);
+
+        let agent_icon = build_agent_icon(pane.active_surface().and_then(surface_agent_kind), 14);
+        agent_icon.add_css_class("pane-agent-icon");
+        header.append(agent_icon.widget());
 
         let title = Label::new(Some("Unnamed terminal pane"));
         title.add_css_class("pane-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        title.set_cursor_from_name(Some("text"));
+        title.set_tooltip_text(Some("Click to rename terminal"));
+        let title_parent: Widget = title.clone().upcast();
+        let rename_title_ui = Rc::clone(self);
+        let rename_title_pane_id = pane.id;
+        let rename_title_click = gtk::GestureClick::new();
+        rename_title_click.set_button(1);
+        rename_title_click.connect_pressed(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            begin_surface_title_rename(&rename_title_ui, &title_parent, rename_title_pane_id);
+        });
+        title.add_controller(rename_title_click);
         header.append(&title);
+
+        let header_tabs = GtkBox::new(Orientation::Horizontal, 2);
+        header_tabs.add_css_class("pane-header-tabs");
+        header_tabs.set_hexpand(true);
+        header_tabs.set_visible(false);
+        header.append(&header_tabs);
 
         let status_dot = Label::new(Some("\u{25cf}"));
         status_dot.add_css_class("status-dot");
@@ -1185,8 +1407,73 @@ impl UiHandle {
         status_dot.set_tooltip_text(Some(pane_attention.label()));
         header.append(&status_dot);
 
+        let header_actions = GtkBox::new(Orientation::Horizontal, 3);
+        header_actions.add_css_class("pane-action-cluster");
+        header.append(&header_actions);
+
+        let new_window_btn = Button::with_label(TOOLBAR_ACTION_NEW_GLYPH);
+        new_window_btn.add_css_class("pane-action");
+        new_window_btn.add_css_class("pane-window-action");
+        new_window_btn.set_tooltip_text(Some("Create a new top-level window"));
+        let nw_ui = Rc::clone(self);
+        let nw_btn = new_window_btn.clone();
+        let nw_pane_id = pane.id;
+        new_window_btn.connect_clicked(move |_| {
+            show_new_window_popover(&nw_btn, &nw_ui, workspace_id, Some(nw_pane_id), None);
+        });
+        header_actions.append(&new_window_btn);
+
+        let split_right_btn = Button::with_label("\u{25eb}");
+        split_right_btn.add_css_class("pane-action");
+        split_right_btn.add_css_class("pane-split-action");
+        split_right_btn.set_tooltip_text(Some("Split right"));
+        let sr_ui = Rc::clone(self);
+        let sr_pane_id = pane.id;
+        split_right_btn.connect_clicked(move |_| {
+            sr_ui.dispatch(ControlCommand::SplitPane {
+                workspace_id,
+                pane_id: Some(sr_pane_id),
+                axis: taskers_domain::SplitAxis::Horizontal,
+            });
+        });
+        header_actions.append(&split_right_btn);
+
+        let split_down_btn = Button::with_label("\u{2501}");
+        split_down_btn.add_css_class("pane-action");
+        split_down_btn.add_css_class("pane-split-action");
+        split_down_btn.set_tooltip_text(Some("Split down"));
+        let sd_ui = Rc::clone(self);
+        let sd_pane_id = pane.id;
+        split_down_btn.connect_clicked(move |_| {
+            sd_ui.dispatch(ControlCommand::SplitPane {
+                workspace_id,
+                pane_id: Some(sd_pane_id),
+                axis: taskers_domain::SplitAxis::Vertical,
+            });
+        });
+        header_actions.append(&split_down_btn);
+
+        let resize_button = Button::with_label(TOOLBAR_ACTION_RESIZE_GLYPH);
+        resize_button.add_css_class("pane-action");
+        resize_button.add_css_class("pane-window-action");
+        resize_button.set_tooltip_text(Some("Resize this top-level window"));
+        resize_button.set_visible(false);
+        let resize_btn_ref = resize_button.clone();
+        let resize_ui = Rc::clone(self);
+        let resize_pane_id = pane.id;
+        resize_button.connect_clicked(move |_| {
+            let model = resize_ui.app_state.snapshot_model();
+            if let Some(ws) = model.workspaces.get(&workspace_id) {
+                if let Some(win_id) = ws.window_for_pane(resize_pane_id) {
+                    show_resize_window_popover(&resize_btn_ref, &resize_ui, workspace_id, win_id);
+                }
+            }
+        });
+        header_actions.append(&resize_button);
+
         let close_button = Button::with_label("\u{00d7}");
         close_button.add_css_class("pane-close");
+        close_button.add_css_class("pane-close-action");
         close_button.set_tooltip_text(Some("Close pane"));
         let close_ui = Rc::clone(self);
         let close_pane_id = pane.id;
@@ -1196,7 +1483,7 @@ impl UiHandle {
                 pane_id: close_pane_id,
             });
         });
-        header.append(&close_button);
+        header_actions.append(&close_button);
 
         // Right-click context menu on pane header
         let header_for_ctx = header.clone();
@@ -1213,6 +1500,85 @@ impl UiHandle {
             content.set_margin_end(4);
             content.set_margin_top(4);
             content.set_margin_bottom(4);
+
+            let rename_terminal = Button::with_label("Rename terminal");
+            rename_terminal.add_css_class("flat");
+            rename_terminal.add_css_class("context-item");
+            let rename_ui = Rc::clone(&ctx_ui);
+            let rename_parent: Widget = header_for_ctx.clone().upcast();
+            let rename_pop = popover.clone();
+            rename_terminal.connect_clicked(move |_| {
+                rename_pop.popdown();
+                begin_surface_title_rename(&rename_ui, &rename_parent, ctx_pane_id);
+            });
+            content.append(&rename_terminal);
+
+            let rename_sep = Separator::new(Orientation::Horizontal);
+            rename_sep.add_css_class("context-separator");
+            content.append(&rename_sep);
+
+            let new_right = Button::with_label("\u{2192} New Window Right");
+            new_right.add_css_class("flat");
+            new_right.add_css_class("context-item");
+            let nr_ui = Rc::clone(&ctx_ui);
+            let nr_pop = popover.clone();
+            new_right.connect_clicked(move |_| {
+                nr_pop.popdown();
+                create_workspace_window_from_pane(
+                    &nr_ui,
+                    workspace_id,
+                    ctx_pane_id,
+                    Direction::Right,
+                );
+            });
+            content.append(&new_right);
+
+            let new_left = Button::with_label("\u{2190} New Window Left");
+            new_left.add_css_class("flat");
+            new_left.add_css_class("context-item");
+            let nl_ui = Rc::clone(&ctx_ui);
+            let nl_pop = popover.clone();
+            new_left.connect_clicked(move |_| {
+                nl_pop.popdown();
+                create_workspace_window_from_pane(
+                    &nl_ui,
+                    workspace_id,
+                    ctx_pane_id,
+                    Direction::Left,
+                );
+            });
+            content.append(&new_left);
+
+            let new_below = Button::with_label("\u{2193} New Window Below");
+            new_below.add_css_class("flat");
+            new_below.add_css_class("context-item");
+            let nb_ui = Rc::clone(&ctx_ui);
+            let nb_pop = popover.clone();
+            new_below.connect_clicked(move |_| {
+                nb_pop.popdown();
+                create_workspace_window_from_pane(
+                    &nb_ui,
+                    workspace_id,
+                    ctx_pane_id,
+                    Direction::Down,
+                );
+            });
+            content.append(&new_below);
+
+            let new_above = Button::with_label("\u{2191} New Window Above");
+            new_above.add_css_class("flat");
+            new_above.add_css_class("context-item");
+            let na_ui = Rc::clone(&ctx_ui);
+            let na_pop = popover.clone();
+            new_above.connect_clicked(move |_| {
+                na_pop.popdown();
+                create_workspace_window_from_pane(&na_ui, workspace_id, ctx_pane_id, Direction::Up);
+            });
+            content.append(&new_above);
+
+            let new_window_sep = Separator::new(Orientation::Horizontal);
+            new_window_sep.add_css_class("context-separator");
+            content.append(&new_window_sep);
 
             let split_right = Button::with_label("\u{25eb} Split Right");
             split_right.add_css_class("flat");
@@ -1273,9 +1639,8 @@ impl UiHandle {
 
         root.append(&header);
 
-        let surface_tabs = GtkBox::new(Orientation::Horizontal, 4);
-        surface_tabs.add_css_class("surface-tabs");
-        root.append(&surface_tabs);
+        let surface_tabs = build_surface_tab_strip(self, workspace_id, pane.id);
+        root.append(&surface_tabs.root);
 
         let terminal_host = GtkBox::new(Orientation::Vertical, 0);
         terminal_host.set_hexpand(true);
@@ -1294,20 +1659,25 @@ impl UiHandle {
         root.add_controller(click);
 
         let card = PaneCardWidgets {
+            displayed_surface_id: Rc::new(Cell::new(None)),
             focus_target: root.clone().upcast(),
             root,
+            header: header.clone(),
+            agent_icon,
             title,
             status_dot,
+            header_actions,
+            header_tabs,
+            resize_button,
             surface_tabs,
             terminal_host,
         };
 
         configure_pane_card_layout(&card);
-        animate_pane_slide_in(self, card.root.upcast_ref());
         let card = PaneCardWidgets { ..card };
         self.pane_cards.borrow_mut().insert(pane.id, card.clone());
         sync_surface_tabs(self, workspace_id, pane, &card);
-        refresh_terminal_body(self, workspace_id, pane, &card);
+        sync_terminal_body(self, workspace_id, pane, &card);
         card
     }
 
@@ -1326,15 +1696,24 @@ impl UiHandle {
             .active_surface()
             .map(display_surface_title)
             .unwrap_or_else(|| "Unnamed terminal pane".into());
+        configure_agent_icon(
+            &card.agent_icon,
+            pane.active_surface().and_then(surface_agent_kind),
+            14,
+        );
         card.title.set_text(&display_title);
-        card.title
-            .set_tooltip_text(Some(&format_pane_meta(pane, snapshot.as_ref())));
+        card.title.set_tooltip_text(Some(&format!(
+            "{}\nClick to rename terminal",
+            format_pane_meta(pane, snapshot.as_ref())
+        )));
 
         if pane.id == active_pane {
             card.root.add_css_class("pane-card-active");
         } else {
             card.root.remove_css_class("pane-card-active");
         }
+        card.header.set_visible(pane.id == active_pane);
+        card.header_actions.set_visible(pane.id == active_pane);
 
         for cls in &[
             "status-dot-normal",
@@ -1346,12 +1725,40 @@ impl UiHandle {
             card.status_dot.remove_css_class(cls);
         }
         let pane_attention = pane.active_attention();
+        for cls in &[
+            "pane-card-state-busy",
+            "pane-card-state-completed",
+            "pane-card-state-waiting",
+            "pane-card-state-error",
+        ] {
+            card.root.remove_css_class(cls);
+        }
+        if pane_attention != AttentionState::Normal {
+            card.root.add_css_class(&format!(
+                "pane-card-state-{}",
+                attention_state_slug(pane_attention)
+            ));
+        }
         card.status_dot
             .add_css_class(&attention_dot_class(pane_attention));
         card.status_dot
             .set_tooltip_text(Some(pane_attention.label()));
+
+        // Show resize button only when pane is the sole pane in a single-pane window
+        let model = self.app_state.snapshot_model();
+        let is_sole_pane = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|ws| {
+                let win_id = ws.window_for_pane(pane.id)?;
+                let window = ws.windows.get(&win_id)?;
+                Some(window.layout.is_leaf())
+            })
+            .unwrap_or(false);
+        card.resize_button.set_visible(is_sole_pane);
+
         sync_surface_tabs(self, workspace_id, pane, &card);
-        refresh_terminal_body(self, workspace_id, pane, &card);
+        sync_terminal_body(self, workspace_id, pane, &card);
     }
 
     fn try_focus_pane_input(
@@ -1371,11 +1778,16 @@ impl UiHandle {
             return false;
         };
 
-        let target = if card.focus_target.parent().is_some() {
-            card.focus_target
-        } else {
-            card.root.upcast()
-        };
+        let target = pane_focus_target(self, active_workspace, pane_id, &card);
+
+        // Skip focus grab when the target (or a descendant like a Ghostty
+        // surface) already holds window focus.  Prevents GTK4 ScrolledWindow
+        // from auto-scrolling to make the focused child visible on every
+        // render cycle, which causes workspace canvas scroll snap-back.
+        if widget_contains_window_focus(&self.window, &target) {
+            return true;
+        }
+
         target.set_focusable(true);
         gtk::prelude::RootExt::set_focus(&self.window, Some(&target));
 
@@ -1479,6 +1891,18 @@ fn main() -> gtk::glib::ExitCode {
         .session
         .unwrap_or_else(session_store::default_session_path);
     let config_path = settings_store::default_config_path();
+    let crash_reporter = CrashReporter::for_session(&session_path, &config_path);
+    crash_reporter.install_panic_hook();
+    let recovered_crash_report = match crash_reporter.recover_previous_run() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("failed to recover previous taskers crash report: {error}");
+            None
+        }
+    };
+    if let Err(error) = crash_reporter.mark_launch() {
+        eprintln!("failed to write taskers run marker: {error}");
+    }
     let ghostty_runtime_toast = match ensure_runtime_installed() {
         Ok(Some(runtime)) => Some(format!(
             "Installed Ghostty runtime assets to {}",
@@ -1536,7 +1960,7 @@ fn main() -> gtk::glib::ExitCode {
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
     let (backend_choice, _backend_note, ghostty_host, backend_toast) =
         initialize_terminal_backend(&probe);
-    let startup_toast = merge_startup_toasts(
+    let runtime_toast = merge_startup_toasts(
         merge_startup_toasts(
             merge_startup_toasts(ghostty_runtime_toast, shell_integration_toast),
             cli.clean_shell
@@ -1547,6 +1971,11 @@ fn main() -> gtk::glib::ExitCode {
             backend_toast,
         ),
     );
+    let startup_toast = merge_startup_toasts(
+        recovered_crash_report
+            .map(|path| format!("Recovered an unclean shutdown report at {}", path.display())),
+        runtime_toast,
+    );
     let app_state = match AppState::new(
         initial_model,
         session_path,
@@ -1555,17 +1984,22 @@ fn main() -> gtk::glib::ExitCode {
     ) {
         Ok(state) => state,
         Err(error) => {
+            let _ = crash_reporter.mark_clean_shutdown();
             eprintln!("failed to initialize app state: {error}");
             return gtk::glib::ExitCode::FAILURE;
         }
     };
     let _server_note = spawn_control_server(app_state.controller(), socket_path);
 
+    let (_theme_name, initial_theme_palette) =
+        theme::load_theme(app_config.theme.as_deref(), themes::builtin_theme);
+
     let startup = StartupContext {
         app_state,
         backend_choice,
         config_path,
         app_config,
+        crash_reporter,
         ghostty_host,
         shell_launch,
         startup_toast,
@@ -1585,7 +2019,7 @@ fn main() -> gtk::glib::ExitCode {
     let startup_for_build = Rc::clone(&startup);
     let hold_guard_for_startup = Rc::clone(&hold_guard);
     app.connect_startup(move |app| {
-        install_css();
+        theme::install_theme(initial_theme_palette.clone());
         *hold_guard_for_startup.borrow_mut() = Some(app.hold());
         if let Some(startup) = startup_for_build.borrow_mut().take() {
             build_ui(app, startup, Rc::clone(&hold_guard_for_startup));
@@ -1616,16 +2050,18 @@ fn build_ui(
         glib::Propagation::Proceed
     });
 
-    let header = adw::HeaderBar::new();
-    let title = adw::WindowTitle::builder().title("taskers").build();
-    header.set_title_widget(Some(&title));
-
     let overlay = adw::ToastOverlay::new();
     overlay.set_vexpand(true);
     let root = GtkBox::new(Orientation::Vertical, 0);
-    root.append(&header);
     root.append(&overlay);
     window.set_content(Some(&root));
+
+    let crash_reporter_for_shutdown = startup.crash_reporter.clone();
+    app.connect_shutdown(move |_| {
+        if let Err(error) = crash_reporter_for_shutdown.mark_clean_shutdown() {
+            eprintln!("failed to clear taskers run marker: {error}");
+        }
+    });
 
     let ui = UiHandle::new(
         startup.app_state,
@@ -1635,6 +2071,7 @@ fn build_ui(
         app.clone(),
         window.clone(),
         overlay,
+        startup.crash_reporter.clone(),
         startup.ghostty_host,
         startup.shell_launch,
     );
@@ -1793,40 +2230,6 @@ fn is_modifier_key(key: gdk::Key) -> bool {
     )
 }
 
-fn directional_shortcut_key(key: gdk::Key) -> bool {
-    matches!(
-        key,
-        gdk::Key::Left
-            | gdk::Key::Right
-            | gdk::Key::Up
-            | gdk::Key::Down
-            | gdk::Key::h
-            | gdk::Key::H
-            | gdk::Key::j
-            | gdk::Key::J
-            | gdk::Key::k
-            | gdk::Key::K
-            | gdk::Key::l
-            | gdk::Key::L
-    )
-}
-
-fn reserved_direction_shortcut(key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
-    if !directional_shortcut_key(key) {
-        return false;
-    }
-
-    let normalized = normalize_shortcut_modifiers(modifiers);
-    let base = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
-
-    normalized == base
-        || normalized == (base | gdk::ModifierType::SHIFT_MASK)
-        || normalized == (base | gdk::ModifierType::SUPER_MASK)
-        || normalized == (base | gdk::ModifierType::SUPER_MASK | gdk::ModifierType::SHIFT_MASK)
-        || normalized == (base | gdk::ModifierType::META_MASK)
-        || normalized == (base | gdk::ModifierType::META_MASK | gdk::ModifierType::SHIFT_MASK)
-}
-
 fn connect_navigation_shortcuts(ui: &Rc<UiHandle>) {
     let controller = gtk::EventControllerKey::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1842,14 +2245,6 @@ fn connect_navigation_shortcuts(ui: &Rc<UiHandle>) {
             return glib::Propagation::Proceed;
         };
 
-        if shortcuts_ui.shortcut_matches(ShortcutAction::NewTerminal, key, state) {
-            shortcuts_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: workspace.id,
-                direction: Direction::Right,
-            });
-            return glib::Propagation::Stop;
-        }
-
         if shortcuts_ui.shortcut_matches(ShortcutAction::CloseTerminal, key, state) {
             shortcuts_ui.dispatch(ControlCommand::ClosePane {
                 workspace_id: workspace.id,
@@ -1858,53 +2253,87 @@ fn connect_navigation_shortcuts(ui: &Rc<UiHandle>) {
             return glib::Propagation::Stop;
         }
 
-        let normalized = normalize_shortcut_modifiers(state);
-        let alt_pressed = normalized.contains(gdk::ModifierType::ALT_MASK);
-        let control_pressed = normalized.contains(gdk::ModifierType::CONTROL_MASK);
-        if !(alt_pressed && control_pressed) {
-            return glib::Propagation::Proceed;
+        for (action, direction) in [
+            (ShortcutAction::FocusLeft, Direction::Left),
+            (ShortcutAction::FocusRight, Direction::Right),
+            (ShortcutAction::FocusUp, Direction::Up),
+            (ShortcutAction::FocusDown, Direction::Down),
+        ] {
+            if shortcuts_ui.shortcut_matches(action, key, state) {
+                shortcuts_ui.dispatch(ControlCommand::FocusPaneDirection {
+                    workspace_id: workspace.id,
+                    direction,
+                });
+                return glib::Propagation::Stop;
+            }
         }
 
-        let shift_pressed = normalized.contains(gdk::ModifierType::SHIFT_MASK);
-        let super_pressed = normalized.contains(gdk::ModifierType::SUPER_MASK)
-            || normalized.contains(gdk::ModifierType::META_MASK);
-
-        let direction = match key {
-            gdk::Key::Left | gdk::Key::h | gdk::Key::H => Some(Direction::Left),
-            gdk::Key::Right | gdk::Key::l | gdk::Key::L => Some(Direction::Right),
-            gdk::Key::Up | gdk::Key::k | gdk::Key::K => Some(Direction::Up),
-            gdk::Key::Down | gdk::Key::j | gdk::Key::J => Some(Direction::Down),
-            _ => None,
-        };
-        let Some(direction) = direction else {
-            return glib::Propagation::Proceed;
-        };
-
-        if super_pressed && shift_pressed {
-            shortcuts_ui.dispatch(ControlCommand::ResizeActivePaneSplit {
-                workspace_id: workspace.id,
-                direction,
-                amount: KEYBOARD_RESIZE_STEP,
-            });
-        } else if super_pressed {
-            shortcuts_ui.dispatch(ControlCommand::ResizeActiveWindow {
-                workspace_id: workspace.id,
-                direction,
-                amount: KEYBOARD_RESIZE_STEP,
-            });
-        } else if shift_pressed {
-            shortcuts_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: workspace.id,
-                direction,
-            });
-        } else {
-            shortcuts_ui.dispatch(ControlCommand::FocusPaneDirection {
-                workspace_id: workspace.id,
-                direction,
-            });
+        for (action, direction) in [
+            (ShortcutAction::NewWindowLeft, Direction::Left),
+            (ShortcutAction::NewWindowRight, Direction::Right),
+            (ShortcutAction::NewWindowUp, Direction::Up),
+            (ShortcutAction::NewWindowDown, Direction::Down),
+        ] {
+            if shortcuts_ui.shortcut_matches(action, key, state) {
+                shortcuts_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+                    workspace_id: workspace.id,
+                    direction,
+                });
+                return glib::Propagation::Stop;
+            }
         }
 
-        glib::Propagation::Stop
+        for (action, direction) in [
+            (ShortcutAction::ResizeWindowLeft, Direction::Left),
+            (ShortcutAction::ResizeWindowRight, Direction::Right),
+            (ShortcutAction::ResizeWindowUp, Direction::Up),
+            (ShortcutAction::ResizeWindowDown, Direction::Down),
+        ] {
+            if shortcuts_ui.shortcut_matches(action, key, state) {
+                shortcuts_ui.dispatch(ControlCommand::ResizeActiveWindow {
+                    workspace_id: workspace.id,
+                    direction,
+                    amount: KEYBOARD_RESIZE_STEP,
+                });
+                return glib::Propagation::Stop;
+            }
+        }
+
+        for (action, direction) in [
+            (ShortcutAction::ResizeSplitLeft, Direction::Left),
+            (ShortcutAction::ResizeSplitRight, Direction::Right),
+            (ShortcutAction::ResizeSplitUp, Direction::Up),
+            (ShortcutAction::ResizeSplitDown, Direction::Down),
+        ] {
+            if shortcuts_ui.shortcut_matches(action, key, state) {
+                shortcuts_ui.dispatch(ControlCommand::ResizeActivePaneSplit {
+                    workspace_id: workspace.id,
+                    direction,
+                    amount: KEYBOARD_RESIZE_STEP,
+                });
+                return glib::Propagation::Stop;
+            }
+        }
+
+        if shortcuts_ui.shortcut_matches(ShortcutAction::SplitRight, key, state) {
+            shortcuts_ui.dispatch(ControlCommand::SplitPane {
+                workspace_id: workspace.id,
+                pane_id: Some(workspace.active_pane),
+                axis: taskers_domain::SplitAxis::Horizontal,
+            });
+            return glib::Propagation::Stop;
+        }
+
+        if shortcuts_ui.shortcut_matches(ShortcutAction::SplitDown, key, state) {
+            shortcuts_ui.dispatch(ControlCommand::SplitPane {
+                workspace_id: workspace.id,
+                pane_id: Some(workspace.active_pane),
+                axis: taskers_domain::SplitAxis::Vertical,
+            });
+            return glib::Propagation::Stop;
+        }
+
+        glib::Propagation::Proceed
     });
     ui.window.add_controller(controller);
 }
@@ -1918,10 +2347,8 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     // --- Sidebar ---
     let sidebar = GtkBox::new(Orientation::Vertical, 2);
     sidebar.add_css_class("workspace-sidebar");
-    sidebar.set_margin_start(8);
-    sidebar.set_margin_end(8);
-    sidebar.set_margin_top(8);
-    sidebar.set_margin_bottom(8);
+    sidebar.set_margin_top(4);
+    sidebar.set_margin_bottom(4);
 
     let sidebar_header = GtkBox::new(Orientation::Horizontal, 8);
     sidebar_header.set_margin_bottom(6);
@@ -1950,9 +2377,18 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     let sidebar_scroll = ScrolledWindow::new();
     sidebar_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     sidebar_scroll.set_child(Some(&sidebar));
-    sidebar_scroll.set_size_request(180, -1);
+    sidebar_scroll.set_min_content_width(SIDEBAR_MIN_WIDTH);
+    sidebar_scroll.set_size_request(SIDEBAR_MIN_WIDTH, -1);
     shell.set_start_child(Some(&sidebar_scroll));
+    shell.set_position(SIDEBAR_MIN_WIDTH);
     shell.set_resize_start_child(false);
+    shell.set_shrink_start_child(false);
+    shell.connect_position_notify(|paned| {
+        let clamped = clamp_sidebar_split_position(paned.position());
+        if clamped != paned.position() {
+            paned.set_position(clamped);
+        }
+    });
 
     // --- Main content split ---
     let content_split = Paned::builder()
@@ -1963,117 +2399,134 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     // --- Main column ---
     let main_column = GtkBox::new(Orientation::Vertical, 0);
 
-    let toolbar = GtkBox::new(Orientation::Horizontal, 8);
-    toolbar.add_css_class("toolbar");
-    toolbar.set_size_request(-1, 36);
-    toolbar.set_margin_start(10);
-    toolbar.set_margin_end(10);
-    toolbar.set_valign(Align::Center);
+    // --- Workspace header bar (custom, not adw::HeaderBar) ---
+    let workspace_header = GtkBox::new(Orientation::Horizontal, 8);
+    workspace_header.add_css_class("workspace-header");
+    workspace_header.set_size_request(-1, 32);
+    workspace_header.set_margin_start(10);
+    workspace_header.set_margin_end(10);
+    workspace_header.set_margin_top(4);
+    workspace_header.set_margin_bottom(2);
 
-    let toolbar_label = Label::new(Some("taskers"));
-    toolbar_label.add_css_class("toolbar-label");
-    toolbar_label.set_xalign(0.0);
-    toolbar_label.set_hexpand(true);
-    toolbar.append(&toolbar_label);
-
-    // --- Window group ---
-    let window_group = GtkBox::new(Orientation::Horizontal, 4);
-    window_group.add_css_class("toolbar-group");
-
-    let btn_window_right = Button::with_label("\u{25eb} Window Right");
-    btn_window_right.add_css_class("toolbar-action");
-    btn_window_right.set_tooltip_text(Some("New window to the right (Ctrl+Alt+Shift+Right)"));
-    let wr_ui = Rc::clone(ui);
-    btn_window_right.connect_clicked(move |_| {
-        let model = wr_ui.app_state.snapshot_model();
-        if let Some(workspace) = model.active_workspace() {
-            wr_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: workspace.id,
-                direction: Direction::Right,
-            });
-        }
+    let workspace_name_button = Button::new();
+    workspace_name_button.add_css_class("flat");
+    workspace_name_button.add_css_class("workspace-header-title-btn");
+    let workspace_name_label = Label::new(Some(""));
+    workspace_name_label.add_css_class("workspace-header-label");
+    workspace_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    workspace_name_button.set_child(Some(&workspace_name_label));
+    workspace_name_button.set_tooltip_text(Some("Click to rename workspace"));
+    let rename_ui = Rc::clone(ui);
+    let rename_parent = workspace_name_button.clone();
+    workspace_name_button.connect_clicked(move |_| {
+        let model = rename_ui.app_state.snapshot_model();
+        let Some(ws) = model.active_workspace() else {
+            return;
+        };
+        let workspace_id = ws.id;
+        let popover = gtk::Popover::new();
+        popover.set_parent(&rename_parent);
+        let entry = Entry::new();
+        entry.set_text(&ws.label);
+        entry.add_css_class("workspace-rename-entry");
+        popover.set_child(Some(&entry));
+        let commit_ui = Rc::clone(&rename_ui);
+        let commit_pop = popover.clone();
+        entry.connect_activate(move |entry| {
+            let new_label = entry.text().to_string();
+            commit_pop.popdown();
+            if !new_label.is_empty() {
+                commit_ui.dispatch(ControlCommand::RenameWorkspace {
+                    workspace_id,
+                    label: new_label,
+                });
+            }
+        });
+        let pop_cleanup = popover.clone();
+        popover.connect_closed(move |_| {
+            pop_cleanup.unparent();
+        });
+        popover.popup();
+        entry.grab_focus();
+        entry.select_region(0, -1);
     });
-    window_group.append(&btn_window_right);
+    workspace_header.append(&workspace_name_button);
 
-    let btn_window_down = Button::with_label("\u{2193} Window Down");
-    btn_window_down.add_css_class("toolbar-action");
-    btn_window_down.set_tooltip_text(Some("New window below (Ctrl+Alt+Shift+Down)"));
-    let wd_ui = Rc::clone(ui);
-    btn_window_down.connect_clicked(move |_| {
-        let model = wd_ui.app_state.snapshot_model();
-        if let Some(workspace) = model.active_workspace() {
-            wd_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: workspace.id,
-                direction: Direction::Down,
-            });
-        }
+    // Spacer
+    let spacer = Label::new(None);
+    spacer.set_hexpand(true);
+    workspace_header.append(&spacer);
+
+    let overview_button = Button::with_label("Overview");
+    overview_button.add_css_class("workspace-header-action");
+    overview_button.set_tooltip_text(Some("Zoom out to the full workspace strip"));
+    let overview_ui = Rc::clone(ui);
+    overview_button.connect_clicked(move |_| {
+        overview_ui.toggle_overview();
     });
-    window_group.append(&btn_window_down);
-    toolbar.append(&window_group);
+    workspace_header.append(&overview_button);
 
-    let sep1 = Separator::new(Orientation::Vertical);
-    sep1.add_css_class("toolbar-separator");
-    toolbar.append(&sep1);
-
-    // --- Pane split group ---
-    let pane_group = GtkBox::new(Orientation::Horizontal, 4);
-    pane_group.add_css_class("toolbar-group");
-
-    let btn_split_right = Button::with_label("\u{25eb} Split Right");
-    btn_split_right.add_css_class("toolbar-action");
-    btn_split_right.set_tooltip_text(Some("Split active pane to the right"));
-    let sr_ui = Rc::clone(ui);
-    btn_split_right.connect_clicked(move |_| {
-        let model = sr_ui.app_state.snapshot_model();
-        if let Some(workspace) = model.active_workspace() {
-            sr_ui.dispatch(ControlCommand::SplitPane {
-                workspace_id: workspace.id,
-                pane_id: Some(workspace.active_pane),
-                axis: taskers_domain::SplitAxis::Horizontal,
-            });
-        }
+    let new_window_btn = Button::with_label("New Window");
+    new_window_btn.add_css_class("workspace-header-action");
+    new_window_btn.set_tooltip_text(Some("Create a new top-level window"));
+    let nw_parent = new_window_btn.clone();
+    let nw_ui = Rc::clone(ui);
+    new_window_btn.connect_clicked(move |_| {
+        let Some(workspace_id) = nw_ui.app_state.snapshot_model().active_workspace_id() else {
+            return;
+        };
+        show_new_window_popover(&nw_parent, &nw_ui, workspace_id, None, None);
     });
-    pane_group.append(&btn_split_right);
+    workspace_header.append(&new_window_btn);
 
-    let btn_split_down = Button::with_label("\u{2501} Split Down");
-    btn_split_down.add_css_class("toolbar-action");
-    btn_split_down.set_tooltip_text(Some("Split active pane downward"));
-    let sd_ui = Rc::clone(ui);
-    btn_split_down.connect_clicked(move |_| {
-        let model = sd_ui.app_state.snapshot_model();
-        if let Some(workspace) = model.active_workspace() {
-            sd_ui.dispatch(ControlCommand::SplitPane {
-                workspace_id: workspace.id,
-                pane_id: Some(workspace.active_pane),
-                axis: taskers_domain::SplitAxis::Vertical,
-            });
-        }
-    });
-    pane_group.append(&btn_split_down);
-    toolbar.append(&pane_group);
-
-    let sep2 = Separator::new(Orientation::Vertical);
-    sep2.add_css_class("toolbar-separator");
-    toolbar.append(&sep2);
-
-    // --- Settings ---
-    let settings_button = Button::with_label("\u{2699} Settings");
-    settings_button.add_css_class("toolbar-action");
-    settings_button.add_css_class("toolbar-action-subtle");
-    settings_button.set_tooltip_text(Some("Keyboard settings"));
+    let settings_button = Button::with_label("\u{2699}");
+    settings_button.add_css_class("workspace-header-action");
+    settings_button.set_tooltip_text(Some("Settings"));
     let settings_ui = Rc::clone(ui);
     settings_button.connect_clicked(move |_| {
         settings_ui.present_settings_dialog();
     });
-    toolbar.append(&settings_button);
+    workspace_header.append(&settings_button);
 
-    main_column.append(&toolbar);
+    // Explicit close button (CSD window controls are hidden under prefer-no-csd)
+    let close_button = Button::with_label("\u{00d7}");
+    close_button.add_css_class("workspace-header-action");
+    close_button.add_css_class("workspace-header-close");
+    close_button.set_tooltip_text(Some("Close window"));
+    let close_window = ui.window.clone();
+    close_button.connect_clicked(move |_| {
+        close_window.close();
+    });
+    workspace_header.append(&close_button);
+
+    let workspace_handle = gtk::WindowHandle::new();
+    workspace_handle.set_child(Some(&workspace_header));
+    main_column.append(&workspace_handle);
 
     let layout_host = Fixed::new();
     layout_host.set_hexpand(true);
     layout_host.set_vexpand(true);
     layout_host.set_halign(Align::Start);
     layout_host.set_valign(Align::Start);
+
+    let workspace_stage_root = Overlay::new();
+    workspace_stage_root.set_halign(Align::Start);
+    workspace_stage_root.set_valign(Align::Start);
+    workspace_stage_root.set_hexpand(false);
+    workspace_stage_root.set_vexpand(false);
+
+    let ghost_layer = Fixed::new();
+    ghost_layer.set_halign(Align::Start);
+    ghost_layer.set_valign(Align::Start);
+    ghost_layer.set_hexpand(false);
+    ghost_layer.set_vexpand(false);
+    ghost_layer.set_can_target(false);
+    workspace_stage_root.add_overlay(&ghost_layer);
+
+    let workspace_stage = WorkspaceStageWidgets {
+        root: workspace_stage_root,
+        ghost_layer,
+    };
 
     let layout_scroll = ScrolledWindow::new();
     layout_scroll.set_hexpand(true);
@@ -2097,12 +2550,8 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     content_split.set_shrink_start_child(false);
 
     // --- Attention column ---
-    let attention_panel = GtkBox::new(Orientation::Vertical, 8);
+    let attention_panel = GtkBox::new(Orientation::Vertical, 6);
     attention_panel.add_css_class("attention-panel");
-    attention_panel.set_margin_start(8);
-    attention_panel.set_margin_end(8);
-    attention_panel.set_margin_top(8);
-    attention_panel.set_margin_bottom(8);
 
     let attention_header = GtkBox::new(Orientation::Horizontal, 8);
     let attention_label = Label::new(Some("Attention"));
@@ -2112,19 +2561,19 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     attention_header.append(&attention_label);
     attention_panel.append(&attention_header);
 
-    let activity_empty = Label::new(Some("No panes need attention."));
-    activity_empty.add_css_class("dim-label");
+    let activity_empty = Label::new(Some("No unread items."));
+    activity_empty.add_css_class("empty-state");
     activity_empty.set_wrap(true);
     activity_empty.set_xalign(0.0);
     attention_panel.append(&activity_empty);
 
-    let activity_list = GtkBox::new(Orientation::Vertical, 4);
+    let activity_list = GtkBox::new(Orientation::Vertical, 0);
     activity_list.set_vexpand(true);
     attention_panel.append(&activity_list);
 
     let attention_scroll = ScrolledWindow::new();
     attention_scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
-    attention_scroll.set_size_request(280, -1);
+    attention_scroll.set_size_request(264, -1);
     attention_scroll.set_child(Some(&attention_panel));
     content_split.set_end_child(Some(&attention_scroll));
     content_split.set_resize_end_child(false);
@@ -2135,15 +2584,13 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     ShellWidgets {
         root: shell,
         sidebar_list,
-        toolbar_label,
-        btn_window_right,
-        btn_window_down,
-        btn_split_right,
-        btn_split_down,
+        workspace_name_label,
+        overview_button,
         activity_list,
         activity_empty,
         layout_scroll,
         layout_host,
+        workspace_stage,
     }
 }
 
@@ -2152,70 +2599,86 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
 
     if let Ok(summaries) = model.workspace_summaries(model.active_window) {
         for summary in summaries {
-            let outer = GtkBox::new(Orientation::Horizontal, 0);
+            let outer = Overlay::new();
+            outer.add_css_class("workspace-row");
+            outer.set_hexpand(true);
 
             let button = Button::new();
             button.add_css_class("flat");
             button.add_css_class("workspace-button");
             button.set_hexpand(true);
 
-            let row = GtkBox::new(Orientation::Horizontal, 8);
-            row.add_css_class("workspace-item");
+            let item_shell = GtkBox::new(Orientation::Vertical, 0);
+            item_shell.add_css_class("workspace-item");
+            item_shell.set_hexpand(true);
             if summary.display_attention != AttentionState::Normal {
-                row.add_css_class("workspace-item-has-attention");
-                row.add_css_class(&format!(
+                item_shell.add_css_class("workspace-item-has-attention");
+                item_shell.add_css_class(&format!(
                     "workspace-item-state-{}",
                     attention_state_slug(summary.display_attention)
                 ));
             }
             if summary.unread_count > 0 {
-                row.add_css_class("workspace-item-has-unread");
+                item_shell.add_css_class("workspace-item-has-unread");
             }
-            row.set_margin_start(6);
-            row.set_margin_end(4);
-            row.set_margin_top(3);
-            row.set_margin_bottom(3);
+            item_shell.set_margin_start(4);
+            item_shell.set_margin_end(0);
+            item_shell.set_margin_top(2);
+            item_shell.set_margin_bottom(2);
 
             if model.active_workspace_id() == Some(summary.workspace_id) {
-                row.add_css_class("workspace-item-active");
+                item_shell.add_css_class("workspace-item-active");
             }
 
-            row.append(&build_workspace_status_widget(&summary));
+            let row = GtkBox::new(Orientation::Vertical, 4);
+            row.set_margin_end(28);
+            let heading = GtkBox::new(Orientation::Horizontal, 8);
+            heading.set_hexpand(true);
+            heading.append(&build_workspace_status_widget(&summary));
 
-            let text = GtkBox::new(Orientation::Vertical, 2);
-            text.set_hexpand(true);
+            let agent_icon = build_agent_icon(
+                model
+                    .workspaces
+                    .get(&summary.workspace_id)
+                    .and_then(workspace_agent_kind),
+                12,
+            );
+            agent_icon.add_css_class("workspace-agent-icon");
+            heading.append(agent_icon.widget());
 
             let label = Label::new(Some(&summary.label));
             label.add_css_class("workspace-label");
             label.set_xalign(0.0);
             label.set_hexpand(true);
-            text.append(&label);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            heading.append(&label);
+            row.append(&heading);
 
-            if let Some(subtitle_text) = workspace_subtitle(&summary) {
-                let subtitle = Label::new(Some(&subtitle_text));
-                subtitle.add_css_class("workspace-subtitle");
-                subtitle.set_xalign(0.0);
-                subtitle.set_hexpand(true);
-                subtitle.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                text.append(&subtitle);
+            if let Some(preview_text) =
+                workspace_preview_text(&summary).filter(|text| text.len() > 2)
+            {
+                let preview = Label::new(Some(&preview_text));
+                preview.add_css_class("workspace-preview");
+                preview.set_xalign(0.0);
+                preview.set_hexpand(true);
+                preview.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                row.append(&preview);
             }
 
-            row.append(&text);
-
-            if let Some(badge_text) = workspace_badge_text(&summary) {
-                let badge = Label::new(Some(&badge_text));
-                badge.add_css_class("workspace-pill");
-                badge.add_css_class(&format!(
-                    "workspace-pill-state-{}",
-                    attention_state_slug(summary.display_attention)
-                ));
-                if summary.unread_count > 0 {
-                    badge.add_css_class("workspace-pill-unread");
-                }
-                row.append(&badge);
+            if let Some(workspace) = model.workspaces.get(&summary.workspace_id)
+                && let Some(meta_text) =
+                    workspace_metadata_line(workspace).filter(|text| text.len() > 2)
+            {
+                let meta = Label::new(Some(&meta_text));
+                meta.add_css_class("workspace-meta");
+                meta.set_xalign(0.0);
+                meta.set_hexpand(true);
+                meta.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                row.append(&meta);
             }
 
-            button.set_child(Some(&row));
+            item_shell.append(&row);
+            button.set_child(Some(&item_shell));
 
             let switch_ui = Rc::clone(ui);
             let workspace_id = summary.workspace_id;
@@ -2225,12 +2688,17 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                     workspace_id,
                 });
             });
-            outer.append(&button);
+            outer.set_child(Some(&button));
 
             let close_btn = Button::with_label("\u{00d7}");
             close_btn.add_css_class("workspace-close");
+            if model.active_workspace_id() == Some(summary.workspace_id) {
+                close_btn.add_css_class("workspace-close-visible");
+            }
             close_btn.set_tooltip_text(Some("Delete workspace"));
+            close_btn.set_halign(Align::End);
             close_btn.set_valign(Align::Center);
+            close_btn.set_margin_end(10);
             let close_ui = Rc::clone(ui);
             let close_ws_id = summary.workspace_id;
             close_btn.connect_clicked(move |_| {
@@ -2238,7 +2706,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
                     workspace_id: close_ws_id,
                 });
             });
-            outer.append(&close_btn);
+            outer.add_overlay(&close_btn);
 
             // Double-click to rename workspace
             let dbl_click = gtk::GestureClick::new();
@@ -2319,64 +2787,96 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     }
 }
 
-fn workspace_subtitle(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
+fn build_workspace_status_widget(summary: &taskers_domain::WorkspaceSummary) -> Widget {
+    let status_text = if summary.unread_count > 0 {
+        summary.unread_count.min(9).to_string()
+    } else {
+        "\u{25cf}".into()
+    };
+    let badge = Label::new(Some(&status_text));
+    badge.add_css_class("workspace-status-badge");
+    badge.add_css_class(&format!(
+        "workspace-status-badge-state-{}",
+        attention_state_slug(summary.display_attention)
+    ));
+    if summary.unread_count == 0 {
+        badge.add_css_class("workspace-status-badge-dot");
+    }
+    if summary.display_attention == AttentionState::Normal {
+        badge.add_css_class("workspace-status-badge-idle");
+    }
+    badge.set_valign(Align::Start);
+    badge.set_tooltip_text(Some(&format_workspace_status(summary)));
+    badge.upcast()
+}
+
+fn workspace_preview_text(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
+    if let Some(message) = summary.latest_notification.as_deref() {
+        let preview = compact_preview(message);
+        if !preview.is_empty() {
+            return Some(preview);
+        }
+    }
+
     if let Some(agent_summary) = workspace_agent_subtitle(summary) {
         return Some(agent_summary);
     }
 
-    if let Some(message) = summary.latest_notification.as_ref()
-        && !message.is_empty()
-    {
-        return Some(message.clone());
-    }
-
-    if summary.display_attention != AttentionState::Normal {
-        return Some(format_workspace_attention(summary));
-    }
-
-    summary.repo_hint.clone()
+    (summary.display_attention != AttentionState::Normal)
+        .then(|| format_workspace_attention(summary))
 }
 
-fn workspace_badge_text(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
-    if summary.unread_count > 0 {
-        Some(summary.unread_count.to_string())
-    } else if summary.agent_summaries.is_empty()
-        && summary.display_attention != AttentionState::Normal
+fn workspace_metadata_line(workspace: &Workspace) -> Option<String> {
+    let metadata = workspace_display_metadata(workspace)?;
+    let mut parts = Vec::new();
+
+    if let Some(branch) = metadata
+        .git_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
     {
-        Some(summary.display_attention.label().to_string())
+        parts.push(branch.to_string());
+    }
+
+    if let Some(cwd) = metadata
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+    {
+        parts.push(compact_path(cwd));
+    }
+
+    if !metadata.ports.is_empty() {
+        parts.push(format_ports(&metadata.ports));
+    }
+
+    if parts.is_empty() {
+        metadata
+            .repo_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|repo_name| !repo_name.is_empty())
+            .map(str::to_owned)
     } else {
-        None
+        Some(parts.join("  •  "))
     }
 }
 
-fn build_workspace_status_widget(summary: &taskers_domain::WorkspaceSummary) -> Widget {
-    if summary.agent_summaries.is_empty() {
-        let dot = Label::new(Some("\u{25cf}"));
-        dot.add_css_class("status-dot");
-        dot.add_css_class(&attention_dot_class(summary.display_attention));
-        dot.set_valign(Align::Center);
-        dot.upcast()
-    } else {
-        let strip = GtkBox::new(Orientation::Horizontal, 4);
-        strip.add_css_class("workspace-agent-strip");
-        strip.set_valign(Align::Center);
-
-        for agent in summary.agent_summaries.iter().take(6) {
-            let chip = Label::new(Some(&workspace_agent_chip_label(agent)));
-            chip.add_css_class("workspace-agent-chip");
-            chip.add_css_class(workspace_agent_state_class(agent.state));
-            chip.set_tooltip_text(Some(&workspace_agent_tooltip(agent)));
-            strip.append(&chip);
-        }
-
-        if summary.agent_summaries.len() > 6 {
-            let overflow = Label::new(Some(&format!("+{}", summary.agent_summaries.len() - 6)));
-            overflow.add_css_class("workspace-agent-overflow");
-            strip.append(&overflow);
-        }
-
-        strip.upcast()
-    }
+fn workspace_display_metadata(workspace: &Workspace) -> Option<&PaneMetadata> {
+    workspace
+        .panes
+        .get(&workspace.active_pane)
+        .and_then(PaneRecord::active_metadata)
+        .filter(|metadata| metadata_has_display_context(metadata))
+        .or_else(|| {
+            workspace
+                .panes
+                .values()
+                .filter_map(PaneRecord::active_metadata)
+                .find(|metadata| metadata_has_display_context(metadata))
+        })
 }
 
 fn workspace_agent_subtitle(summary: &taskers_domain::WorkspaceSummary) -> Option<String> {
@@ -2414,41 +2914,6 @@ fn workspace_agent_subtitle(summary: &taskers_domain::WorkspaceSummary) -> Optio
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-fn workspace_agent_chip_label(agent: &WorkspaceAgentSummary) -> String {
-    let kind = agent.agent_kind.trim();
-    match kind {
-        "codex" => "CX".into(),
-        "claude" => "CL".into(),
-        "opencode" => "OC".into(),
-        "aider" => "AI".into(),
-        other => other
-            .chars()
-            .filter(|ch| ch.is_ascii_alphanumeric())
-            .take(2)
-            .collect::<String>()
-            .to_uppercase(),
-    }
-}
-
-fn workspace_agent_tooltip(agent: &WorkspaceAgentSummary) -> String {
-    let title = agent
-        .title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| humanize_agent_kind(&agent.agent_kind));
-    format!("{title}  |  {}", agent.state.label())
-}
-
-fn workspace_agent_state_class(state: WorkspaceAgentState) -> &'static str {
-    match state {
-        WorkspaceAgentState::Working => "workspace-agent-chip-working",
-        WorkspaceAgentState::Waiting => "workspace-agent-chip-waiting",
-        WorkspaceAgentState::Inactive => "workspace-agent-chip-inactive",
-    }
-}
-
 fn format_workspace_attention(summary: &taskers_domain::WorkspaceSummary) -> String {
     let count = summary
         .counts_by_attention
@@ -2467,6 +2932,21 @@ fn format_workspace_attention(summary: &taskers_domain::WorkspaceSummary) -> Str
     }
 }
 
+fn format_workspace_status(summary: &taskers_domain::WorkspaceSummary) -> String {
+    if summary.unread_count > 0 {
+        let noun = if summary.unread_count == 1 {
+            "unread item"
+        } else {
+            "unread items"
+        };
+        format!("{} {noun}", summary.unread_count)
+    } else if let Some(agent_summary) = workspace_agent_subtitle(summary) {
+        agent_summary
+    } else {
+        summary.display_attention.label().to_string()
+    }
+}
+
 fn update_toolbar(shell: &ShellWidgets, model: &AppModel, overview_mode: bool) {
     if let Some(workspace) = model.active_workspace() {
         let label = if overview_mode {
@@ -2474,17 +2954,34 @@ fn update_toolbar(shell: &ShellWidgets, model: &AppModel, overview_mode: bool) {
         } else {
             workspace.label.clone()
         };
-        shell.toolbar_label.set_text(&label);
-        shell.btn_window_right.set_sensitive(true);
-        shell.btn_window_down.set_sensitive(true);
-        shell.btn_split_right.set_sensitive(true);
-        shell.btn_split_down.set_sensitive(true);
+        shell.workspace_name_label.set_text(&label);
+        shell.overview_button.set_label(if overview_mode {
+            "Exit Overview"
+        } else {
+            "Overview"
+        });
+        shell
+            .overview_button
+            .set_tooltip_text(Some(if overview_mode {
+                "Return to the focused workspace view"
+            } else {
+                "Zoom out to the full workspace strip"
+            }));
+        if overview_mode {
+            shell
+                .overview_button
+                .add_css_class("workspace-header-action-active");
+        } else {
+            shell
+                .overview_button
+                .remove_css_class("workspace-header-action-active");
+        }
     } else {
-        shell.toolbar_label.set_text("No workspace");
-        shell.btn_window_right.set_sensitive(false);
-        shell.btn_window_down.set_sensitive(false);
-        shell.btn_split_right.set_sensitive(false);
-        shell.btn_split_down.set_sensitive(false);
+        shell.workspace_name_label.set_text("");
+        shell.overview_button.set_label("Overview");
+        shell
+            .overview_button
+            .remove_css_class("workspace-header-action-active");
     }
 }
 
@@ -2510,18 +3007,29 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     button.set_focusable(false);
     button.set_hexpand(true);
 
-    let row = GtkBox::new(Orientation::Vertical, 4);
+    let row = GtkBox::new(Orientation::Vertical, 2);
     row.add_css_class("activity-item");
+    row.add_css_class(&format!(
+        "activity-item-state-{}",
+        attention_state_slug(item.state)
+    ));
     row.set_margin_start(8);
-    row.set_margin_end(8);
-    row.set_margin_top(8);
-    row.set_margin_bottom(8);
+    row.set_margin_end(6);
+    row.set_margin_top(5);
+    row.set_margin_bottom(5);
 
     let heading = GtkBox::new(Orientation::Horizontal, 6);
     let dot = Label::new(Some("\u{25cf}"));
     dot.add_css_class("status-dot");
     dot.add_css_class(&attention_dot_class(item.state));
     heading.append(&dot);
+
+    let agent_icon = build_agent_icon(
+        activity_surface(model, item).and_then(surface_agent_kind),
+        13,
+    );
+    agent_icon.add_css_class("activity-agent-icon");
+    heading.append(agent_icon.widget());
 
     let title = model
         .workspaces
@@ -2538,32 +3046,26 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     title_label.add_css_class("pane-title");
     title_label.set_xalign(0.0);
     title_label.set_hexpand(true);
+    title_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     heading.append(&title_label);
 
     let time_label = Label::new(Some(&item.created_at.time().to_string()));
-    time_label.add_css_class("dim-label");
     time_label.add_css_class("activity-time");
     heading.append(&time_label);
     row.append(&heading);
 
-    let workspace_label = model
-        .workspaces
-        .get(&item.workspace_id)
-        .map(|workspace| workspace.label.clone())
-        .unwrap_or_else(|| "Workspace".into());
-    let meta_label = Label::new(Some(&format!(
-        "{}  |  {}",
-        workspace_label,
-        activity_kind_label(&item.kind)
-    )));
-    meta_label.add_css_class("dim-label");
+    let meta_label = Label::new(Some(&activity_context_line(model, item)));
+    meta_label.add_css_class("activity-meta");
     meta_label.set_xalign(0.0);
+    meta_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     row.append(&meta_label);
 
-    let message = Label::new(Some(&item.message));
-    message.set_wrap(true);
+    let message = Label::new(Some(&compact_preview(&item.message)));
+    message.add_css_class("activity-preview");
     message.set_xalign(0.0);
+    message.set_ellipsize(gtk::pango::EllipsizeMode::End);
     row.append(&message);
+    button.set_tooltip_text(Some(&item.message));
 
     button.set_child(Some(&row));
 
@@ -2584,8 +3086,8 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
 
     outer.append(&button);
 
-    let done_button = Button::with_label("Done");
-    done_button.add_css_class("activity-dismiss");
+    let done_button = Button::with_label("Clear");
+    done_button.add_css_class("activity-action");
     done_button.set_valign(Align::Center);
     done_button.set_tooltip_text(Some("Mark this item addressed"));
     let done_ui = Rc::clone(ui);
@@ -2602,6 +3104,53 @@ fn build_activity_row(ui: &Rc<UiHandle>, model: &AppModel, item: &ActivityItem) 
     outer.append(&done_button);
 
     outer.upcast()
+}
+
+fn activity_context_line(model: &AppModel, item: &ActivityItem) -> String {
+    let workspace_label = model
+        .workspaces
+        .get(&item.workspace_id)
+        .map(|workspace| workspace.label.clone())
+        .unwrap_or_else(|| "Workspace".into());
+
+    let mut parts = vec![workspace_label];
+    if let Some(metadata) = activity_metadata(model, item) {
+        if let Some(branch) = metadata
+            .git_branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|branch| !branch.is_empty())
+        {
+            parts.push(branch.to_string());
+        }
+
+        if let Some(cwd) = metadata
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+        {
+            parts.push(compact_path(cwd));
+        }
+    }
+    parts.push(activity_kind_label(&item.kind).to_string());
+    parts.join("  •  ")
+}
+
+fn activity_surface<'a>(model: &'a AppModel, item: &ActivityItem) -> Option<&'a SurfaceRecord> {
+    model
+        .workspaces
+        .get(&item.workspace_id)
+        .and_then(|workspace| workspace.panes.get(&item.pane_id))
+        .and_then(|pane| {
+            pane.surfaces
+                .get(&item.surface_id)
+                .or_else(|| pane.active_surface())
+        })
+}
+
+fn activity_metadata<'a>(model: &'a AppModel, item: &ActivityItem) -> Option<&'a PaneMetadata> {
+    activity_surface(model, item).map(|surface| &surface.metadata)
 }
 
 fn focus_activity_target(
@@ -2724,138 +3273,122 @@ fn begin_inline_rename(
     entry.add_controller(key_controller);
 }
 
-// ── Animation helpers ──
-//
-// Niri-style slide + fade using a manual frame timer (~60fps).
-// This bypasses adw animation APIs which don't reliably fire on
-// freshly-created widgets that haven't been fully realized yet.
-
-const ANIM_SLIDE_PX: f64 = 80.0;
-const ANIM_DURATION_MS: u64 = 350;
-const ANIM_FRAME_MS: u64 = 16;
-
-/// Ease-out cubic: starts fast, decelerates to a smooth stop.
-fn ease_out_cubic(t: f64) -> f64 {
-    let t1 = 1.0 - t;
-    1.0 - t1 * t1 * t1
+fn clamp_sidebar_split_position(position: i32) -> i32 {
+    position.max(SIDEBAR_MIN_WIDTH)
 }
 
-/// Animate a workspace window sliding into position on a Fixed canvas.
-/// Widget starts at offset position with opacity 0 and slides to final
-/// position over ANIM_DURATION_MS with an ease-out curve.
-fn animate_window_slide_in(
-    ui: &UiHandle,
-    canvas: &Fixed,
-    widget: &Widget,
-    final_x: f64,
-    final_y: f64,
-    display_frame: WindowFrame,
-) {
-    if !ui.settings.borrow().animations_enabled || ui.backend_choice == BackendChoice::Ghostty {
+fn begin_surface_title_rename(ui: &Rc<UiHandle>, parent: &Widget, pane_id: taskers_domain::PaneId) {
+    let Some((surface_id, current_title, placeholder_title)) = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .values()
+        .find_map(|workspace| {
+            workspace.panes.get(&pane_id).and_then(|pane| {
+                pane.active_surface().map(|surface| {
+                    (
+                        surface.id,
+                        editable_surface_title(surface),
+                        display_surface_title(surface),
+                    )
+                })
+            })
+        })
+    else {
         return;
-    }
-
-    // Determine slide direction from frame position.
-    let (offset_x, offset_y) = if display_frame.x > 0 {
-        (ANIM_SLIDE_PX, 0.0)
-    } else if display_frame.y > 0 {
-        (0.0, ANIM_SLIDE_PX)
-    } else {
-        (ANIM_SLIDE_PX, 0.0)
     };
 
-    let start_x = final_x + offset_x;
-    let start_y = final_y + offset_y;
+    let popover = gtk::Popover::new();
+    popover.set_parent(parent);
 
-    // Place at start and hide.
-    canvas.move_(widget, start_x, start_y);
-    widget.set_opacity(0.0);
+    let entry = Entry::new();
+    entry.set_text(&current_title);
+    entry.set_placeholder_text(Some(&placeholder_title));
+    entry.add_css_class("workspace-rename-entry");
+    entry.set_width_chars(24);
+    popover.set_child(Some(&entry));
 
-    // Drive animation with a frame timer.
-    let w = widget.clone();
-    let c = canvas.clone();
-    let start_time = Rc::new(Cell::new(None::<u64>));
-    glib::timeout_add_local(Duration::from_millis(ANIM_FRAME_MS), move || {
-        let now = glib::monotonic_time() as u64; // microseconds
-        let started = start_time.get();
-        let t0 = match started {
-            Some(t0) => t0,
-            None => {
-                start_time.set(Some(now));
-                now
-            }
-        };
+    let committed = Rc::new(Cell::new(false));
 
-        let elapsed_ms = (now.saturating_sub(t0)) / 1000;
-        let progress = (elapsed_ms as f64 / ANIM_DURATION_MS as f64).min(1.0);
-        let eased = ease_out_cubic(progress);
-
-        let x = start_x + (final_x - start_x) * eased;
-        let y = start_y + (final_y - start_y) * eased;
-        c.move_(&w, x, y);
-        w.set_opacity(eased);
-
-        if progress >= 1.0 {
-            w.set_opacity(1.0);
-            c.move_(&w, final_x, final_y);
-            glib::ControlFlow::Break
-        } else {
-            glib::ControlFlow::Continue
+    let commit_ui = Rc::clone(ui);
+    let commit_popover = popover.clone();
+    let committed_for_activate = Rc::clone(&committed);
+    entry.connect_activate(move |entry| {
+        if committed_for_activate.get() {
+            return;
         }
+        committed_for_activate.set(true);
+        commit_popover.popdown();
+        commit_ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+            surface_id,
+            patch: PaneMetadataPatch {
+                title: Some(entry.text().trim().to_string()),
+                ..PaneMetadataPatch::default()
+            },
+        });
     });
-}
 
-/// Animate a pane card sliding in from the right.
-fn animate_pane_slide_in(ui: &UiHandle, widget: &Widget) {
-    if !ui.settings.borrow().animations_enabled || ui.backend_choice == BackendChoice::Ghostty {
-        return;
-    }
-
-    widget.set_opacity(0.0);
-    widget.set_margin_start(40);
-
-    let w = widget.clone();
-    let start_time = Rc::new(Cell::new(None::<u64>));
-    glib::timeout_add_local(Duration::from_millis(ANIM_FRAME_MS), move || {
-        let now = glib::monotonic_time() as u64;
-        let t0 = match start_time.get() {
-            Some(t0) => t0,
-            None => {
-                start_time.set(Some(now));
-                now
-            }
-        };
-
-        let elapsed_ms = (now.saturating_sub(t0)) / 1000;
-        let progress = (elapsed_ms as f64 / ANIM_DURATION_MS as f64).min(1.0);
-        let eased = ease_out_cubic(progress);
-
-        w.set_opacity(eased);
-        w.set_margin_start(((1.0 - eased) * 40.0).round() as i32);
-
-        if progress >= 1.0 {
-            w.set_opacity(1.0);
-            w.set_margin_start(0);
-            glib::ControlFlow::Break
-        } else {
-            glib::ControlFlow::Continue
+    let focus_ui = Rc::clone(ui);
+    let focus_popover = popover.clone();
+    let committed_for_focus = Rc::clone(&committed);
+    entry.connect_notify_local(Some("has-focus"), move |entry, _| {
+        if entry.has_focus() || committed_for_focus.get() {
+            return;
         }
+
+        committed_for_focus.set(true);
+        focus_popover.popdown();
+        focus_ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+            surface_id,
+            patch: PaneMetadataPatch {
+                title: Some(entry.text().trim().to_string()),
+                ..PaneMetadataPatch::default()
+            },
+        });
     });
+
+    let escape_popover = popover.clone();
+    let committed_for_escape = Rc::clone(&committed);
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.connect_key_pressed(move |_, key, _, _| {
+        if key == gdk::Key::Escape {
+            committed_for_escape.set(true);
+            escape_popover.popdown();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    entry.add_controller(key_controller);
+
+    let pop_cleanup = popover.clone();
+    popover.connect_closed(move |_| {
+        pop_cleanup.unparent();
+    });
+
+    popover.popup();
+    entry.grab_focus();
+    entry.select_region(0, -1);
 }
 
 fn layout_render_key(
     workspace: &Workspace,
     render_context: WorkspaceRenderContext,
 ) -> LayoutRenderKey {
+    // active_window is intentionally excluded so that focus switches
+    // don't trigger a full canvas rebuild. Active window styling is synced
+    // separately in update_layout().
     LayoutRenderKey::WorkspaceWindows {
-        active_window: workspace.active_window,
-        windows: workspace
-            .windows
-            .values()
-            .map(|window| WorkspaceWindowRenderKey {
-                window_id: window.id,
-                frame: display_window_frame(window.frame, render_context),
-                layout: window.layout.clone(),
+        windows: workspace_display_window_placements(workspace, render_context)
+            .into_iter()
+            .filter_map(|placement| {
+                workspace
+                    .windows
+                    .get(&placement.window_id)
+                    .map(|window| WorkspaceWindowRenderKey {
+                        window_id: placement.window_id,
+                        frame: placement.frame,
+                        layout: window.layout.clone(),
+                    })
             })
             .collect(),
     }
@@ -2889,32 +3422,90 @@ fn compute_layout_render_state(ui: &UiHandle, model: &AppModel) -> LayoutRenderS
 fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     let previous_model = ui.last_rendered.borrow().clone();
     let next_state = compute_layout_render_state(ui.as_ref(), model);
-    let needs_rebuild = *ui.layout_state.borrow() != next_state;
+    let previous_layout_state = ui.layout_state.borrow().clone();
+    let needs_rebuild = previous_layout_state != next_state;
     let overview_mode = ui.overview_mode.get();
+    let top_level_resize_preview_active = ui.top_level_resize_preview_active();
 
     if needs_rebuild {
-        let previous_window_ids: HashSet<WorkspaceWindowId> = previous_model
-            .as_ref()
-            .and_then(AppModel::active_workspace)
-            .map(|ws| ws.windows.keys().copied().collect())
-            .unwrap_or_default();
-        let new_content: Widget = if let Some(workspace) = model.active_workspace() {
-            build_workspace_canvas_widget(ui, shell, workspace, &previous_window_ids)
+        if let Some(workspace) = model.active_workspace() {
+            ensure_workspace_stage(shell);
+            let new_canvas = build_workspace_canvas_widget(ui, shell, workspace);
+            shell.workspace_stage.root.set_child(Some(&new_canvas));
+
+            let next_scene = build_workspace_scene_snapshot(ui.as_ref(), shell, workspace);
+            let next_visuals = build_workspace_scene_visuals(workspace);
+            let previous_workspace = previous_model
+                .as_ref()
+                .and_then(AppModel::active_workspace)
+                .filter(|candidate| candidate.id == workspace.id);
+            let should_animate_transition = ui.settings.borrow().animations_enabled
+                && !overview_mode
+                && !top_level_resize_preview_active
+                && !previous_layout_state.overview_mode
+                && previous_workspace
+                    .map(|previous| has_terminal_lifecycle_change(previous, workspace))
+                    .unwrap_or(false);
+
+            if should_animate_transition {
+                let previous_scene = previous_workspace
+                    .map(|workspace| build_workspace_scene_snapshot(ui.as_ref(), shell, workspace));
+                let previous_visuals = previous_workspace
+                    .map(build_workspace_scene_visuals)
+                    .unwrap_or_default();
+                let mut plan = plan_workspace_transition(
+                    previous_scene.as_ref(),
+                    &next_scene,
+                    TERMINAL_MOTION_SPEC,
+                );
+                let presented = ui.workspace_transition_state.borrow().presented.clone();
+                retarget_transition_plan(&mut plan, &presented);
+                if plan.items.is_empty() {
+                    reset_workspace_transition(
+                        ui.as_ref(),
+                        shell,
+                        (next_scene.canvas_width, next_scene.canvas_height),
+                    );
+                } else {
+                    start_workspace_transition(
+                        ui,
+                        shell,
+                        plan,
+                        (next_scene.canvas_width, next_scene.canvas_height),
+                        &previous_visuals,
+                        &next_visuals,
+                    );
+                }
+            } else {
+                reset_workspace_transition(
+                    ui.as_ref(),
+                    shell,
+                    (next_scene.canvas_width, next_scene.canvas_height),
+                );
+            }
         } else {
+            reset_workspace_transition(ui.as_ref(), shell, (1, 1));
+            if shell.workspace_stage.root.parent().is_some() {
+                shell.layout_host.remove(&shell.workspace_stage.root);
+            }
+            shell.layout_host.set_size_request(-1, -1);
             let empty = Label::new(Some("No workspace selected"));
             empty.add_css_class("empty-state");
             empty.set_xalign(0.5);
             empty.set_yalign(0.5);
             empty.set_hexpand(true);
             empty.set_vexpand(true);
-            empty.upcast()
-        };
-        clear_fixed(&shell.layout_host);
-        shell.layout_host.put(&new_content, 0.0, 0.0);
+            clear_fixed(&shell.layout_host);
+            shell.layout_host.put(&empty, 0.0, 0.0);
+        }
         *ui.layout_state.borrow_mut() = next_state;
     }
 
     if let Some(workspace) = model.active_workspace() {
+        // Sync active window CSS class without a full rebuild.
+        let active_name = format!("ww-{}", workspace.active_window);
+        sync_active_window_class(&shell.workspace_stage, &active_name);
+
         for pane in workspace.panes.values() {
             ui.sync_pane_card(workspace.id, workspace.active_pane, pane);
         }
@@ -2930,16 +3521,20 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             .as_ref()
             .and_then(AppModel::active_workspace)
             .map(|workspace| workspace.active_pane);
-        let should_restore_viewport = previous_workspace_id != Some(workspace.id);
-        let should_focus_input = needs_rebuild
-            || previous_workspace_id != Some(workspace.id)
-            || previous_active_window != Some(workspace.active_window)
-            || previous_active_pane != Some(workspace.active_pane);
-        let should_reveal = needs_rebuild
-            || previous_workspace_id != Some(workspace.id)
-            || previous_active_window != Some(workspace.active_window)
-            || previous_active_pane != Some(workspace.active_pane);
-        if should_focus_input {
+        let should_restore_viewport =
+            !top_level_resize_preview_active && previous_workspace_id != Some(workspace.id);
+        let should_focus_input = !top_level_resize_preview_active
+            && (needs_rebuild
+                || previous_workspace_id != Some(workspace.id)
+                || previous_active_window != Some(workspace.active_window)
+                || previous_active_pane != Some(workspace.active_pane));
+        let should_reveal = !top_level_resize_preview_active
+            && (needs_rebuild
+                || previous_workspace_id != Some(workspace.id)
+                || previous_active_window != Some(workspace.active_window));
+        let should_recover_scroller_focus = !top_level_resize_preview_active
+            && active_pane_needs_scroller_focus_recovery(ui.as_ref(), shell, workspace);
+        if should_focus_input || should_recover_scroller_focus {
             ui.queue_focus_active_pane_input(model);
         }
         if overview_mode {
@@ -2976,11 +3571,434 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
     }
 }
 
+fn ensure_workspace_stage(shell: &ShellWidgets) {
+    if shell.workspace_stage.root.parent().is_none() {
+        clear_fixed(&shell.layout_host);
+        shell.layout_host.put(&shell.workspace_stage.root, 0.0, 0.0);
+    }
+}
+
+fn set_workspace_stage_size(shell: &ShellWidgets, width: i32, height: i32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    shell.workspace_stage.root.set_size_request(width, height);
+    shell
+        .workspace_stage
+        .ghost_layer
+        .set_size_request(width, height);
+    shell.layout_host.set_size_request(width, height);
+}
+
+fn apply_workspace_preview_placements(
+    shell: &ShellWidgets,
+    workspace: &Workspace,
+    render_context: WorkspaceRenderContext,
+) {
+    let Some(canvas): Option<Fixed> = shell.workspace_stage.root.child().and_downcast::<Fixed>()
+    else {
+        return;
+    };
+
+    let metrics = workspace_canvas_metrics(workspace, render_context);
+    let placements = workspace_display_window_placements(workspace, render_context)
+        .into_iter()
+        .map(|placement| (format!("ww-{}", placement.window_id), placement.frame))
+        .collect::<HashMap<_, _>>();
+
+    set_workspace_stage_size(shell, metrics.width, metrics.height);
+    canvas.set_size_request(metrics.width, metrics.height);
+
+    let mut child: Option<gtk::Widget> = canvas.first_child();
+    while let Some(widget) = child {
+        let next: Option<gtk::Widget> = widget.next_sibling();
+        let Ok(overlay) = widget.clone().downcast::<Overlay>() else {
+            child = next;
+            continue;
+        };
+        let Some(inner): Option<gtk::Widget> = overlay.child() else {
+            child = next;
+            continue;
+        };
+        let Some(frame) = placements.get(inner.widget_name().as_str()) else {
+            child = next;
+            continue;
+        };
+
+        overlay.set_size_request(frame.width, frame.height);
+        inner.set_size_request(frame.width, frame.height);
+        canvas.move_(
+            &overlay,
+            f64::from(frame.x + metrics.offset_x),
+            f64::from(frame.y + metrics.offset_y),
+        );
+
+        child = next;
+    }
+}
+
+fn reset_workspace_transition(ui: &UiHandle, shell: &ShellWidgets, canvas_size: (i32, i32)) {
+    clear_fixed(&shell.workspace_stage.ghost_layer);
+    let mut state = ui.workspace_transition_state.borrow_mut();
+    state.motion = None;
+    state.presented.clear();
+    state.target_canvas_width = canvas_size.0.max(1);
+    state.target_canvas_height = canvas_size.1.max(1);
+    drop(state);
+    if shell.workspace_stage.root.parent().is_some() {
+        set_workspace_stage_size(shell, canvas_size.0, canvas_size.1);
+    }
+}
+
+fn build_workspace_scene_snapshot(
+    ui: &UiHandle,
+    shell: &ShellWidgets,
+    workspace: &Workspace,
+) -> WorkspaceSceneSnapshot {
+    let render_context = workspace_render_context(
+        ui,
+        Some(shell),
+        workspace,
+        ui.overview_mode.get(),
+        workspace_viewport_width(ui, Some(shell)),
+        workspace_viewport_height(ui, Some(shell)),
+    );
+    let metrics = workspace_canvas_metrics(workspace, render_context);
+    let placements = workspace_display_window_placements(workspace, render_context);
+    let windows = placements
+        .iter()
+        .map(|placement| WorkspaceWindowSnapshot {
+            id: placement.window_id,
+            rect: WindowFrame {
+                x: placement.frame.x + metrics.offset_x,
+                y: placement.frame.y + metrics.offset_y,
+                width: placement.frame.width,
+                height: placement.frame.height,
+            },
+        })
+        .collect::<Vec<_>>();
+    let panes = placements
+        .iter()
+        .filter_map(|placement| {
+            workspace
+                .windows
+                .get(&placement.window_id)
+                .map(|window| (placement, window))
+        })
+        .flat_map(|(placement, window)| {
+            derive_pane_frames(placement.frame, &window.layout)
+                .into_iter()
+                .map(move |(pane_id, pane_rect)| PaneSceneSnapshot {
+                    id: pane_id,
+                    window_id: placement.window_id,
+                    rect: WindowFrame {
+                        x: pane_rect.x + metrics.offset_x,
+                        y: pane_rect.y + metrics.offset_y,
+                        width: pane_rect.width,
+                        height: pane_rect.height,
+                    },
+                })
+        })
+        .collect::<Vec<_>>();
+
+    WorkspaceSceneSnapshot {
+        canvas_width: metrics.width,
+        canvas_height: metrics.height,
+        windows,
+        panes,
+    }
+}
+
+fn build_workspace_scene_visuals(workspace: &Workspace) -> WorkspaceSceneVisuals {
+    let windows = workspace
+        .windows
+        .values()
+        .map(|window| {
+            (
+                window.id,
+                WindowGhostVisual {
+                    active: window.id == workspace.active_window,
+                    attention: workspace_window_attention(workspace, window),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    WorkspaceSceneVisuals { windows }
+}
+
+fn has_terminal_lifecycle_change(previous: &Workspace, next: &Workspace) -> bool {
+    previous.windows.keys().copied().collect::<HashSet<_>>()
+        != next.windows.keys().copied().collect::<HashSet<_>>()
+}
+
+fn start_workspace_transition(
+    ui: &Rc<UiHandle>,
+    shell: &ShellWidgets,
+    plan: terminal_transitions::TransitionPlan,
+    target_canvas_size: (i32, i32),
+    previous_visuals: &WorkspaceSceneVisuals,
+    next_visuals: &WorkspaceSceneVisuals,
+) {
+    clear_fixed(&shell.workspace_stage.ghost_layer);
+    set_workspace_stage_size(shell, plan.canvas_width, plan.canvas_height);
+
+    let mut items = Vec::new();
+    for item in plan.items {
+        let widget = build_workspace_transition_widget(&item, previous_visuals, next_visuals);
+        let start_rect = presented_transition_rect(item.start_rect);
+        let end_rect = presented_transition_rect(item.end_rect);
+        let spec = workspace_transition_spec(item.kind);
+        shell
+            .workspace_stage
+            .ghost_layer
+            .put(&widget, start_rect.x, start_rect.y);
+        apply_workspace_transition_widget_frame(
+            &shell.workspace_stage.ghost_layer,
+            &widget,
+            start_rect,
+            spec.ghost_start_opacity,
+        );
+        items.push(WorkspaceTransitionMotionItem {
+            id: item.id,
+            widget,
+            start_rect,
+            end_rect,
+            duration_us: spec.timing.duration_us,
+            curve: spec.timing.curve,
+            start_opacity: spec.ghost_start_opacity,
+        });
+    }
+
+    let mut state = ui.workspace_transition_state.borrow_mut();
+    state.target_canvas_width = target_canvas_size.0.max(1);
+    state.target_canvas_height = target_canvas_size.1.max(1);
+    state.presented = items
+        .iter()
+        .map(|item| (item.id, item.start_rect))
+        .collect();
+    state.motion = Some(WorkspaceTransitionMotionState {
+        start_time: glib::monotonic_time(),
+        items,
+    });
+    drop(state);
+
+    start_workspace_transition_tick(ui, shell);
+}
+
+fn workspace_transition_spec(
+    kind: TransitionItemKind,
+) -> terminal_transitions::LifecycleMotionSpec {
+    match kind {
+        TransitionItemKind::Window => TERMINAL_MOTION_SPEC.window,
+    }
+}
+
+fn build_workspace_transition_widget(
+    item: &terminal_transitions::TransitionItem,
+    previous_visuals: &WorkspaceSceneVisuals,
+    next_visuals: &WorkspaceSceneVisuals,
+) -> Widget {
+    match item.id {
+        TransitionItemId::Window(window_id) => {
+            let visual = match item.phase {
+                TransitionPhase::Exit => previous_visuals.windows.get(&window_id).copied(),
+                _ => next_visuals
+                    .windows
+                    .get(&window_id)
+                    .copied()
+                    .or_else(|| previous_visuals.windows.get(&window_id).copied()),
+            }
+            .unwrap_or(WindowGhostVisual {
+                active: false,
+                attention: AttentionState::Normal,
+            });
+            build_workspace_window_ghost(visual)
+        }
+    }
+}
+
+fn build_workspace_window_ghost(visual: WindowGhostVisual) -> Widget {
+    let root = GtkBox::new(Orientation::Vertical, 0);
+    root.add_css_class("workspace-window");
+    root.add_css_class("workspace-window-ghost");
+    if visual.attention != AttentionState::Normal {
+        root.add_css_class(&format!(
+            "workspace-window-state-{}",
+            attention_state_slug(visual.attention)
+        ));
+    }
+    if visual.active {
+        root.add_css_class("workspace-window-active");
+    }
+
+    let chrome = GtkBox::new(Orientation::Vertical, 0);
+    chrome.add_css_class("workspace-window-ghost-chrome");
+    let header = GtkBox::new(Orientation::Horizontal, 4);
+    header.add_css_class("pane-header");
+    header.add_css_class("workspace-window-ghost-header");
+    let title = Label::new(Some("Terminal"));
+    title.add_css_class("pane-title");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    header.append(&title);
+    let dot = Label::new(Some("\u{25cf}"));
+    dot.add_css_class("status-dot");
+    dot.add_css_class(&attention_dot_class(visual.attention));
+    header.append(&dot);
+    chrome.append(&header);
+
+    let strip = GtkBox::new(Orientation::Horizontal, 4);
+    strip.add_css_class("surface-tabs");
+    strip.add_css_class("workspace-window-ghost-strip");
+    let tab = GtkBox::new(Orientation::Horizontal, 0);
+    tab.add_css_class("surface-tab");
+    tab.add_css_class("workspace-window-ghost-tab");
+    tab.set_size_request(132, 22);
+    strip.append(&tab);
+    chrome.append(&strip);
+
+    let body = GtkBox::new(Orientation::Vertical, 0);
+    body.add_css_class("workspace-window-ghost-body");
+    body.set_hexpand(true);
+    body.set_vexpand(true);
+    chrome.append(&body);
+
+    root.append(&chrome);
+    root.upcast()
+}
+
+fn start_workspace_transition_tick(ui: &Rc<UiHandle>, shell: &ShellWidgets) {
+    let mut state = ui.workspace_transition_state.borrow_mut();
+    if state.tick_running {
+        return;
+    }
+    state.tick_running = true;
+    drop(state);
+
+    let ui = Rc::clone(ui);
+    let shell = shell.clone();
+    let tick_root = shell.workspace_stage.root.clone();
+    tick_root.add_tick_callback(move |_, clock| {
+        if advance_workspace_transition_tick(&ui, &shell, clock.frame_time()) {
+            glib::ControlFlow::Continue
+        } else {
+            ui.workspace_transition_state.borrow_mut().tick_running = false;
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+fn advance_workspace_transition_tick(ui: &UiHandle, shell: &ShellWidgets, now: i64) -> bool {
+    let (frames, keep_running, target_canvas_size) = {
+        let mut state = ui.workspace_transition_state.borrow_mut();
+        let Some(motion) = state.motion.clone() else {
+            return false;
+        };
+
+        state.presented.clear();
+        let mut frames = Vec::new();
+        let mut keep_running = false;
+        for item in &motion.items {
+            let progress =
+                ((now - motion.start_time) as f64 / item.duration_us as f64).clamp(0.0, 1.0);
+            let eased = item.curve.sample(progress);
+            let rect = lerp_presented_transition_rect(item.start_rect, item.end_rect, eased);
+            let opacity = item.start_opacity * (1.0 - eased);
+            state.presented.insert(item.id, rect);
+            frames.push((item.widget.clone(), rect, opacity));
+            if progress < 1.0 {
+                keep_running = true;
+            }
+        }
+        if !keep_running {
+            state.motion = None;
+            state.presented.clear();
+        }
+        (
+            frames,
+            keep_running,
+            (state.target_canvas_width, state.target_canvas_height),
+        )
+    };
+
+    for (widget, rect, opacity) in &frames {
+        apply_workspace_transition_widget_frame(
+            &shell.workspace_stage.ghost_layer,
+            widget,
+            *rect,
+            *opacity,
+        );
+    }
+
+    if !keep_running {
+        clear_fixed(&shell.workspace_stage.ghost_layer);
+        set_workspace_stage_size(shell, target_canvas_size.0, target_canvas_size.1);
+    }
+
+    keep_running
+}
+
+fn presented_transition_rect(frame: WindowFrame) -> PresentedTransitionRect {
+    PresentedTransitionRect {
+        x: f64::from(frame.x),
+        y: f64::from(frame.y),
+        width: f64::from(frame.width),
+        height: f64::from(frame.height),
+    }
+}
+
+fn lerp_presented_transition_rect(
+    start: PresentedTransitionRect,
+    end: PresentedTransitionRect,
+    t: f64,
+) -> PresentedTransitionRect {
+    PresentedTransitionRect {
+        x: start.x + ((end.x - start.x) * t),
+        y: start.y + ((end.y - start.y) * t),
+        width: start.width + ((end.width - start.width) * t),
+        height: start.height + ((end.height - start.height) * t),
+    }
+}
+
+fn apply_workspace_transition_widget_frame(
+    layer: &Fixed,
+    widget: &Widget,
+    rect: PresentedTransitionRect,
+    opacity: f64,
+) {
+    widget.set_size_request(
+        rect.width.round().max(1.0) as i32,
+        rect.height.round().max(1.0) as i32,
+    );
+    layer.move_(widget, rect.x, rect.y);
+    widget.set_opacity(opacity.clamp(0.0, 1.0));
+}
+
+/// Walk the layout host tree to toggle `.workspace-window-active` on the
+/// correct window widget, identified by its widget name.
+fn sync_active_window_class(workspace_stage: &WorkspaceStageWidgets, active_name: &str) {
+    let Some(canvas) = workspace_stage.root.child() else {
+        return;
+    };
+    let mut child = canvas.first_child();
+    while let Some(widget) = child {
+        // Each child of the canvas is an Overlay; the workspace-window box
+        // is the Overlay's child.
+        if let Some(inner) = widget.first_child() {
+            if inner.widget_name().as_str() == active_name {
+                inner.add_css_class("workspace-window-active");
+            } else {
+                inner.remove_css_class("workspace-window-active");
+            }
+        }
+        child = widget.next_sibling();
+    }
+}
+
 fn build_workspace_canvas_widget(
     ui: &Rc<UiHandle>,
     shell: &ShellWidgets,
     workspace: &Workspace,
-    previous_window_ids: &HashSet<WorkspaceWindowId>,
 ) -> gtk::Widget {
     let canvas = Fixed::new();
     canvas.set_halign(Align::Start);
@@ -2999,22 +4017,20 @@ fn build_workspace_canvas_widget(
     let metrics = workspace_canvas_metrics(workspace, render_context);
     canvas.set_size_request(metrics.width, metrics.height);
 
-    for window in workspace.windows.values() {
-        let display_frame = display_window_frame(window.frame, render_context);
-        let window_widget = build_workspace_window_widget(ui, workspace, window, display_frame);
-        let final_x = f64::from(display_frame.x + metrics.offset_x);
-        let final_y = f64::from(display_frame.y + metrics.offset_y);
+    for placement in workspace_display_window_placements(workspace, render_context) {
+        let Some(window) = workspace.windows.get(&placement.window_id) else {
+            continue;
+        };
+        let window_widget = build_workspace_window_widget(
+            ui,
+            workspace,
+            window,
+            placement.column_id,
+            placement.frame,
+        );
+        let final_x = f64::from(placement.frame.x + metrics.offset_x);
+        let final_y = f64::from(placement.frame.y + metrics.offset_y);
         canvas.put(&window_widget, final_x, final_y);
-        if !previous_window_ids.contains(&window.id) {
-            animate_window_slide_in(
-                ui.as_ref(),
-                &canvas,
-                &window_widget,
-                final_x,
-                final_y,
-                display_frame,
-            );
-        }
     }
 
     canvas.upcast()
@@ -3024,6 +4040,7 @@ fn build_workspace_window_widget(
     ui: &Rc<UiHandle>,
     workspace: &Workspace,
     window: &taskers_domain::WorkspaceWindowRecord,
+    workspace_column_id: WorkspaceColumnId,
     display_frame: WindowFrame,
 ) -> gtk::Widget {
     let overlay = Overlay::new();
@@ -3033,6 +4050,14 @@ fn build_workspace_window_widget(
 
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class("workspace-window");
+    root.set_widget_name(&format!("ww-{}", window.id));
+    let window_attention = workspace_window_attention(workspace, window);
+    if window_attention != AttentionState::Normal {
+        root.add_css_class(&format!(
+            "workspace-window-state-{}",
+            attention_state_slug(window_attention)
+        ));
+    }
     if window.id == workspace.active_window {
         root.add_css_class("workspace-window-active");
     }
@@ -3040,10 +4065,92 @@ fn build_workspace_window_widget(
     root.set_hexpand(true);
     root.set_vexpand(true);
 
-    // Focus click on the window root (no separate header bar)
-    let focus_ui = Rc::clone(ui);
+    let is_single_pane = window.layout.is_leaf();
+    let header_height = if is_single_pane {
+        0
+    } else {
+        WORKSPACE_WINDOW_HEADER_HEIGHT
+    };
+
+    let window_title = workspace_window_title(workspace, window);
+    let window_header = GtkBox::new(Orientation::Horizontal, 6);
+    window_header.add_css_class("workspace-window-toolbar");
+    window_header.set_size_request(-1, WORKSPACE_WINDOW_HEADER_HEIGHT);
+    window_header.set_margin_start(8);
+    window_header.set_margin_end(8);
+    window_header.set_margin_top(6);
+    window_header.set_margin_bottom(4);
+    window_header.set_visible(!is_single_pane);
+
+    let header_title = Label::new(Some(&window_title));
+    header_title.add_css_class("workspace-window-toolbar-title");
+    header_title.set_xalign(0.0);
+    header_title.set_hexpand(true);
+    header_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    header_title.set_tooltip_text(Some(&window_title));
+    window_header.append(&header_title);
+
+    let attention_dot = Label::new(Some("\u{25cf}"));
+    attention_dot.add_css_class("status-dot");
+    attention_dot.add_css_class(&attention_dot_class(window_attention));
+    attention_dot.set_tooltip_text(Some(window_attention.label()));
+    window_header.append(&attention_dot);
+
+    let toolbar_actions = GtkBox::new(Orientation::Horizontal, 4);
+    toolbar_actions.add_css_class("workspace-window-toolbar-actions");
+    window_header.append(&toolbar_actions);
+
     let workspace_id = workspace.id;
     let window_id = window.id;
+
+    if window.id != workspace.active_window {
+        let focus_button = Button::with_label(TOOLBAR_ACTION_FOCUS_GLYPH);
+        focus_button.add_css_class("workspace-window-toolbar-action");
+        focus_button.set_tooltip_text(Some("Focus this top-level window"));
+        let focus_header_ui = Rc::clone(ui);
+        focus_button.connect_clicked(move |_| {
+            focus_header_ui.dispatch(ControlCommand::FocusWorkspaceWindow {
+                workspace_id,
+                workspace_window_id: window_id,
+            });
+        });
+        toolbar_actions.append(&focus_button);
+    }
+
+    let new_button = Button::with_label(TOOLBAR_ACTION_NEW_GLYPH);
+    new_button.add_css_class("workspace-window-toolbar-action");
+    new_button.set_tooltip_text(Some("Create a new top-level window from this one"));
+    let new_button_parent = new_button.clone();
+    let new_header_ui = Rc::clone(ui);
+    new_button.connect_clicked(move |_| {
+        show_new_window_popover(
+            &new_button_parent,
+            &new_header_ui,
+            workspace_id,
+            None,
+            Some(window_id),
+        );
+    });
+    toolbar_actions.append(&new_button);
+
+    let resize_button = Button::with_label(TOOLBAR_ACTION_RESIZE_GLYPH);
+    resize_button.add_css_class("workspace-window-toolbar-action");
+    resize_button.set_tooltip_text(Some("Resize this top-level window"));
+    let resize_button_parent = resize_button.clone();
+    let resize_header_ui = Rc::clone(ui);
+    resize_button.connect_clicked(move |_| {
+        show_resize_window_popover(
+            &resize_button_parent,
+            &resize_header_ui,
+            workspace_id,
+            window_id,
+        );
+    });
+    toolbar_actions.append(&resize_button);
+    root.append(&window_header);
+
+    // Focus click on the window root (no separate header bar)
+    let focus_ui = Rc::clone(ui);
     let focus_click = gtk::GestureClick::new();
     focus_click.connect_pressed(move |_, _, _, _| {
         focus_ui.dispatch(ControlCommand::FocusWorkspaceWindow {
@@ -3078,12 +4185,20 @@ fn build_workspace_window_widget(
         let nr_pop = popover.clone();
         new_right.connect_clicked(move |_| {
             nr_pop.popdown();
-            nr_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: wctx_ws_id,
-                direction: Direction::Right,
-            });
+            create_workspace_window_from_window(&nr_ui, wctx_ws_id, wctx_win_id, Direction::Right);
         });
         content.append(&new_right);
+
+        let new_left = Button::with_label("\u{2190} New Window Left");
+        new_left.add_css_class("flat");
+        new_left.add_css_class("context-item");
+        let nl_ui = Rc::clone(&wctx_ui);
+        let nl_pop = popover.clone();
+        new_left.connect_clicked(move |_| {
+            nl_pop.popdown();
+            create_workspace_window_from_window(&nl_ui, wctx_ws_id, wctx_win_id, Direction::Left);
+        });
+        content.append(&new_left);
 
         let new_below = Button::with_label("\u{2193} New Window Below");
         new_below.add_css_class("flat");
@@ -3092,16 +4207,46 @@ fn build_workspace_window_widget(
         let nb_pop = popover.clone();
         new_below.connect_clicked(move |_| {
             nb_pop.popdown();
-            nb_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
-                workspace_id: wctx_ws_id,
-                direction: Direction::Down,
-            });
+            create_workspace_window_from_window(&nb_ui, wctx_ws_id, wctx_win_id, Direction::Down);
         });
         content.append(&new_below);
+
+        let new_above = Button::with_label("\u{2191} New Window Above");
+        new_above.add_css_class("flat");
+        new_above.add_css_class("context-item");
+        let na_ui = Rc::clone(&wctx_ui);
+        let na_pop = popover.clone();
+        new_above.connect_clicked(move |_| {
+            na_pop.popdown();
+            create_workspace_window_from_window(&na_ui, wctx_ws_id, wctx_win_id, Direction::Up);
+        });
+        content.append(&new_above);
 
         let sep = Separator::new(Orientation::Horizontal);
         sep.add_css_class("context-separator");
         content.append(&sep);
+
+        for (label, direction) in [
+            ("Resize Narrower", Direction::Left),
+            ("Resize Wider", Direction::Right),
+            ("Resize Shorter", Direction::Up),
+            ("Resize Taller", Direction::Down),
+        ] {
+            let resize_button = Button::with_label(label);
+            resize_button.add_css_class("flat");
+            resize_button.add_css_class("context-item");
+            let resize_ui = Rc::clone(&wctx_ui);
+            let resize_pop = popover.clone();
+            resize_button.connect_clicked(move |_| {
+                resize_pop.popdown();
+                resize_workspace_window_from_window(&resize_ui, wctx_ws_id, wctx_win_id, direction);
+            });
+            content.append(&resize_button);
+        }
+
+        let focus_sep = Separator::new(Orientation::Horizontal);
+        focus_sep.add_css_class("context-separator");
+        content.append(&focus_sep);
 
         let focus_btn = Button::with_label("Focus Window");
         focus_btn.add_css_class("flat");
@@ -3127,7 +4272,20 @@ fn build_workspace_window_widget(
     });
     root.add_controller(wctx_click);
 
-    let body = build_split_layout_widget(ui, workspace, window.id, &window.layout, Vec::new());
+    let body_frame = WindowFrame {
+        y: display_frame.y + header_height,
+        height: (display_frame.height - header_height).max(1),
+        ..display_frame
+    };
+
+    let body = build_split_layout_widget(
+        ui,
+        workspace,
+        window.id,
+        &window.layout,
+        body_frame,
+        Vec::new(),
+    );
     body.set_hexpand(true);
     body.set_vexpand(true);
     root.append(&body);
@@ -3138,6 +4296,7 @@ fn build_workspace_window_widget(
             ui,
             &overlay,
             workspace.id,
+            workspace_column_id,
             window.id,
             display_frame,
         );
@@ -3145,11 +4304,24 @@ fn build_workspace_window_widget(
     overlay.upcast()
 }
 
+fn workspace_window_title(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+) -> String {
+    workspace
+        .panes
+        .get(&window.active_pane)
+        .and_then(|pane| pane.active_surface())
+        .map(display_surface_title)
+        .unwrap_or_else(|| "Top-level window".into())
+}
+
 fn build_split_layout_widget(
     ui: &Rc<UiHandle>,
     workspace: &Workspace,
     workspace_window_id: WorkspaceWindowId,
     node: &LayoutNode,
+    rect: WindowFrame,
     path: Vec<bool>,
 ) -> gtk::Widget {
     match node {
@@ -3169,6 +4341,7 @@ fn build_split_layout_widget(
             first,
             second,
         } => {
+            let (first_rect, second_rect) = split_layout_rects(rect, *axis, *ratio);
             let paned = Paned::builder()
                 .orientation(match axis {
                     taskers_domain::SplitAxis::Horizontal => Orientation::Horizontal,
@@ -3176,6 +4349,15 @@ fn build_split_layout_widget(
                 })
                 .wide_handle(false)
                 .build();
+            // Seed the Paned with its final divider position up front so split
+            // creation does not visibly "settle" on the next main-loop turn.
+            paned.set_position(split_position_for_extent(
+                match axis {
+                    taskers_domain::SplitAxis::Horizontal => rect.width,
+                    taskers_domain::SplitAxis::Vertical => rect.height,
+                },
+                *ratio,
+            ));
             let mut first_path = path.clone();
             first_path.push(false);
             paned.set_start_child(Some(&build_split_layout_widget(
@@ -3183,6 +4365,7 @@ fn build_split_layout_widget(
                 workspace,
                 workspace_window_id,
                 first,
+                first_rect,
                 first_path,
             )));
             let mut second_path = path.clone();
@@ -3192,17 +4375,10 @@ fn build_split_layout_widget(
                 workspace,
                 workspace_window_id,
                 second,
+                second_rect,
                 second_path,
             )));
-            bind_split_ratio_updates(
-                ui,
-                workspace.id,
-                workspace_window_id,
-                &paned,
-                *axis,
-                path,
-                *ratio,
-            );
+            bind_split_ratio_updates(ui, workspace.id, workspace_window_id, &paned, *axis, path);
             paned.upcast()
         }
     }
@@ -3212,12 +4388,14 @@ fn attach_workspace_window_resize_handles(
     ui: &Rc<UiHandle>,
     overlay: &Overlay,
     workspace_id: taskers_domain::WorkspaceId,
+    workspace_column_id: WorkspaceColumnId,
     workspace_window_id: WorkspaceWindowId,
     display_frame: WindowFrame,
 ) {
     overlay.add_overlay(&build_workspace_window_resize_handle(
         ui,
         workspace_id,
+        workspace_column_id,
         workspace_window_id,
         display_frame,
         ResizeHandleEdge::Right,
@@ -3225,6 +4403,7 @@ fn attach_workspace_window_resize_handles(
     overlay.add_overlay(&build_workspace_window_resize_handle(
         ui,
         workspace_id,
+        workspace_column_id,
         workspace_window_id,
         display_frame,
         ResizeHandleEdge::Bottom,
@@ -3234,6 +4413,7 @@ fn attach_workspace_window_resize_handles(
 fn build_workspace_window_resize_handle(
     ui: &Rc<UiHandle>,
     workspace_id: taskers_domain::WorkspaceId,
+    workspace_column_id: WorkspaceColumnId,
     workspace_window_id: WorkspaceWindowId,
     display_frame: WindowFrame,
     edge: ResizeHandleEdge,
@@ -3246,88 +4426,113 @@ fn build_workspace_window_resize_handle(
             handle.set_halign(Align::End);
             handle.set_valign(Align::Fill);
             handle.set_vexpand(true);
-            handle.set_size_request(8, -1);
+            handle.set_size_request(12, -1);
+            handle.set_tooltip_text(Some("Drag to resize this column"));
+            handle.set_cursor_from_name(Some("ew-resize"));
         }
         ResizeHandleEdge::Bottom => {
             handle.add_css_class("workspace-window-resize-handle-bottom");
             handle.set_halign(Align::Fill);
             handle.set_valign(Align::End);
             handle.set_hexpand(true);
-            handle.set_size_request(-1, 8);
+            handle.set_size_request(-1, 12);
+            handle.set_tooltip_text(Some("Drag to resize this stacked window"));
+            handle.set_cursor_from_name(Some("ns-resize"));
         }
     }
 
-    let start_frame = Rc::new(Cell::new(display_frame));
-    let current_frame = Rc::new(Cell::new(display_frame));
-    let handle_widget = handle.clone();
-    let drag_ui = Rc::clone(ui);
+    let start_size = Rc::new(Cell::new(match edge {
+        ResizeHandleEdge::Right => display_frame.width,
+        ResizeHandleEdge::Bottom => display_frame.height,
+    }));
+    let current_size = Rc::new(Cell::new(match edge {
+        ResizeHandleEdge::Right => display_frame.width,
+        ResizeHandleEdge::Bottom => display_frame.height,
+    }));
     let drag_begin_ui = Rc::clone(ui);
     let drag = gtk::GestureDrag::new();
-    let start_frame_for_begin = Rc::clone(&start_frame);
-    let current_frame_for_begin = Rc::clone(&current_frame);
+    let start_size_for_begin = Rc::clone(&start_size);
+    let current_size_for_begin = Rc::clone(&current_size);
+    let active_handle_for_begin = handle.clone();
+    let active_handle_for_end = handle.clone();
     drag.connect_drag_begin(move |_, _, _| {
-        let raw_frame = drag_begin_ui
+        let start = drag_begin_ui
             .app_state
             .snapshot_model()
             .workspaces
             .get(&workspace_id)
-            .and_then(|workspace| workspace.windows.get(&workspace_window_id))
-            .map(|window| window.frame)
-            .unwrap_or(display_frame);
-        let latest_frame = display_window_frame(
-            raw_frame,
-            workspace_render_context(
-                drag_begin_ui.as_ref(),
-                drag_begin_ui.shell.borrow().as_ref(),
-                drag_begin_ui
-                    .app_state
-                    .snapshot_model()
-                    .workspaces
-                    .get(&workspace_id)
-                    .expect("workspace should exist while resizing"),
-                drag_begin_ui.overview_mode.get(),
-                workspace_viewport_width(
-                    drag_begin_ui.as_ref(),
-                    drag_begin_ui.shell.borrow().as_ref(),
-                ),
-                workspace_viewport_height(
-                    drag_begin_ui.as_ref(),
-                    drag_begin_ui.shell.borrow().as_ref(),
-                ),
-            ),
-        );
-        start_frame_for_begin.set(latest_frame);
-        current_frame_for_begin.set(latest_frame);
-        drag_begin_ui.dispatch(ControlCommand::FocusWorkspaceWindow {
-            workspace_id,
-            workspace_window_id,
-        });
+            .map(|workspace| match edge {
+                ResizeHandleEdge::Right => workspace
+                    .columns
+                    .get(&workspace_column_id)
+                    .map(|column| column.width)
+                    .unwrap_or(display_frame.width),
+                ResizeHandleEdge::Bottom => workspace
+                    .windows
+                    .get(&workspace_window_id)
+                    .map(|window| window.height)
+                    .unwrap_or(display_frame.height),
+            })
+            .unwrap_or(match edge {
+                ResizeHandleEdge::Right => display_frame.width,
+                ResizeHandleEdge::Bottom => display_frame.height,
+            });
+        start_size_for_begin.set(start);
+        current_size_for_begin.set(start);
+        active_handle_for_begin.add_css_class("workspace-window-resize-handle-active");
     });
-    let current_frame_for_update = Rc::clone(&current_frame);
+    let current_size_for_update = Rc::clone(&current_size);
+    let start_size_for_update = Rc::clone(&start_size);
+    let drag_update_ui = Rc::clone(ui);
     drag.connect_drag_update(move |_, dx, dy| {
-        let mut next = start_frame.get();
-        match edge {
-            ResizeHandleEdge::Right => {
-                next.width = (next.width + dx.round() as i32).max(720);
-            }
-            ResizeHandleEdge::Bottom => {
-                next.height = (next.height + dy.round() as i32).max(MIN_WORKSPACE_WINDOW_HEIGHT);
-            }
-        }
-        current_frame_for_update.set(next);
-        if let Some(overlay) = handle_widget.parent().and_downcast::<Overlay>() {
-            overlay.set_size_request(next.width, next.height);
-            if let Some(child) = overlay.child() {
-                child.set_size_request(next.width, next.height);
-            }
-        }
-    });
-    drag.connect_drag_end(move |_, _, _| {
-        drag_ui.dispatch(ControlCommand::SetWorkspaceWindowFrame {
+        let next =
+            match edge {
+                ResizeHandleEdge::Right => (start_size_for_update.get() + dx.round() as i32)
+                    .max(MIN_WORKSPACE_WINDOW_WIDTH),
+                ResizeHandleEdge::Bottom => (start_size_for_update.get() + dy.round() as i32)
+                    .max(MIN_WORKSPACE_WINDOW_HEIGHT),
+            };
+        current_size_for_update.set(next);
+        let preview = TopLevelResizePreview {
             workspace_id,
-            workspace_window_id,
-            frame: current_frame.get(),
-        });
+            target: match edge {
+                ResizeHandleEdge::Right => TopLevelResizePreviewTarget::ColumnWidth {
+                    workspace_column_id,
+                    width: next,
+                },
+                ResizeHandleEdge::Bottom => TopLevelResizePreviewTarget::WindowHeight {
+                    workspace_window_id,
+                    height: next,
+                },
+            },
+        };
+        drag_update_ui.set_top_level_resize_preview(Some(preview));
+        let model = drag_update_ui.app_state.snapshot_model();
+        drag_update_ui.apply_top_level_resize_preview(&model);
+    });
+    let start_size_for_end = Rc::clone(&start_size);
+    let drag_end_ui = Rc::clone(ui);
+    drag.connect_drag_end(move |_, _, _| {
+        active_handle_for_end.remove_css_class("workspace-window-resize-handle-active");
+        drag_end_ui.set_top_level_resize_preview(None);
+        if current_size.get() == start_size_for_end.get() {
+            let model = drag_end_ui.app_state.snapshot_model();
+            drag_end_ui.sync_layout_state(&model);
+            return;
+        }
+        let command = match edge {
+            ResizeHandleEdge::Right => ControlCommand::SetWorkspaceColumnWidth {
+                workspace_id,
+                workspace_column_id,
+                width: current_size.get(),
+            },
+            ResizeHandleEdge::Bottom => ControlCommand::SetWorkspaceWindowHeight {
+                workspace_id,
+                workspace_window_id,
+                height: current_size.get(),
+            },
+        };
+        drag_end_ui.dispatch(command);
     });
     handle.add_controller(drag);
 
@@ -3341,34 +4546,11 @@ fn bind_split_ratio_updates(
     paned: &Paned,
     axis: taskers_domain::SplitAxis,
     path: Vec<bool>,
-    ratio: u16,
 ) {
-    let suppress = Rc::new(Cell::new(false));
-    let path = Rc::new(path);
-    let pending_source = Rc::new(RefCell::new(None::<glib::SourceId>));
-
-    let sync_paned = paned.clone();
-    let suppress_for_sync = Rc::clone(&suppress);
-    glib::idle_add_local_once(move || {
-        suppress_for_sync.set(true);
-        let extent = paned_extent(&sync_paned, axis);
-        if extent > 0 {
-            sync_paned.set_position(((extent * i32::from(ratio)) / 1000).max(1));
-        }
-        suppress_for_sync.set(false);
-    });
-
-    let ratio_ui = Rc::clone(ui);
-    let suppress_for_notify = Rc::clone(&suppress);
-    let pending_for_notify = Rc::clone(&pending_source);
-    paned.connect_notify_local(Some("position"), move |paned, _| {
-        if suppress_for_notify.get() {
-            return;
-        }
-
-        if let Some(source) = pending_for_notify.borrow_mut().take() {
-            source.remove();
-        }
+    let path = Arc::new(path);
+    let pending_ratio = Rc::new(Cell::new(None::<u16>));
+    let pending_ratio_for_notify = Rc::clone(&pending_ratio);
+    paned.connect_position_notify(move |paned| {
         let extent = paned_extent(paned, axis);
         if extent <= 0 {
             return;
@@ -3376,18 +4558,69 @@ fn bind_split_ratio_updates(
         let ratio = (((paned.position() as f64) / f64::from(extent)) * 1000.0)
             .round()
             .clamp(0.0, 1000.0) as u16;
-        let path = Rc::clone(&path);
-        let ratio_ui = Rc::clone(&ratio_ui);
-        let source = glib::timeout_add_local_once(Duration::from_millis(120), move || {
-            ratio_ui.dispatch(ControlCommand::SetWindowSplitRatio {
-                workspace_id,
-                workspace_window_id,
-                path: path.as_ref().clone(),
-                ratio,
-            });
-        });
-        *pending_for_notify.borrow_mut() = Some(source);
+        pending_ratio_for_notify.set(Some(ratio));
     });
+    let pending_ratio_for_accept = Rc::clone(&pending_ratio);
+    let accept_ui = Rc::clone(ui);
+    let path_for_accept = Arc::clone(&path);
+    paned.connect_accept_position(move |_| {
+        let Some(ratio) = pending_ratio_for_accept.take() else {
+            return false;
+        };
+        accept_ui.dispatch(ControlCommand::SetWindowSplitRatio {
+            workspace_id,
+            workspace_window_id,
+            path: path_for_accept.as_ref().clone(),
+            ratio,
+        });
+        false
+    });
+    let pending_ratio_for_cancel = Rc::clone(&pending_ratio);
+    paned.connect_cancel_position(move |_| {
+        pending_ratio_for_cancel.set(None);
+        false
+    });
+}
+
+fn split_position_for_extent(extent: i32, ratio: u16) -> i32 {
+    ((extent * i32::from(ratio)) / 1000).max(1)
+}
+
+fn split_layout_rects(
+    rect: WindowFrame,
+    axis: taskers_domain::SplitAxis,
+    ratio: u16,
+) -> (WindowFrame, WindowFrame) {
+    match axis {
+        taskers_domain::SplitAxis::Horizontal => {
+            let first_width = split_position_for_extent(rect.width, ratio);
+            (
+                WindowFrame {
+                    width: first_width,
+                    ..rect
+                },
+                WindowFrame {
+                    x: rect.x + first_width,
+                    width: rect.width - first_width,
+                    ..rect
+                },
+            )
+        }
+        taskers_domain::SplitAxis::Vertical => {
+            let first_height = split_position_for_extent(rect.height, ratio);
+            (
+                WindowFrame {
+                    height: first_height,
+                    ..rect
+                },
+                WindowFrame {
+                    y: rect.y + first_height,
+                    height: rect.height - first_height,
+                    ..rect
+                },
+            )
+        }
+    }
 }
 
 fn initialize_terminal_body(
@@ -3396,6 +4629,9 @@ fn initialize_terminal_body(
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) -> Widget {
+    card.displayed_surface_id
+        .set(pane.active_surface().map(|surface| surface.id));
+
     if let Some(widget) = ui.terminal_widget(workspace_id, pane) {
         widget.set_focusable(true);
         card.terminal_host.append(&widget);
@@ -3482,14 +4718,331 @@ fn initialize_terminal_body(
     entry.upcast()
 }
 
-fn refresh_terminal_body(
+fn sync_terminal_body(
     ui: &Rc<UiHandle>,
     workspace_id: taskers_domain::WorkspaceId,
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) {
+    if !terminal_body_needs_refresh(
+        card.displayed_surface_id.get(),
+        pane.active_surface().map(|surface| surface.id),
+        card.terminal_host.first_child().is_some(),
+    ) {
+        return;
+    }
+
     clear_box(&card.terminal_host);
     let _ = initialize_terminal_body(ui, workspace_id, pane, card);
+}
+
+fn terminal_body_needs_refresh(
+    displayed_surface_id: Option<SurfaceId>,
+    next_surface_id: Option<SurfaceId>,
+    has_child: bool,
+) -> bool {
+    !has_child || displayed_surface_id != next_surface_id
+}
+
+fn create_workspace_window_from_pane(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+    direction: Direction,
+) {
+    let should_focus_pane = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .is_some_and(|workspace| {
+            workspace.active_pane != pane_id
+                || workspace
+                    .window_for_pane(pane_id)
+                    .is_some_and(|window_id| window_id != workspace.active_window)
+        });
+
+    if should_focus_pane {
+        ui.dispatch(ControlCommand::FocusPane {
+            workspace_id,
+            pane_id,
+        });
+    }
+
+    ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+        workspace_id,
+        direction,
+    });
+}
+
+fn create_workspace_window_from_window(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_window_id: WorkspaceWindowId,
+    direction: Direction,
+) {
+    let should_focus_window = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .is_some_and(|workspace| workspace.active_window != workspace_window_id);
+
+    if should_focus_window {
+        ui.dispatch(ControlCommand::FocusWorkspaceWindow {
+            workspace_id,
+            workspace_window_id,
+        });
+    }
+
+    ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+        workspace_id,
+        direction,
+    });
+}
+
+fn resize_workspace_window_from_window(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_window_id: WorkspaceWindowId,
+    direction: Direction,
+) {
+    let should_focus_window = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .is_some_and(|workspace| workspace.active_window != workspace_window_id);
+
+    if should_focus_window {
+        ui.dispatch(ControlCommand::FocusWorkspaceWindow {
+            workspace_id,
+            workspace_window_id,
+        });
+    }
+
+    ui.dispatch(ControlCommand::ResizeActiveWindow {
+        workspace_id,
+        direction,
+        amount: KEYBOARD_RESIZE_STEP,
+    });
+}
+
+fn show_new_window_popover(
+    parent: &Button,
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: Option<taskers_domain::PaneId>,
+    workspace_window_id: Option<WorkspaceWindowId>,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_parent(parent);
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
+    content.set_margin_start(4);
+    content.set_margin_end(4);
+    content.set_margin_top(4);
+    content.set_margin_bottom(4);
+
+    append_new_window_direction_button(
+        &content,
+        &popover,
+        ui,
+        workspace_id,
+        pane_id,
+        workspace_window_id,
+        Direction::Left,
+    );
+    append_new_window_direction_button(
+        &content,
+        &popover,
+        ui,
+        workspace_id,
+        pane_id,
+        workspace_window_id,
+        Direction::Right,
+    );
+    append_new_window_direction_button(
+        &content,
+        &popover,
+        ui,
+        workspace_id,
+        pane_id,
+        workspace_window_id,
+        Direction::Up,
+    );
+    append_new_window_direction_button(
+        &content,
+        &popover,
+        ui,
+        workspace_id,
+        pane_id,
+        workspace_window_id,
+        Direction::Down,
+    );
+
+    popover.set_child(Some(&content));
+    let pop_cleanup = popover.clone();
+    popover.connect_closed(move |_| {
+        pop_cleanup.unparent();
+    });
+    popover.popup();
+}
+
+fn append_new_window_direction_button(
+    content: &GtkBox,
+    popover: &gtk::Popover,
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: Option<taskers_domain::PaneId>,
+    workspace_window_id: Option<WorkspaceWindowId>,
+    direction: Direction,
+) {
+    let button = Button::with_label(new_window_direction_label(direction));
+    button.add_css_class("flat");
+    button.add_css_class("context-item");
+
+    let shortcut = ui.shortcut_label(new_window_direction_action(direction));
+    if shortcut == "Unbound" {
+        button.set_tooltip_text(Some(new_window_direction_tooltip(direction)));
+    } else {
+        button.set_tooltip_text(Some(&format!(
+            "{} ({shortcut})",
+            new_window_direction_tooltip(direction)
+        )));
+    }
+
+    let local_ui = Rc::clone(ui);
+    let local_popover = popover.clone();
+    button.connect_clicked(move |_| {
+        local_popover.popdown();
+        if let Some(pane_id) = pane_id {
+            create_workspace_window_from_pane(&local_ui, workspace_id, pane_id, direction);
+        } else if let Some(workspace_window_id) = workspace_window_id {
+            create_workspace_window_from_window(
+                &local_ui,
+                workspace_id,
+                workspace_window_id,
+                direction,
+            );
+        } else {
+            local_ui.dispatch(ControlCommand::CreateWorkspaceWindow {
+                workspace_id,
+                direction,
+            });
+        }
+    });
+    content.append(&button);
+}
+
+fn new_window_direction_label(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "\u{2190} Left",
+        Direction::Right => "\u{2192} Right",
+        Direction::Up => "\u{2191} Above",
+        Direction::Down => "\u{2193} Below",
+    }
+}
+
+fn new_window_direction_tooltip(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "Create a new window to the left",
+        Direction::Right => "Create a new window to the right",
+        Direction::Up => "Create a new window above",
+        Direction::Down => "Create a new window below",
+    }
+}
+
+fn new_window_direction_action(direction: Direction) -> ShortcutAction {
+    match direction {
+        Direction::Left => ShortcutAction::NewWindowLeft,
+        Direction::Right => ShortcutAction::NewWindowRight,
+        Direction::Up => ShortcutAction::NewWindowUp,
+        Direction::Down => ShortcutAction::NewWindowDown,
+    }
+}
+
+fn show_resize_window_popover(
+    parent: &Button,
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_window_id: WorkspaceWindowId,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_parent(parent);
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
+    content.set_margin_start(4);
+    content.set_margin_end(4);
+    content.set_margin_top(4);
+    content.set_margin_bottom(4);
+
+    for direction in [
+        Direction::Left,
+        Direction::Right,
+        Direction::Up,
+        Direction::Down,
+    ] {
+        let button = Button::with_label(resize_window_direction_label(direction));
+        button.add_css_class("flat");
+        button.add_css_class("context-item");
+        let shortcut = ui.shortcut_label(resize_window_direction_action(direction));
+        if shortcut == "Unbound" {
+            button.set_tooltip_text(Some(resize_window_direction_tooltip(direction)));
+        } else {
+            button.set_tooltip_text(Some(&format!(
+                "{} ({shortcut})",
+                resize_window_direction_tooltip(direction)
+            )));
+        }
+
+        let local_ui = Rc::clone(ui);
+        let local_popover = popover.clone();
+        button.connect_clicked(move |_| {
+            local_popover.popdown();
+            resize_workspace_window_from_window(
+                &local_ui,
+                workspace_id,
+                workspace_window_id,
+                direction,
+            );
+        });
+        content.append(&button);
+    }
+
+    popover.set_child(Some(&content));
+    let pop_cleanup = popover.clone();
+    popover.connect_closed(move |_| {
+        pop_cleanup.unparent();
+    });
+    popover.popup();
+}
+
+fn resize_window_direction_label(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "Narrower",
+        Direction::Right => "Wider",
+        Direction::Up => "Shorter",
+        Direction::Down => "Taller",
+    }
+}
+
+fn resize_window_direction_tooltip(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "Reduce the active window width",
+        Direction::Right => "Increase the active window width",
+        Direction::Up => "Reduce the active window height",
+        Direction::Down => "Increase the active window height",
+    }
+}
+
+fn resize_window_direction_action(direction: Direction) -> ShortcutAction {
+    match direction {
+        Direction::Left => ShortcutAction::ResizeWindowLeft,
+        Direction::Right => ShortcutAction::ResizeWindowRight,
+        Direction::Up => ShortcutAction::ResizeWindowUp,
+        Direction::Down => ShortcutAction::ResizeWindowDown,
+    }
 }
 
 fn sync_surface_tabs(
@@ -3498,49 +5051,221 @@ fn sync_surface_tabs(
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) {
-    clear_box(&card.surface_tabs);
-
+    let pane_is_active = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .is_some_and(|workspace| workspace.active_pane == pane.id);
+    let desired_surface_ids = pane.surface_ids().collect::<HashSet<_>>();
+    let model_order = pane.surface_ids().collect::<Vec<_>>();
+    let animations_enabled = ui.settings.borrow().animations_enabled;
+    let mut tabs = card.surface_tabs.tabs.borrow_mut();
     for surface in pane.surfaces.values() {
-        let tab = GtkBox::new(Orientation::Horizontal, 4);
-        tab.add_css_class("surface-tab");
+        let tab = tabs.entry(surface.id).or_insert_with(|| {
+            build_surface_tab(ui, &card.surface_tabs, workspace_id, pane.id, surface.id)
+        });
+        if tab.root.parent().is_none() {
+            card.surface_tabs.root.put(&tab.root, 0.0, 0.0);
+        }
+        configure_surface_tab(tab, surface, pane.active_surface);
+    }
+
+    let stale_surface_ids = tabs
+        .keys()
+        .copied()
+        .filter(|surface_id| !desired_surface_ids.contains(surface_id))
+        .collect::<Vec<_>>();
+    let mut removed_tabs = Vec::new();
+    for surface_id in stale_surface_ids {
+        if let Some(tab) = tabs.remove(&surface_id) {
+            removed_tabs.push((surface_id, tab));
+        }
+    }
+    drop(tabs);
+
+    {
+        let mut state = card.surface_tabs.state.borrow_mut();
+        state.model_order = model_order.clone();
+        if state
+            .drag
+            .as_ref()
+            .is_some_and(|drag| !desired_surface_ids.contains(&drag.surface_id))
+        {
+            state.drag = None;
+        }
+    }
+
+    for (surface_id, tab) in removed_tabs {
+        remove_surface_tab(&card.surface_tabs, surface_id, tab, animations_enabled);
+    }
+
+    let display_order = {
+        let state = card.surface_tabs.state.borrow();
+        state
+            .drag
+            .as_ref()
+            .map(|drag| {
+                let mut order = drag
+                    .preview_order
+                    .iter()
+                    .copied()
+                    .filter(|surface_id| desired_surface_ids.contains(surface_id))
+                    .collect::<Vec<_>>();
+                for surface_id in &model_order {
+                    if !order.contains(surface_id) {
+                        order.push(*surface_id);
+                    }
+                }
+                order
+            })
+            .unwrap_or_else(|| model_order.clone())
+    };
+
+    let layout = compute_surface_tab_strip_layout(&card.surface_tabs, &display_order);
+    set_surface_tab_layout(&card.surface_tabs, layout, animations_enabled);
+    apply_surface_tab_widgets(&card.surface_tabs);
+
+    if !pane_is_active {
+        clear_box(&card.header_tabs);
+        card.header_tabs.set_visible(false);
+        card.header_tabs.set_hexpand(false);
+        card.title.set_visible(true);
+        card.surface_tabs.root.set_visible(false);
+        return;
+    }
+
+    // Decide between inline tabs (in pane-header) vs. standalone strip vs. hidden (single surface)
+    let surface_count = pane.surfaces.len();
+    match surface_tab_presentation(surface_count, card.header.allocated_width()) {
+        SurfaceTabPresentation::AddOnly => {
+            sync_single_surface_add_button(ui, workspace_id, pane, card);
+            card.header_tabs.set_hexpand(false);
+            card.header_tabs.set_visible(true);
+            card.title.set_visible(true);
+            card.surface_tabs.root.set_visible(false);
+        }
+        SurfaceTabPresentation::Inline => {
+            sync_inline_header_tabs(ui, workspace_id, pane, card);
+            card.header_tabs.set_hexpand(true);
+            card.header_tabs.set_visible(true);
+            card.title.set_visible(false);
+            card.surface_tabs.root.set_visible(false);
+        }
+        SurfaceTabPresentation::Strip => {
+            clear_box(&card.header_tabs);
+            card.header_tabs.set_visible(false);
+            card.header_tabs.set_hexpand(false);
+            card.title.set_visible(true);
+            card.surface_tabs.root.set_visible(true);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceTabPresentation {
+    AddOnly,
+    Inline,
+    Strip,
+}
+
+fn surface_tab_presentation(surface_count: usize, header_width: i32) -> SurfaceTabPresentation {
+    if surface_count <= 1 {
+        return SurfaceTabPresentation::AddOnly;
+    }
+
+    let effective_header_width = if header_width > 0 {
+        header_width
+    } else {
+        DEFAULT_WORKSPACE_WINDOW_WIDTH
+    };
+
+    // Reserve space for status + pane/window action buttons on the right side
+    // of the header so inline tabs only appear when they comfortably fit.
+    let action_buttons_width = 200;
+    let available_for_tabs = (effective_header_width - action_buttons_width).max(0);
+    let tab_width_estimate = SURFACE_TAB_MIN_WIDTH + SURFACE_TAB_GAP;
+    let max_inline_tabs = available_for_tabs / tab_width_estimate;
+
+    if surface_count <= 6 && surface_count as i32 <= max_inline_tabs {
+        SurfaceTabPresentation::Inline
+    } else {
+        SurfaceTabPresentation::Strip
+    }
+}
+
+fn sync_single_surface_add_button(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane: &PaneRecord,
+    card: &PaneCardWidgets,
+) {
+    clear_box(&card.header_tabs);
+
+    let add_btn = Button::with_label("+");
+    add_btn.add_css_class("flat");
+    add_btn.add_css_class("inline-tab-add");
+    add_btn.set_tooltip_text(Some("Open another surface"));
+    let add_ui = Rc::clone(ui);
+    let add_pane_id = pane.id;
+    add_btn.connect_clicked(move |_| {
+        add_ui.dispatch(ControlCommand::CreateSurface {
+            workspace_id,
+            pane_id: add_pane_id,
+            kind: PaneKind::Terminal,
+        });
+    });
+    card.header_tabs.append(&add_btn);
+}
+
+fn sync_inline_header_tabs(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane: &PaneRecord,
+    card: &PaneCardWidgets,
+) {
+    clear_box(&card.header_tabs);
+    let active_surface_id = pane.active_surface;
+    for surface in pane.surfaces.values() {
+        let tab_title = display_surface_title(surface);
+        let tab_root = GtkBox::new(Orientation::Horizontal, 4);
+        tab_root.add_css_class("inline-tab");
+        if surface.id == active_surface_id {
+            tab_root.add_css_class("inline-tab-active");
+        }
         if surface.attention != AttentionState::Normal {
-            tab.add_css_class("surface-tab-has-attention");
-            tab.add_css_class(&format!(
-                "surface-tab-state-{}",
+            tab_root.add_css_class(&format!(
+                "inline-tab-state-{}",
                 attention_state_slug(surface.attention)
             ));
         }
-        if surface.id == pane.active_surface {
-            tab.add_css_class("surface-tab-active");
-        }
 
-        let dot = Label::new(Some("\u{25cf}"));
-        dot.add_css_class("status-dot");
-        dot.add_css_class(&attention_dot_class(surface.attention));
-        dot.set_tooltip_text(Some(surface.attention.label()));
-        tab.append(&dot);
-
-        let label = Button::with_label(&display_surface_title(surface));
-        label.add_css_class("flat");
-        label.add_css_class("surface-tab-label");
+        let focus_button = Button::new();
+        focus_button.add_css_class("flat");
+        focus_button.add_css_class("inline-tab-button");
+        let label = Label::new(Some(&tab_title));
+        label.add_css_class("inline-tab-label");
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_max_width_chars(16);
+        focus_button.set_child(Some(&label));
         let focus_ui = Rc::clone(ui);
-        let pane_id = pane.id;
-        let surface_id = surface.id;
-        label.connect_clicked(move |_| {
+        let focus_surface_id = surface.id;
+        let focus_pane_id = pane.id;
+        focus_button.connect_clicked(move |_| {
             focus_ui.dispatch(ControlCommand::FocusSurface {
                 workspace_id,
-                pane_id,
-                surface_id,
+                pane_id: focus_pane_id,
+                surface_id: focus_surface_id,
             });
         });
-        tab.append(&label);
+        tab_root.append(&focus_button);
 
         let close = Button::with_label("\u{00d7}");
         close.add_css_class("flat");
-        close.add_css_class("surface-tab-close");
+        close.add_css_class("inline-tab-close");
         let close_ui = Rc::clone(ui);
-        let close_pane_id = pane.id;
         let close_surface_id = surface.id;
+        let close_pane_id = pane.id;
         close.connect_clicked(move |_| {
             close_ui.dispatch(ControlCommand::CloseSurface {
                 workspace_id,
@@ -3548,24 +5273,801 @@ fn sync_surface_tabs(
                 surface_id: close_surface_id,
             });
         });
-        tab.append(&close);
-
-        card.surface_tabs.append(&tab);
+        tab_root.append(&close);
+        card.header_tabs.append(&tab_root);
     }
-
-    let add = Button::with_label("+");
-    add.add_css_class("flat");
-    add.add_css_class("surface-tab-add");
+    // Add "+" button for creating new surface
+    let add_btn = Button::with_label("+");
+    add_btn.add_css_class("flat");
+    add_btn.add_css_class("inline-tab-add");
     let add_ui = Rc::clone(ui);
-    let pane_id = pane.id;
-    add.connect_clicked(move |_| {
+    let add_pane_id = pane.id;
+    add_btn.connect_clicked(move |_| {
+        add_ui.dispatch(ControlCommand::CreateSurface {
+            workspace_id,
+            pane_id: add_pane_id,
+            kind: PaneKind::Terminal,
+        });
+    });
+    card.header_tabs.append(&add_btn);
+}
+
+fn build_surface_tab_strip(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+) -> SurfaceTabStripWidgets {
+    let root = Fixed::new();
+    root.add_css_class("surface-tabs");
+    root.set_hexpand(true);
+
+    let add_button = Button::with_label("+");
+    add_button.add_css_class("flat");
+    add_button.add_css_class("surface-tab-add");
+    let add_ui = Rc::clone(ui);
+    add_button.connect_clicked(move |_| {
         add_ui.dispatch(ControlCommand::CreateSurface {
             workspace_id,
             pane_id,
             kind: PaneKind::Terminal,
         });
     });
-    card.surface_tabs.append(&add);
+    root.put(&add_button, 0.0, 0.0);
+
+    SurfaceTabStripWidgets {
+        root,
+        add_button,
+        tabs: Rc::new(RefCell::new(HashMap::new())),
+        state: Rc::new(RefCell::new(SurfaceTabStripState::default())),
+    }
+}
+
+fn build_surface_tab(
+    ui: &Rc<UiHandle>,
+    strip: &SurfaceTabStripWidgets,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+    surface_id: SurfaceId,
+) -> SurfaceTabWidgets {
+    let root = GtkBox::new(Orientation::Horizontal, 4);
+    root.add_css_class("surface-tab");
+
+    let dot = Label::new(Some("\u{25cf}"));
+    dot.add_css_class("status-dot");
+    root.append(&dot);
+
+    let label = Button::new();
+    label.add_css_class("flat");
+    label.add_css_class("surface-tab-label");
+    label.set_hexpand(true);
+    let label_content = GtkBox::new(Orientation::Horizontal, 4);
+    label_content.set_hexpand(true);
+    let agent_icon = build_agent_icon(None, 12);
+    agent_icon.add_css_class("surface-tab-agent-icon");
+    label_content.append(agent_icon.widget());
+    let title = Label::new(None);
+    title.add_css_class("surface-tab-title");
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label_content.append(&title);
+    label.set_child(Some(&label_content));
+    let focus_ui = Rc::clone(ui);
+    let focus_state = Rc::clone(&strip.state);
+    label.connect_clicked(move |_| {
+        let mut strip_state = focus_state.borrow_mut();
+        if strip_state.suppress_click_surface == Some(surface_id) {
+            strip_state.suppress_click_surface = None;
+            return;
+        }
+        drop(strip_state);
+        focus_ui.dispatch(ControlCommand::FocusSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+    });
+    let drag_ui = Rc::clone(ui);
+    let drag_strip = strip.clone();
+    let drag = gtk::GestureDrag::new();
+    drag.connect_drag_begin(move |_, _, _| {
+        begin_surface_tab_drag(&drag_strip, surface_id);
+    });
+    let drag_strip = strip.clone();
+    let drag_ui_for_update = Rc::clone(&drag_ui);
+    drag.connect_drag_update(move |_, dx, _| {
+        update_surface_tab_drag(&drag_ui_for_update, &drag_strip, surface_id, dx);
+    });
+    let drag_strip = strip.clone();
+    drag.connect_drag_end(move |_, _, _| {
+        end_surface_tab_drag(&drag_ui, &drag_strip, workspace_id, pane_id, surface_id);
+    });
+    label.add_controller(drag);
+    root.append(&label);
+
+    let close = Button::with_label("\u{00d7}");
+    close.add_css_class("flat");
+    close.add_css_class("surface-tab-close");
+    let close_ui = Rc::clone(ui);
+    close.connect_clicked(move |_| {
+        close_ui.dispatch(ControlCommand::CloseSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+    });
+    root.append(&close);
+
+    SurfaceTabWidgets {
+        root,
+        dot,
+        agent_icon,
+        title,
+    }
+}
+
+fn configure_surface_tab(
+    tab: &SurfaceTabWidgets,
+    surface: &SurfaceRecord,
+    active_surface_id: SurfaceId,
+) {
+    for cls in &[
+        "surface-tab-has-attention",
+        "surface-tab-active",
+        "surface-tab-state-busy",
+        "surface-tab-state-completed",
+        "surface-tab-state-waiting",
+        "surface-tab-state-error",
+    ] {
+        tab.root.remove_css_class(cls);
+    }
+    for cls in &[
+        "status-dot-normal",
+        "status-dot-busy",
+        "status-dot-completed",
+        "status-dot-waiting",
+        "status-dot-error",
+    ] {
+        tab.dot.remove_css_class(cls);
+    }
+
+    if surface.attention != AttentionState::Normal {
+        tab.root.add_css_class("surface-tab-has-attention");
+        tab.root.add_css_class(&format!(
+            "surface-tab-state-{}",
+            attention_state_slug(surface.attention)
+        ));
+    }
+    if surface.id == active_surface_id {
+        tab.root.add_css_class("surface-tab-active");
+    }
+
+    tab.dot
+        .add_css_class(&attention_dot_class(surface.attention));
+    tab.dot.set_tooltip_text(Some(surface.attention.label()));
+    configure_agent_icon(&tab.agent_icon, surface_agent_kind(surface), 12);
+    tab.title.set_text(&display_surface_title(surface));
+}
+
+fn remove_surface_tab(
+    strip: &SurfaceTabStripWidgets,
+    surface_id: SurfaceId,
+    tab: SurfaceTabWidgets,
+    animations_enabled: bool,
+) {
+    let key = SurfaceTabItemKey::Surface(surface_id);
+    let mut state = strip.state.borrow_mut();
+    if !animations_enabled {
+        state.presented.remove(&key);
+        if tab.root.parent().is_some() {
+            strip.root.remove(&tab.root);
+        }
+        return;
+    }
+
+    if let Some(start_item) = state.presented.remove(&key) {
+        tab.root.add_css_class("surface-tab-exiting");
+        state.exiting.push(SurfaceTabExitAnimation {
+            root: tab.root,
+            start_time: glib::monotonic_time(),
+            duration_us: TERMINAL_MOTION_SPEC.tab.structural.duration_us,
+            start_item,
+            end_item: PresentedSurfaceTabItem {
+                x: start_item.x - TERMINAL_MOTION_SPEC.tab.exit_offset_px,
+                opacity: 0.0,
+                width: (start_item.width - TERMINAL_MOTION_SPEC.tab.size_delta_px)
+                    .max(SURFACE_TAB_MIN_WIDTH),
+                height: start_item.height,
+            },
+        });
+    } else if tab.root.parent().is_some() {
+        strip.root.remove(&tab.root);
+    }
+}
+
+fn compute_surface_tab_strip_layout(
+    strip: &SurfaceTabStripWidgets,
+    order: &[SurfaceId],
+) -> SurfaceTabStripLayout {
+    let tabs = strip.tabs.borrow();
+    let mut widths = Vec::new();
+    let mut heights = Vec::new();
+    for surface_id in order {
+        let Some(tab) = tabs.get(surface_id) else {
+            continue;
+        };
+        let (_, natural_width, _, _) = tab.root.measure(Orientation::Horizontal, -1);
+        let (_, natural_height, _, _) = tab.root.measure(Orientation::Vertical, -1);
+        widths.push(natural_width.clamp(SURFACE_TAB_MIN_WIDTH, SURFACE_TAB_MAX_WIDTH));
+        heights.push(natural_height);
+    }
+    drop(tabs);
+
+    let (_, add_width, _, _) = strip.add_button.measure(Orientation::Horizontal, -1);
+    let (_, add_height, _, _) = strip.add_button.measure(Orientation::Vertical, -1);
+    let gap_count = if widths.is_empty() {
+        0
+    } else {
+        widths.len() as i32
+    };
+    shrink_surface_tab_widths(
+        &mut widths,
+        add_width,
+        gap_count,
+        strip.root.allocated_width(),
+    );
+
+    let mut x = 0.0;
+    let mut items = Vec::new();
+    let mut max_height = add_height;
+    for (index, surface_id) in order.iter().copied().enumerate() {
+        let Some(width) = widths.get(index).copied() else {
+            continue;
+        };
+        let height = heights.get(index).copied().unwrap_or(add_height);
+        max_height = max_height.max(height);
+        items.push(SurfaceTabLayoutItem {
+            surface_id,
+            x,
+            width,
+            height,
+        });
+        x += f64::from(width + SURFACE_TAB_GAP);
+    }
+
+    SurfaceTabStripLayout {
+        items,
+        add_button: SurfaceTabAuxLayoutItem {
+            x,
+            width: add_width,
+            height: add_height,
+        },
+        height: max_height,
+    }
+}
+
+fn shrink_surface_tab_widths(
+    widths: &mut [i32],
+    add_width: i32,
+    gap_count: i32,
+    available_width: i32,
+) {
+    if widths.is_empty() || available_width <= 0 {
+        return;
+    }
+
+    let gap_total = gap_count * SURFACE_TAB_GAP;
+    let mut total_width = widths.iter().sum::<i32>() + add_width + gap_total;
+    if total_width <= available_width {
+        return;
+    }
+
+    let min_total = widths.len() as i32 * SURFACE_TAB_MIN_WIDTH + add_width + gap_total;
+    if available_width <= min_total {
+        widths.fill(SURFACE_TAB_MIN_WIDTH);
+        return;
+    }
+
+    while total_width > available_width {
+        let mut reduced_any = false;
+        for width in widths.iter_mut() {
+            if total_width <= available_width {
+                break;
+            }
+            if *width > SURFACE_TAB_MIN_WIDTH {
+                *width -= 1;
+                total_width -= 1;
+                reduced_any = true;
+            }
+        }
+        if !reduced_any {
+            break;
+        }
+    }
+}
+
+fn set_surface_tab_layout(
+    strip: &SurfaceTabStripWidgets,
+    layout: SurfaceTabStripLayout,
+    animations_enabled: bool,
+) {
+    let mut state = strip.state.borrow_mut();
+    let target_items = surface_tab_target_items(&layout, state.drag.as_ref());
+    let duration_us = state
+        .next_animation_duration_us
+        .take()
+        .unwrap_or(TERMINAL_MOTION_SPEC.tab.structural.duration_us);
+    state.layout = Some(layout);
+
+    if !animations_enabled {
+        for exit in state.exiting.drain(..) {
+            if exit.root.parent().is_some() {
+                strip.root.remove(&exit.root);
+            }
+        }
+        state.motion = None;
+        state.presented = target_items;
+        return;
+    }
+
+    if state.presented.is_empty() {
+        state.motion = None;
+        state.presented = target_items;
+        return;
+    }
+
+    let start_items = target_items
+        .iter()
+        .map(|(key, target)| {
+            let start = state
+                .presented
+                .get(key)
+                .copied()
+                .unwrap_or_else(|| surface_tab_enter_item(*key, *target));
+            (*key, start)
+        })
+        .collect::<HashMap<_, _>>();
+
+    if start_items == target_items {
+        state.motion = None;
+        state.presented = target_items;
+        return;
+    }
+
+    state.presented = start_items.clone();
+    state.motion = Some(SurfaceTabMotionState {
+        start_time: glib::monotonic_time(),
+        duration_us,
+        start_items,
+        target_items,
+    });
+    drop(state);
+    start_surface_tab_tick(strip);
+}
+
+fn surface_tab_target_items(
+    layout: &SurfaceTabStripLayout,
+    drag: Option<&SurfaceTabDragState>,
+) -> HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem> {
+    let mut items = layout
+        .items
+        .iter()
+        .map(|item| {
+            (
+                SurfaceTabItemKey::Surface(item.surface_id),
+                PresentedSurfaceTabItem {
+                    x: item.x,
+                    opacity: 1.0,
+                    width: item.width,
+                    height: item.height,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    items.insert(
+        SurfaceTabItemKey::AddButton,
+        PresentedSurfaceTabItem {
+            x: layout.add_button.x,
+            opacity: 1.0,
+            width: layout.add_button.width,
+            height: layout.add_button.height,
+        },
+    );
+
+    if let Some(drag) = drag.filter(|drag| drag.threshold_crossed) {
+        if let Some(item) = items.get_mut(&SurfaceTabItemKey::Surface(drag.surface_id)) {
+            item.x = drag.start_x + drag.current_dx;
+        }
+    }
+
+    items
+}
+
+fn surface_tab_enter_item(
+    key: SurfaceTabItemKey,
+    target: PresentedSurfaceTabItem,
+) -> PresentedSurfaceTabItem {
+    match key {
+        SurfaceTabItemKey::Surface(_) => PresentedSurfaceTabItem {
+            x: target.x + TERMINAL_MOTION_SPEC.tab.enter_offset_px,
+            opacity: 0.0,
+            width: (target.width - TERMINAL_MOTION_SPEC.tab.size_delta_px)
+                .max(SURFACE_TAB_MIN_WIDTH),
+            height: target.height,
+        },
+        SurfaceTabItemKey::AddButton => target,
+    }
+}
+
+fn start_surface_tab_tick(strip: &SurfaceTabStripWidgets) {
+    let mut state = strip.state.borrow_mut();
+    if state.tick_running {
+        return;
+    }
+    state.tick_running = true;
+    drop(state);
+
+    let strip = strip.clone();
+    let root = strip.root.clone();
+    root.add_tick_callback(move |_, clock| {
+        if advance_surface_tab_tick(&strip, clock.frame_time()) {
+            glib::ControlFlow::Continue
+        } else {
+            strip.state.borrow_mut().tick_running = false;
+            glib::ControlFlow::Break
+        }
+    });
+}
+
+fn advance_surface_tab_tick(strip: &SurfaceTabStripWidgets, now: i64) -> bool {
+    let (presented, exiting, height, completed_exits, keep_running) = {
+        let mut state = strip.state.borrow_mut();
+
+        if let Some(motion) = state.motion.clone() {
+            let progress =
+                ((now - motion.start_time) as f64 / motion.duration_us as f64).clamp(0.0, 1.0);
+            let eased = TERMINAL_MOTION_SPEC.tab.structural.curve.sample(progress);
+            state.presented = motion
+                .target_items
+                .iter()
+                .map(|(key, target)| {
+                    let start = motion.start_items.get(key).copied().unwrap_or(*target);
+                    (*key, lerp_surface_tab_item(start, *target, eased))
+                })
+                .collect();
+            if progress >= 1.0 {
+                state.presented = motion.target_items;
+                state.motion = None;
+            }
+        }
+
+        if let Some(drag_surface_id) = state
+            .drag
+            .as_ref()
+            .filter(|drag| drag.threshold_crossed)
+            .map(|drag| (drag.surface_id, drag.start_x + drag.current_dx))
+        {
+            if let Some(item) = state
+                .presented
+                .get_mut(&SurfaceTabItemKey::Surface(drag_surface_id.0))
+            {
+                item.x = drag_surface_id.1;
+                item.opacity = 1.0;
+            }
+        }
+
+        let mut exiting = Vec::new();
+        let mut completed_exits = Vec::new();
+        state.exiting.retain(|exit| {
+            let progress =
+                ((now - exit.start_time) as f64 / exit.duration_us as f64).clamp(0.0, 1.0);
+            let eased = TERMINAL_MOTION_SPEC.tab.structural.curve.sample(progress);
+            let item = lerp_surface_tab_item(exit.start_item, exit.end_item, eased);
+            if progress >= 1.0 {
+                completed_exits.push(exit.root.clone());
+                false
+            } else {
+                exiting.push((exit.root.clone(), item));
+                true
+            }
+        });
+
+        let height = state
+            .layout
+            .as_ref()
+            .map(|layout| layout.height)
+            .unwrap_or(0);
+        let keep_running = state.motion.is_some() || !state.exiting.is_empty();
+        (
+            state.presented.clone(),
+            exiting,
+            height,
+            completed_exits,
+            keep_running,
+        )
+    };
+
+    apply_surface_tab_widget_frames(strip, &presented, &exiting, height);
+    for exit_root in completed_exits {
+        if exit_root.parent().is_some() {
+            strip.root.remove(&exit_root);
+        }
+    }
+
+    keep_running
+}
+
+fn apply_surface_tab_widgets(strip: &SurfaceTabStripWidgets) {
+    let (presented, exiting, height) = {
+        let state = strip.state.borrow();
+        let exiting = state
+            .exiting
+            .iter()
+            .map(|exit| (exit.root.clone(), exit.start_item))
+            .collect::<Vec<_>>();
+        let mut presented = state.presented.clone();
+        if let Some(drag) = state.drag.as_ref().filter(|drag| drag.threshold_crossed) {
+            if let Some(item) = presented.get_mut(&SurfaceTabItemKey::Surface(drag.surface_id)) {
+                item.x = drag.start_x + drag.current_dx;
+                item.opacity = 1.0;
+            }
+        }
+        (
+            presented,
+            exiting,
+            state
+                .layout
+                .as_ref()
+                .map(|layout| layout.height)
+                .unwrap_or(0),
+        )
+    };
+    apply_surface_tab_widget_frames(strip, &presented, &exiting, height);
+}
+
+fn apply_surface_tab_widget_frames(
+    strip: &SurfaceTabStripWidgets,
+    presented: &HashMap<SurfaceTabItemKey, PresentedSurfaceTabItem>,
+    exiting: &[(GtkBox, PresentedSurfaceTabItem)],
+    height: i32,
+) {
+    let tabs = strip.tabs.borrow();
+    for (surface_id, tab) in tabs.iter() {
+        let Some(item) = presented.get(&SurfaceTabItemKey::Surface(*surface_id)) else {
+            continue;
+        };
+        if tab.root.parent().is_none() {
+            strip.root.put(&tab.root, item.x, 0.0);
+        }
+        tab.root
+            .set_size_request(item.width, item.height.max(height));
+        strip.root.move_(&tab.root, item.x, 0.0);
+        tab.root.set_opacity(item.opacity);
+    }
+
+    if let Some(item) = presented.get(&SurfaceTabItemKey::AddButton) {
+        if strip.add_button.parent().is_none() {
+            strip.root.put(&strip.add_button, item.x, 0.0);
+        }
+        strip
+            .add_button
+            .set_size_request(item.width, item.height.max(height));
+        strip.root.move_(&strip.add_button, item.x, 0.0);
+        strip.add_button.set_opacity(item.opacity);
+    }
+
+    for (exit_root, item) in exiting {
+        if exit_root.parent().is_none() {
+            strip.root.put(exit_root, item.x, 0.0);
+        }
+        exit_root.set_size_request(item.width, item.height.max(height));
+        strip.root.move_(exit_root, item.x, 0.0);
+        exit_root.set_opacity(item.opacity);
+    }
+
+    strip.root.set_size_request(-1, height.max(1));
+}
+
+fn begin_surface_tab_drag(strip: &SurfaceTabStripWidgets, surface_id: SurfaceId) {
+    let mut state = strip.state.borrow_mut();
+    let Some(presented) = state
+        .presented
+        .get(&SurfaceTabItemKey::Surface(surface_id))
+        .copied()
+    else {
+        return;
+    };
+    let preview_order = state
+        .layout
+        .as_ref()
+        .map(|layout| layout.items.iter().map(|item| item.surface_id).collect())
+        .unwrap_or_else(|| state.model_order.clone());
+    state.drag = Some(SurfaceTabDragState {
+        surface_id,
+        start_x: presented.x,
+        current_dx: 0.0,
+        preview_order,
+        threshold_crossed: false,
+    });
+    drop(state);
+
+    if let Some(tab) = strip.tabs.borrow().get(&surface_id).cloned() {
+        tab.root.add_css_class("surface-tab-dragging");
+        raise_surface_tab_widget(strip, &tab.root, presented);
+    }
+}
+
+fn update_surface_tab_drag(
+    ui: &Rc<UiHandle>,
+    strip: &SurfaceTabStripWidgets,
+    surface_id: SurfaceId,
+    dx: f64,
+) {
+    let mut next_order = None;
+    let (should_suppress_click, threshold_crossed, layout, current_center, current_preview) = {
+        let mut state = strip.state.borrow_mut();
+        let current_width = surface_tab_item_width(&state, surface_id);
+        let state_layout = state.layout.clone();
+        let Some(drag) = state.drag.as_mut() else {
+            return;
+        };
+        if drag.surface_id != surface_id {
+            return;
+        }
+        drag.current_dx = dx;
+        let mut should_suppress_click = false;
+        if !drag.threshold_crossed && dx.abs() >= TERMINAL_MOTION_SPEC.tab.drag_threshold_px {
+            drag.threshold_crossed = true;
+            should_suppress_click = true;
+        }
+        (
+            should_suppress_click,
+            drag.threshold_crossed,
+            state_layout,
+            drag.start_x + drag.current_dx + current_width / 2.0,
+            drag.preview_order.clone(),
+        )
+    };
+
+    if should_suppress_click {
+        strip.state.borrow_mut().suppress_click_surface = Some(surface_id);
+    }
+    if !threshold_crossed {
+        apply_surface_tab_widgets(strip);
+        return;
+    }
+
+    if let Some(layout) = layout {
+        let preview =
+            surface_tab_preview_order(&layout, &current_preview, surface_id, current_center);
+        if preview != current_preview {
+            if let Some(drag) = strip.state.borrow_mut().drag.as_mut() {
+                drag.preview_order = preview.clone();
+            }
+            next_order = Some(preview);
+        }
+    }
+
+    if let Some(order) = next_order {
+        let layout = compute_surface_tab_strip_layout(strip, &order);
+        set_surface_tab_layout(strip, layout, ui.settings.borrow().animations_enabled);
+    }
+    apply_surface_tab_widgets(strip);
+}
+
+fn end_surface_tab_drag(
+    ui: &Rc<UiHandle>,
+    strip: &SurfaceTabStripWidgets,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+    surface_id: SurfaceId,
+) {
+    let (threshold_crossed, preview_index, current_index) = {
+        let mut state = strip.state.borrow_mut();
+        let Some(drag) = state.drag.take() else {
+            return;
+        };
+        state.next_animation_duration_us = drag
+            .threshold_crossed
+            .then_some(TERMINAL_MOTION_SPEC.tab.drag_snap.duration_us);
+        (
+            drag.threshold_crossed,
+            drag.preview_order.iter().position(|id| *id == surface_id),
+            state.model_order.iter().position(|id| *id == surface_id),
+        )
+    };
+
+    if let Some(tab) = strip.tabs.borrow().get(&surface_id).cloned() {
+        tab.root.remove_css_class("surface-tab-dragging");
+    }
+
+    if !threshold_crossed {
+        apply_surface_tab_widgets(strip);
+        return;
+    }
+
+    if preview_index != current_index {
+        ui.dispatch(ControlCommand::MoveSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+            to_index: preview_index.unwrap_or_default(),
+        });
+        return;
+    }
+
+    ui.refresh(true);
+}
+
+fn surface_tab_item_width(state: &SurfaceTabStripState, surface_id: SurfaceId) -> f64 {
+    state
+        .presented
+        .get(&SurfaceTabItemKey::Surface(surface_id))
+        .map(|item| f64::from(item.width))
+        .or_else(|| {
+            state.layout.as_ref().and_then(|layout| {
+                layout
+                    .items
+                    .iter()
+                    .find(|item| item.surface_id == surface_id)
+                    .map(|item| f64::from(item.width))
+            })
+        })
+        .unwrap_or(f64::from(SURFACE_TAB_MIN_WIDTH))
+}
+
+fn surface_tab_preview_order(
+    layout: &SurfaceTabStripLayout,
+    current_order: &[SurfaceId],
+    surface_id: SurfaceId,
+    current_center: f64,
+) -> Vec<SurfaceId> {
+    let mut order = current_order
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != surface_id)
+        .collect::<Vec<_>>();
+    let insert_index = order
+        .iter()
+        .position(|candidate| {
+            layout
+                .items
+                .iter()
+                .find(|item| item.surface_id == *candidate)
+                .map(|item| current_center < item.x + (f64::from(item.width) / 2.0))
+                .unwrap_or(false)
+        })
+        .unwrap_or(order.len());
+    order.insert(insert_index, surface_id);
+    order
+}
+
+fn raise_surface_tab_widget(
+    strip: &SurfaceTabStripWidgets,
+    widget: &GtkBox,
+    presented: PresentedSurfaceTabItem,
+) {
+    if widget.parent().is_some() {
+        strip.root.remove(widget);
+    }
+    strip.root.put(widget, presented.x, 0.0);
+}
+
+fn lerp_surface_tab_item(
+    start: PresentedSurfaceTabItem,
+    end: PresentedSurfaceTabItem,
+    progress: f64,
+) -> PresentedSurfaceTabItem {
+    PresentedSurfaceTabItem {
+        x: start.x + ((end.x - start.x) * progress),
+        opacity: start.opacity + ((end.opacity - start.opacity) * progress),
+        width: lerp_i32(start.width, end.width, progress),
+        height: lerp_i32(start.height, end.height, progress),
+    }
+}
+
+fn lerp_i32(start: i32, end: i32, progress: f64) -> i32 {
+    (f64::from(start) + (f64::from(end - start) * progress)).round() as i32
 }
 
 fn clear_box(container: &GtkBox) {
@@ -3610,6 +6112,52 @@ fn widget_contains_window_focus(window: &adw::ApplicationWindow, target: &Widget
     false
 }
 
+fn pane_focus_target(
+    ui: &UiHandle,
+    workspace: &Workspace,
+    pane_id: taskers_domain::PaneId,
+    card: &PaneCardWidgets,
+) -> Widget {
+    let active_surface_widget = workspace
+        .panes
+        .get(&pane_id)
+        .and_then(|pane| pane.active_surface().map(|surface| surface.id))
+        .and_then(|surface_id| ui.ghostty_surfaces.borrow().get(&surface_id).cloned())
+        .filter(|widget| widget.parent().is_some());
+
+    active_surface_widget
+        .or_else(|| card.terminal_host.first_child())
+        .or_else(|| {
+            if card.focus_target.parent().is_some() {
+                Some(card.focus_target.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| card.root.clone().upcast())
+}
+
+fn active_pane_needs_scroller_focus_recovery(
+    ui: &UiHandle,
+    shell: &ShellWidgets,
+    workspace: &Workspace,
+) -> bool {
+    let Some(card) = ui.pane_cards.borrow().get(&workspace.active_pane).cloned() else {
+        return false;
+    };
+    let target = pane_focus_target(ui, workspace, workspace.active_pane, &card);
+    if widget_contains_window_focus(&ui.window, &target) {
+        return false;
+    }
+
+    let Some(focused_widget) = gtk::prelude::GtkWindowExt::focus(&ui.window) else {
+        return false;
+    };
+
+    focused_widget.type_().name() == "GtkScrolledWindow"
+        && widget_is_descendant_of(&focused_widget, shell.layout_scroll.upcast_ref())
+}
+
 fn widget_is_descendant_of(widget: &Widget, ancestor: &Widget) -> bool {
     let mut current = Some(widget.clone());
     while let Some(node) = current {
@@ -3632,7 +6180,7 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
         return title.to_string();
     }
 
-    if let Some(agent) = surface.metadata.agent_kind.as_deref() {
+    if let Some(agent) = surface_agent_kind(surface) {
         return humanize_agent_kind(agent);
     }
 
@@ -3642,10 +6190,345 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     }
 }
 
+fn editable_surface_title(surface: &SurfaceRecord) -> String {
+    surface
+        .metadata
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+const AGENT_ICON_CLASSES: [&str; 4] = [
+    "agent-icon",
+    "agent-icon-codex",
+    "agent-icon-claude",
+    "agent-icon-opencode",
+];
+
+const CODEX_ICON_PATH: &str = "M239.184 106.203a64.716 64.716 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.716 64.716 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.665 64.665 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.767 64.767 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483Zm-97.56 136.338a48.397 48.397 0 0 1-31.105-11.255l1.535-.87 51.67-29.825a8.595 8.595 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601Zm-104.466-44.61a48.345 48.345 0 0 1-5.781-32.589l1.534.921 51.722 29.826a8.339 8.339 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803ZM23.549 85.38a48.499 48.499 0 0 1 25.58-21.333v61.39a8.288 8.288 0 0 0 4.195 7.316l62.874 36.272-21.845 12.636a.819.819 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405v.256Zm179.466 41.695-63.08-36.63L161.73 77.86a.819.819 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.544 8.544 0 0 0-4.4-7.213Zm21.742-32.69-1.535-.922-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.716.716 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391v.205ZM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87-51.67 29.825a8.595 8.595 0 0 0-4.246 7.367l-.051 72.697Zm11.868-25.58 28.138-16.217 28.188 16.218v32.434l-28.086 16.218-28.188-16.218-.052-32.434Z";
+
+const CLAUDE_CODE_ICON_PATH: &str = "m50.228 170.321 50.357-28.257.843-2.463-.843-1.361h-2.462l-8.426-.518-28.775-.778-24.952-1.037-24.175-1.296-6.092-1.297L0 125.796l.583-3.759 5.12-3.434 7.324.648 16.202 1.101 24.304 1.685 17.629 1.037 26.118 2.722h4.148l.583-1.685-1.426-1.037-1.101-1.037-25.147-17.045-27.22-18.017-14.258-10.37-7.713-5.25-3.888-4.925-1.685-10.758 7-7.713 9.397.649 2.398.648 9.527 7.323 20.35 15.75L94.817 91.9l3.889 3.24 1.555-1.102.195-.777-1.75-2.917-14.453-26.118-15.425-26.572-6.87-11.018-1.814-6.61c-.648-2.723-1.102-4.991-1.102-7.778l7.972-10.823L71.42 0 82.05 1.426l4.472 3.888 6.61 15.101 10.694 23.786 16.591 32.34 4.861 9.592 2.592 8.879.973 2.722h1.685v-1.556l1.36-18.211 2.528-22.36 2.463-28.776.843-8.1 4.018-9.722 7.971-5.25 6.222 2.981 5.12 7.324-.713 4.73-3.046 19.768-5.962 30.98-3.889 20.739h2.268l2.593-2.593 10.499-13.934 17.628-22.036 7.778-8.749 9.073-9.657 5.833-4.601h11.018l8.1 12.055-3.628 12.443-11.342 14.388-9.398 12.184-13.48 18.147-8.426 14.518.778 1.166 2.01-.194 30.46-6.481 16.462-2.982 19.637-3.37 8.88 4.148.971 4.213-3.5 8.62-20.998 5.184-24.628 4.926-36.682 8.685-.454.324.519.648 16.526 1.555 7.065.389h17.304l32.21 2.398 8.426 5.574 5.055 6.805-.843 5.184-12.962 6.611-17.498-4.148-40.83-9.721-14-3.5h-1.944v1.167l11.666 11.406 21.387 19.314 26.767 24.887 1.36 6.157-3.434 4.86-3.63-.518-23.526-17.693-9.073-7.972-20.545-17.304h-1.36v1.814l4.73 6.935 25.017 37.59 1.296 11.536-1.814 3.76-6.481 2.268-7.13-1.297-14.647-20.544-15.1-23.138-12.185-20.739-1.49.843-7.194 77.448-3.37 3.953-7.778 2.981-6.48-4.925-3.436-7.972 3.435-15.749 4.148-20.544 3.37-16.333 3.046-20.285 1.815-6.74-.13-.454-1.49.194-15.295 20.999-23.267 31.433-18.406 19.702-4.407 1.75-7.648-3.954.713-7.064 4.277-6.286 25.47-32.405 15.36-20.092 9.917-11.6-.065-1.686h-.583L44.07 198.125l-12.055 1.555-5.185-4.86.648-7.972 2.463-2.593 20.35-13.999-.064.065Z";
+
+const OPENCODE_ICON_FRAME_PATH: &str = "M24 8H8V32H24V8ZM32 40H0V0H32V40Z";
+const OPENCODE_ICON_CORE_PATH: &str = "M24 32H8V16H24V32Z";
+
+const CODEX_ICON_SPEC: AgentIconSpec = AgentIconSpec {
+    view_box_width: 256.0,
+    view_box_height: 260.0,
+    paths: &[AgentIconPathSpec {
+        data: CODEX_ICON_PATH,
+        fill: AgentIconFill::CurrentColor,
+    }],
+};
+
+const CLAUDE_CODE_ICON_SPEC: AgentIconSpec = AgentIconSpec {
+    view_box_width: 256.0,
+    view_box_height: 257.0,
+    paths: &[AgentIconPathSpec {
+        data: CLAUDE_CODE_ICON_PATH,
+        fill: AgentIconFill::Agent("claude"),
+    }],
+};
+
+const OPENCODE_ICON_SPEC: AgentIconSpec = AgentIconSpec {
+    view_box_width: 32.0,
+    view_box_height: 40.0,
+    paths: &[
+        AgentIconPathSpec {
+            data: OPENCODE_ICON_FRAME_PATH,
+            fill: AgentIconFill::CurrentColor,
+        },
+        AgentIconPathSpec {
+            data: OPENCODE_ICON_CORE_PATH,
+            fill: AgentIconFill::Agent("opencode"),
+        },
+    ],
+};
+
+impl AgentIconWidget {
+    fn new(agent_kind: Option<&str>, size: i32) -> Self {
+        let root = DrawingArea::new();
+        root.set_halign(Align::Center);
+        root.set_valign(Align::Center);
+
+        let state = Rc::new(RefCell::new(AgentIconState::default()));
+        let draw_state = Rc::clone(&state);
+        root.set_draw_func(move |area, cr, width, height| {
+            let Some(agent_kind) = draw_state.borrow().kind else {
+                return;
+            };
+            render_agent_icon(area, cr, width, height, agent_kind);
+        });
+
+        let icon = Self { root, state };
+        configure_agent_icon(&icon, agent_kind, size);
+        icon
+    }
+
+    fn widget(&self) -> &DrawingArea {
+        &self.root
+    }
+
+    fn add_css_class(&self, class_name: &str) {
+        self.root.add_css_class(class_name);
+    }
+}
+
+fn build_agent_icon(agent_kind: Option<&str>, size: i32) -> AgentIconWidget {
+    AgentIconWidget::new(agent_kind, size)
+}
+
+fn configure_agent_icon(icon: &AgentIconWidget, agent_kind: Option<&str>, size: i32) {
+    icon.root.set_content_width(size);
+    icon.root.set_content_height(size);
+    icon.root.set_size_request(size, size);
+    for class_name in AGENT_ICON_CLASSES {
+        icon.root.remove_css_class(class_name);
+    }
+
+    let Some(agent_kind) =
+        agent_kind.and_then(|agent_kind| normalized_agent_kind(Some(agent_kind)))
+    else {
+        icon.state.borrow_mut().kind = None;
+        icon.root.set_tooltip_text(None);
+        icon.root.set_visible(false);
+        icon.root.queue_draw();
+        return;
+    };
+
+    if agent_icon_spec(agent_kind).is_none() {
+        icon.state.borrow_mut().kind = None;
+        icon.root.set_tooltip_text(None);
+        icon.root.set_visible(false);
+        icon.root.queue_draw();
+        return;
+    }
+
+    icon.state.borrow_mut().kind = Some(agent_kind);
+    icon.root.add_css_class("agent-icon");
+    icon.root.add_css_class(agent_icon_class(agent_kind));
+    icon.root
+        .set_tooltip_text(Some(&humanize_agent_kind(agent_kind)));
+    icon.root.set_visible(true);
+    icon.root.queue_draw();
+}
+
+fn agent_icon_class(agent_kind: &str) -> &'static str {
+    match agent_kind {
+        "codex" => "agent-icon-codex",
+        "claude" => "agent-icon-claude",
+        "opencode" => "agent-icon-opencode",
+        _ => "agent-icon",
+    }
+}
+
+fn agent_icon_spec(agent_kind: &str) -> Option<&'static AgentIconSpec> {
+    match agent_kind {
+        "codex" => Some(&CODEX_ICON_SPEC),
+        "claude" => Some(&CLAUDE_CODE_ICON_SPEC),
+        "opencode" => Some(&OPENCODE_ICON_SPEC),
+        _ => None,
+    }
+}
+
+fn render_agent_icon(
+    area: &DrawingArea,
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    agent_kind: &'static str,
+) {
+    let Some(spec) = agent_icon_spec(agent_kind) else {
+        return;
+    };
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    let scale = f64::min(
+        f64::from(width) / spec.view_box_width,
+        f64::from(height) / spec.view_box_height,
+    );
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+
+    let offset_x = (f64::from(width) - (spec.view_box_width * scale)) / 2.0;
+    let offset_y = (f64::from(height) - (spec.view_box_height * scale)) / 2.0;
+
+    let _ = cr.save();
+    cr.set_antialias(gtk::cairo::Antialias::Best);
+    cr.translate(offset_x, offset_y);
+    cr.scale(scale, scale);
+
+    for path in spec.paths {
+        let Some(commands) = agent_icon_commands(path.data) else {
+            continue;
+        };
+        cr.new_path();
+        append_agent_icon_path(cr, commands.as_ref());
+        apply_agent_icon_fill(area, cr, path.fill);
+        let _ = cr.fill();
+    }
+
+    let _ = cr.restore();
+}
+
+fn agent_icon_commands(path_data: &'static str) -> Option<Rc<Vec<SimplePathSegment>>> {
+    AGENT_ICON_PATHS.with(|cache| {
+        if let Some(commands) = cache.borrow().get(path_data).cloned() {
+            return Some(commands);
+        }
+
+        let commands = Rc::new(
+            SimplifyingPathParser::from(path_data)
+                .map(|segment| segment.ok())
+                .collect::<Option<Vec<_>>>()?,
+        );
+        cache.borrow_mut().insert(path_data, Rc::clone(&commands));
+        Some(commands)
+    })
+}
+
+fn append_agent_icon_path(cr: &gtk::cairo::Context, commands: &[SimplePathSegment]) {
+    let mut current = (0.0, 0.0);
+    let mut subpath_start = (0.0, 0.0);
+
+    for command in commands {
+        match *command {
+            SimplePathSegment::MoveTo { x, y } => {
+                cr.move_to(x, y);
+                current = (x, y);
+                subpath_start = (x, y);
+            }
+            SimplePathSegment::LineTo { x, y } => {
+                cr.line_to(x, y);
+                current = (x, y);
+            }
+            SimplePathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
+                cr.curve_to(x1, y1, x2, y2, x, y);
+                current = (x, y);
+            }
+            SimplePathSegment::Quadratic { x1, y1, x, y } => {
+                let cubic_1_x = current.0 + ((2.0 / 3.0) * (x1 - current.0));
+                let cubic_1_y = current.1 + ((2.0 / 3.0) * (y1 - current.1));
+                let cubic_2_x = x + ((2.0 / 3.0) * (x1 - x));
+                let cubic_2_y = y + ((2.0 / 3.0) * (y1 - y));
+                cr.curve_to(cubic_1_x, cubic_1_y, cubic_2_x, cubic_2_y, x, y);
+                current = (x, y);
+            }
+            SimplePathSegment::ClosePath => {
+                cr.close_path();
+                current = subpath_start;
+            }
+        }
+    }
+}
+
+fn apply_agent_icon_fill(area: &DrawingArea, cr: &gtk::cairo::Context, fill: AgentIconFill) {
+    let color = match fill {
+        AgentIconFill::CurrentColor => {
+            let color = area.style_context().color();
+            AgentIconColor {
+                red: f64::from(color.red()),
+                green: f64::from(color.green()),
+                blue: f64::from(color.blue()),
+                alpha: f64::from(color.alpha()),
+            }
+        }
+        AgentIconFill::Agent(kind) => theme::resolve_agent_icon_color(kind).unwrap_or_else(|| {
+            let color = area.style_context().color();
+            AgentIconColor {
+                red: f64::from(color.red()),
+                green: f64::from(color.green()),
+                blue: f64::from(color.blue()),
+                alpha: f64::from(color.alpha()),
+            }
+        }),
+    };
+
+    cr.set_source_rgba(color.red, color.green, color.blue, color.alpha);
+}
+
+fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<&'static str> {
+    let agent_kind = agent_kind?.trim();
+    if agent_kind.is_empty() || agent_kind.eq_ignore_ascii_case("shell") {
+        return None;
+    }
+
+    if agent_kind.eq_ignore_ascii_case("codex") || agent_kind.eq_ignore_ascii_case("openai") {
+        Some("codex")
+    } else if agent_kind.eq_ignore_ascii_case("claude")
+        || agent_kind.eq_ignore_ascii_case("claude code")
+        || agent_kind.eq_ignore_ascii_case("claude-code")
+        || agent_kind.eq_ignore_ascii_case("anthropic")
+    {
+        Some("claude")
+    } else if agent_kind.eq_ignore_ascii_case("opencode") {
+        Some("opencode")
+    } else if agent_kind.eq_ignore_ascii_case("aider") {
+        Some("aider")
+    } else {
+        None
+    }
+}
+
+fn infer_agent_kind(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.contains("codex") {
+        Some("codex")
+    } else if normalized.contains("claude") {
+        Some("claude")
+    } else if normalized.contains("opencode") {
+        Some("opencode")
+    } else if normalized.contains("aider") {
+        Some("aider")
+    } else {
+        None
+    }
+}
+
+fn surface_agent_kind(surface: &SurfaceRecord) -> Option<&'static str> {
+    normalized_agent_kind(surface.metadata.agent_kind.as_deref())
+        .or_else(|| surface.metadata.title.as_deref().and_then(infer_agent_kind))
+        .or_else(|| {
+            surface
+                .command
+                .as_ref()
+                .and_then(|command| command.first())
+                .and_then(|command| infer_agent_kind(command))
+        })
+}
+
+fn workspace_agent_kind(workspace: &Workspace) -> Option<&'static str> {
+    workspace
+        .panes
+        .get(&workspace.active_pane)
+        .and_then(PaneRecord::active_surface)
+        .and_then(surface_agent_kind)
+        .or_else(|| {
+            workspace
+                .panes
+                .values()
+                .filter_map(PaneRecord::active_surface)
+                .find_map(surface_agent_kind)
+        })
+}
+
 fn humanize_agent_kind(agent: &str) -> String {
     match agent {
         "codex" => "Codex".into(),
-        "claude" => "Claude".into(),
+        "claude" => "Claude Code".into(),
         "opencode" => "OpenCode".into(),
         "aider" => "Aider".into(),
         other => {
@@ -3721,23 +6604,6 @@ fn workspace_viewport_height(ui: &UiHandle, shell: Option<&ShellWidgets>) -> i32
     DEFAULT_WORKSPACE_WINDOW_HEIGHT
 }
 
-fn expanded_window_frame(frame: WindowFrame, viewport_height: i32) -> WindowFrame {
-    if frame.height != DEFAULT_WORKSPACE_WINDOW_HEIGHT {
-        return frame;
-    }
-
-    let mut display = frame;
-    display.height = viewport_height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
-
-    let default_stride = DEFAULT_WORKSPACE_WINDOW_HEIGHT + DEFAULT_WORKSPACE_WINDOW_GAP;
-    if default_stride > 0 && frame.y % default_stride == 0 {
-        let display_stride = display.height + DEFAULT_WORKSPACE_WINDOW_GAP;
-        display.y = (frame.y / default_stride) * display_stride;
-    }
-
-    display
-}
-
 fn scale_window_frame(frame: WindowFrame, scale: f64) -> WindowFrame {
     if (scale - 1.0).abs() < f64::EPSILON {
         return frame;
@@ -3751,42 +6617,86 @@ fn scale_window_frame(frame: WindowFrame, scale: f64) -> WindowFrame {
     }
 }
 
-fn display_window_frame(frame: WindowFrame, render_context: WorkspaceRenderContext) -> WindowFrame {
-    let expanded = expanded_window_frame(frame, render_context.viewport_height);
-    if !render_context.overview_mode {
-        return expanded;
+fn workspace_window_placements(
+    workspace: &Workspace,
+    top_level_resize_preview: Option<TopLevelResizePreview>,
+) -> Vec<WorkspaceWindowPlacement> {
+    let mut placements = Vec::new();
+    let mut x = 0;
+
+    for column in workspace.columns.values() {
+        let column_width = match top_level_resize_preview {
+            Some(TopLevelResizePreview {
+                workspace_id: _,
+                target:
+                    TopLevelResizePreviewTarget::ColumnWidth {
+                        workspace_column_id,
+                        width,
+                    },
+            }) if workspace_column_id == column.id => width.max(MIN_WORKSPACE_WINDOW_WIDTH),
+            _ => column.width.max(1),
+        };
+        let mut y = 0;
+        for window_id in &column.window_order {
+            let Some(window) = workspace.windows.get(window_id) else {
+                continue;
+            };
+            let window_height = match top_level_resize_preview {
+                Some(TopLevelResizePreview {
+                    workspace_id: _,
+                    target:
+                        TopLevelResizePreviewTarget::WindowHeight {
+                            workspace_window_id,
+                            height,
+                        },
+                }) if workspace_window_id == *window_id => height.max(MIN_WORKSPACE_WINDOW_HEIGHT),
+                _ => window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT),
+            };
+            placements.push(WorkspaceWindowPlacement {
+                window_id: *window_id,
+                column_id: column.id,
+                frame: WindowFrame {
+                    x,
+                    y,
+                    width: column_width,
+                    height: window_height,
+                },
+            });
+            y += window_height + DEFAULT_WORKSPACE_WINDOW_GAP;
+        }
+        x += column_width + DEFAULT_WORKSPACE_WINDOW_GAP;
     }
 
-    scale_window_frame(expanded, render_context.overview_scale)
+    placements
 }
 
-fn workspace_base_canvas_metrics(workspace: &Workspace, viewport_height: i32) -> CanvasMetrics {
-    let display_frames: Vec<_> = workspace
-        .windows
-        .values()
-        .map(|window| expanded_window_frame(window.frame, viewport_height))
-        .collect();
+fn workspace_display_window_placements(
+    workspace: &Workspace,
+    render_context: WorkspaceRenderContext,
+) -> Vec<WorkspaceWindowPlacement> {
+    workspace_window_placements(workspace, render_context.top_level_resize_preview)
+        .into_iter()
+        .map(|mut placement| {
+            if render_context.overview_mode {
+                placement.frame =
+                    scale_window_frame(placement.frame, render_context.overview_scale);
+            }
+            placement
+        })
+        .collect()
+}
 
-    let min_x = display_frames
-        .iter()
-        .map(|frame| frame.x)
-        .min()
-        .unwrap_or(0)
-        .min(0);
-    let min_y = display_frames
-        .iter()
-        .map(|frame| frame.y)
-        .min()
-        .unwrap_or(0)
-        .min(0);
+fn canvas_metrics_from_frames(frames: &[WindowFrame]) -> CanvasMetrics {
+    let min_x = frames.iter().map(|frame| frame.x).min().unwrap_or(0);
+    let min_y = frames.iter().map(|frame| frame.y).min().unwrap_or(0);
     let offset_x = WORKSPACE_CANVAS_PADDING - min_x;
     let offset_y = WORKSPACE_CANVAS_PADDING - min_y;
-    let width = display_frames
+    let width = frames
         .iter()
         .map(|frame| frame.right() + offset_x + WORKSPACE_CANVAS_PADDING)
         .max()
         .unwrap_or(WORKSPACE_CANVAS_PADDING * 2);
-    let height = display_frames
+    let height = frames
         .iter()
         .map(|frame| frame.bottom() + offset_y + WORKSPACE_CANVAS_PADDING)
         .max()
@@ -3801,7 +6711,7 @@ fn workspace_base_canvas_metrics(workspace: &Workspace, viewport_height: i32) ->
 }
 
 fn workspace_render_context(
-    _ui: &UiHandle,
+    ui: &UiHandle,
     _shell: Option<&ShellWidgets>,
     workspace: &Workspace,
     overview_mode: bool,
@@ -3810,13 +6720,17 @@ fn workspace_render_context(
 ) -> WorkspaceRenderContext {
     if !overview_mode {
         return WorkspaceRenderContext {
-            viewport_height,
             overview_mode: false,
             overview_scale: 1.0,
+            top_level_resize_preview: ui.active_top_level_resize_preview(workspace.id),
         };
     }
 
-    let base_metrics = workspace_base_canvas_metrics(workspace, viewport_height);
+    let base_frames = workspace_window_placements(workspace, None)
+        .into_iter()
+        .map(|placement| placement.frame)
+        .collect::<Vec<_>>();
+    let base_metrics = canvas_metrics_from_frames(&base_frames);
     let content_width = (base_metrics.width - (WORKSPACE_CANVAS_PADDING * 2)).max(1);
     let content_height = (base_metrics.height - (WORKSPACE_CANVAS_PADDING * 2)).max(1);
     let available_width = (viewport_width - (WORKSPACE_CANVAS_PADDING * 2)).max(1) as f64;
@@ -3826,9 +6740,9 @@ fn workspace_render_context(
         .clamp(0.05, 1.0);
 
     WorkspaceRenderContext {
-        viewport_height,
         overview_mode: true,
         overview_scale,
+        top_level_resize_preview: None,
     }
 }
 
@@ -3836,43 +6750,25 @@ fn workspace_canvas_metrics(
     workspace: &Workspace,
     render_context: WorkspaceRenderContext,
 ) -> CanvasMetrics {
-    let display_frames: Vec<_> = workspace
-        .windows
-        .values()
-        .map(|window| display_window_frame(window.frame, render_context))
-        .collect();
+    let display_frames = workspace_display_window_placements(workspace, render_context)
+        .into_iter()
+        .map(|placement| placement.frame)
+        .collect::<Vec<_>>();
+    canvas_metrics_from_frames(&display_frames)
+}
 
-    let min_x = display_frames
-        .iter()
-        .map(|frame| frame.x)
-        .min()
-        .unwrap_or(0)
-        .min(0);
-    let min_y = display_frames
-        .iter()
-        .map(|frame| frame.y)
-        .min()
-        .unwrap_or(0)
-        .min(0);
-    let offset_x = WORKSPACE_CANVAS_PADDING - min_x;
-    let offset_y = WORKSPACE_CANVAS_PADDING - min_y;
-    let width = display_frames
-        .iter()
-        .map(|frame| frame.right() + offset_x + WORKSPACE_CANVAS_PADDING)
-        .max()
-        .unwrap_or(WORKSPACE_CANVAS_PADDING * 2);
-    let height = display_frames
-        .iter()
-        .map(|frame| frame.bottom() + offset_y + WORKSPACE_CANVAS_PADDING)
-        .max()
-        .unwrap_or(WORKSPACE_CANVAS_PADDING * 2);
-
-    CanvasMetrics {
-        offset_x,
-        offset_y,
-        width,
-        height,
-    }
+fn workspace_window_attention(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+) -> AttentionState {
+    window
+        .layout
+        .leaves()
+        .into_iter()
+        .filter_map(|pane_id| workspace.panes.get(&pane_id))
+        .map(PaneRecord::active_attention)
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(AttentionState::Normal)
 }
 
 fn paned_extent(paned: &Paned, axis: taskers_domain::SplitAxis) -> i32 {
@@ -4136,6 +7032,52 @@ fn format_pane_meta(pane: &PaneRecord, snapshot: Option<&PaneRuntimeSnapshot>) -
     format!("{agent}  \u{2022}  {cwd}  \u{2022}  {branch}  \u{2022}  {ports}  \u{2022}  {process}")
 }
 
+fn metadata_has_display_context(metadata: &PaneMetadata) -> bool {
+    metadata
+        .cwd
+        .as_deref()
+        .is_some_and(|cwd| !cwd.trim().is_empty())
+        || metadata
+            .git_branch
+            .as_deref()
+            .is_some_and(|branch| !branch.trim().is_empty())
+        || metadata
+            .repo_name
+            .as_deref()
+            .is_some_and(|repo_name| !repo_name.trim().is_empty())
+        || metadata
+            .agent_kind
+            .as_deref()
+            .is_some_and(|agent_kind| !agent_kind.trim().is_empty())
+        || !metadata.ports.is_empty()
+}
+
+fn compact_preview(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn compact_path(path: &str) -> String {
+    let home = std::env::var("HOME").ok();
+    if let Some(home) = home {
+        if path == home {
+            return "~".into();
+        }
+        if let Some(suffix) = path.strip_prefix(&(home + "/")) {
+            return format!("~/{suffix}");
+        }
+    }
+
+    path.to_string()
+}
+
+fn format_ports(ports: &[u16]) -> String {
+    match ports {
+        [] => String::new(),
+        [port] => format!(":{port}"),
+        [first, rest @ ..] => format!(":{first} +{}", rest.len()),
+    }
+}
+
 fn sorted_id_strings<I, T>(values: I) -> Vec<String>
 where
     I: IntoIterator<Item = T>,
@@ -4185,575 +7127,736 @@ fn spawn_control_server(controller: InMemoryController, socket_path: PathBuf) ->
     note
 }
 
-fn install_css() {
-    let provider = CssProvider::new();
-    provider.load_from_data(
-        "
-        /* ── Base ── */
-
-        window {
-            background: #09090b;
-            color: #e4e4e7;
-        }
-
-        headerbar {
-            background: #09090b;
-            border-bottom: 1px solid rgba(255,255,255,0.06);
-            box-shadow: none;
-        }
-
-        /* ── Paned separators ── */
-
-        paned > separator {
-            background: rgba(255,255,255,0.08);
-            min-width: 1px;
-            min-height: 1px;
-            padding: 0;
-        }
-
-        /* ── Sidebar ── */
-
-        .workspace-sidebar {
-            background: #09090b;
-            border-right: 1px solid rgba(255,255,255,0.06);
-        }
-
-        .sidebar-heading {
-            font-weight: 600;
-            font-size: 0.8rem;
-            color: #71717a;
-            letter-spacing: 0.02em;
-        }
-
-        .workspace-add {
-            background: rgba(99,102,241,0.10);
-            color: #a5b4fc;
-            border: 1px solid rgba(99,102,241,0.15);
-            border-radius: 6px;
-            min-width: 24px;
-            min-height: 24px;
-            padding: 0;
-            font-size: 1rem;
-            transition: background 150ms ease, border-color 150ms ease;
-        }
-
-        .workspace-add:hover {
-            background: rgba(99,102,241,0.22);
-            border-color: rgba(99,102,241,0.30);
-        }
-
-        .workspace-add:active {
-            background: rgba(99,102,241,0.30);
-        }
-
-        .workspace-button {
-            padding: 0;
-        }
-
-        .workspace-button:hover .workspace-item {
-            background: rgba(255,255,255,0.05);
-        }
-
-        .workspace-item {
-            padding: 6px 8px;
-            border-radius: 6px;
-            border-left: 2px solid transparent;
-            transition: background 120ms ease;
-        }
-
-        .workspace-item-active {
-            background: rgba(99,102,241,0.10);
-            border-left: 2px solid #6366f1;
-        }
-
-        .workspace-label {
-            font-weight: 500;
-            color: #d4d4d8;
-            font-size: 0.82rem;
-        }
-
-        .workspace-subtitle {
-            color: #71717a;
-            font-size: 0.72rem;
-        }
-
-        .workspace-agent-strip {
-            margin-right: 4px;
-        }
-
-        .workspace-agent-chip {
-            border-radius: 999px;
-            padding: 2px 6px;
-            min-width: 24px;
-            font-size: 0.62rem;
-            font-weight: 700;
-            letter-spacing: 0.04em;
-        }
-
-        .workspace-agent-chip-working {
-            background: rgba(34,197,94,0.16);
-            color: #bbf7d0;
-        }
-
-        .workspace-agent-chip-waiting {
-            background: rgba(245,158,11,0.18);
-            color: #fde68a;
-        }
-
-        .workspace-agent-chip-inactive {
-            background: rgba(239,68,68,0.16);
-            color: #fecaca;
-        }
-
-        .workspace-agent-overflow {
-            color: #71717a;
-            font-size: 0.68rem;
-            font-weight: 600;
-        }
-
-        .workspace-pill {
-            background: rgba(255,255,255,0.05);
-            color: #d4d4d8;
-            font-size: 0.7rem;
-            font-weight: 600;
-            border-radius: 999px;
-            padding: 2px 7px;
-            min-height: 0;
-        }
-
-        .workspace-pill-unread {
-            background: rgba(255,255,255,0.08);
-            color: #fafafa;
-        }
-
-        .workspace-pill-state-busy {
-            background: rgba(99,102,241,0.15);
-            color: #c7d2fe;
-        }
-
-        .workspace-pill-state-completed {
-            background: rgba(34,197,94,0.16);
-            color: #bbf7d0;
-        }
-
-        .workspace-pill-state-waiting {
-            background: rgba(245,158,11,0.17);
-            color: #fde68a;
-        }
-
-        .workspace-pill-state-error {
-            background: rgba(239,68,68,0.16);
-            color: #fecaca;
-        }
-
-        .workspace-item-has-attention {
-            border-left-color: rgba(255,255,255,0.16);
-        }
-
-        .workspace-item-state-busy {
-            background: rgba(99,102,241,0.06);
-            border-left-color: rgba(99,102,241,0.45);
-        }
-
-        .workspace-item-state-completed {
-            background: rgba(34,197,94,0.06);
-            border-left-color: rgba(34,197,94,0.45);
-        }
-
-        .workspace-item-state-waiting {
-            background: rgba(245,158,11,0.08);
-            border-left-color: rgba(245,158,11,0.55);
-        }
-
-        .workspace-item-state-error {
-            background: rgba(239,68,68,0.08);
-            border-left-color: rgba(239,68,68,0.55);
-        }
-
-        .workspace-item-has-unread .workspace-label {
-            color: #fafafa;
-        }
-
-        .workspace-item-active.workspace-item-state-busy {
-            background: rgba(99,102,241,0.14);
-        }
-
-        .workspace-item-active.workspace-item-state-completed {
-            background: rgba(34,197,94,0.12);
-        }
-
-        .workspace-item-active.workspace-item-state-waiting {
-            background: rgba(245,158,11,0.14);
-        }
-
-        .workspace-item-active.workspace-item-state-error {
-            background: rgba(239,68,68,0.14);
-        }
-
-        .workspace-close {
-            background: transparent;
-            color: #3f3f46;
-            border-radius: 4px;
-            min-width: 22px;
-            min-height: 22px;
-            padding: 0;
-            font-size: 0.85rem;
-            transition: background 120ms ease, color 120ms ease;
-        }
-
-        .workspace-close:hover {
-            background: rgba(239,68,68,0.15);
-            color: #ef4444;
-        }
-
-        .workspace-rename-entry {
-            background: rgba(99,102,241,0.08);
-            color: #e4e4e7;
-            border: 1px solid rgba(99,102,241,0.30);
-            border-radius: 4px;
-            padding: 4px 6px;
-            font-size: 0.82rem;
-            font-weight: 500;
-            min-height: 0;
-        }
-
-        .workspace-rename-entry:focus {
-            border-color: rgba(99,102,241,0.55);
-        }
-
-        /* ── Toolbar ── */
-
-        .toolbar {
-            border-bottom: 1px solid rgba(255,255,255,0.06);
-            padding: 4px 0;
-        }
-
-        .toolbar-label {
-            font-weight: 600;
-            font-size: 0.9rem;
-            color: #fafafa;
-        }
-
-        .toolbar-separator {
-            background: rgba(255,255,255,0.08);
-            margin: 4px 6px;
-            min-width: 1px;
-        }
-
-        .toolbar-action {
-            background: rgba(255,255,255,0.04);
-            color: #a1a1aa;
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 6px;
-            padding: 4px 10px;
-            font-size: 0.75rem;
-            font-weight: 500;
-            transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
-        }
-
-        .toolbar-action:hover {
-            background: rgba(99,102,241,0.10);
-            color: #c7d2fe;
-            border-color: rgba(99,102,241,0.25);
-        }
-
-        .toolbar-action:active {
-            background: rgba(99,102,241,0.18);
-        }
-
-        .toolbar-action-subtle {
-            background: transparent;
-            border-color: transparent;
-        }
-
-        .toolbar-action-subtle:hover {
-            background: rgba(255,255,255,0.06);
-            border-color: rgba(255,255,255,0.08);
-            color: #d4d4d8;
-        }
-
-        /* ── Attention panel ── */
-
-        .attention-panel {
-            background: #09090b;
-            border-left: 1px solid rgba(255,255,255,0.06);
-        }
-
-        .activity-item-button {
-            padding: 0;
-        }
-
-        .activity-item {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.05);
-            border-radius: 8px;
-            transition: background 120ms ease, border-color 120ms ease;
-        }
-
-        .activity-item-button:hover .activity-item {
-            background: rgba(99,102,241,0.08);
-            border-color: rgba(99,102,241,0.16);
-        }
-
-        .activity-dismiss {
-            background: rgba(34,197,94,0.12);
-            color: #bbf7d0;
-            border: 1px solid rgba(34,197,94,0.24);
-            border-radius: 8px;
-            padding: 4px 10px;
-            font-size: 0.72rem;
-            font-weight: 600;
-            min-height: 0;
-            transition: background 120ms ease, border-color 120ms ease;
-        }
-
-        .activity-dismiss:hover {
-            background: rgba(34,197,94,0.18);
-            border-color: rgba(34,197,94,0.34);
-        }
-
-        .activity-time {
-            font-size: 0.72rem;
-        }
-
-        /* ── Workspace windows ── */
-
-        .workspace-window {
-            background: #0b0b0f;
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 0;
-        }
-
-        .workspace-window-active {
-            border-color: rgba(99,102,241,0.35);
-        }
-
-        .workspace-window-resize-handle {
-            background: transparent;
-            transition: background 120ms ease;
-        }
-
-        .workspace-window-resize-handle-right:hover,
-        .workspace-window-resize-handle-bottom:hover {
-            background: rgba(99,102,241,0.14);
-        }
-
-        /* ── Pane cards ── */
-
-        .pane-card {
-            background: transparent;
-        }
-
-        .pane-header {
-            background: rgba(255,255,255,0.02);
-            border-bottom: 1px solid rgba(255,255,255,0.04);
-            padding: 2px 0;
-            transition: background 120ms ease;
-        }
-
-        .pane-header:hover {
-            background: rgba(255,255,255,0.04);
-        }
-
-        .pane-card-active .pane-header {
-            background: rgba(99,102,241,0.06);
-            border-bottom: 1px solid rgba(99,102,241,0.15);
-        }
-
-        .pane-card-active .pane-header:hover {
-            background: rgba(99,102,241,0.10);
-        }
-
-        .pane-title {
-            font-weight: 500;
-            color: #a1a1aa;
-            font-size: 0.72rem;
-        }
-
-        .pane-card-active .pane-title {
-            color: #e4e4e7;
-        }
-
-        .pane-close {
-            background: transparent;
-            color: #3f3f46;
-            border-radius: 3px;
-            min-width: 18px;
-            min-height: 18px;
-            padding: 0;
-            font-size: 0.75rem;
-            transition: background 120ms ease, color 120ms ease;
-        }
-
-        .pane-close:hover {
-            background: rgba(239,68,68,0.15);
-            color: #ef4444;
-        }
-
-        .pane-meta {
-            color: #52525b;
-            font-size: 0.75rem;
-        }
-
-        .surface-tabs {
-            margin: 4px 8px 6px;
-        }
-
-        .surface-tab {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 8px;
-            padding: 2px 6px;
-            transition: background 120ms ease, border-color 120ms ease;
-        }
-
-        .surface-tab-active {
-            background: rgba(99,102,241,0.14);
-            border-color: rgba(99,102,241,0.35);
-        }
-
-        .surface-tab-has-attention.surface-tab-state-busy {
-            background: rgba(99,102,241,0.08);
-            border-color: rgba(99,102,241,0.22);
-        }
-
-        .surface-tab-has-attention.surface-tab-state-completed {
-            background: rgba(34,197,94,0.08);
-            border-color: rgba(34,197,94,0.22);
-        }
-
-        .surface-tab-has-attention.surface-tab-state-waiting {
-            background: rgba(245,158,11,0.10);
-            border-color: rgba(245,158,11,0.28);
-        }
-
-        .surface-tab-has-attention.surface-tab-state-error {
-            background: rgba(239,68,68,0.10);
-            border-color: rgba(239,68,68,0.28);
-        }
-
-        .surface-tab-label,
-        .surface-tab-close,
-        .surface-tab-add {
-            min-height: 0;
-            padding: 0;
-        }
-
-        .surface-tab-label {
-            color: #a1a1aa;
-            font-size: 0.74rem;
-        }
-
-        .surface-tab-active .surface-tab-label {
-            color: #fafafa;
-        }
-
-        .surface-tab-close,
-        .surface-tab-add {
-            color: #71717a;
-            border-radius: 4px;
-            min-width: 18px;
-            min-height: 18px;
-        }
-
-        .surface-tab-close:hover,
-        .surface-tab-add:hover {
-            background: rgba(255,255,255,0.06);
-            color: #d4d4d8;
-        }
-
-        /* ── Status dots ── */
-
-        .status-dot {
-            font-size: 0.5rem;
-        }
-
-        .status-dot-normal { color: #3f3f46; }
-        .status-dot-busy { color: #6366f1; }
-        .status-dot-completed { color: #22c55e; }
-        .status-dot-waiting { color: #f59e0b; }
-        .status-dot-error { color: #ef4444; }
-
-        /* ── Empty state ── */
-
-        .empty-state {
-            color: #3f3f46;
-            font-size: 0.85rem;
-        }
-
-        /* ── Terminal ── */
-
-        .terminal-output,
-        .terminal-entry {
-            border-radius: 0;
-            background: #09090b;
-            color: #e4e4e7;
-            font-family: Monospace;
-        }
-
-        .terminal-output {
-            padding: 4px;
-        }
-
-        .terminal-entry {
-            padding: 6px 8px;
-            border-top: 1px solid rgba(255,255,255,0.06);
-        }
-
-        .terminal-entry:focus {
-            border-top: 1px solid rgba(99,102,241,0.4);
-        }
-
-        /* ── Popover / context menus ── */
-
-        popover > contents {
-            background: #1a1a1e;
-            border: 1px solid rgba(255,255,255,0.10);
-            border-radius: 8px;
-            padding: 4px;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-        }
-
-        .context-item {
-            color: #d4d4d8;
-            font-size: 0.8rem;
-            padding: 6px 12px;
-            border-radius: 4px;
-            min-height: 0;
-            transition: background 100ms ease;
-        }
-
-        .context-item:hover {
-            background: rgba(99,102,241,0.12);
-            color: #e4e4e7;
-        }
-
-        .context-separator {
-            background: rgba(255,255,255,0.06);
-            margin: 4px 8px;
-            min-height: 1px;
-        }
-
-        popover .destructive-action {
-            color: #ef4444;
-            font-size: 0.8rem;
-            padding: 6px 12px;
-            border-radius: 4px;
-            min-height: 0;
-            transition: background 100ms ease;
-        }
-
-        popover .destructive-action:hover {
-            background: rgba(239,68,68,0.12);
-        }
-        ",
-    );
-
-    if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            STYLE_PROVIDER_PRIORITY_APPLICATION,
+// ── Settings page builders ──
+
+fn build_settings_theme_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+
+    let content = GtkBox::new(Orientation::Vertical, 8);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    content.set_margin_top(14);
+    content.set_margin_bottom(18);
+
+    let current_theme = ui
+        .settings
+        .borrow()
+        .theme
+        .clone()
+        .unwrap_or_else(|| "dark".into());
+
+    // Collect all FlowBoxes so the click handler can clear active styling across families.
+    let all_flows: Rc<RefCell<Vec<gtk::FlowBox>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let mut prev_family = "";
+    let mut current_flow: Option<gtk::FlowBox> = None;
+
+    for &name in themes::BUILTIN_NAMES {
+        let family = themes::theme_family(name);
+
+        if family != prev_family {
+            // Flush previous FlowBox.
+            if let Some(flow) = current_flow.take() {
+                content.append(&flow);
+            }
+
+            let heading = Label::new(Some(family));
+            heading.set_xalign(0.0);
+            heading.add_css_class("settings-theme-family");
+            content.append(&heading);
+
+            let flow = gtk::FlowBox::new();
+            flow.set_max_children_per_line(3);
+            flow.set_min_children_per_line(2);
+            flow.set_homogeneous(true);
+            flow.set_row_spacing(8);
+            flow.set_column_spacing(8);
+            flow.set_selection_mode(gtk::SelectionMode::None);
+            all_flows.borrow_mut().push(flow.clone());
+            current_flow = Some(flow);
+
+            prev_family = family;
+        }
+
+        let palette = if name == "dark" {
+            theme::default_dark()
+        } else {
+            themes::builtin_theme(name).unwrap_or_else(theme::default_dark)
+        };
+        let is_active = name == current_theme;
+        let card = build_theme_card(name, &palette, is_active);
+
+        let card_button = Button::new();
+        card_button.set_child(Some(&card));
+        card_button.add_css_class("flat");
+
+        let click_ui = Rc::clone(ui);
+        let click_name = name.to_string();
+        let click_flows = Rc::clone(&all_flows);
+        card_button.connect_clicked(move |btn| {
+            let theme_value = if click_name == "dark" {
+                None
+            } else {
+                Some(click_name.clone())
+            };
+            let mut next_settings = click_ui.settings.borrow().clone();
+            next_settings.theme = theme_value;
+            if let Err(error) = settings_store::save_config(&click_ui.config_path, &next_settings) {
+                click_ui.toast(&format!("Failed to save theme: {error}"));
+                return;
+            }
+            *click_ui.settings.borrow_mut() = next_settings;
+
+            // Clear active styling across all family FlowBoxes.
+            for flow in click_flows.borrow().iter() {
+                let mut idx = 0;
+                while let Some(child) = flow.child_at_index(idx) {
+                    if let Some(b) = child.child().and_then(|w| w.downcast::<Button>().ok()) {
+                        if let Some(inner) = b.child().and_then(|w| w.downcast::<GtkBox>().ok()) {
+                            inner.remove_css_class("theme-card-active");
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+
+            // Mark this card active.
+            if let Some(inner) = btn.child().and_then(|w| w.downcast::<GtkBox>().ok()) {
+                inner.add_css_class("theme-card-active");
+            }
+
+            // Live-apply the new theme.
+            let palette = if click_name == "dark" {
+                theme::default_dark()
+            } else {
+                themes::builtin_theme(&click_name).unwrap_or_else(theme::default_dark)
+            };
+            theme::apply_theme(palette);
+
+            // Invalidate agent icon drawing areas so they pick up new colors.
+            for card in click_ui.pane_cards.borrow().values() {
+                card.agent_icon.widget().queue_draw();
+            }
+
+            click_ui.toast("Theme applied.");
+        });
+
+        if let Some(flow) = &current_flow {
+            flow.insert(&card_button, -1);
+        }
+    }
+
+    // Flush the last FlowBox.
+    if let Some(flow) = current_flow.take() {
+        content.append(&flow);
+    }
+
+    scroll.set_child(Some(&content));
+    scroll
+}
+
+fn build_settings_general_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+
+    let content = GtkBox::new(Orientation::Vertical, 14);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    content.set_margin_top(14);
+    content.set_margin_bottom(18);
+
+    // Animations toggle
+    let anim_row = GtkBox::new(Orientation::Horizontal, 12);
+    anim_row.add_css_class("settings-row");
+    let anim_details = GtkBox::new(Orientation::Vertical, 4);
+    anim_details.set_hexpand(true);
+
+    let anim_title = Label::new(Some("Animations"));
+    anim_title.set_xalign(0.0);
+    anim_title.add_css_class("pane-title");
+    anim_details.append(&anim_title);
+
+    let anim_detail = Label::new(Some(
+        "Animate terminal lifecycle changes, including pane/window create-delete transitions and surface tab open-close motion.",
+    ));
+    anim_detail.set_xalign(0.0);
+    anim_detail.set_wrap(true);
+    anim_detail.add_css_class("dim-label");
+    anim_details.append(&anim_detail);
+    anim_row.append(&anim_details);
+
+    let anim_switch = gtk::Switch::new();
+    anim_switch.set_active(ui.settings.borrow().animations_enabled);
+    anim_switch.set_valign(Align::Center);
+    let anim_ui = Rc::clone(ui);
+    anim_switch.connect_state_set(move |_, active| {
+        let mut next_settings = anim_ui.settings.borrow().clone();
+        next_settings.animations_enabled = active;
+        if let Err(error) = settings_store::save_config(&anim_ui.config_path, &next_settings) {
+            anim_ui.toast(&format!("Failed to save settings: {error}"));
+        }
+        *anim_ui.settings.borrow_mut() = next_settings;
+        glib::Propagation::Proceed
+    });
+    anim_row.append(&anim_switch);
+    content.append(&anim_row);
+
+    // Shell program
+    let shell_row = GtkBox::new(Orientation::Horizontal, 12);
+    shell_row.add_css_class("settings-row");
+    let shell_details = GtkBox::new(Orientation::Vertical, 4);
+    shell_details.set_hexpand(true);
+
+    let shell_title = Label::new(Some("Shell program"));
+    shell_title.set_xalign(0.0);
+    shell_title.add_css_class("pane-title");
+    shell_details.append(&shell_title);
+
+    let system_shell = default_shell_program();
+    let shell_detail = Label::new(Some(&format!(
+        "Optional shell override for new panes. Leave empty to use the system login shell (currently {}). Relaunch Taskers after changing this.",
+        system_shell.display()
+    )));
+    shell_detail.set_xalign(0.0);
+    shell_detail.set_wrap(true);
+    shell_detail.add_css_class("dim-label");
+    shell_details.append(&shell_detail);
+    shell_row.append(&shell_details);
+
+    let shell_entry = Entry::new();
+    shell_entry.set_hexpand(true);
+    shell_entry.set_width_chars(24);
+    shell_entry.set_placeholder_text(Some("System default login shell"));
+    if let Some(program) = ui.settings.borrow().shell.program.as_deref() {
+        shell_entry.set_text(program);
+    }
+    let activate_ui = Rc::clone(ui);
+    shell_entry.connect_activate(move |entry| {
+        let text = entry.text().to_string();
+        if let Err(error) = activate_ui.set_shell_program(Some(text.clone())) {
+            activate_ui.toast(&error);
+            return;
+        }
+        let normalized = text.trim().to_string();
+        entry.set_text(&normalized);
+        activate_ui.toast("Shell setting saved. Relaunch Taskers to apply.");
+    });
+    let focus_ui = Rc::clone(ui);
+    shell_entry.connect_notify_local(Some("has-focus"), move |entry, _| {
+        if entry.has_focus() {
+            return;
+        }
+
+        let text = entry.text().to_string();
+        if let Err(error) = focus_ui.set_shell_program(Some(text.clone())) {
+            focus_ui.toast(&error);
+            return;
+        }
+        entry.set_text(text.trim());
+    });
+    shell_row.append(&shell_entry);
+
+    let reset_shell = Button::with_label("Use system");
+    let reset_ui = Rc::clone(ui);
+    let reset_entry = shell_entry.clone();
+    reset_shell.connect_clicked(move |_| {
+        if let Err(error) = reset_ui.set_shell_program(None) {
+            reset_ui.toast(&error);
+            return;
+        }
+        reset_entry.set_text("");
+        reset_ui.toast("Shell setting cleared. Relaunch Taskers to apply.");
+    });
+    shell_row.append(&reset_shell);
+    content.append(&shell_row);
+
+    scroll.set_child(Some(&content));
+    scroll
+}
+
+fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+
+    let outer = GtkBox::new(Orientation::Vertical, 0);
+
+    let intro = Label::new(Some(
+        "Balanced defaults keep the common window-management actions bound. Advanced resize actions stay available, but start unbound by default.",
+    ));
+    intro.set_xalign(0.0);
+    intro.set_wrap(true);
+    intro.add_css_class("dim-label");
+    intro.set_margin_start(18);
+    intro.set_margin_end(18);
+    intro.set_margin_top(10);
+    intro.set_margin_bottom(8);
+    outer.append(&intro);
+
+    let preset_row = GtkBox::new(Orientation::Horizontal, 8);
+    preset_row.set_margin_start(18);
+    preset_row.set_margin_end(18);
+    preset_row.set_margin_bottom(8);
+    let mut preset_buttons = Vec::new();
+    for preset in ShortcutPreset::ALL {
+        let button = Button::with_label(preset.label());
+        button.set_tooltip_text(Some(preset.detail()));
+        preset_row.append(&button);
+        preset_buttons.push((button, preset));
+    }
+    outer.append(&preset_row);
+
+    // Search bar (pinned above scroll).
+    let search_entry = Entry::new();
+    search_entry.set_placeholder_text(Some("Filter shortcuts\u{2026}"));
+    search_entry.add_css_class("settings-search");
+    search_entry.set_margin_start(18);
+    search_entry.set_margin_end(18);
+    search_entry.set_margin_top(10);
+    search_entry.set_margin_bottom(6);
+    outer.append(&search_entry);
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    content.set_margin_top(4);
+    content.set_margin_bottom(18);
+
+    // Build rows, collecting widgets for search filtering.
+    struct ShortcutRow {
+        action: ShortcutAction,
+        heading: Option<Widget>,
+        row: GtkBox,
+        shortcut_label: Label,
+        search_text: String,
+        category: &'static str,
+    }
+    let rows: Rc<RefCell<Vec<ShortcutRow>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let mut prev_category = "";
+
+    for action in ShortcutAction::ALL {
+        let category = action.category();
+
+        let heading_widget = if category != prev_category {
+            let heading = Label::new(Some(category));
+            heading.set_xalign(0.0);
+            heading.add_css_class("settings-keybind-category");
+            content.append(&heading);
+            prev_category = category;
+            Some(heading.upcast::<Widget>())
+        } else {
+            None
+        };
+
+        let row = GtkBox::new(Orientation::Horizontal, 8);
+        row.add_css_class("settings-row");
+
+        let details = GtkBox::new(Orientation::Vertical, 2);
+        details.set_hexpand(true);
+
+        let title = Label::new(Some(action.label()));
+        title.set_xalign(0.0);
+        title.add_css_class("pane-title");
+        details.append(&title);
+
+        let detail_text = if action.default_accelerators().is_empty() {
+            format!("{} Unbound by default.", action.detail())
+        } else {
+            action.detail().to_string()
+        };
+        let detail = Label::new(Some(&detail_text));
+        detail.set_xalign(0.0);
+        detail.set_wrap(true);
+        detail.add_css_class("dim-label");
+        details.append(&detail);
+
+        row.append(&details);
+
+        // Clickable keybind label — opens the capture dialog directly.
+        let shortcut_label = Label::new(Some(&ui.shortcut_label(action)));
+        shortcut_label.set_xalign(1.0);
+        shortcut_label.add_css_class("monospace");
+        shortcut_label.add_css_class("settings-keybind-value");
+
+        let keybind_button = Button::new();
+        keybind_button.set_child(Some(&shortcut_label));
+        keybind_button.add_css_class("flat");
+        keybind_button.add_css_class("settings-keybind-btn");
+        keybind_button.set_valign(Align::Center);
+
+        let change_ui = Rc::clone(ui);
+        let change_label = shortcut_label.clone();
+        keybind_button.connect_clicked(move |_| {
+            change_ui.present_shortcut_capture_dialog(action, &change_label);
+        });
+        row.append(&keybind_button);
+
+        // Tiny reset button.
+        let reset_button = Button::with_label("\u{21ba}");
+        reset_button.add_css_class("flat");
+        reset_button.add_css_class("settings-reset-btn");
+        reset_button.set_valign(Align::Center);
+        reset_button.set_tooltip_text(Some("Reset to default"));
+        let reset_ui = Rc::clone(ui);
+        let reset_label = shortcut_label.clone();
+        reset_button.connect_clicked(move |_| match reset_ui.reset_shortcuts(action) {
+            Ok(next_label) => reset_label.set_text(&next_label),
+            Err(error) => reset_ui.toast(&error),
+        });
+        row.append(&reset_button);
+
+        content.append(&row);
+
+        let search_text =
+            format!("{} {} {}", action.label(), detail_text, action.category()).to_lowercase();
+
+        rows.borrow_mut().push(ShortcutRow {
+            action,
+            heading: heading_widget,
+            row,
+            shortcut_label: shortcut_label.clone(),
+            search_text,
+            category,
+        });
+    }
+
+    for (button, preset) in preset_buttons {
+        let preset_ui = Rc::clone(ui);
+        let preset_rows = Rc::clone(&rows);
+        button.connect_clicked(move |_| match preset_ui.apply_shortcut_preset(preset) {
+            Ok(()) => {
+                for row in preset_rows.borrow().iter() {
+                    row.shortcut_label
+                        .set_text(&preset_ui.shortcut_label(row.action));
+                }
+            }
+            Err(error) => preset_ui.toast(&error),
+        });
+    }
+
+    // Search filtering.
+    let filter_rows = Rc::clone(&rows);
+    search_entry.connect_changed(move |entry| {
+        let query = entry.text().to_string().to_lowercase();
+        let rows = filter_rows.borrow();
+
+        // First pass: determine which rows match.
+        let visible: Vec<bool> = rows
+            .iter()
+            .map(|r| query.is_empty() || r.search_text.contains(&query))
+            .collect();
+
+        // Second pass: show/hide rows and category headings.
+        // A heading is visible if any row in its category is visible.
+        let mut category_visible: HashMap<&str, bool> = HashMap::new();
+        for (i, r) in rows.iter().enumerate() {
+            let entry = category_visible.entry(r.category).or_insert(false);
+            if visible[i] {
+                *entry = true;
+            }
+        }
+
+        for (i, r) in rows.iter().enumerate() {
+            r.row.set_visible(visible[i]);
+            if let Some(heading) = &r.heading {
+                heading.set_visible(*category_visible.get(r.category).unwrap_or(&false));
+            }
+        }
+    });
+
+    scroll.set_child(Some(&content));
+    outer.append(&scroll);
+
+    // Wrap in an outer ScrolledWindow that doesn't scroll (the inner one does),
+    // so the Stack page has the right type. Actually, return the outer box inside a scroll.
+    let page_scroll = ScrolledWindow::new();
+    page_scroll.set_policy(PolicyType::Never, PolicyType::Never);
+    page_scroll.set_vexpand(true);
+    page_scroll.set_child(Some(&outer));
+    // Let the inner scroll handle scrolling; the outer just wraps for the Stack.
+    scroll.set_vexpand(true);
+    page_scroll
+}
+
+fn build_theme_swatch(color: theme::Color, size: i32) -> DrawingArea {
+    let area = DrawingArea::new();
+    area.set_content_width(size);
+    area.set_content_height(size);
+    area.set_size_request(size, size);
+    area.set_draw_func(move |_, cr, w, h| {
+        let r = f64::from(color.r) / 255.0;
+        let g = f64::from(color.g) / 255.0;
+        let b = f64::from(color.b) / 255.0;
+        let radius = 3.0;
+        let (w, h) = (f64::from(w), f64::from(h));
+        cr.new_sub_path();
+        cr.arc(
+            w - radius,
+            radius,
+            radius,
+            -std::f64::consts::FRAC_PI_2,
+            0.0,
+        );
+        cr.arc(
+            w - radius,
+            h - radius,
+            radius,
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+        );
+        cr.arc(
+            radius,
+            h - radius,
+            radius,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+        );
+        cr.arc(
+            radius,
+            radius,
+            radius,
+            std::f64::consts::PI,
+            3.0 * std::f64::consts::FRAC_PI_2,
+        );
+        cr.close_path();
+        cr.set_source_rgb(r, g, b);
+        let _ = cr.fill();
+    });
+    area
+}
+
+fn build_theme_card(name: &str, palette: &theme::ThemePalette, is_active: bool) -> GtkBox {
+    let card = GtkBox::new(Orientation::Vertical, 4);
+    card.add_css_class("theme-card");
+    if is_active {
+        card.add_css_class("theme-card-active");
+    }
+
+    let swatches = GtkBox::new(Orientation::Horizontal, 4);
+    for color in [
+        palette.base,
+        palette.accent,
+        palette.busy,
+        palette.completed,
+        palette.error,
+    ] {
+        swatches.append(&build_theme_swatch(color, 14));
+    }
+    card.append(&swatches);
+
+    let label = Label::new(Some(&humanize_theme_name(name)));
+    label.set_xalign(0.0);
+    label.add_css_class("theme-card-label");
+    card.append(&label);
+
+    card
+}
+
+fn humanize_theme_name(name: &str) -> String {
+    name.split('-')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut s = first.to_uppercase().to_string();
+                    s.push_str(chars.as_str());
+                    s
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preview_test_workspace() -> Workspace {
+        let left_pane = PaneRecord::new(PaneKind::Terminal);
+        let top_right_pane = PaneRecord::new(PaneKind::Terminal);
+        let bottom_right_pane = PaneRecord::new(PaneKind::Terminal);
+
+        let left_window = taskers_domain::WorkspaceWindowRecord {
+            id: WorkspaceWindowId::new(),
+            height: 620,
+            layout: LayoutNode::leaf(left_pane.id),
+            active_pane: left_pane.id,
+        };
+        let top_right_window = taskers_domain::WorkspaceWindowRecord {
+            id: WorkspaceWindowId::new(),
+            height: 560,
+            layout: LayoutNode::leaf(top_right_pane.id),
+            active_pane: top_right_pane.id,
+        };
+        let bottom_right_window = taskers_domain::WorkspaceWindowRecord {
+            id: WorkspaceWindowId::new(),
+            height: 540,
+            layout: LayoutNode::leaf(bottom_right_pane.id),
+            active_pane: bottom_right_pane.id,
+        };
+
+        let left_column = taskers_domain::WorkspaceColumnRecord {
+            id: WorkspaceColumnId::new(),
+            width: 840,
+            window_order: vec![left_window.id],
+            active_window: left_window.id,
+        };
+        let right_column = taskers_domain::WorkspaceColumnRecord {
+            id: WorkspaceColumnId::new(),
+            width: 960,
+            window_order: vec![top_right_window.id, bottom_right_window.id],
+            active_window: top_right_window.id,
+        };
+
+        Workspace {
+            id: taskers_domain::WorkspaceId::new(),
+            label: "Preview test".into(),
+            columns: [
+                (left_column.id, left_column),
+                (right_column.id, right_column),
+            ]
+            .into_iter()
+            .collect(),
+            windows: [
+                (left_window.id, left_window.clone()),
+                (top_right_window.id, top_right_window.clone()),
+                (bottom_right_window.id, bottom_right_window.clone()),
+            ]
+            .into_iter()
+            .collect(),
+            active_window: left_window.id,
+            panes: [
+                (left_pane.id, left_pane),
+                (top_right_pane.id, top_right_pane),
+                (bottom_right_pane.id, bottom_right_pane),
+            ]
+            .into_iter()
+            .collect(),
+            active_pane: left_window.active_pane,
+            viewport: WorkspaceViewport::default(),
+            notifications: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn terminal_body_refreshes_when_surface_changes_or_child_is_missing() {
+        let first = SurfaceId::new();
+        let second = SurfaceId::new();
+
+        assert!(!terminal_body_needs_refresh(Some(first), Some(first), true));
+        assert!(terminal_body_needs_refresh(Some(first), Some(second), true));
+        assert!(terminal_body_needs_refresh(Some(first), Some(first), false));
+        assert!(terminal_body_needs_refresh(None, Some(first), true));
+        assert!(!terminal_body_needs_refresh(None, None, true));
+    }
+
+    #[test]
+    fn surface_tab_presentation_preserves_single_surface_add_affordance() {
+        assert_eq!(
+            surface_tab_presentation(1, 720),
+            SurfaceTabPresentation::AddOnly
+        );
+    }
+
+    #[test]
+    fn surface_tab_presentation_only_inlines_when_tabs_fit() {
+        assert_eq!(
+            surface_tab_presentation(3, 640),
+            SurfaceTabPresentation::Inline
+        );
+        assert_eq!(
+            surface_tab_presentation(3, 320),
+            SurfaceTabPresentation::Strip
+        );
+        assert_eq!(
+            surface_tab_presentation(7, 1600),
+            SurfaceTabPresentation::Strip
+        );
+    }
+
+    #[test]
+    fn surface_tab_presentation_uses_default_width_before_header_is_allocated() {
+        assert_eq!(
+            surface_tab_presentation(3, 0),
+            SurfaceTabPresentation::Inline
+        );
+    }
+
+    #[test]
+    fn editable_surface_title_prefers_explicit_metadata_title() {
+        let mut surface = SurfaceRecord::new(PaneKind::Terminal);
+        surface.metadata.title = Some("  inbox  ".into());
+
+        assert_eq!(editable_surface_title(&surface), "inbox");
+    }
+
+    #[test]
+    fn editable_surface_title_keeps_default_terminal_label_unset() {
+        let surface = SurfaceRecord::new(PaneKind::Terminal);
+
+        assert_eq!(editable_surface_title(&surface), "");
+    }
+
+    #[test]
+    fn workspace_window_placements_reflow_following_columns_for_preview_width() {
+        let workspace = preview_test_workspace();
+        let left_column_id = workspace
+            .columns
+            .keys()
+            .copied()
+            .next()
+            .expect("left column");
+        let preview = TopLevelResizePreview {
+            workspace_id: workspace.id,
+            target: TopLevelResizePreviewTarget::ColumnWidth {
+                workspace_column_id: left_column_id,
+                width: 1080,
+            },
+        };
+
+        let placements = workspace_window_placements(&workspace, Some(preview));
+
+        assert_eq!(placements[0].frame.width, 1080);
+        assert_eq!(placements[1].frame.x, 1080 + DEFAULT_WORKSPACE_WINDOW_GAP);
+    }
+
+    #[test]
+    fn workspace_window_placements_reflow_stacked_windows_for_preview_height() {
+        let workspace = preview_test_workspace();
+        let right_column = workspace.columns.values().nth(1).expect("right column");
+        let top_window_id = right_column.window_order[0];
+        let preview = TopLevelResizePreview {
+            workspace_id: workspace.id,
+            target: TopLevelResizePreviewTarget::WindowHeight {
+                workspace_window_id: top_window_id,
+                height: MIN_WORKSPACE_WINDOW_HEIGHT - 40,
+            },
+        };
+
+        let placements = workspace_window_placements(&workspace, Some(preview));
+
+        assert_eq!(placements[1].frame.height, MIN_WORKSPACE_WINDOW_HEIGHT);
+        assert_eq!(
+            placements[2].frame.y,
+            MIN_WORKSPACE_WINDOW_HEIGHT + DEFAULT_WORKSPACE_WINDOW_GAP
+        );
+    }
+
+    #[test]
+    fn sidebar_split_position_stays_above_minimum_width() {
+        assert_eq!(
+            clamp_sidebar_split_position(SIDEBAR_MIN_WIDTH - 80),
+            SIDEBAR_MIN_WIDTH
+        );
+        assert_eq!(
+            clamp_sidebar_split_position(SIDEBAR_MIN_WIDTH + 32),
+            SIDEBAR_MIN_WIDTH + 32
         );
     }
 }
