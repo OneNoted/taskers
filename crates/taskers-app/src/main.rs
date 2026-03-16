@@ -39,7 +39,7 @@ use taskers_domain::{
     DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, Direction,
     KEYBOARD_RESIZE_STEP, LayoutNode, MIN_WORKSPACE_WINDOW_HEIGHT, PaneKind, PaneMetadata,
     PaneMetadataPatch, PaneRecord, SignalEvent, SignalKind, SurfaceId, SurfaceRecord, WindowFrame,
-    Workspace, WorkspaceAgentState, WorkspaceViewport, WorkspaceWindowId,
+    Workspace, WorkspaceAgentState, WorkspaceColumnId, WorkspaceViewport, WorkspaceWindowId,
 };
 use taskers_ghostty::{
     BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, SurfaceDescriptor, TerminalBackend,
@@ -289,6 +289,13 @@ struct WorkspaceWindowRenderKey {
 }
 
 #[derive(Clone, Copy)]
+struct WorkspaceWindowPlacement {
+    window_id: WorkspaceWindowId,
+    column_id: WorkspaceColumnId,
+    frame: WindowFrame,
+}
+
+#[derive(Clone, Copy)]
 struct CanvasMetrics {
     offset_x: i32,
     offset_y: i32,
@@ -303,7 +310,6 @@ const SURFACE_TAB_MAX_WIDTH: i32 = 220;
 
 #[derive(Clone, Copy)]
 struct WorkspaceRenderContext {
-    viewport_height: i32,
     overview_mode: bool,
     overview_scale: f64,
 }
@@ -1163,9 +1169,6 @@ impl UiHandle {
     }
 
     fn reveal_active_window(&self, shell: &ShellWidgets, workspace: &Workspace) {
-        let Some(active_window) = workspace.active_window_record() else {
-            return;
-        };
         let render_context = workspace_render_context(
             self,
             Some(shell),
@@ -1175,7 +1178,13 @@ impl UiHandle {
             workspace_viewport_height(self, Some(shell)),
         );
         let metrics = workspace_canvas_metrics(workspace, render_context);
-        let active_frame = display_window_frame(active_window.frame, render_context);
+        let Some(active_frame) = workspace_display_window_placements(workspace, render_context)
+            .into_iter()
+            .find(|placement| placement.window_id == workspace.active_window)
+            .map(|placement| placement.frame)
+        else {
+            return;
+        };
 
         let h_adjustment = shell.layout_scroll.hadjustment();
         let v_adjustment = shell.layout_scroll.vadjustment();
@@ -1347,29 +1356,27 @@ impl UiHandle {
                 (
                     sorted_id_strings(workspace.panes.keys().copied()),
                     workspace
-                        .windows
+                        .columns
                         .values()
+                        .flat_map(|column| column.window_order.iter())
+                        .filter_map(|window_id| workspace.windows.get(window_id))
                         .flat_map(|window| window.layout.leaves())
                         .map(|pane_id| pane_id.to_string())
                         .collect(),
                     Some(workspace.label.clone()),
                     Some(workspace.active_window.to_string()),
                     sorted_id_strings(workspace.windows.keys().copied()),
-                    workspace
-                        .windows
-                        .values()
-                        .map(|window| {
-                            let display_frame = display_window_frame(window.frame, render_context);
+                    workspace_display_window_placements(workspace, render_context)
+                        .into_iter()
+                        .filter_map(|placement| {
+                            workspace.windows.get(&placement.window_id).map(|window| {
                             json!({
                                 "id": window.id.to_string(),
-                                "x": window.frame.x,
-                                "y": window.frame.y,
-                                "width": window.frame.width,
-                                "height": window.frame.height,
-                                "display_x": display_frame.x,
-                                "display_y": display_frame.y,
-                                "display_width": display_frame.width,
-                                "display_height": display_frame.height,
+                                "column_id": placement.column_id.to_string(),
+                                "x": placement.frame.x,
+                                "y": placement.frame.y,
+                                "width": placement.frame.width,
+                                "height": placement.frame.height,
                                 "active_pane": window.active_pane.to_string(),
                                 "leaf_pane_ids": window
                                     .layout
@@ -1377,6 +1384,7 @@ impl UiHandle {
                                     .into_iter()
                                     .map(|pane_id| pane_id.to_string())
                                     .collect::<Vec<_>>(),
+                            })
                             })
                         })
                         .collect(),
@@ -3245,13 +3253,16 @@ fn layout_render_key(
     // don't trigger a full canvas rebuild. Active window styling is synced
     // separately in update_layout().
     LayoutRenderKey::WorkspaceWindows {
-        windows: workspace
-            .windows
-            .values()
-            .map(|window| WorkspaceWindowRenderKey {
-                window_id: window.id,
-                frame: display_window_frame(window.frame, render_context),
-                layout: window.layout.clone(),
+        windows: workspace_display_window_placements(workspace, render_context)
+            .into_iter()
+            .filter_map(|placement| {
+                workspace.windows.get(&placement.window_id).map(|window| {
+                    WorkspaceWindowRenderKey {
+                        window_id: placement.window_id,
+                        frame: placement.frame,
+                        layout: window.layout.clone(),
+                    }
+                })
             })
             .collect(),
     }
@@ -3472,32 +3483,35 @@ fn build_workspace_scene_snapshot(
         workspace_viewport_height(ui, Some(shell)),
     );
     let metrics = workspace_canvas_metrics(workspace, render_context);
-    let windows = workspace
-        .windows
-        .values()
-        .map(|window| {
-            let display_frame = display_window_frame(window.frame, render_context);
+    let placements = workspace_display_window_placements(workspace, render_context);
+    let windows = placements
+        .iter()
+        .map(|placement| {
             WorkspaceWindowSnapshot {
-                id: window.id,
+                id: placement.window_id,
                 rect: WindowFrame {
-                    x: display_frame.x + metrics.offset_x,
-                    y: display_frame.y + metrics.offset_y,
-                    width: display_frame.width,
-                    height: display_frame.height,
+                    x: placement.frame.x + metrics.offset_x,
+                    y: placement.frame.y + metrics.offset_y,
+                    width: placement.frame.width,
+                    height: placement.frame.height,
                 },
             }
         })
         .collect::<Vec<_>>();
-    let panes = workspace
-        .windows
-        .values()
-        .flat_map(|window| {
-            let display_frame = display_window_frame(window.frame, render_context);
-            derive_pane_frames(display_frame, &window.layout)
+    let panes = placements
+        .iter()
+        .filter_map(|placement| {
+            workspace
+                .windows
+                .get(&placement.window_id)
+                .map(|window| (placement, window))
+        })
+        .flat_map(|(placement, window)| {
+            derive_pane_frames(placement.frame, &window.layout)
                 .into_iter()
                 .map(move |(pane_id, pane_rect)| PaneSceneSnapshot {
                     id: pane_id,
-                    window_id: window.id,
+                    window_id: placement.window_id,
                     rect: WindowFrame {
                         x: pane_rect.x + metrics.offset_x,
                         y: pane_rect.y + metrics.offset_y,
@@ -3825,11 +3839,19 @@ fn build_workspace_canvas_widget(
     let metrics = workspace_canvas_metrics(workspace, render_context);
     canvas.set_size_request(metrics.width, metrics.height);
 
-    for window in workspace.windows.values() {
-        let display_frame = display_window_frame(window.frame, render_context);
-        let window_widget = build_workspace_window_widget(ui, workspace, window, display_frame);
-        let final_x = f64::from(display_frame.x + metrics.offset_x);
-        let final_y = f64::from(display_frame.y + metrics.offset_y);
+    for placement in workspace_display_window_placements(workspace, render_context) {
+        let Some(window) = workspace.windows.get(&placement.window_id) else {
+            continue;
+        };
+        let window_widget = build_workspace_window_widget(
+            ui,
+            workspace,
+            window,
+            placement.column_id,
+            placement.frame,
+        );
+        let final_x = f64::from(placement.frame.x + metrics.offset_x);
+        let final_y = f64::from(placement.frame.y + metrics.offset_y);
         canvas.put(&window_widget, final_x, final_y);
     }
 
@@ -3840,6 +3862,7 @@ fn build_workspace_window_widget(
     ui: &Rc<UiHandle>,
     workspace: &Workspace,
     window: &taskers_domain::WorkspaceWindowRecord,
+    workspace_column_id: WorkspaceColumnId,
     display_frame: WindowFrame,
 ) -> gtk::Widget {
     let overlay = Overlay::new();
@@ -3969,6 +3992,7 @@ fn build_workspace_window_widget(
             ui,
             &overlay,
             workspace.id,
+            workspace_column_id,
             window.id,
             display_frame,
         );
@@ -4048,12 +4072,14 @@ fn attach_workspace_window_resize_handles(
     ui: &Rc<UiHandle>,
     overlay: &Overlay,
     workspace_id: taskers_domain::WorkspaceId,
+    workspace_column_id: WorkspaceColumnId,
     workspace_window_id: WorkspaceWindowId,
     display_frame: WindowFrame,
 ) {
     overlay.add_overlay(&build_workspace_window_resize_handle(
         ui,
         workspace_id,
+        workspace_column_id,
         workspace_window_id,
         display_frame,
         ResizeHandleEdge::Right,
@@ -4061,6 +4087,7 @@ fn attach_workspace_window_resize_handles(
     overlay.add_overlay(&build_workspace_window_resize_handle(
         ui,
         workspace_id,
+        workspace_column_id,
         workspace_window_id,
         display_frame,
         ResizeHandleEdge::Bottom,
@@ -4070,6 +4097,7 @@ fn attach_workspace_window_resize_handles(
 fn build_workspace_window_resize_handle(
     ui: &Rc<UiHandle>,
     workspace_id: taskers_domain::WorkspaceId,
+    workspace_column_id: WorkspaceColumnId,
     workspace_window_id: WorkspaceWindowId,
     display_frame: WindowFrame,
     edge: ResizeHandleEdge,
@@ -4093,77 +4121,100 @@ fn build_workspace_window_resize_handle(
         }
     }
 
-    let start_frame = Rc::new(Cell::new(display_frame));
-    let current_frame = Rc::new(Cell::new(display_frame));
-    let handle_widget = handle.clone();
+    let start_size = Rc::new(Cell::new(match edge {
+        ResizeHandleEdge::Right => display_frame.width,
+        ResizeHandleEdge::Bottom => display_frame.height,
+    }));
+    let current_size = Rc::new(Cell::new(match edge {
+        ResizeHandleEdge::Right => display_frame.width,
+        ResizeHandleEdge::Bottom => display_frame.height,
+    }));
+    let handle_widget_for_update = handle.clone();
+    let handle_widget_for_end = handle.clone();
     let drag_ui = Rc::clone(ui);
     let drag_begin_ui = Rc::clone(ui);
     let drag = gtk::GestureDrag::new();
-    let start_frame_for_begin = Rc::clone(&start_frame);
-    let current_frame_for_begin = Rc::clone(&current_frame);
+    let start_size_for_begin = Rc::clone(&start_size);
+    let current_size_for_begin = Rc::clone(&current_size);
     drag.connect_drag_begin(move |_, _, _| {
-        let raw_frame = drag_begin_ui
+        let start = drag_begin_ui
             .app_state
             .snapshot_model()
             .workspaces
             .get(&workspace_id)
-            .and_then(|workspace| workspace.windows.get(&workspace_window_id))
-            .map(|window| window.frame)
-            .unwrap_or(display_frame);
-        let latest_frame = display_window_frame(
-            raw_frame,
-            workspace_render_context(
-                drag_begin_ui.as_ref(),
-                drag_begin_ui.shell.borrow().as_ref(),
-                drag_begin_ui
-                    .app_state
-                    .snapshot_model()
-                    .workspaces
-                    .get(&workspace_id)
-                    .expect("workspace should exist while resizing"),
-                drag_begin_ui.overview_mode.get(),
-                workspace_viewport_width(
-                    drag_begin_ui.as_ref(),
-                    drag_begin_ui.shell.borrow().as_ref(),
-                ),
-                workspace_viewport_height(
-                    drag_begin_ui.as_ref(),
-                    drag_begin_ui.shell.borrow().as_ref(),
-                ),
-            ),
-        );
-        start_frame_for_begin.set(latest_frame);
-        current_frame_for_begin.set(latest_frame);
+            .map(|workspace| match edge {
+                ResizeHandleEdge::Right => workspace
+                    .columns
+                    .get(&workspace_column_id)
+                    .map(|column| column.width)
+                    .unwrap_or(display_frame.width),
+                ResizeHandleEdge::Bottom => workspace
+                    .windows
+                    .get(&workspace_window_id)
+                    .map(|window| window.height)
+                    .unwrap_or(display_frame.height),
+            })
+            .unwrap_or(match edge {
+                ResizeHandleEdge::Right => display_frame.width,
+                ResizeHandleEdge::Bottom => display_frame.height,
+            });
+        start_size_for_begin.set(start);
+        current_size_for_begin.set(start);
         drag_begin_ui.dispatch(ControlCommand::FocusWorkspaceWindow {
             workspace_id,
             workspace_window_id,
         });
     });
-    let current_frame_for_update = Rc::clone(&current_frame);
+    let current_size_for_update = Rc::clone(&current_size);
     drag.connect_drag_update(move |_, dx, dy| {
-        let mut next = start_frame.get();
+        let next = match edge {
+            ResizeHandleEdge::Right => (start_size.get() + dx.round() as i32).max(720),
+            ResizeHandleEdge::Bottom => {
+                (start_size.get() + dy.round() as i32).max(MIN_WORKSPACE_WINDOW_HEIGHT)
+            }
+        };
+        current_size_for_update.set(next);
         match edge {
             ResizeHandleEdge::Right => {
-                next.width = (next.width + dx.round() as i32).max(720);
+                if let Some(overlay) = handle_widget_for_update.parent().and_downcast::<Overlay>()
+                {
+                    overlay.set_size_request(next, display_frame.height);
+                    if let Some(child) = overlay.child() {
+                        child.set_size_request(next, display_frame.height);
+                    }
+                }
             }
             ResizeHandleEdge::Bottom => {
-                next.height = (next.height + dy.round() as i32).max(MIN_WORKSPACE_WINDOW_HEIGHT);
+                if let Some(overlay) = handle_widget_for_update.parent().and_downcast::<Overlay>()
+                {
+                    overlay.set_size_request(display_frame.width, next);
+                    if let Some(child) = overlay.child() {
+                        child.set_size_request(display_frame.width, next);
+                    }
+                }
             }
-        }
-        current_frame_for_update.set(next);
-        if let Some(overlay) = handle_widget.parent().and_downcast::<Overlay>() {
-            overlay.set_size_request(next.width, next.height);
-            if let Some(child) = overlay.child() {
-                child.set_size_request(next.width, next.height);
-            }
-        }
+        };
     });
     drag.connect_drag_end(move |_, _, _| {
-        drag_ui.dispatch(ControlCommand::SetWorkspaceWindowFrame {
-            workspace_id,
-            workspace_window_id,
-            frame: current_frame.get(),
-        });
+        let command = match edge {
+            ResizeHandleEdge::Right => ControlCommand::SetWorkspaceColumnWidth {
+                workspace_id,
+                workspace_column_id,
+                width: current_size.get(),
+            },
+            ResizeHandleEdge::Bottom => ControlCommand::SetWorkspaceWindowHeight {
+                workspace_id,
+                workspace_window_id,
+                height: current_size.get(),
+            },
+        };
+        drag_ui.dispatch(command);
+        if let Some(overlay) = handle_widget_for_end.parent().and_downcast::<Overlay>() {
+            overlay.set_size_request(display_frame.width, display_frame.height);
+            if let Some(child) = overlay.child() {
+                child.set_size_request(display_frame.width, display_frame.height);
+            }
+        }
     });
     handle.add_controller(drag);
 
@@ -5739,23 +5790,6 @@ fn workspace_viewport_height(ui: &UiHandle, shell: Option<&ShellWidgets>) -> i32
     DEFAULT_WORKSPACE_WINDOW_HEIGHT
 }
 
-fn expanded_window_frame(frame: WindowFrame, viewport_height: i32) -> WindowFrame {
-    if frame.height != DEFAULT_WORKSPACE_WINDOW_HEIGHT {
-        return frame;
-    }
-
-    let mut display = frame;
-    display.height = viewport_height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
-
-    let default_stride = DEFAULT_WORKSPACE_WINDOW_HEIGHT + DEFAULT_WORKSPACE_WINDOW_GAP;
-    if default_stride > 0 && frame.y % default_stride == 0 {
-        let display_stride = display.height + DEFAULT_WORKSPACE_WINDOW_GAP;
-        display.y = (frame.y / default_stride) * display_stride;
-    }
-
-    display
-}
-
 fn scale_window_frame(frame: WindowFrame, scale: f64) -> WindowFrame {
     if (scale - 1.0).abs() < f64::EPSILON {
         return frame;
@@ -5769,40 +5803,60 @@ fn scale_window_frame(frame: WindowFrame, scale: f64) -> WindowFrame {
     }
 }
 
-fn display_window_frame(frame: WindowFrame, render_context: WorkspaceRenderContext) -> WindowFrame {
-    let expanded = expanded_window_frame(frame, render_context.viewport_height);
-    if !render_context.overview_mode {
-        return expanded;
+fn workspace_window_placements(workspace: &Workspace) -> Vec<WorkspaceWindowPlacement> {
+    let mut placements = Vec::new();
+    let mut x = 0;
+
+    for column in workspace.columns.values() {
+        let mut y = 0;
+        for window_id in &column.window_order {
+            let Some(window) = workspace.windows.get(window_id) else {
+                continue;
+            };
+            placements.push(WorkspaceWindowPlacement {
+                window_id: *window_id,
+                column_id: column.id,
+                frame: WindowFrame {
+                    x,
+                    y,
+                    width: column.width.max(1),
+                    height: window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT),
+                },
+            });
+            y += window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT) + DEFAULT_WORKSPACE_WINDOW_GAP;
+        }
+        x += column.width + DEFAULT_WORKSPACE_WINDOW_GAP;
     }
 
-    scale_window_frame(expanded, render_context.overview_scale)
+    placements
 }
 
-fn workspace_base_canvas_metrics(workspace: &Workspace, viewport_height: i32) -> CanvasMetrics {
-    let display_frames: Vec<_> = workspace
-        .windows
-        .values()
-        .map(|window| expanded_window_frame(window.frame, viewport_height))
-        .collect();
+fn workspace_display_window_placements(
+    workspace: &Workspace,
+    render_context: WorkspaceRenderContext,
+) -> Vec<WorkspaceWindowPlacement> {
+    workspace_window_placements(workspace)
+        .into_iter()
+        .map(|mut placement| {
+            if render_context.overview_mode {
+                placement.frame = scale_window_frame(placement.frame, render_context.overview_scale);
+            }
+            placement
+        })
+        .collect()
+}
 
-    let min_x = display_frames
-        .iter()
-        .map(|frame| frame.x)
-        .min()
-        .unwrap_or(0);
-    let min_y = display_frames
-        .iter()
-        .map(|frame| frame.y)
-        .min()
-        .unwrap_or(0);
+fn canvas_metrics_from_frames(frames: &[WindowFrame]) -> CanvasMetrics {
+    let min_x = frames.iter().map(|frame| frame.x).min().unwrap_or(0);
+    let min_y = frames.iter().map(|frame| frame.y).min().unwrap_or(0);
     let offset_x = WORKSPACE_CANVAS_PADDING - min_x;
     let offset_y = WORKSPACE_CANVAS_PADDING - min_y;
-    let width = display_frames
+    let width = frames
         .iter()
         .map(|frame| frame.right() + offset_x + WORKSPACE_CANVAS_PADDING)
         .max()
         .unwrap_or(WORKSPACE_CANVAS_PADDING * 2);
-    let height = display_frames
+    let height = frames
         .iter()
         .map(|frame| frame.bottom() + offset_y + WORKSPACE_CANVAS_PADDING)
         .max()
@@ -5826,13 +5880,16 @@ fn workspace_render_context(
 ) -> WorkspaceRenderContext {
     if !overview_mode {
         return WorkspaceRenderContext {
-            viewport_height,
             overview_mode: false,
             overview_scale: 1.0,
         };
     }
 
-    let base_metrics = workspace_base_canvas_metrics(workspace, viewport_height);
+    let base_frames = workspace_window_placements(workspace)
+        .into_iter()
+        .map(|placement| placement.frame)
+        .collect::<Vec<_>>();
+    let base_metrics = canvas_metrics_from_frames(&base_frames);
     let content_width = (base_metrics.width - (WORKSPACE_CANVAS_PADDING * 2)).max(1);
     let content_height = (base_metrics.height - (WORKSPACE_CANVAS_PADDING * 2)).max(1);
     let available_width = (viewport_width - (WORKSPACE_CANVAS_PADDING * 2)).max(1) as f64;
@@ -5842,7 +5899,6 @@ fn workspace_render_context(
         .clamp(0.05, 1.0);
 
     WorkspaceRenderContext {
-        viewport_height,
         overview_mode: true,
         overview_scale,
     }
@@ -5852,41 +5908,11 @@ fn workspace_canvas_metrics(
     workspace: &Workspace,
     render_context: WorkspaceRenderContext,
 ) -> CanvasMetrics {
-    let display_frames: Vec<_> = workspace
-        .windows
-        .values()
-        .map(|window| display_window_frame(window.frame, render_context))
-        .collect();
-
-    let min_x = display_frames
-        .iter()
-        .map(|frame| frame.x)
-        .min()
-        .unwrap_or(0);
-    let min_y = display_frames
-        .iter()
-        .map(|frame| frame.y)
-        .min()
-        .unwrap_or(0);
-    let offset_x = WORKSPACE_CANVAS_PADDING - min_x;
-    let offset_y = WORKSPACE_CANVAS_PADDING - min_y;
-    let width = display_frames
-        .iter()
-        .map(|frame| frame.right() + offset_x + WORKSPACE_CANVAS_PADDING)
-        .max()
-        .unwrap_or(WORKSPACE_CANVAS_PADDING * 2);
-    let height = display_frames
-        .iter()
-        .map(|frame| frame.bottom() + offset_y + WORKSPACE_CANVAS_PADDING)
-        .max()
-        .unwrap_or(WORKSPACE_CANVAS_PADDING * 2);
-
-    CanvasMetrics {
-        offset_x,
-        offset_y,
-        width,
-        height,
-    }
+    let display_frames = workspace_display_window_placements(workspace, render_context)
+        .into_iter()
+        .map(|placement| placement.frame)
+        .collect::<Vec<_>>();
+    canvas_metrics_from_frames(&display_frames)
 }
 
 fn workspace_window_attention(
@@ -6343,5 +6369,3 @@ fn humanize_theme_name(name: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-
-
