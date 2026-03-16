@@ -1263,6 +1263,66 @@ pub fn generate_css(p: &ThemePalette) -> String {
         error_12 = rgba(p.error, 0.12),
     );
 
+    // ── Settings dialog ──
+    let _ = write!(
+        w,
+        "
+        .settings-section-title {{
+            font-weight: 700;
+            font-size: 0.76rem;
+            color: {text_dim};
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }}
+
+        .settings-row {{
+            padding: 6px 0;
+        }}
+
+        .theme-card {{
+            background: {border_03};
+            border: 1px solid {border_07};
+            border-radius: 8px;
+            padding: 8px;
+            transition: background 160ms ease-in-out, border-color 160ms ease-in-out;
+        }}
+
+        .theme-card:hover {{
+            background: {border_06};
+            border-color: {border_12};
+        }}
+
+        .theme-card-active {{
+            border-color: {accent_40};
+            background: {accent_06};
+        }}
+
+        .theme-card-active:hover {{
+            background: {accent_10};
+        }}
+
+        .theme-card-label {{
+            font-size: 0.70rem;
+            font-weight: 600;
+            color: {text_muted};
+        }}
+
+        .theme-card-active .theme-card-label {{
+            color: {text_bright};
+        }}
+        ",
+        text_dim = p.text_dim.to_hex(),
+        text_muted = p.text_muted.to_hex(),
+        text_bright = p.text_bright.to_hex(),
+        border_03 = rgba(p.border, 0.03),
+        border_06 = rgba(p.border, 0.06),
+        border_07 = rgba(p.border, 0.07),
+        border_12 = rgba(p.border, 0.12),
+        accent_06 = rgba(p.accent, 0.06),
+        accent_10 = rgba(p.accent, 0.10),
+        accent_40 = rgba(p.accent, 0.40),
+    );
+
     css
 }
 

@@ -610,18 +610,117 @@ impl UiHandle {
             gtk::DialogFlags::MODAL,
             &[("Close", gtk::ResponseType::Close)],
         );
-        dialog.set_default_size(560, -1);
+        dialog.set_default_size(580, 520);
         dialog.connect_response(|dialog, _| dialog.close());
 
-        let content = dialog.content_area();
+        let scroll = ScrolledWindow::new();
+        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scroll.set_vexpand(true);
+
+        let content = GtkBox::new(Orientation::Vertical, 14);
         content.set_margin_start(18);
         content.set_margin_end(18);
         content.set_margin_top(18);
         content.set_margin_bottom(18);
-        content.set_spacing(14);
 
-        // ── Animations toggle ──
+        // ── Theme section ──
+        let theme_heading = Label::new(Some("Theme"));
+        theme_heading.set_xalign(0.0);
+        theme_heading.add_css_class("settings-section-title");
+        content.append(&theme_heading);
+
+        let current_theme = self
+            .settings
+            .borrow()
+            .theme
+            .clone()
+            .unwrap_or_else(|| "dark".into());
+
+        let flow = gtk::FlowBox::new();
+        flow.set_max_children_per_line(3);
+        flow.set_min_children_per_line(2);
+        flow.set_homogeneous(true);
+        flow.set_row_spacing(8);
+        flow.set_column_spacing(8);
+        flow.set_selection_mode(gtk::SelectionMode::None);
+
+        for &name in themes::BUILTIN_NAMES {
+            let palette = if name == "dark" {
+                theme::default_dark()
+            } else {
+                themes::builtin_theme(name).unwrap_or_else(theme::default_dark)
+            };
+            let is_active = name == current_theme;
+            let card = build_theme_card(name, &palette, is_active);
+
+            let card_button = Button::new();
+            card_button.set_child(Some(&card));
+            card_button.add_css_class("flat");
+
+            let click_ui = Rc::clone(self);
+            let click_name = name.to_string();
+            let click_flow = flow.clone();
+            card_button.connect_clicked(move |_| {
+                let theme_value = if click_name == "dark" {
+                    None
+                } else {
+                    Some(click_name.clone())
+                };
+                let mut next_settings = click_ui.settings.borrow().clone();
+                next_settings.theme = theme_value;
+                if let Err(error) =
+                    settings_store::save_config(&click_ui.config_path, &next_settings)
+                {
+                    click_ui.toast(&format!("Failed to save theme: {error}"));
+                    return;
+                }
+                *click_ui.settings.borrow_mut() = next_settings;
+
+                // Update active card styling across the grid.
+                let mut idx = 0;
+                while let Some(child) = click_flow.child_at_index(idx) {
+                    if let Some(btn) = child.child().and_then(|w| w.downcast::<Button>().ok()) {
+                        if let Some(inner) = btn.child().and_then(|w| w.downcast::<GtkBox>().ok())
+                        {
+                            inner.remove_css_class("theme-card-active");
+                        }
+                    }
+                    idx += 1;
+                }
+                if let Some(me) = click_flow.child_at_index(
+                    themes::BUILTIN_NAMES
+                        .iter()
+                        .position(|n| *n == click_name)
+                        .unwrap_or(0) as i32,
+                ) {
+                    if let Some(btn) = me.child().and_then(|w| w.downcast::<Button>().ok()) {
+                        if let Some(inner) = btn.child().and_then(|w| w.downcast::<GtkBox>().ok())
+                        {
+                            inner.add_css_class("theme-card-active");
+                        }
+                    }
+                }
+
+                click_ui.toast("Theme saved. Relaunch Taskers to apply.");
+            });
+
+            flow.insert(&card_button, -1);
+        }
+        content.append(&flow);
+
+        let sep = Separator::new(Orientation::Horizontal);
+        sep.add_css_class("context-separator");
+        content.append(&sep);
+
+        // ── General section ──
+        let general_heading = Label::new(Some("General"));
+        general_heading.set_xalign(0.0);
+        general_heading.add_css_class("settings-section-title");
+        content.append(&general_heading);
+
+        // Animations toggle
         let anim_row = GtkBox::new(Orientation::Horizontal, 12);
+        anim_row.add_css_class("settings-row");
         let anim_details = GtkBox::new(Orientation::Vertical, 4);
         anim_details.set_hexpand(true);
 
@@ -655,11 +754,9 @@ impl UiHandle {
         anim_row.append(&anim_switch);
         content.append(&anim_row);
 
-        let sep = Separator::new(Orientation::Horizontal);
-        sep.add_css_class("context-separator");
-        content.append(&sep);
-
+        // Shell program
         let shell_row = GtkBox::new(Orientation::Horizontal, 12);
+        shell_row.add_css_class("settings-row");
         let shell_details = GtkBox::new(Orientation::Vertical, 4);
         shell_details.set_hexpand(true);
 
@@ -730,16 +827,23 @@ impl UiHandle {
         sep.add_css_class("context-separator");
         content.append(&sep);
 
-        // ── Keyboard shortcuts ──
+        // ── Keyboard shortcuts section ──
+        let kb_heading = Label::new(Some("Keyboard shortcuts"));
+        kb_heading.set_xalign(0.0);
+        kb_heading.add_css_class("settings-section-title");
+        content.append(&kb_heading);
+
         let intro = Label::new(Some(
-            "Keyboard shortcuts. Directional navigation and resize chords stay fixed.",
+            "Directional navigation and resize chords stay fixed.",
         ));
         intro.set_wrap(true);
         intro.set_xalign(0.0);
+        intro.add_css_class("dim-label");
         content.append(&intro);
 
         for action in ShortcutAction::ALL {
             let row = GtkBox::new(Orientation::Horizontal, 12);
+            row.add_css_class("settings-row");
 
             let details = GtkBox::new(Orientation::Vertical, 4);
             details.set_hexpand(true);
@@ -785,6 +889,8 @@ impl UiHandle {
             content.append(&row);
         }
 
+        scroll.set_child(Some(&content));
+        dialog.content_area().append(&scroll);
         dialog.present();
     }
 
@@ -6134,6 +6240,91 @@ fn spawn_control_server(controller: InMemoryController, socket_path: PathBuf) ->
     });
 
     note
+}
+
+fn build_theme_swatch(color: theme::Color, size: i32) -> DrawingArea {
+    let area = DrawingArea::new();
+    area.set_content_width(size);
+    area.set_content_height(size);
+    area.set_size_request(size, size);
+    area.set_draw_func(move |_, cr, w, h| {
+        let r = f64::from(color.r) / 255.0;
+        let g = f64::from(color.g) / 255.0;
+        let b = f64::from(color.b) / 255.0;
+        let radius = 3.0;
+        let (w, h) = (f64::from(w), f64::from(h));
+        cr.new_sub_path();
+        cr.arc(w - radius, radius, radius, -std::f64::consts::FRAC_PI_2, 0.0);
+        cr.arc(
+            w - radius,
+            h - radius,
+            radius,
+            0.0,
+            std::f64::consts::FRAC_PI_2,
+        );
+        cr.arc(
+            radius,
+            h - radius,
+            radius,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+        );
+        cr.arc(
+            radius,
+            radius,
+            radius,
+            std::f64::consts::PI,
+            3.0 * std::f64::consts::FRAC_PI_2,
+        );
+        cr.close_path();
+        cr.set_source_rgb(r, g, b);
+        let _ = cr.fill();
+    });
+    area
+}
+
+fn build_theme_card(name: &str, palette: &theme::ThemePalette, is_active: bool) -> GtkBox {
+    let card = GtkBox::new(Orientation::Vertical, 4);
+    card.add_css_class("theme-card");
+    if is_active {
+        card.add_css_class("theme-card-active");
+    }
+
+    let swatches = GtkBox::new(Orientation::Horizontal, 4);
+    for color in [
+        palette.base,
+        palette.accent,
+        palette.busy,
+        palette.completed,
+        palette.error,
+    ] {
+        swatches.append(&build_theme_swatch(color, 14));
+    }
+    card.append(&swatches);
+
+    let label = Label::new(Some(&humanize_theme_name(name)));
+    label.set_xalign(0.0);
+    label.add_css_class("theme-card-label");
+    card.append(&label);
+
+    card
+}
+
+fn humanize_theme_name(name: &str) -> String {
+    name.split('-')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut s = first.to_uppercase().to_string();
+                    s.push_str(chars.as_str());
+                    s
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn install_css(palette: &theme::ThemePalette) {
