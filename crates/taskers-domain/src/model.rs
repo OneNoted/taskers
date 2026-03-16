@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -7,10 +7,10 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{
     AttentionState, Direction, LayoutNode, PaneId, SessionId, SignalEvent, SignalKind, SplitAxis,
-    SurfaceId, WindowId, WorkspaceId, WorkspaceWindowId,
+    SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
 };
 
-pub const SESSION_SCHEMA_VERSION: u32 = 3;
+pub const SESSION_SCHEMA_VERSION: u32 = 4;
 pub const DEFAULT_WORKSPACE_WINDOW_WIDTH: i32 = 1280;
 pub const DEFAULT_WORKSPACE_WINDOW_HEIGHT: i32 = 860;
 pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 2;
@@ -24,6 +24,8 @@ pub enum DomainError {
     MissingWindow(WindowId),
     #[error("workspace {0} was not found")]
     MissingWorkspace(WorkspaceId),
+    #[error("workspace column {0} was not found")]
+    MissingWorkspaceColumn(WorkspaceColumnId),
     #[error("workspace window {0} was not found")]
     MissingWorkspaceWindow(WorkspaceWindowId),
     #[error("pane {0} was not found")]
@@ -360,30 +362,52 @@ impl WindowFrame {
         self.width = self.width.max(MIN_WORKSPACE_WINDOW_WIDTH);
         self.height = self.height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
     }
-
-    fn overlaps(self, other: Self) -> bool {
-        self.x < other.right()
-            && self.right() > other.x
-            && self.y < other.bottom()
-            && self.bottom() > other.y
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceWindowRecord {
     pub id: WorkspaceWindowId,
-    pub frame: WindowFrame,
+    pub height: i32,
     pub layout: LayoutNode,
     pub active_pane: PaneId,
 }
 
 impl WorkspaceWindowRecord {
-    fn new(frame: WindowFrame, pane_id: PaneId) -> Self {
+    fn new(pane_id: PaneId) -> Self {
         Self {
             id: WorkspaceWindowId::new(),
-            frame,
+            height: DEFAULT_WORKSPACE_WINDOW_HEIGHT,
             layout: LayoutNode::leaf(pane_id),
             active_pane: pane_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceColumnRecord {
+    pub id: WorkspaceColumnId,
+    pub width: i32,
+    pub window_order: Vec<WorkspaceWindowId>,
+    pub active_window: WorkspaceWindowId,
+}
+
+impl WorkspaceColumnRecord {
+    fn new(window_id: WorkspaceWindowId) -> Self {
+        Self {
+            id: WorkspaceColumnId::new(),
+            width: DEFAULT_WORKSPACE_WINDOW_WIDTH,
+            window_order: vec![window_id],
+            active_window: window_id,
+        }
+    }
+
+    fn normalize(&mut self, windows: &IndexMap<WorkspaceWindowId, WorkspaceWindowRecord>) {
+        self.width = self.width.max(MIN_WORKSPACE_WINDOW_WIDTH);
+        self.window_order.retain(|window_id| windows.contains_key(window_id));
+        if !self.window_order.contains(&self.active_window)
+            && let Some(window_id) = self.window_order.first()
+        {
+            self.active_window = *window_id;
         }
     }
 }
@@ -392,6 +416,7 @@ impl WorkspaceWindowRecord {
 pub struct Workspace {
     pub id: WorkspaceId,
     pub label: String,
+    pub columns: IndexMap<WorkspaceColumnId, WorkspaceColumnRecord>,
     pub windows: IndexMap<WorkspaceWindowId, WorkspaceWindowRecord>,
     pub active_window: WorkspaceWindowId,
     pub panes: IndexMap<PaneId, PaneRecord>,
@@ -406,11 +431,7 @@ impl<'de> Deserialize<'de> for Workspace {
     where
         D: Deserializer<'de>,
     {
-        let workspace = match WorkspaceSerdeCompat::deserialize(deserializer)? {
-            WorkspaceSerdeCompat::Current(current) => current.into_workspace(),
-            WorkspaceSerdeCompat::Legacy(legacy) => legacy.into_workspace(),
-        };
-        Ok(workspace)
+        Ok(CurrentWorkspaceSerde::deserialize(deserializer)?.into_workspace())
     }
 }
 
@@ -420,14 +441,18 @@ impl Workspace {
         let active_pane = first_pane.id;
         let mut panes = IndexMap::new();
         panes.insert(active_pane, first_pane);
-        let first_window = WorkspaceWindowRecord::new(WindowFrame::root(), active_pane);
+        let first_window = WorkspaceWindowRecord::new(active_pane);
         let active_window = first_window.id;
         let mut windows = IndexMap::new();
         windows.insert(active_window, first_window);
+        let first_column = WorkspaceColumnRecord::new(active_window);
+        let mut columns = IndexMap::new();
+        columns.insert(first_column.id, first_column);
 
         Self {
             id: WorkspaceId::new(),
             label: label.into(),
+            columns,
             windows,
             active_window,
             panes,
@@ -445,6 +470,35 @@ impl Workspace {
         self.windows.get_mut(&self.active_window)
     }
 
+    pub fn column_for_window(&self, window_id: WorkspaceWindowId) -> Option<WorkspaceColumnId> {
+        self.columns.iter().find_map(|(column_id, column)| {
+            column
+                .window_order
+                .contains(&window_id)
+                .then_some(*column_id)
+        })
+    }
+
+    pub fn active_column_id(&self) -> Option<WorkspaceColumnId> {
+        self.column_for_window(self.active_window)
+    }
+
+    fn position_for_window(
+        &self,
+        window_id: WorkspaceWindowId,
+    ) -> Option<(WorkspaceColumnId, usize, usize)> {
+        self.columns
+            .iter()
+            .enumerate()
+            .find_map(|(column_index, (column_id, column))| {
+                column
+                    .window_order
+                    .iter()
+                    .position(|candidate| *candidate == window_id)
+                    .map(|window_index| (*column_id, column_index, window_index))
+            })
+    }
+
     pub fn window_for_pane(&self, pane_id: PaneId) -> Option<WorkspaceWindowId> {
         self.windows
             .iter()
@@ -455,14 +509,16 @@ impl Workspace {
         if let Some(window) = self.windows.get(&window_id) {
             self.active_window = window_id;
             self.active_pane = window.active_pane;
+            if let Some(column_id) = self.column_for_window(window_id)
+                && let Some(column) = self.columns.get_mut(&column_id)
+            {
+                column.active_window = window_id;
+            }
         }
     }
 
     fn focus_window(&mut self, window_id: WorkspaceWindowId) {
-        if let Some(window) = self.windows.get(&window_id) {
-            self.active_window = window_id;
-            self.active_pane = window.active_pane;
-        }
+        self.sync_active_from_window(window_id);
     }
 
     fn focus_pane(&mut self, pane_id: PaneId) -> bool {
@@ -507,87 +563,106 @@ impl Workspace {
         }
     }
 
-    fn next_window_frame(&self, source: WindowFrame, direction: Direction) -> WindowFrame {
-        let mut candidate = source.shifted(direction);
-        while self
-            .windows
-            .values()
-            .any(|window| window.frame.overlaps(candidate))
-        {
-            candidate = candidate.shifted(direction);
-        }
-        candidate
-    }
-
     fn top_level_neighbor(
         &self,
         source_window_id: WorkspaceWindowId,
         direction: Direction,
     ) -> Option<WorkspaceWindowId> {
-        let source = self.windows.get(&source_window_id)?.frame;
-        self.windows
-            .iter()
-            .filter(|(window_id, _)| **window_id != source_window_id)
-            .filter_map(|(window_id, window)| {
-                let primary = match direction {
-                    Direction::Left => source.center_x() - window.frame.center_x(),
-                    Direction::Right => window.frame.center_x() - source.center_x(),
-                    Direction::Up => source.center_y() - window.frame.center_y(),
-                    Direction::Down => window.frame.center_y() - source.center_y(),
-                };
-                if primary <= 0 {
-                    return None;
-                }
-
-                let secondary = match direction {
-                    Direction::Left | Direction::Right => {
-                        (window.frame.center_y() - source.center_y()).abs()
-                    }
-                    Direction::Up | Direction::Down => {
-                        (window.frame.center_x() - source.center_x()).abs()
-                    }
-                };
-                Some((*window_id, primary, secondary))
-            })
-            .min_by_key(|(_, primary, secondary)| (*primary, *secondary))
-            .map(|(window_id, _, _)| window_id)
+        let (_, column_index, window_index) = self.position_for_window(source_window_id)?;
+        match direction {
+            Direction::Left => column_index
+                .checked_sub(1)
+                .and_then(|index| self.columns.get_index(index))
+                .map(|(_, column)| column.active_window),
+            Direction::Right => self
+                .columns
+                .get_index(column_index + 1)
+                .map(|(_, column)| column.active_window),
+            Direction::Up => self
+                .columns
+                .get_index(column_index)
+                .and_then(|(_, column)| window_index.checked_sub(1).and_then(|index| column.window_order.get(index)))
+                .copied(),
+            Direction::Down => self
+                .columns
+                .get_index(column_index)
+                .and_then(|(_, column)| column.window_order.get(window_index + 1))
+                .copied(),
+        }
     }
 
-    fn fallback_window_after_close(&self, source: WindowFrame) -> Option<WorkspaceWindowId> {
-        [
-            Direction::Right,
-            Direction::Down,
-            Direction::Left,
-            Direction::Up,
-        ]
-        .into_iter()
-        .find_map(|direction| {
-            self.windows
-                .iter()
-                .filter_map(|(window_id, window)| {
-                    let primary = match direction {
-                        Direction::Left => source.center_x() - window.frame.center_x(),
-                        Direction::Right => window.frame.center_x() - source.center_x(),
-                        Direction::Up => source.center_y() - window.frame.center_y(),
-                        Direction::Down => window.frame.center_y() - source.center_y(),
-                    };
-                    if primary <= 0 {
-                        return None;
-                    }
-                    let secondary = match direction {
-                        Direction::Left | Direction::Right => {
-                            (window.frame.center_y() - source.center_y()).abs()
-                        }
-                        Direction::Up | Direction::Down => {
-                            (window.frame.center_x() - source.center_x()).abs()
-                        }
-                    };
-                    Some((*window_id, primary, secondary))
-                })
-                .min_by_key(|(_, primary, secondary)| (*primary, *secondary))
-                .map(|(window_id, _, _)| window_id)
-        })
-        .or_else(|| self.windows.first().map(|(window_id, _)| *window_id))
+    fn fallback_window_after_close(
+        &self,
+        source_column_index: usize,
+        source_window_index: usize,
+        same_column_survived: bool,
+    ) -> Option<WorkspaceWindowId> {
+        if same_column_survived
+            && let Some((_, column)) = self.columns.get_index(source_column_index)
+        {
+            if let Some(window_id) = column.window_order.get(source_window_index) {
+                return Some(*window_id);
+            }
+            if let Some(window_id) = source_window_index
+                .checked_sub(1)
+                .and_then(|index| column.window_order.get(index))
+            {
+                return Some(*window_id);
+            }
+        }
+
+        let right_column_index = if same_column_survived {
+            source_column_index + 1
+        } else {
+            source_column_index
+        };
+        if let Some((_, column)) = self.columns.get_index(right_column_index)
+            && let Some(window_id) = column.window_order.first()
+        {
+            return Some(*window_id);
+        }
+
+        source_column_index
+            .checked_sub(1)
+            .and_then(|index| self.columns.get_index(index))
+            .and_then(|(_, column)| column.window_order.first())
+            .copied()
+    }
+
+    fn insert_column_at(&mut self, index: usize, column: WorkspaceColumnRecord) {
+        let insert_index = index.min(self.columns.len());
+        let mut next = IndexMap::with_capacity(self.columns.len() + 1);
+        let mut pending = Some(column);
+        for (current_index, (column_id, current_column)) in std::mem::take(&mut self.columns)
+            .into_iter()
+            .enumerate()
+        {
+            if current_index == insert_index
+                && let Some(column) = pending.take()
+            {
+                next.insert(column.id, column);
+            }
+            next.insert(column_id, current_column);
+        }
+        if let Some(column) = pending.take() {
+            next.insert(column.id, column);
+        }
+        self.columns = next;
+    }
+
+    fn append_missing_windows_to_columns(&mut self) {
+        let assigned = self
+            .columns
+            .values()
+            .flat_map(|column| column.window_order.iter().copied())
+            .collect::<BTreeSet<_>>();
+        for window_id in self.windows.keys().copied().collect::<Vec<_>>() {
+            if assigned.contains(&window_id) {
+                continue;
+            }
+            let column = WorkspaceColumnRecord::new(window_id);
+            self.columns.insert(column.id, column);
+        }
     }
 
     fn normalize(&mut self) {
@@ -609,13 +684,14 @@ impl Workspace {
                 .first()
                 .map(|(pane_id, _)| *pane_id)
                 .expect("workspace has at least one pane");
-            let fallback_window = WorkspaceWindowRecord::new(WindowFrame::root(), fallback_pane);
+            let fallback_window = WorkspaceWindowRecord::new(fallback_pane);
             self.active_window = fallback_window.id;
             self.active_pane = fallback_pane;
             self.windows.insert(fallback_window.id, fallback_window);
         }
 
         for window in self.windows.values_mut() {
+            window.height = window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
             if !window.layout.contains(window.active_pane) {
                 window.active_pane = window
                     .layout
@@ -627,12 +703,38 @@ impl Workspace {
             }
         }
 
-        if !self.windows.contains_key(&self.active_window) {
-            self.active_window = self
+        for column in self.columns.values_mut() {
+            column.normalize(&self.windows);
+        }
+
+        let mut assigned = BTreeSet::new();
+        for column in self.columns.values_mut() {
+            column.window_order.retain(|window_id| assigned.insert(*window_id));
+            if !column.window_order.contains(&column.active_window)
+                && let Some(window_id) = column.window_order.first()
+            {
+                column.active_window = *window_id;
+            }
+        }
+        self.columns.retain(|_, column| !column.window_order.is_empty());
+        self.append_missing_windows_to_columns();
+
+        if self.columns.is_empty() {
+            let fallback_window_id = self
                 .windows
                 .first()
                 .map(|(window_id, _)| *window_id)
                 .expect("workspace has at least one window");
+            let column = WorkspaceColumnRecord::new(fallback_window_id);
+            self.columns.insert(column.id, column);
+        }
+
+        if !self.windows.contains_key(&self.active_window) {
+            self.active_window = self
+                .columns
+                .first()
+                .map(|(_, column)| column.active_window)
+                .expect("workspace has at least one column");
         }
         if !self
             .windows
@@ -645,6 +747,7 @@ impl Workspace {
                 .map(|window| window.active_pane)
                 .expect("active window exists");
         }
+        self.sync_active_from_window(self.active_window);
     }
 
     pub fn repo_hint(&self) -> Option<&str> {
@@ -927,19 +1030,43 @@ impl AppModel {
             .workspaces
             .get_mut(&workspace_id)
             .ok_or(DomainError::MissingWorkspace(workspace_id))?;
-
-        let source_frame = workspace
-            .active_window_record()
-            .map(|window| window.frame)
-            .unwrap_or_else(WindowFrame::root);
         let new_pane = PaneRecord::new(PaneKind::Terminal);
         let new_pane_id = new_pane.id;
         workspace.panes.insert(new_pane_id, new_pane);
 
-        let frame = workspace.next_window_frame(source_frame, direction);
-        let new_window = WorkspaceWindowRecord::new(frame, new_pane_id);
+        let new_window = WorkspaceWindowRecord::new(new_pane_id);
         let new_window_id = new_window.id;
         workspace.windows.insert(new_window_id, new_window);
+
+        let (source_column_id, source_column_index, source_window_index) = workspace
+            .position_for_window(workspace.active_window)
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace.active_window))?;
+
+        match direction {
+            Direction::Left | Direction::Right => {
+                let new_column = WorkspaceColumnRecord::new(new_window_id);
+                let insert_index = if matches!(direction, Direction::Left) {
+                    source_column_index
+                } else {
+                    source_column_index + 1
+                };
+                workspace.insert_column_at(insert_index, new_column);
+            }
+            Direction::Up | Direction::Down => {
+                let column = workspace
+                    .columns
+                    .get_mut(&source_column_id)
+                    .expect("active column should exist");
+                let insert_index = if matches!(direction, Direction::Up) {
+                    source_window_index
+                } else {
+                    source_window_index + 1
+                };
+                column.window_order.insert(insert_index, new_window_id);
+                column.active_window = new_window_id;
+            }
+        }
+
         workspace.sync_active_from_window(new_window_id);
 
         Ok(new_pane_id)
@@ -1110,11 +1237,37 @@ impl AppModel {
             .get_mut(&workspace_id)
             .ok_or(DomainError::MissingWorkspace(workspace_id))?;
         let active_window = workspace.active_window;
-        let window = workspace
-            .active_window_record_mut()
+        let (column_id, _, _) = workspace
+            .position_for_window(active_window)
             .ok_or(DomainError::MissingWorkspaceWindow(active_window))?;
-        window.frame.resize_by_direction(direction, amount);
-        window.frame.clamp();
+        match direction {
+            Direction::Left => {
+                let column = workspace
+                    .columns
+                    .get_mut(&column_id)
+                    .ok_or(DomainError::MissingWorkspaceWindow(active_window))?;
+                column.width = (column.width - amount).max(MIN_WORKSPACE_WINDOW_WIDTH);
+            }
+            Direction::Right => {
+                let column = workspace
+                    .columns
+                    .get_mut(&column_id)
+                    .ok_or(DomainError::MissingWorkspaceWindow(active_window))?;
+                column.width = (column.width + amount).max(MIN_WORKSPACE_WINDOW_WIDTH);
+            }
+            Direction::Up => {
+                let window = workspace
+                    .active_window_record_mut()
+                    .ok_or(DomainError::MissingWorkspaceWindow(active_window))?;
+                window.height = (window.height - amount).max(MIN_WORKSPACE_WINDOW_HEIGHT);
+            }
+            Direction::Down => {
+                let window = workspace
+                    .active_window_record_mut()
+                    .ok_or(DomainError::MissingWorkspaceWindow(active_window))?;
+                window.height = (window.height + amount).max(MIN_WORKSPACE_WINDOW_HEIGHT);
+            }
+        }
         Ok(())
     }
 
@@ -1138,11 +1291,29 @@ impl AppModel {
         Ok(())
     }
 
-    pub fn set_workspace_window_frame(
+    pub fn set_workspace_column_width(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_column_id: WorkspaceColumnId,
+        width: i32,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let column = workspace
+            .columns
+            .get_mut(&workspace_column_id)
+            .ok_or(DomainError::MissingWorkspaceColumn(workspace_column_id))?;
+        column.width = width.max(MIN_WORKSPACE_WINDOW_WIDTH);
+        Ok(())
+    }
+
+    pub fn set_workspace_window_height(
         &mut self,
         workspace_id: WorkspaceId,
         workspace_window_id: WorkspaceWindowId,
-        mut frame: WindowFrame,
+        height: i32,
     ) -> Result<(), DomainError> {
         let workspace = self
             .workspaces
@@ -1152,8 +1323,7 @@ impl AppModel {
             .windows
             .get_mut(&workspace_window_id)
             .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
-        frame.clamp();
-        window.frame = frame;
+        window.height = height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
         Ok(())
     }
 
@@ -1505,6 +1675,9 @@ impl AppModel {
         let window_id = workspace
             .window_for_pane(pane_id)
             .ok_or(DomainError::MissingPane(pane_id))?;
+        let (column_id, column_index, window_index) = workspace
+            .position_for_window(window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(window_id))?;
 
         let window_leaf_count = workspace
             .windows
@@ -1512,17 +1685,29 @@ impl AppModel {
             .map(|window| window.layout.leaves().len())
             .unwrap_or_default();
         if window_leaf_count <= 1 && workspace.windows.len() > 1 {
-            let source_frame = workspace
-                .windows
-                .get(&window_id)
-                .map(|window| window.frame)
-                .expect("window exists");
+            let column = workspace
+                .columns
+                .get_mut(&column_id)
+                .expect("window column should exist");
+            column.window_order.remove(window_index);
+            let same_column_survived = !column.window_order.is_empty();
+            if same_column_survived {
+                if !column.window_order.contains(&column.active_window) {
+                    let replacement_index = window_index.min(column.window_order.len() - 1);
+                    column.active_window = column.window_order[replacement_index];
+                }
+            } else {
+                workspace.columns.shift_remove(&column_id);
+            }
+
             workspace.windows.shift_remove(&window_id);
             workspace.panes.shift_remove(&pane_id);
             workspace
                 .notifications
                 .retain(|item| item.pane_id != pane_id);
-            if let Some(next_window_id) = workspace.fallback_window_after_close(source_frame) {
+            if let Some(next_window_id) =
+                workspace.fallback_window_after_close(column_index, window_index, same_column_survived)
+            {
                 workspace.sync_active_from_window(next_window_id);
             }
             return Ok(());
@@ -1662,16 +1847,10 @@ impl AppModel {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum WorkspaceSerdeCompat {
-    Current(CurrentWorkspaceSerde),
-    Legacy(LegacyWorkspaceSerde),
-}
-
-#[derive(Debug, Deserialize)]
 struct CurrentWorkspaceSerde {
     id: WorkspaceId,
     label: String,
+    columns: IndexMap<WorkspaceColumnId, WorkspaceColumnRecord>,
     windows: IndexMap<WorkspaceWindowId, WorkspaceWindowRecord>,
     active_window: WorkspaceWindowId,
     panes: IndexMap<PaneId, PaneRecord>,
@@ -1687,6 +1866,7 @@ impl CurrentWorkspaceSerde {
         let mut workspace = Workspace {
             id: self.id,
             label: self.label,
+            columns: self.columns,
             windows: self.windows,
             active_window: self.active_window,
             panes: self.panes,
@@ -1697,133 +1877,6 @@ impl CurrentWorkspaceSerde {
         workspace.normalize();
         workspace
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyWorkspaceSerde {
-    id: WorkspaceId,
-    label: String,
-    layout: LegacyWorkspaceLayout,
-    panes: IndexMap<PaneId, PaneRecord>,
-    active_pane: PaneId,
-    #[serde(default)]
-    notifications: Vec<NotificationItem>,
-}
-
-impl LegacyWorkspaceSerde {
-    fn into_workspace(self) -> Workspace {
-        let mut windows = IndexMap::new();
-        let mut viewport = WorkspaceViewport::default();
-        let mut active_window = None;
-        let preferred_active_pane = if self.panes.contains_key(&self.active_pane) {
-            self.active_pane
-        } else {
-            self.panes
-                .first()
-                .map(|(pane_id, _)| *pane_id)
-                .unwrap_or_else(PaneId::new)
-        };
-
-        match self.layout {
-            LegacyWorkspaceLayout::SplitTree(layout) => {
-                let active_pane = active_pane_for_layout(&layout, preferred_active_pane);
-                let window = WorkspaceWindowRecord {
-                    id: WorkspaceWindowId::new(),
-                    frame: WindowFrame::root(),
-                    layout,
-                    active_pane,
-                };
-                active_window = Some(window.id);
-                windows.insert(window.id, window);
-            }
-            LegacyWorkspaceLayout::Scrollable(scrollable) => {
-                viewport = scrollable.viewport;
-                for (index, column) in scrollable.columns.into_iter().enumerate() {
-                    let Some(layout) = layout_from_pane_stack(&column.panes) else {
-                        continue;
-                    };
-                    let active_pane = active_pane_for_layout(&layout, preferred_active_pane);
-                    let frame = WindowFrame {
-                        x: index as i32
-                            * (DEFAULT_WORKSPACE_WINDOW_WIDTH + DEFAULT_WORKSPACE_WINDOW_GAP),
-                        y: 0,
-                        width: DEFAULT_WORKSPACE_WINDOW_WIDTH,
-                        height: DEFAULT_WORKSPACE_WINDOW_HEIGHT,
-                    };
-                    let window = WorkspaceWindowRecord {
-                        id: WorkspaceWindowId::new(),
-                        frame,
-                        layout,
-                        active_pane,
-                    };
-                    if window.layout.contains(preferred_active_pane) {
-                        active_window = Some(window.id);
-                    }
-                    windows.insert(window.id, window);
-                }
-            }
-        }
-
-        let mut workspace = Workspace {
-            id: self.id,
-            label: self.label,
-            windows,
-            active_window: active_window.unwrap_or_else(WorkspaceWindowId::new),
-            panes: self.panes,
-            active_pane: preferred_active_pane,
-            viewport,
-            notifications: self.notifications,
-        };
-        workspace.normalize();
-        workspace
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum LegacyWorkspaceLayout {
-    Scrollable(LegacyScrollableLayout),
-    SplitTree(LayoutNode),
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyScrollableLayout {
-    #[serde(rename = "kind")]
-    _kind: String,
-    columns: Vec<LegacyPaneColumn>,
-    #[serde(default)]
-    viewport: WorkspaceViewport,
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyPaneColumn {
-    panes: Vec<PaneId>,
-}
-
-fn active_pane_for_layout(layout: &LayoutNode, preferred: PaneId) -> PaneId {
-    if layout.contains(preferred) {
-        preferred
-    } else {
-        layout
-            .leaves()
-            .into_iter()
-            .next()
-            .expect("legacy layout should contain at least one pane")
-    }
-}
-
-fn layout_from_pane_stack(panes: &[PaneId]) -> Option<LayoutNode> {
-    let (first, rest) = panes.split_first()?;
-    let mut layout = LayoutNode::leaf(*first);
-    for pane_id in rest {
-        layout = LayoutNode::Split {
-            axis: SplitAxis::Vertical,
-            ratio: 500,
-            first: Box::new(layout),
-            second: Box::new(LayoutNode::leaf(*pane_id)),
-        };
-    }
-    Some(layout)
 }
 
 const RECENT_INACTIVE_AGENT_RETENTION: Duration = Duration::minutes(15);
@@ -1924,27 +1977,45 @@ mod tests {
     use crate::SignalPaneMetadata;
 
     #[test]
-    fn creating_workspace_windows_updates_focus_and_frame() {
+    fn creating_workspace_windows_creates_columns_and_stacks() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
-        let first_window = model
+        let first_window_id = model
             .active_workspace()
-            .and_then(|workspace| workspace.active_window_record().map(|window| window.frame))
+            .map(|workspace| workspace.active_window)
             .expect("window");
 
-        let new_pane = model
+        let right_pane = model
             .create_workspace_window(workspace_id, Direction::Right)
             .expect("window created");
+        let stacked_pane = model
+            .create_workspace_window(workspace_id, Direction::Down)
+            .expect("stacked window created");
         let workspace = model.workspaces.get(&workspace_id).expect("workspace");
-        let active_window = workspace.active_window_record().expect("active window");
+        let right_column = workspace
+            .columns
+            .values()
+            .find(|column| column.window_order.contains(&workspace.active_window))
+            .expect("active column");
 
-        assert_eq!(workspace.windows.len(), 2);
-        assert_eq!(workspace.active_pane, new_pane);
+        assert_eq!(workspace.windows.len(), 3);
+        assert_eq!(workspace.columns.len(), 2);
+        assert_eq!(workspace.active_pane, stacked_pane);
+        assert_eq!(right_column.window_order.len(), 2);
+        assert_ne!(workspace.active_window, first_window_id);
+        assert!(workspace
+            .columns
+            .values()
+            .any(|column| column.window_order == vec![first_window_id]));
+        let upper_window_id = right_column.window_order[0];
         assert_eq!(
-            active_window.frame.x,
-            first_window.x + first_window.width + DEFAULT_WORKSPACE_WINDOW_GAP
+            workspace
+                .windows
+                .get(&upper_window_id)
+                .expect("window")
+                .active_pane,
+            right_pane
         );
-        assert_eq!(active_window.frame.y, first_window.y);
     }
 
     #[test]
@@ -1977,13 +2048,16 @@ mod tests {
         let right_window_pane = model
             .create_workspace_window(workspace_id, Direction::Right)
             .expect("window");
+        let lower_window_pane = model
+            .create_workspace_window(workspace_id, Direction::Down)
+            .expect("window");
         let lower_right_pane = model
-            .split_pane(workspace_id, Some(right_window_pane), SplitAxis::Vertical)
+            .split_pane(workspace_id, Some(lower_window_pane), SplitAxis::Vertical)
             .expect("split");
 
         model
-            .focus_pane(workspace_id, right_window_pane)
-            .expect("focus old pane in right window");
+            .focus_pane(workspace_id, lower_window_pane)
+            .expect("focus lower window");
         model
             .focus_pane(workspace_id, first_pane)
             .expect("focus left window");
@@ -1997,12 +2071,27 @@ mod tests {
                 .get(&workspace_id)
                 .expect("workspace")
                 .active_pane,
-            right_window_pane
+            lower_window_pane
         );
 
         model
             .focus_pane(workspace_id, lower_right_pane)
             .expect("focus lower pane");
+        model
+            .focus_pane_direction(workspace_id, Direction::Up)
+            .expect("move up");
+        assert_eq!(
+            model
+                .workspaces
+                .get(&workspace_id)
+                .expect("workspace")
+                .active_pane,
+            right_window_pane
+        );
+
+        model
+            .focus_pane_direction(workspace_id, Direction::Down)
+            .expect("move down again");
         model
             .focus_pane_direction(workspace_id, Direction::Left)
             .expect("move left");
@@ -2027,15 +2116,24 @@ mod tests {
         let right_window_pane = model
             .create_workspace_window(workspace_id, Direction::Right)
             .expect("window");
+        let lower_window_pane = model
+            .create_workspace_window(workspace_id, Direction::Down)
+            .expect("window");
 
         model
-            .close_pane(workspace_id, right_window_pane)
+            .close_pane(workspace_id, lower_window_pane)
             .expect("close pane");
 
         let workspace = model.workspaces.get(&workspace_id).expect("workspace");
-        assert_eq!(workspace.windows.len(), 1);
-        assert!(!workspace.panes.contains_key(&right_window_pane));
-        assert_ne!(workspace.active_pane, right_window_pane);
+        assert_eq!(workspace.windows.len(), 2);
+        assert!(!workspace.panes.contains_key(&lower_window_pane));
+        assert_eq!(workspace.active_pane, right_window_pane);
+        let right_column = workspace
+            .columns
+            .values()
+            .find(|column| column.window_order.contains(&workspace.active_window))
+            .expect("right column");
+        assert_eq!(right_column.window_order.len(), 1);
     }
 
     #[test]
@@ -2192,18 +2290,26 @@ mod tests {
         model
             .resize_active_window(workspace_id, Direction::Right, 120)
             .expect("resize window");
+        model
+            .resize_active_window(workspace_id, Direction::Down, 90)
+            .expect("resize height");
 
         let workspace = model.workspaces.get(&workspace_id).expect("workspace");
         let window = workspace.active_window_record().expect("window");
+        let column = workspace
+            .active_column_id()
+            .and_then(|column_id| workspace.columns.get(&column_id))
+            .expect("column");
         let LayoutNode::Split { ratio, .. } = &window.layout else {
             panic!("expected split layout");
         };
         assert_eq!(*ratio, 440);
-        assert_eq!(window.frame.width, DEFAULT_WORKSPACE_WINDOW_WIDTH + 120);
+        assert_eq!(column.width, DEFAULT_WORKSPACE_WINDOW_WIDTH + 120);
+        assert_eq!(window.height, DEFAULT_WORKSPACE_WINDOW_HEIGHT + 90);
     }
 
     #[test]
-    fn legacy_scrollable_layouts_deserialize_into_workspace_windows() {
+    fn clean_break_rejects_legacy_workspace_layouts() {
         let workspace_id = WorkspaceId::new();
         let window_id = WindowId::new();
         let left_pane = PaneRecord::new(PaneKind::Terminal);
@@ -2244,18 +2350,8 @@ mod tests {
             }
         });
 
-        let decoded: PersistedSession =
-            serde_json::from_value(encoded).expect("legacy session should deserialize");
-        let workspace = decoded
-            .model
-            .workspaces
-            .get(&workspace_id)
-            .expect("workspace exists");
-
-        assert_eq!(workspace.windows.len(), 2);
-        assert_eq!(workspace.viewport.x, 64);
-        assert_eq!(workspace.viewport.y, 24);
-        assert_eq!(workspace.active_pane, right_pane.id);
+        let decoded = serde_json::from_value::<PersistedSession>(encoded);
+        assert!(decoded.is_err());
     }
 
     #[test]
