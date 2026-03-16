@@ -26,10 +26,10 @@ use gtk::{
 use serde_json::json;
 use settings_store::{AppConfig, ShortcutAction, ShortcutPreset};
 use svgtypes::{SimplePathSegment, SimplifyingPathParser};
-use taskers_core::{AppState, PaneRuntimeSnapshot, default_session_path, load_or_bootstrap};
 use taskers_control::{
     ControlCommand, InMemoryController, bind_socket, default_socket_path, serve,
 };
+use taskers_core::{AppState, PaneRuntimeSnapshot, default_session_path, load_or_bootstrap};
 use taskers_domain::{
     ActivityItem, AppModel, AttentionState, DEFAULT_WORKSPACE_WINDOW_GAP,
     DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, Direction,

@@ -6,6 +6,9 @@
 
 typedef struct taskers_macos_core taskers_macos_core_t;
 
+taskers_macos_core_t *taskers_macos_core_new_with_options_json(
+    const char *options_json
+);
 taskers_macos_core_t *taskers_macos_core_new(
     const char *session_path,
     const char *socket_path,

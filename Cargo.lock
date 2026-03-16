@@ -1543,6 +1543,7 @@ dependencies = [
 name = "taskers-macos-ffi"
 version = "0.2.1"
 dependencies = [
+ "serde",
  "serde_json",
  "taskers-control",
  "taskers-core",

@@ -12,6 +12,7 @@ use crate::{pane_runtime::RuntimeManager, session_store};
 pub struct AppState {
     controller: InMemoryController,
     runtime: RuntimeManager,
+    backend: BackendChoice,
     session_path: PathBuf,
     shell_launch: ShellLaunchSpec,
 }
@@ -26,7 +27,10 @@ impl AppState {
         let controller = InMemoryController::new(model.clone());
         let runtime = RuntimeManager::new(
             controller.clone(),
-            backend != BackendChoice::Ghostty,
+            !matches!(
+                backend,
+                BackendChoice::Ghostty | BackendChoice::GhosttyEmbedded
+            ),
             shell_launch.clone(),
         );
         runtime.sync_model(&model)?;
@@ -34,6 +38,7 @@ impl AppState {
         let state = Self {
             controller,
             runtime,
+            backend,
             session_path,
             shell_launch,
         };
@@ -49,12 +54,20 @@ impl AppState {
         self.runtime.clone()
     }
 
+    pub fn backend(&self) -> BackendChoice {
+        self.backend
+    }
+
     pub fn shell_launch(&self) -> &ShellLaunchSpec {
         &self.shell_launch
     }
 
     pub fn snapshot_model(&self) -> AppModel {
         self.controller.snapshot().model
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.controller.revision()
     }
 
     pub fn dispatch(&self, command: ControlCommand) -> Result<ControlResponse> {
@@ -119,6 +132,7 @@ impl AppState {
 mod tests {
     use std::path::PathBuf;
 
+    use taskers_control::{ControlCommand, ControlQuery};
     use taskers_domain::AppModel;
     use taskers_ghostty::BackendChoice;
     use taskers_runtime::ShellLaunchSpec;
@@ -155,7 +169,57 @@ mod tests {
             descriptor.env.get("TASKERS_WORKSPACE_ID"),
             Some(&workspace.to_string())
         );
-        assert_eq!(descriptor.env.get("TASKERS_PANE_ID"), Some(&pane.to_string()));
+        assert_eq!(
+            descriptor.env.get("TASKERS_PANE_ID"),
+            Some(&pane.to_string())
+        );
         assert!(descriptor.env.contains_key("TASKERS_SURFACE_ID"));
+    }
+
+    #[test]
+    fn revision_tracks_controller_mutations() {
+        let app_state = AppState::new(
+            AppModel::new("Main"),
+            PathBuf::from("/tmp/taskers-session.json"),
+            BackendChoice::Mock,
+            ShellLaunchSpec::fallback(),
+        )
+        .expect("app state");
+
+        assert_eq!(app_state.revision(), 0);
+
+        app_state
+            .dispatch(ControlCommand::QueryStatus {
+                query: ControlQuery::All,
+            })
+            .expect("query");
+        assert_eq!(app_state.revision(), 0);
+
+        app_state
+            .dispatch(ControlCommand::CreateWorkspace {
+                label: "Docs".into(),
+            })
+            .expect("create workspace");
+        assert_eq!(app_state.revision(), 1);
+    }
+
+    #[test]
+    fn embedded_backend_disables_mock_runtime() {
+        let model = AppModel::new("Main");
+        let workspace = model.active_workspace().expect("workspace");
+        let pane = workspace.panes.get(&workspace.active_pane).expect("pane");
+        let surface_id = pane.active_surface;
+
+        let app_state = AppState::new(
+            model,
+            PathBuf::from("/tmp/taskers-session.json"),
+            BackendChoice::GhosttyEmbedded,
+            ShellLaunchSpec::fallback(),
+        )
+        .expect("app state");
+
+        assert_eq!(app_state.backend(), BackendChoice::GhosttyEmbedded);
+        assert_eq!(app_state.revision(), 0);
+        assert!(app_state.runtime().snapshot(surface_id).is_none());
     }
 }

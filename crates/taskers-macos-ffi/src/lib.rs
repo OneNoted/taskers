@@ -6,16 +6,30 @@ use std::{
     str::FromStr,
 };
 
+use serde::Deserialize;
 use taskers_control::{ControlCommand, default_socket_path};
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_domain::{PaneId, WorkspaceId};
-use taskers_ghostty::{BackendChoice, DefaultBackend, TerminalBackend};
+use taskers_ghostty::BackendChoice;
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration};
 
 pub struct TaskersMacosCore {
     app_state: AppState,
-    revision: u64,
     _socket_path: PathBuf,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CoreOptions {
+    #[serde(default)]
+    session_path: Option<PathBuf>,
+    #[serde(default)]
+    socket_path: Option<PathBuf>,
+    #[serde(default)]
+    configured_shell: Option<String>,
+    #[serde(default)]
+    demo: bool,
+    #[serde(default)]
+    backend: Option<BackendChoice>,
 }
 
 thread_local! {
@@ -35,19 +49,14 @@ fn clear_last_error() {
 }
 
 impl TaskersMacosCore {
-    fn new(
-        session_path: Option<PathBuf>,
-        socket_path: Option<PathBuf>,
-        configured_shell: Option<&str>,
-        demo: bool,
-    ) -> Result<Self, String> {
-        let session_path = session_path.unwrap_or_else(default_session_path);
-        let socket_path = socket_path.unwrap_or_else(default_socket_path);
-        let model = load_or_bootstrap(&session_path, demo)
+    fn new_with_options(options: CoreOptions) -> Result<Self, String> {
+        let session_path = options.session_path.unwrap_or_else(default_session_path);
+        let socket_path = options.socket_path.unwrap_or_else(default_socket_path);
+        let model = load_or_bootstrap(&session_path, options.demo)
             .map_err(|error| format!("failed to initialize session state: {error}"))?;
 
         let (mut shell_launch, shell_integration_error) =
-            match install_shell_integration(configured_shell) {
+            match install_shell_integration(options.configured_shell.as_deref()) {
                 Ok(integration) => (integration.launch_spec(), None),
                 Err(error) => (
                     ShellLaunchSpec::fallback(),
@@ -58,12 +67,7 @@ impl TaskersMacosCore {
             .env
             .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
 
-        let probe = DefaultBackend::probe(BackendChoice::Auto);
-        let backend_choice = if probe.selected == BackendChoice::Ghostty {
-            BackendChoice::Ghostty
-        } else {
-            BackendChoice::Mock
-        };
+        let backend_choice = options.backend.unwrap_or(BackendChoice::GhosttyEmbedded);
         let app_state = AppState::new(model, session_path, backend_choice, shell_launch)
             .map_err(|error| format!("failed to create shared app state: {error}"))?;
 
@@ -75,8 +79,22 @@ impl TaskersMacosCore {
 
         Ok(Self {
             app_state,
-            revision: 0,
             _socket_path: socket_path,
+        })
+    }
+
+    fn new(
+        session_path: Option<PathBuf>,
+        socket_path: Option<PathBuf>,
+        configured_shell: Option<&str>,
+        demo: bool,
+    ) -> Result<Self, String> {
+        Self::new_with_options(CoreOptions {
+            session_path,
+            socket_path,
+            configured_shell: configured_shell.map(str::to_string),
+            demo,
+            backend: Some(BackendChoice::GhosttyEmbedded),
         })
     }
 
@@ -92,16 +110,11 @@ impl TaskersMacosCore {
             .app_state
             .dispatch(command)
             .map_err(|error| format!("command failed: {error}"))?;
-        self.revision = self.revision.saturating_add(1);
         serde_json::to_string(&response)
             .map_err(|error| format!("failed to serialize response: {error}"))
     }
 
-    fn surface_descriptor_json(
-        &self,
-        workspace_id: &str,
-        pane_id: &str,
-    ) -> Result<String, String> {
+    fn surface_descriptor_json(&self, workspace_id: &str, pane_id: &str) -> Result<String, String> {
         let workspace_id = WorkspaceId::from_str(workspace_id)
             .map_err(|error| format!("invalid workspace id: {error}"))?;
         let pane_id =
@@ -146,10 +159,39 @@ fn optional_string_from_ptr(value: *const c_char) -> Result<Option<String>, Stri
     }
 }
 
+fn options_from_json_ptr(value: *const c_char) -> Result<CoreOptions, String> {
+    match optional_string_from_ptr(value)? {
+        Some(value) => serde_json::from_str(&value)
+            .map_err(|error| format!("failed to decode options JSON: {error}")),
+        None => Ok(CoreOptions::default()),
+    }
+}
+
 fn string_into_ptr(value: String) -> *mut c_char {
     match CString::new(value) {
         Ok(value) => value.into_raw(),
         Err(_) => ptr::null_mut(),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn taskers_macos_core_new_with_options_json(
+    options_json: *const c_char,
+) -> *mut TaskersMacosCore {
+    let options = match options_from_json_ptr(options_json) {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_error(error);
+            return ptr::null_mut();
+        }
+    };
+
+    match TaskersMacosCore::new_with_options(options) {
+        Ok(core) => Box::into_raw(Box::new(core)),
+        Err(error) => {
+            set_last_error(error);
+            ptr::null_mut()
+        }
     }
 }
 
@@ -226,12 +268,7 @@ pub extern "C" fn taskers_macos_core_new(
         }
     };
 
-    match TaskersMacosCore::new(
-        session_path,
-        socket_path,
-        configured_shell.as_deref(),
-        demo,
-    ) {
+    match TaskersMacosCore::new(session_path, socket_path, configured_shell.as_deref(), demo) {
         Ok(core) => Box::into_raw(Box::new(core)),
         Err(error) => {
             set_last_error(error);
@@ -252,9 +289,7 @@ pub extern "C" fn taskers_macos_core_free(core: *mut TaskersMacosCore) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn taskers_macos_core_snapshot_json(
-    core: *const TaskersMacosCore,
-) -> *mut c_char {
+pub extern "C" fn taskers_macos_core_snapshot_json(core: *const TaskersMacosCore) -> *mut c_char {
     with_core(core, TaskersMacosCore::snapshot_json)
         .map(string_into_ptr)
         .unwrap_or(ptr::null_mut())
@@ -311,14 +346,16 @@ pub extern "C" fn taskers_macos_core_surface_descriptor_json(
         }
     };
 
-    with_core(core, |core| core.surface_descriptor_json(&workspace_id, &pane_id))
-        .map(string_into_ptr)
-        .unwrap_or(ptr::null_mut())
+    with_core(core, |core| {
+        core.surface_descriptor_json(&workspace_id, &pane_id)
+    })
+    .map(string_into_ptr)
+    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn taskers_macos_core_revision(core: *const TaskersMacosCore) -> u64 {
-    with_core(core, |core| Ok(core.revision)).unwrap_or(0)
+    with_core(core, |core| Ok(core.app_state.revision())).unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
@@ -342,10 +379,10 @@ pub extern "C" fn taskers_macos_string_free(value: *mut c_char) {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use tempfile::tempdir;
 
-    use super::TaskersMacosCore;
+    use super::{CoreOptions, TaskersMacosCore};
 
     #[test]
     fn core_roundtrips_snapshot_and_dispatch_json() {
@@ -372,7 +409,7 @@ mod tests {
             response.get("status").and_then(Value::as_str),
             Some("workspace_created")
         );
-        assert_eq!(core.revision, 1);
+        assert_eq!(core.app_state.revision(), 1);
     }
 
     #[test]
@@ -390,7 +427,11 @@ mod tests {
 
         let model = core.app_state.snapshot_model();
         let workspace_id = model.active_workspace_id().expect("workspace").to_string();
-        let pane_id = model.active_workspace().expect("workspace").active_pane.to_string();
+        let pane_id = model
+            .active_workspace()
+            .expect("workspace")
+            .active_pane
+            .to_string();
 
         let descriptor = core
             .surface_descriptor_json(&workspace_id, &pane_id)
@@ -407,7 +448,33 @@ mod tests {
                 .and_then(Value::as_object)
                 .and_then(|env| env.get("TASKERS_SOCKET"))
                 .and_then(Value::as_str),
-            Some(temp.path().join("taskers.sock").to_str().expect("utf-8 socket path"))
+            Some(
+                temp.path()
+                    .join("taskers.sock")
+                    .to_str()
+                    .expect("utf-8 socket path")
+            )
+        );
+    }
+
+    #[test]
+    fn options_json_supports_explicit_mock_backend() {
+        let temp = tempdir().expect("tempdir");
+        let options = serde_json::from_value::<CoreOptions>(json!({
+            "session_path": temp.path().join("session.json"),
+            "socket_path": temp.path().join("taskers.sock"),
+            "configured_shell": "/bin/sh",
+            "backend": "mock"
+        }))
+        .expect("options");
+        let core = TaskersMacosCore::new_with_options(options).expect("core");
+
+        assert_eq!(core.app_state.revision(), 0);
+        assert!(
+            core.app_state
+                .snapshot_model()
+                .active_workspace_id()
+                .is_some()
         );
     }
 }

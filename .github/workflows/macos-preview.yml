@@ -1,0 +1,87 @@
+name: macOS Preview
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  macos-preview:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-15
+          - macos-15-intel
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install macOS build tools
+        run: |
+          brew update
+          brew install xcodegen zig
+
+      - name: Run shared Rust validation
+        run: |
+          cargo test -p taskers-control -p taskers-core -p taskers-macos-ffi
+          cargo check --workspace
+
+      - name: Generate Xcode project
+        run: ./scripts/generate_macos_project.sh
+
+      - name: Build and test Taskers.app
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project macos/Taskers.xcodeproj \
+            -scheme TaskersMac \
+            -configuration Debug \
+            -derivedDataPath build/macos/DerivedData \
+            -resultBundlePath build/macos/Taskers-${{ matrix.runner }}.xcresult \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            | tee build/macos/xcodebuild-test-${{ matrix.runner }}.log
+
+      - name: Smoke launch bundled app
+        run: |
+          APP_PATH="build/macos/DerivedData/Build/Products/Debug/Taskers.app"
+          if [[ ! -d "${APP_PATH}" ]]; then
+            echo "expected app bundle at ${APP_PATH}" >&2
+            exit 1
+          fi
+
+          TASKERS_SMOKE_TEST=1 \
+            "${APP_PATH}/Contents/MacOS/Taskers"
+
+      - name: Package unsigned app
+        if: always()
+        run: |
+          APP_PATH="build/macos/DerivedData/Build/Products/Debug/Taskers.app"
+          if [[ -d "${APP_PATH}" ]]; then
+            ditto -c -k --sequesterRsrc --keepParent \
+              "${APP_PATH}" \
+              "build/macos/Taskers-${{ matrix.runner }}.zip"
+          fi
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: taskers-macos-${{ matrix.runner }}
+          if-no-files-found: ignore
+          path: |
+            build/macos/Taskers-${{ matrix.runner }}.zip
+            build/macos/Taskers-${{ matrix.runner }}.xcresult
+            build/macos/xcodebuild-test-${{ matrix.runner }}.log
+            build/macos/DerivedData/Logs/Build/*.xcactivitylog

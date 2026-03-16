@@ -403,7 +403,8 @@ impl WorkspaceColumnRecord {
 
     fn normalize(&mut self, windows: &IndexMap<WorkspaceWindowId, WorkspaceWindowRecord>) {
         self.width = self.width.max(MIN_WORKSPACE_WINDOW_WIDTH);
-        self.window_order.retain(|window_id| windows.contains_key(window_id));
+        self.window_order
+            .retain(|window_id| windows.contains_key(window_id));
         if !self.window_order.contains(&self.active_window)
             && let Some(window_id) = self.window_order.first()
         {
@@ -581,7 +582,11 @@ impl Workspace {
             Direction::Up => self
                 .columns
                 .get_index(column_index)
-                .and_then(|(_, column)| window_index.checked_sub(1).and_then(|index| column.window_order.get(index)))
+                .and_then(|(_, column)| {
+                    window_index
+                        .checked_sub(1)
+                        .and_then(|index| column.window_order.get(index))
+                })
                 .copied(),
             Direction::Down => self
                 .columns
@@ -633,9 +638,8 @@ impl Workspace {
         let insert_index = index.min(self.columns.len());
         let mut next = IndexMap::with_capacity(self.columns.len() + 1);
         let mut pending = Some(column);
-        for (current_index, (column_id, current_column)) in std::mem::take(&mut self.columns)
-            .into_iter()
-            .enumerate()
+        for (current_index, (column_id, current_column)) in
+            std::mem::take(&mut self.columns).into_iter().enumerate()
         {
             if current_index == insert_index
                 && let Some(column) = pending.take()
@@ -709,14 +713,17 @@ impl Workspace {
 
         let mut assigned = BTreeSet::new();
         for column in self.columns.values_mut() {
-            column.window_order.retain(|window_id| assigned.insert(*window_id));
+            column
+                .window_order
+                .retain(|window_id| assigned.insert(*window_id));
             if !column.window_order.contains(&column.active_window)
                 && let Some(window_id) = column.window_order.first()
             {
                 column.active_window = *window_id;
             }
         }
-        self.columns.retain(|_, column| !column.window_order.is_empty());
+        self.columns
+            .retain(|_, column| !column.window_order.is_empty());
         self.append_missing_windows_to_columns();
 
         if self.columns.is_empty() {
@@ -1705,9 +1712,11 @@ impl AppModel {
             workspace
                 .notifications
                 .retain(|item| item.pane_id != pane_id);
-            if let Some(next_window_id) =
-                workspace.fallback_window_after_close(column_index, window_index, same_column_survived)
-            {
+            if let Some(next_window_id) = workspace.fallback_window_after_close(
+                column_index,
+                window_index,
+                same_column_survived,
+            ) {
                 workspace.sync_active_from_window(next_window_id);
             }
             return Ok(());
@@ -2003,10 +2012,12 @@ mod tests {
         assert_eq!(workspace.active_pane, stacked_pane);
         assert_eq!(right_column.window_order.len(), 2);
         assert_ne!(workspace.active_window, first_window_id);
-        assert!(workspace
-            .columns
-            .values()
-            .any(|column| column.window_order == vec![first_window_id]));
+        assert!(
+            workspace
+                .columns
+                .values()
+                .any(|column| column.window_order == vec![first_window_id])
+        );
         let upper_window_id = right_column.window_order[0];
         assert_eq!(
             workspace

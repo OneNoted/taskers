@@ -13,13 +13,14 @@ name = "taskers_macos_ffi"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 taskers-core.workspace = true
 taskers-control = { version = "0.2.1", path = "../taskers-control" }
 taskers-domain = { version = "0.2.1", path = "../taskers-domain" }
 taskers-ghostty = { version = "0.2.1", path = "../taskers-ghostty" }
 taskers-paths.workspace = true
 taskers-runtime = { version = "0.2.1", path = "../taskers-runtime" }
-serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -373,7 +373,9 @@ mod tests {
         );
         assert_eq!(
             paths.shell_runtime_dir(),
-            &PathBuf::from(format!("/Users/notes/Library/Caches/{APP_ID}/runtime/shell"))
+            &PathBuf::from(format!(
+                "/Users/notes/Library/Caches/{APP_ID}/runtime/shell"
+            ))
         );
     }
 
@@ -390,10 +392,22 @@ mod tests {
         };
         let paths = TaskersPaths::from_env(HostPlatform::Linux, &env);
 
-        assert_eq!(paths.config_path(), &PathBuf::from("/tmp/config/taskers/config.json"));
-        assert_eq!(paths.session_path(), &PathBuf::from("/tmp/state/taskers/session.json"));
-        assert_eq!(paths.ghostty_runtime_dir(), &PathBuf::from("/tmp/data/taskers/ghostty"));
-        assert_eq!(paths.shell_runtime_dir(), &PathBuf::from("/tmp/runtime/taskers/shell"));
+        assert_eq!(
+            paths.config_path(),
+            &PathBuf::from("/tmp/config/taskers/config.json")
+        );
+        assert_eq!(
+            paths.session_path(),
+            &PathBuf::from("/tmp/state/taskers/session.json")
+        );
+        assert_eq!(
+            paths.ghostty_runtime_dir(),
+            &PathBuf::from("/tmp/data/taskers/ghostty")
+        );
+        assert_eq!(
+            paths.shell_runtime_dir(),
+            &PathBuf::from("/tmp/runtime/taskers/shell")
+        );
         assert_eq!(paths.socket_path(), &PathBuf::from("/tmp/taskers.sock"));
     }
 
@@ -412,7 +426,10 @@ mod tests {
         assert_eq!(paths.config_path(), &PathBuf::from("/work/config.json"));
         assert_eq!(paths.session_path(), &PathBuf::from("/work/session.json"));
         assert_eq!(paths.socket_path(), &PathBuf::from("/work/control.sock"));
-        assert_eq!(paths.shell_runtime_dir(), &PathBuf::from("/work/runtime/shell"));
+        assert_eq!(
+            paths.shell_runtime_dir(),
+            &PathBuf::from("/work/runtime/shell")
+        );
         assert_eq!(paths.ghostty_runtime_dir(), &PathBuf::from("/work/ghostty"));
     }
 }

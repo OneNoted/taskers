@@ -109,7 +109,9 @@ impl ShortcutAction {
         match self {
             Self::ToggleOverview => "Zoom the current workspace out to fit the full column strip.",
             Self::CloseTerminal => "Close the active pane or active top-level window.",
-            Self::FocusLeft => "Move focus to the column on the left, then fall back to pane focus.",
+            Self::FocusLeft => {
+                "Move focus to the column on the left, then fall back to pane focus."
+            }
             Self::FocusRight => {
                 "Move focus to the column on the right, then fall back to pane focus."
             }
@@ -370,10 +372,9 @@ mod tests {
         let tempdir = tempdir().expect("tempdir");
         let config_path = tempdir.path().join("config.json");
         let mut config = AppConfig::default();
-        config.keybindings.set_accelerators(
-            ShortcutAction::FocusRight,
-            vec!["<Control><Shift>t".into()],
-        );
+        config
+            .keybindings
+            .set_accelerators(ShortcutAction::FocusRight, vec!["<Control><Shift>t".into()]);
 
         save_config(&config_path, &config).expect("config saved");
         let loaded = load_or_default(&config_path).expect("config loaded");
@@ -390,7 +391,9 @@ mod tests {
         let loaded = load_or_default(&config_path).expect("config loaded");
 
         assert_eq!(
-            loaded.keybindings.accelerators(ShortcutAction::ToggleOverview),
+            loaded
+                .keybindings
+                .accelerators(ShortcutAction::ToggleOverview),
             ShortcutAction::ToggleOverview
                 .default_accelerators()
                 .iter()
@@ -406,7 +409,9 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            loaded.keybindings.accelerators(ShortcutAction::CloseTerminal),
+            loaded
+                .keybindings
+                .accelerators(ShortcutAction::CloseTerminal),
             ShortcutAction::CloseTerminal
                 .default_accelerators()
                 .iter()
@@ -422,7 +427,11 @@ mod tests {
                 .default_accelerators()
                 .is_empty()
         );
-        assert!(ShortcutAction::NewWindowUp.default_accelerators().is_empty());
+        assert!(
+            ShortcutAction::NewWindowUp
+                .default_accelerators()
+                .is_empty()
+        );
         assert!(
             ShortcutAction::ResizeWindowLeft
                 .default_accelerators()

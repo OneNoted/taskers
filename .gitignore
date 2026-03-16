@@ -1,1 +1,4 @@
+build/
 dist/
+build/
+macos/Taskers.xcodeproj/

@@ -8,6 +8,7 @@ use thiserror::Error;
 pub enum BackendChoice {
     Auto,
     Ghostty,
+    GhosttyEmbedded,
     Mock,
 }
 
@@ -58,6 +59,7 @@ impl TerminalBackend for DefaultBackend {
         let env_override = std::env::var("TASKERS_TERMINAL_BACKEND").ok();
         let requested = match env_override.as_deref() {
             Some("ghostty") => BackendChoice::Ghostty,
+            Some("ghostty_embedded") | Some("ghostty-embedded") => BackendChoice::GhosttyEmbedded,
             Some("mock") => BackendChoice::Mock,
             _ => requested,
         };
@@ -69,6 +71,12 @@ impl TerminalBackend for DefaultBackend {
                 selected: BackendChoice::Mock,
                 availability: BackendAvailability::Fallback,
                 notes: "Using placeholder terminal surfaces.".into(),
+            },
+            BackendChoice::GhosttyEmbedded => BackendProbe {
+                requested,
+                selected: BackendChoice::GhosttyEmbedded,
+                availability: embedded_ghostty_availability(),
+                notes: embedded_ghostty_notes(),
             },
             BackendChoice::Ghostty => BackendProbe {
                 requested,
@@ -115,6 +123,18 @@ fn ghostty_availability() -> BackendAvailability {
     }
 }
 
+fn embedded_ghostty_availability() -> BackendAvailability {
+    #[cfg(target_os = "macos")]
+    {
+        BackendAvailability::Ready
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        BackendAvailability::Unavailable
+    }
+}
+
 fn ghostty_notes() -> String {
     let mut notes = String::from("Ghostty GTK bridge compiled in.");
     if let Some(path) = runtime_bridge_path() {
@@ -130,6 +150,10 @@ fn ghostty_notes() -> String {
     notes
 }
 
+fn embedded_ghostty_notes() -> String {
+    String::from("Embedded Ghostty surfaces require the native macOS host.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BackendAvailability, BackendChoice, DefaultBackend, TerminalBackend};
@@ -143,5 +167,25 @@ mod tests {
                 assert_eq!(probe.selected, BackendChoice::Mock);
             }
         }
+    }
+
+    #[test]
+    fn embedded_probe_stays_explicit() {
+        let probe = DefaultBackend::probe(BackendChoice::GhosttyEmbedded);
+        assert_eq!(probe.selected, BackendChoice::GhosttyEmbedded);
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(probe.availability, BackendAvailability::Ready);
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(probe.availability, BackendAvailability::Unavailable);
+    }
+
+    #[test]
+    fn env_override_accepts_hyphenated_embedded_backend() {
+        unsafe { std::env::set_var("TASKERS_TERMINAL_BACKEND", "ghostty-embedded") };
+        let probe = DefaultBackend::probe(BackendChoice::Mock);
+        unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
+        assert_eq!(probe.selected, BackendChoice::GhosttyEmbedded);
     }
 }
