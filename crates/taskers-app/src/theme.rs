@@ -288,13 +288,44 @@ pub fn load_theme(
     }
 }
 
-// ── Thread-local palette for agent icon draw functions ──
+// ── Thread-local state for live theme switching ──
 
 thread_local! {
     static ACTIVE_PALETTE: RefCell<Option<ThemePalette>> = const { RefCell::new(None) };
+    static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
 
-pub fn set_active_palette(palette: ThemePalette) {
+/// First-time theme installation: creates the CssProvider, attaches it to
+/// the display, and stores both it and the palette for later live updates.
+pub fn install_theme(palette: ThemePalette) {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(&generate_css(&palette));
+
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
+    CSS_PROVIDER.with(|cell| {
+        *cell.borrow_mut() = Some(provider);
+    });
+    ACTIVE_PALETTE.with(|cell| {
+        *cell.borrow_mut() = Some(palette);
+    });
+}
+
+/// Live-switch to a new theme without restarting. Reloads CSS on the
+/// existing provider and updates the palette thread-local.
+pub fn apply_theme(palette: ThemePalette) {
+    let css = generate_css(&palette);
+    CSS_PROVIDER.with(|cell| {
+        if let Some(provider) = cell.borrow().as_ref() {
+            provider.load_from_data(&css);
+        }
+    });
     ACTIVE_PALETTE.with(|cell| {
         *cell.borrow_mut() = Some(palette);
     });

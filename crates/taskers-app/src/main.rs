@@ -24,9 +24,8 @@ use app_state::AppState;
 use clap::Parser;
 use crash_reporter::CrashReporter;
 use gtk::{
-    Align, Box as GtkBox, Button, CssProvider, DrawingArea, Entry, Fixed, Label, Orientation,
-    Overlay, Paned, PolicyType, STYLE_PROVIDER_PRIORITY_APPLICATION, ScrolledWindow, Separator,
-    TextView, Widget, WrapMode, gdk, glib,
+    Align, Box as GtkBox, Button, DrawingArea, Entry, Fixed, Label, Orientation, Overlay, Paned,
+    PolicyType, ScrolledWindow, Separator, TextView, Widget, WrapMode, gdk, glib,
 };
 use pane_runtime::PaneRuntimeSnapshot;
 use serde_json::json;
@@ -701,7 +700,20 @@ impl UiHandle {
                     }
                 }
 
-                click_ui.toast("Theme saved. Relaunch Taskers to apply.");
+                // Live-apply the new theme.
+                let palette = if click_name == "dark" {
+                    theme::default_dark()
+                } else {
+                    themes::builtin_theme(&click_name).unwrap_or_else(theme::default_dark)
+                };
+                theme::apply_theme(palette);
+
+                // Invalidate all agent icon drawing areas so they pick up new colors.
+                for card in click_ui.pane_cards.borrow().values() {
+                    card.agent_icon.widget().queue_draw();
+                }
+
+                click_ui.toast("Theme applied.");
             });
 
             flow.insert(&card_button, -1);
@@ -1004,9 +1016,6 @@ impl UiHandle {
         update_activity_panel(self, &shell, model);
         update_layout(self, &shell, model);
         self.sync_desktop_notifications(model);
-        if model.active_workspace().is_some() && !self.overview_mode.get() {
-            self.queue_focus_active_pane_input(model);
-        }
     }
 
     fn sync_desktop_notifications(&self, model: &AppModel) {
@@ -1780,6 +1789,15 @@ impl UiHandle {
         } else {
             card.root.upcast()
         };
+
+        // Skip focus grab when the target (or a descendant like a Ghostty
+        // surface) already holds window focus.  Prevents GTK4 ScrolledWindow
+        // from auto-scrolling to make the focused child visible on every
+        // render cycle, which causes workspace canvas scroll snap-back.
+        if widget_contains_window_focus(&self.window, &target) {
+            return true;
+        }
+
         target.set_focusable(true);
         gtk::prelude::RootExt::set_focus(&self.window, Some(&target));
 
@@ -1983,9 +2001,8 @@ fn main() -> gtk::glib::ExitCode {
     };
     let _server_note = spawn_control_server(app_state.controller(), socket_path);
 
-    let (_theme_name, theme_palette) =
+    let (_theme_name, initial_theme_palette) =
         theme::load_theme(app_config.theme.as_deref(), themes::builtin_theme);
-    theme::set_active_palette(theme_palette.clone());
 
     let startup = StartupContext {
         app_state,
@@ -2012,7 +2029,7 @@ fn main() -> gtk::glib::ExitCode {
     let startup_for_build = Rc::clone(&startup);
     let hold_guard_for_startup = Rc::clone(&hold_guard);
     app.connect_startup(move |app| {
-        install_css(&theme_palette);
+        theme::install_theme(initial_theme_palette.clone());
         *hold_guard_for_startup.borrow_mut() = Some(app.hold());
         if let Some(startup) = startup_for_build.borrow_mut().take() {
             build_ui(app, startup, Rc::clone(&hold_guard_for_startup));
@@ -6327,15 +6344,4 @@ fn humanize_theme_name(name: &str) -> String {
         .join(" ")
 }
 
-fn install_css(palette: &theme::ThemePalette) {
-    let provider = CssProvider::new();
-    provider.load_from_data(&theme::generate_css(palette));
 
-    if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
-}
