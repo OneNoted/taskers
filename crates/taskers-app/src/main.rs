@@ -1471,8 +1471,8 @@ impl UiHandle {
         header.add_css_class("pane-header");
         header.set_margin_start(6);
         header.set_margin_end(4);
-        header.set_margin_top(1);
-        header.set_margin_bottom(1);
+        header.set_margin_top(2);
+        header.set_margin_bottom(2);
 
         let agent_icon = build_agent_icon(pane.active_surface().and_then(surface_agent_kind), 14);
         agent_icon.add_css_class("pane-agent-icon");
@@ -1482,6 +1482,7 @@ impl UiHandle {
         title.add_css_class("pane-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         header.append(&title);
 
         let status_dot = Label::new(Some("\u{25cf}"));
@@ -2370,10 +2371,8 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     // --- Sidebar ---
     let sidebar = GtkBox::new(Orientation::Vertical, 2);
     sidebar.add_css_class("workspace-sidebar");
-    sidebar.set_margin_start(8);
-    sidebar.set_margin_end(8);
-    sidebar.set_margin_top(8);
-    sidebar.set_margin_bottom(8);
+    sidebar.set_margin_top(4);
+    sidebar.set_margin_bottom(4);
 
     let sidebar_header = GtkBox::new(Orientation::Horizontal, 8);
     sidebar_header.set_margin_bottom(6);
@@ -2427,6 +2426,7 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     workspace_name_label.add_css_class("workspace-header-label");
     workspace_name_label.set_xalign(0.0);
     workspace_name_label.set_hexpand(true);
+    workspace_name_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     workspace_header.append(&workspace_name_label);
 
     // New-window popover button
@@ -2551,10 +2551,6 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     // --- Attention column ---
     let attention_panel = GtkBox::new(Orientation::Vertical, 6);
     attention_panel.add_css_class("attention-panel");
-    attention_panel.set_margin_start(8);
-    attention_panel.set_margin_end(8);
-    attention_panel.set_margin_top(8);
-    attention_panel.set_margin_bottom(8);
 
     let attention_header = GtkBox::new(Orientation::Horizontal, 8);
     let attention_label = Label::new(Some("Attention"));
@@ -2652,7 +2648,9 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             heading.append(&label);
             row.append(&heading);
 
-            if let Some(preview_text) = workspace_preview_text(&summary) {
+            if let Some(preview_text) = workspace_preview_text(&summary)
+                .filter(|text| text.len() > 2)
+            {
                 let preview = Label::new(Some(&preview_text));
                 preview.add_css_class("workspace-preview");
                 preview.set_xalign(0.0);
@@ -2663,6 +2661,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
 
             if let Some(workspace) = model.workspaces.get(&summary.workspace_id)
                 && let Some(meta_text) = workspace_metadata_line(workspace)
+                    .filter(|text| text.len() > 2)
             {
                 let meta = Label::new(Some(&meta_text));
                 meta.add_css_class("workspace-meta");
@@ -2688,6 +2687,7 @@ fn update_sidebar(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             close_btn.add_css_class("workspace-close");
             close_btn.set_tooltip_text(Some("Delete workspace"));
             close_btn.set_valign(Align::Center);
+            close_btn.set_opacity(0.0);
             let close_ui = Rc::clone(ui);
             let close_ws_id = summary.workspace_id;
             close_btn.connect_clicked(move |_| {

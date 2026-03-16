@@ -360,6 +360,11 @@ pub fn generate_css(p: &ThemePalette) -> String {
         window {{
             background: {base};
             color: {text};
+            font-family: \"IBM Plex Sans\", \"SF Pro Text\", system-ui, sans-serif;
+        }}
+
+        label {{
+            line-height: 1.35;
         }}
 
         headerbar {{
@@ -378,13 +383,13 @@ pub fn generate_css(p: &ThemePalette) -> String {
         w,
         "
         paned > separator {{
-            background: {border_07};
+            background: {border_04};
             min-width: 1px;
             min-height: 1px;
             padding: 0;
         }}
         ",
-        border_07 = rgba(p.border, 0.07),
+        border_04 = rgba(p.border, 0.04),
     );
 
     // ── Sidebar ──
@@ -393,15 +398,17 @@ pub fn generate_css(p: &ThemePalette) -> String {
         "
         .workspace-sidebar {{
             background: {surface};
-            border-right: 1px solid {border_07};
+            border-right: 1px solid {border_04};
+            padding: 4px 6px;
         }}
 
         .sidebar-heading {{
             font-weight: 600;
-            font-size: 0.72rem;
+            font-size: 0.74rem;
             color: {text_dim};
             letter-spacing: 0.10em;
             text-transform: uppercase;
+            margin-bottom: 2px;
         }}
 
         .workspace-add {{
@@ -479,7 +486,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
 
         .workspace-meta {{
             color: {text_dim};
-            font-size: 0.68rem;
+            font-size: 0.70rem;
             letter-spacing: 0.01em;
         }}
 
@@ -505,6 +512,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
 
         .workspace-status-badge-idle {{
             color: {text_faint};
+            opacity: 0;
         }}
 
         .workspace-status-badge-state-busy {{
@@ -583,7 +591,12 @@ pub fn generate_css(p: &ThemePalette) -> String {
             min-height: 22px;
             padding: 0;
             font-size: 0.85rem;
-            transition: background 160ms ease-in-out, color 160ms ease-in-out;
+            opacity: 0;
+            transition: opacity 160ms ease-in-out, background 160ms ease-in-out, color 160ms ease-in-out;
+        }}
+
+        .workspace-row:hover .workspace-close {{
+            opacity: 1;
         }}
 
         .workspace-close:hover {{
@@ -609,7 +622,6 @@ pub fn generate_css(p: &ThemePalette) -> String {
         surface = p.surface.to_hex(),
         border_04 = rgba(p.border, 0.04),
         border_05 = rgba(p.border, 0.05),
-        border_07 = rgba(p.border, 0.07),
         border_10 = rgba(p.border, 0.10),
         text = p.text.to_hex(),
         text_bright = p.text_bright.to_hex(),
@@ -658,12 +670,12 @@ pub fn generate_css(p: &ThemePalette) -> String {
         "
         .workspace-header {{
             border-bottom: 1px solid {border_07};
-            padding: 4px 0;
+            padding: 6px 0;
         }}
 
         .workspace-header-label {{
             font-weight: 600;
-            font-size: 0.82rem;
+            font-size: 0.84rem;
             color: {text_bright};
         }}
 
@@ -696,7 +708,8 @@ pub fn generate_css(p: &ThemePalette) -> String {
         "
         .attention-panel {{
             background: {surface};
-            border-left: 1px solid {border_07};
+            border-left: 1px solid {border_04};
+            padding: 6px 12px;
         }}
 
         .activity-item-button {{
@@ -731,7 +744,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
 
         .activity-meta {{
             color: {text_dim};
-            font-size: 0.68rem;
+            font-size: 0.70rem;
         }}
 
         .activity-preview {{
@@ -745,7 +758,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
             border: 1px solid {border_10};
             border-radius: 999px;
             padding: 2px 8px;
-            font-size: 0.68rem;
+            font-size: 0.70rem;
             font-weight: 600;
             min-height: 0;
             transition: background 160ms ease-in-out, color 160ms ease-in-out, border-color 160ms ease-in-out;
@@ -759,12 +772,12 @@ pub fn generate_css(p: &ThemePalette) -> String {
 
         .activity-time {{
             color: {text_faint};
-            font-size: 0.68rem;
+            font-size: 0.70rem;
         }}
         ",
         surface = p.surface.to_hex(),
         border_03 = rgba(p.border, 0.03),
-        border_07 = rgba(p.border, 0.07),
+        border_04 = rgba(p.border, 0.04),
         border_10 = rgba(p.border, 0.10),
         text_dim = p.text_dim.to_hex(),
         text_faint = p.text_faint.to_hex(),
@@ -896,7 +909,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
         .pane-header {{
             background: {border_02};
             border-bottom: 1px solid {border_05};
-            padding: 2px 0;
+            padding: 4px 2px;
             transition: background 160ms ease-in-out;
         }}
 
@@ -941,7 +954,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
         .pane-title {{
             font-weight: 500;
             color: {text_muted};
-            font-size: 0.72rem;
+            font-size: 0.74rem;
         }}
 
         .pane-card-active .pane-title {{
@@ -1076,7 +1089,7 @@ pub fn generate_css(p: &ThemePalette) -> String {
             background: {border_03};
             border: 1px solid {border_07};
             border-radius: 6px;
-            padding: 2px 6px;
+            padding: 3px 8px;
             transition: background 160ms ease-in-out, border-color 160ms ease-in-out;
         }}
 
@@ -1180,7 +1193,9 @@ pub fn generate_css(p: &ThemePalette) -> String {
         w,
         "
         .status-dot {{
-            font-size: 0.5rem;
+            font-size: 0.55rem;
+            min-width: 10px;
+            min-height: 10px;
         }}
 
         .status-dot-normal {{ color: {text_faint}; }}
@@ -1202,7 +1217,8 @@ pub fn generate_css(p: &ThemePalette) -> String {
         "
         .empty-state {{
             color: {text_faint};
-            font-size: 0.85rem;
+            font-size: 0.80rem;
+            margin-top: 4px;
         }}
         ",
         text_faint = p.text_faint.to_hex(),
@@ -1292,6 +1308,20 @@ pub fn generate_css(p: &ThemePalette) -> String {
         error = p.error.to_hex(),
         accent_12 = rgba(p.accent, 0.12),
         error_12 = rgba(p.error, 0.12),
+    );
+
+    // ── Utility classes ──
+    let _ = write!(
+        w,
+        "
+        .dim-label {{
+            opacity: 0.6;
+        }}
+
+        .monospace {{
+            font-family: Monospace;
+        }}
+        ",
     );
 
     // ── Settings dialog ──
