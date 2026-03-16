@@ -3,7 +3,8 @@ use uuid::Uuid;
 
 use taskers_domain::{
     AppModel, Direction, PaneId, PaneKind, PaneMetadataPatch, PersistedSession, SignalEvent,
-    SplitAxis, SurfaceId, WindowFrame, WindowId, WorkspaceId, WorkspaceViewport, WorkspaceWindowId,
+    SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceViewport,
+    WorkspaceWindowId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,10 +52,15 @@ pub enum ControlCommand {
         direction: Direction,
         amount: i32,
     },
-    SetWorkspaceWindowFrame {
+    SetWorkspaceColumnWidth {
+        workspace_id: WorkspaceId,
+        workspace_column_id: WorkspaceColumnId,
+        width: i32,
+    },
+    SetWorkspaceWindowHeight {
         workspace_id: WorkspaceId,
         workspace_window_id: WorkspaceWindowId,
-        frame: WindowFrame,
+        height: i32,
     },
     SetWindowSplitRatio {
         workspace_id: WorkspaceId,
