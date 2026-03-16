@@ -1100,6 +1100,10 @@ impl UiHandle {
             active_layout_pane_ids,
             active_workspace_label,
             active_window_id,
+            active_pane_id,
+            active_surface_id,
+            active_displayed_surface_id,
+            active_terminal_child_count,
             workspace_window_ids,
             workspace_windows,
         ) = model.active_workspace().map_or_else(
@@ -1109,6 +1113,10 @@ impl UiHandle {
                     Vec::new(),
                     None,
                     None::<String>,
+                    None::<String>,
+                    None::<String>,
+                    None::<String>,
+                    0usize,
                     Vec::<String>::new(),
                     Vec::<serde_json::Value>::new(),
                 )
@@ -1134,6 +1142,24 @@ impl UiHandle {
                         .collect(),
                     Some(workspace.label.clone()),
                     Some(workspace.active_window.to_string()),
+                    Some(workspace.active_pane.to_string()),
+                    workspace
+                        .panes
+                        .get(&workspace.active_pane)
+                        .map(|pane| pane.active_surface.to_string()),
+                    self.pane_cards
+                        .borrow()
+                        .get(&workspace.active_pane)
+                        .and_then(|card| {
+                            card.displayed_surface_id
+                                .get()
+                                .map(|surface_id| surface_id.to_string())
+                        }),
+                    self.pane_cards
+                        .borrow()
+                        .get(&workspace.active_pane)
+                        .map(|card| count_widget_children(card.terminal_host.upcast_ref()))
+                        .unwrap_or(0),
                     sorted_id_strings(workspace.windows.keys().copied()),
                     workspace_display_window_placements(workspace, render_context)
                         .into_iter()
@@ -1171,6 +1197,10 @@ impl UiHandle {
             "active_workspace_id": model.active_workspace_id().map(|id| id.to_string()),
             "active_workspace_label": active_workspace_label,
             "active_workspace_window_id": active_window_id,
+            "active_workspace_pane_id": active_pane_id,
+            "active_workspace_surface_id": active_surface_id,
+            "active_displayed_surface_id": active_displayed_surface_id,
+            "active_terminal_child_count": active_terminal_child_count,
             "active_workspace_window_ids": workspace_window_ids,
             "active_workspace_windows": workspace_windows,
             "all_live_pane_ids": all_live_pane_ids,
@@ -3134,7 +3164,9 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
         let should_reveal = needs_rebuild
             || previous_workspace_id != Some(workspace.id)
             || previous_active_window != Some(workspace.active_window);
-        if should_focus_input {
+        let should_recover_scroller_focus =
+            active_pane_needs_scroller_focus_recovery(ui.as_ref(), shell, workspace);
+        if should_focus_input || should_recover_scroller_focus {
             ui.queue_focus_active_pane_input(model);
         }
         if overview_mode {
@@ -5276,6 +5308,27 @@ fn pane_focus_target(
             }
         })
         .unwrap_or_else(|| card.root.clone().upcast())
+}
+
+fn active_pane_needs_scroller_focus_recovery(
+    ui: &UiHandle,
+    shell: &ShellWidgets,
+    workspace: &Workspace,
+) -> bool {
+    let Some(card) = ui.pane_cards.borrow().get(&workspace.active_pane).cloned() else {
+        return false;
+    };
+    let target = pane_focus_target(ui, workspace, workspace.active_pane, &card);
+    if widget_contains_window_focus(&ui.window, &target) {
+        return false;
+    }
+
+    let Some(focused_widget) = gtk::prelude::GtkWindowExt::focus(&ui.window) else {
+        return false;
+    };
+
+    focused_widget.type_().name() == "GtkScrolledWindow"
+        && widget_is_descendant_of(&focused_widget, shell.layout_scroll.upcast_ref())
 }
 
 fn widget_is_descendant_of(widget: &Widget, ancestor: &Widget) -> bool {
