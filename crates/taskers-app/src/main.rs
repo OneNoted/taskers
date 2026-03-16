@@ -4781,6 +4781,11 @@ fn sync_surface_tabs(
     let layout = compute_surface_tab_strip_layout(&card.surface_tabs, &display_order);
     set_surface_tab_layout(&card.surface_tabs, layout, animations_enabled);
     apply_surface_tab_widgets(&card.surface_tabs);
+
+    // Auto-hide the tab strip when there is only one surface
+    card.surface_tabs
+        .root
+        .set_visible(pane.surfaces.len() > 1);
 }
 
 fn build_surface_tab_strip(
