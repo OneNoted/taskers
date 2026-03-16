@@ -128,6 +128,7 @@ struct PaneCardWidgets {
     agent_icon: AgentIconWidget,
     title: Label,
     status_dot: Label,
+    resize_button: Button,
     surface_tabs: SurfaceTabStripWidgets,
     terminal_host: GtkBox,
     displayed_surface_id: Rc<Cell<Option<SurfaceId>>>,
@@ -1355,6 +1356,29 @@ impl UiHandle {
         });
         header.append(&split_down_btn);
 
+        let resize_button = Button::with_label("Resize");
+        resize_button.add_css_class("pane-action");
+        resize_button.add_css_class("pane-window-action");
+        resize_button.set_tooltip_text(Some("Resize this top-level window"));
+        resize_button.set_visible(false);
+        let resize_btn_ref = resize_button.clone();
+        let resize_ui = Rc::clone(self);
+        let resize_pane_id = pane.id;
+        resize_button.connect_clicked(move |_| {
+            let model = resize_ui.app_state.snapshot_model();
+            if let Some(ws) = model.workspaces.get(&workspace_id) {
+                if let Some(win_id) = ws.window_for_pane(resize_pane_id) {
+                    show_resize_window_popover(
+                        &resize_btn_ref,
+                        &resize_ui,
+                        workspace_id,
+                        win_id,
+                    );
+                }
+            }
+        });
+        header.append(&resize_button);
+
         let close_button = Button::with_label("\u{00d7}");
         close_button.add_css_class("pane-close");
         close_button.add_css_class("pane-close-action");
@@ -1533,6 +1557,7 @@ impl UiHandle {
             agent_icon,
             title,
             status_dot,
+            resize_button,
             surface_tabs,
             terminal_host,
         };
@@ -1603,6 +1628,20 @@ impl UiHandle {
             .add_css_class(&attention_dot_class(pane_attention));
         card.status_dot
             .set_tooltip_text(Some(pane_attention.label()));
+
+        // Show resize button only when pane is the sole pane in a single-pane window
+        let model = self.app_state.snapshot_model();
+        let is_sole_pane = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|ws| {
+                let win_id = ws.window_for_pane(pane.id)?;
+                let window = ws.windows.get(&win_id)?;
+                Some(window.layout.is_leaf())
+            })
+            .unwrap_or(false);
+        card.resize_button.set_visible(is_sole_pane);
+
         sync_surface_tabs(self, workspace_id, pane, &card);
         sync_terminal_body(self, workspace_id, pane, &card);
     }
@@ -3670,6 +3709,13 @@ fn build_workspace_window_widget(
     root.set_hexpand(true);
     root.set_vexpand(true);
 
+    let is_single_pane = window.layout.is_leaf();
+    let header_height = if is_single_pane {
+        0
+    } else {
+        WORKSPACE_WINDOW_HEADER_HEIGHT
+    };
+
     let window_title = workspace_window_title(workspace, window);
     let window_header = GtkBox::new(Orientation::Horizontal, 6);
     window_header.add_css_class("workspace-window-toolbar");
@@ -3678,6 +3724,7 @@ fn build_workspace_window_widget(
     window_header.set_margin_end(8);
     window_header.set_margin_top(6);
     window_header.set_margin_bottom(4);
+    window_header.set_visible(!is_single_pane);
 
     let header_title = Label::new(Some(&window_title));
     header_title.add_css_class("workspace-window-toolbar-title");
@@ -3866,8 +3913,8 @@ fn build_workspace_window_widget(
     root.add_controller(wctx_click);
 
     let body_frame = WindowFrame {
-        y: display_frame.y + WORKSPACE_WINDOW_HEADER_HEIGHT,
-        height: (display_frame.height - WORKSPACE_WINDOW_HEADER_HEIGHT).max(1),
+        y: display_frame.y + header_height,
+        height: (display_frame.height - header_height).max(1),
         ..display_frame
     };
 
