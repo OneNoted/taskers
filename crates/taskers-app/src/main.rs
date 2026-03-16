@@ -636,300 +636,40 @@ impl UiHandle {
             gtk::DialogFlags::MODAL,
             &[("Close", gtk::ResponseType::Close)],
         );
-        dialog.set_default_size(580, 520);
+        dialog.set_default_size(640, 560);
         dialog.connect_response(|dialog, _| dialog.close());
 
-        let scroll = ScrolledWindow::new();
-        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-        scroll.set_vexpand(true);
+        let stack = gtk::Stack::new();
+        stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+        stack.set_transition_duration(150);
+        stack.set_vexpand(true);
 
-        let content = GtkBox::new(Orientation::Vertical, 14);
-        content.set_margin_start(18);
-        content.set_margin_end(18);
-        content.set_margin_top(18);
-        content.set_margin_bottom(18);
+        stack.add_titled(
+            &build_settings_theme_page(self),
+            Some("theme"),
+            "Theme",
+        );
+        stack.add_titled(
+            &build_settings_general_page(self),
+            Some("general"),
+            "General",
+        );
+        stack.add_titled(
+            &build_settings_shortcuts_page(self),
+            Some("shortcuts"),
+            "Keyboard shortcuts",
+        );
 
-        // ── Theme section ──
-        let theme_heading = Label::new(Some("Theme"));
-        theme_heading.set_xalign(0.0);
-        theme_heading.add_css_class("settings-section-title");
-        content.append(&theme_heading);
+        let switcher = gtk::StackSwitcher::new();
+        switcher.set_stack(Some(&stack));
+        switcher.set_halign(Align::Center);
+        switcher.add_css_class("settings-nav");
 
-        let current_theme = self
-            .settings
-            .borrow()
-            .theme
-            .clone()
-            .unwrap_or_else(|| "dark".into());
+        let layout = GtkBox::new(Orientation::Vertical, 0);
+        layout.append(&switcher);
+        layout.append(&stack);
 
-        let flow = gtk::FlowBox::new();
-        flow.set_max_children_per_line(3);
-        flow.set_min_children_per_line(2);
-        flow.set_homogeneous(true);
-        flow.set_row_spacing(8);
-        flow.set_column_spacing(8);
-        flow.set_selection_mode(gtk::SelectionMode::None);
-
-        for &name in themes::BUILTIN_NAMES {
-            let palette = if name == "dark" {
-                theme::default_dark()
-            } else {
-                themes::builtin_theme(name).unwrap_or_else(theme::default_dark)
-            };
-            let is_active = name == current_theme;
-            let card = build_theme_card(name, &palette, is_active);
-
-            let card_button = Button::new();
-            card_button.set_child(Some(&card));
-            card_button.add_css_class("flat");
-
-            let click_ui = Rc::clone(self);
-            let click_name = name.to_string();
-            let click_flow = flow.clone();
-            card_button.connect_clicked(move |_| {
-                let theme_value = if click_name == "dark" {
-                    None
-                } else {
-                    Some(click_name.clone())
-                };
-                let mut next_settings = click_ui.settings.borrow().clone();
-                next_settings.theme = theme_value;
-                if let Err(error) =
-                    settings_store::save_config(&click_ui.config_path, &next_settings)
-                {
-                    click_ui.toast(&format!("Failed to save theme: {error}"));
-                    return;
-                }
-                *click_ui.settings.borrow_mut() = next_settings;
-
-                // Update active card styling across the grid.
-                let mut idx = 0;
-                while let Some(child) = click_flow.child_at_index(idx) {
-                    if let Some(btn) = child.child().and_then(|w| w.downcast::<Button>().ok()) {
-                        if let Some(inner) = btn.child().and_then(|w| w.downcast::<GtkBox>().ok())
-                        {
-                            inner.remove_css_class("theme-card-active");
-                        }
-                    }
-                    idx += 1;
-                }
-                if let Some(me) = click_flow.child_at_index(
-                    themes::BUILTIN_NAMES
-                        .iter()
-                        .position(|n| *n == click_name)
-                        .unwrap_or(0) as i32,
-                ) {
-                    if let Some(btn) = me.child().and_then(|w| w.downcast::<Button>().ok()) {
-                        if let Some(inner) = btn.child().and_then(|w| w.downcast::<GtkBox>().ok())
-                        {
-                            inner.add_css_class("theme-card-active");
-                        }
-                    }
-                }
-
-                // Live-apply the new theme.
-                let palette = if click_name == "dark" {
-                    theme::default_dark()
-                } else {
-                    themes::builtin_theme(&click_name).unwrap_or_else(theme::default_dark)
-                };
-                theme::apply_theme(palette);
-
-                // Invalidate all agent icon drawing areas so they pick up new colors.
-                for card in click_ui.pane_cards.borrow().values() {
-                    card.agent_icon.widget().queue_draw();
-                }
-
-                click_ui.toast("Theme applied.");
-            });
-
-            flow.insert(&card_button, -1);
-        }
-        content.append(&flow);
-
-        let sep = Separator::new(Orientation::Horizontal);
-        sep.add_css_class("context-separator");
-        content.append(&sep);
-
-        // ── General section ──
-        let general_heading = Label::new(Some("General"));
-        general_heading.set_xalign(0.0);
-        general_heading.add_css_class("settings-section-title");
-        content.append(&general_heading);
-
-        // Animations toggle
-        let anim_row = GtkBox::new(Orientation::Horizontal, 12);
-        anim_row.add_css_class("settings-row");
-        let anim_details = GtkBox::new(Orientation::Vertical, 4);
-        anim_details.set_hexpand(true);
-
-        let anim_title = Label::new(Some("Animations"));
-        anim_title.set_xalign(0.0);
-        anim_title.add_css_class("pane-title");
-        anim_details.append(&anim_title);
-
-        let anim_detail = Label::new(Some(
-            "Animate terminal lifecycle changes, including pane/window create-delete transitions and surface tab open-close motion.",
-        ));
-        anim_detail.set_xalign(0.0);
-        anim_detail.set_wrap(true);
-        anim_detail.add_css_class("dim-label");
-        anim_details.append(&anim_detail);
-        anim_row.append(&anim_details);
-
-        let anim_switch = gtk::Switch::new();
-        anim_switch.set_active(self.settings.borrow().animations_enabled);
-        anim_switch.set_valign(Align::Center);
-        let anim_ui = Rc::clone(self);
-        anim_switch.connect_state_set(move |_, active| {
-            let mut next_settings = anim_ui.settings.borrow().clone();
-            next_settings.animations_enabled = active;
-            if let Err(error) = settings_store::save_config(&anim_ui.config_path, &next_settings) {
-                anim_ui.toast(&format!("Failed to save settings: {error}"));
-            }
-            *anim_ui.settings.borrow_mut() = next_settings;
-            glib::Propagation::Proceed
-        });
-        anim_row.append(&anim_switch);
-        content.append(&anim_row);
-
-        // Shell program
-        let shell_row = GtkBox::new(Orientation::Horizontal, 12);
-        shell_row.add_css_class("settings-row");
-        let shell_details = GtkBox::new(Orientation::Vertical, 4);
-        shell_details.set_hexpand(true);
-
-        let shell_title = Label::new(Some("Shell program"));
-        shell_title.set_xalign(0.0);
-        shell_title.add_css_class("pane-title");
-        shell_details.append(&shell_title);
-
-        let system_shell = default_shell_program();
-        let shell_detail = Label::new(Some(&format!(
-            "Optional shell override for new panes. Leave empty to use the system login shell (currently {}). Relaunch Taskers after changing this.",
-            system_shell.display()
-        )));
-        shell_detail.set_xalign(0.0);
-        shell_detail.set_wrap(true);
-        shell_detail.add_css_class("dim-label");
-        shell_details.append(&shell_detail);
-        shell_row.append(&shell_details);
-
-        let shell_entry = Entry::new();
-        shell_entry.set_hexpand(true);
-        shell_entry.set_width_chars(24);
-        shell_entry.set_placeholder_text(Some("System default login shell"));
-        if let Some(program) = self.settings.borrow().shell.program.as_deref() {
-            shell_entry.set_text(program);
-        }
-        let activate_ui = Rc::clone(self);
-        shell_entry.connect_activate(move |entry| {
-            let text = entry.text().to_string();
-            if let Err(error) = activate_ui.set_shell_program(Some(text.clone())) {
-                activate_ui.toast(&error);
-                return;
-            }
-            let normalized = text.trim().to_string();
-            entry.set_text(&normalized);
-            activate_ui.toast("Shell setting saved. Relaunch Taskers to apply.");
-        });
-        let focus_ui = Rc::clone(self);
-        shell_entry.connect_notify_local(Some("has-focus"), move |entry, _| {
-            if entry.has_focus() {
-                return;
-            }
-
-            let text = entry.text().to_string();
-            if let Err(error) = focus_ui.set_shell_program(Some(text.clone())) {
-                focus_ui.toast(&error);
-                return;
-            }
-            entry.set_text(text.trim());
-        });
-        shell_row.append(&shell_entry);
-
-        let reset_shell = Button::with_label("Use system");
-        let reset_ui = Rc::clone(self);
-        let reset_entry = shell_entry.clone();
-        reset_shell.connect_clicked(move |_| {
-            if let Err(error) = reset_ui.set_shell_program(None) {
-                reset_ui.toast(&error);
-                return;
-            }
-            reset_entry.set_text("");
-            reset_ui.toast("Shell setting cleared. Relaunch Taskers to apply.");
-        });
-        shell_row.append(&reset_shell);
-        content.append(&shell_row);
-
-        let sep = Separator::new(Orientation::Horizontal);
-        sep.add_css_class("context-separator");
-        content.append(&sep);
-
-        // ── Keyboard shortcuts section ──
-        let kb_heading = Label::new(Some("Keyboard shortcuts"));
-        kb_heading.set_xalign(0.0);
-        kb_heading.add_css_class("settings-section-title");
-        content.append(&kb_heading);
-
-        let intro = Label::new(Some(
-            "Workspace navigation, top-level window management, split actions, and overview are all configurable here.",
-        ));
-        intro.set_wrap(true);
-        intro.set_xalign(0.0);
-        intro.add_css_class("dim-label");
-        content.append(&intro);
-
-        for action in ShortcutAction::ALL {
-            let row = GtkBox::new(Orientation::Horizontal, 12);
-            row.add_css_class("settings-row");
-
-            let details = GtkBox::new(Orientation::Vertical, 4);
-            details.set_hexpand(true);
-
-            let title = Label::new(Some(action.label()));
-            title.set_xalign(0.0);
-            title.add_css_class("pane-title");
-            details.append(&title);
-
-            let detail = Label::new(Some(action.detail()));
-            detail.set_xalign(0.0);
-            detail.set_wrap(true);
-            detail.add_css_class("dim-label");
-            details.append(&detail);
-
-            row.append(&details);
-
-            let shortcut_label = Label::new(Some(&self.shortcut_label(action)));
-            shortcut_label.set_width_chars(28);
-            shortcut_label.set_xalign(1.0);
-            shortcut_label.add_css_class("monospace");
-            row.append(&shortcut_label);
-
-            let change_button = Button::with_label("Change");
-            let change_ui = Rc::clone(self);
-            let change_label = shortcut_label.clone();
-            change_button.connect_clicked(move |_| {
-                change_ui.present_shortcut_capture_dialog(action, &change_label);
-            });
-            row.append(&change_button);
-
-            let reset_button = Button::with_label("Reset");
-            let reset_ui = Rc::clone(self);
-            let reset_label = shortcut_label.clone();
-            reset_button.connect_clicked(move |_| {
-                match reset_ui.reset_shortcuts(action) {
-                    Ok(next_label) => reset_label.set_text(&next_label),
-                    Err(error) => reset_ui.toast(&error),
-                }
-            });
-            row.append(&reset_button);
-
-            content.append(&row);
-        }
-
-        scroll.set_child(Some(&content));
-        dialog.content_area().append(&scroll);
+        dialog.content_area().append(&layout);
         dialog.present();
     }
 
@@ -6356,6 +6096,343 @@ fn spawn_control_server(controller: InMemoryController, socket_path: PathBuf) ->
     });
 
     note
+}
+
+// ── Settings page builders ──
+
+fn build_settings_theme_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+
+    let content = GtkBox::new(Orientation::Vertical, 8);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    content.set_margin_top(14);
+    content.set_margin_bottom(18);
+
+    let current_theme = ui
+        .settings
+        .borrow()
+        .theme
+        .clone()
+        .unwrap_or_else(|| "dark".into());
+
+    // Collect all FlowBoxes so the click handler can clear active styling across families.
+    let all_flows: Rc<RefCell<Vec<gtk::FlowBox>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let mut prev_family = "";
+    let mut current_flow: Option<gtk::FlowBox> = None;
+
+    for &name in themes::BUILTIN_NAMES {
+        let family = themes::theme_family(name);
+
+        if family != prev_family {
+            // Flush previous FlowBox.
+            if let Some(flow) = current_flow.take() {
+                content.append(&flow);
+            }
+
+            let heading = Label::new(Some(family));
+            heading.set_xalign(0.0);
+            heading.add_css_class("settings-theme-family");
+            content.append(&heading);
+
+            let flow = gtk::FlowBox::new();
+            flow.set_max_children_per_line(3);
+            flow.set_min_children_per_line(2);
+            flow.set_homogeneous(true);
+            flow.set_row_spacing(8);
+            flow.set_column_spacing(8);
+            flow.set_selection_mode(gtk::SelectionMode::None);
+            all_flows.borrow_mut().push(flow.clone());
+            current_flow = Some(flow);
+
+            prev_family = family;
+        }
+
+        let palette = if name == "dark" {
+            theme::default_dark()
+        } else {
+            themes::builtin_theme(name).unwrap_or_else(theme::default_dark)
+        };
+        let is_active = name == current_theme;
+        let card = build_theme_card(name, &palette, is_active);
+
+        let card_button = Button::new();
+        card_button.set_child(Some(&card));
+        card_button.add_css_class("flat");
+
+        let click_ui = Rc::clone(ui);
+        let click_name = name.to_string();
+        let click_flows = Rc::clone(&all_flows);
+        card_button.connect_clicked(move |btn| {
+            let theme_value = if click_name == "dark" {
+                None
+            } else {
+                Some(click_name.clone())
+            };
+            let mut next_settings = click_ui.settings.borrow().clone();
+            next_settings.theme = theme_value;
+            if let Err(error) =
+                settings_store::save_config(&click_ui.config_path, &next_settings)
+            {
+                click_ui.toast(&format!("Failed to save theme: {error}"));
+                return;
+            }
+            *click_ui.settings.borrow_mut() = next_settings;
+
+            // Clear active styling across all family FlowBoxes.
+            for flow in click_flows.borrow().iter() {
+                let mut idx = 0;
+                while let Some(child) = flow.child_at_index(idx) {
+                    if let Some(b) = child.child().and_then(|w| w.downcast::<Button>().ok()) {
+                        if let Some(inner) =
+                            b.child().and_then(|w| w.downcast::<GtkBox>().ok())
+                        {
+                            inner.remove_css_class("theme-card-active");
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+
+            // Mark this card active.
+            if let Some(inner) = btn.child().and_then(|w| w.downcast::<GtkBox>().ok()) {
+                inner.add_css_class("theme-card-active");
+            }
+
+            // Live-apply the new theme.
+            let palette = if click_name == "dark" {
+                theme::default_dark()
+            } else {
+                themes::builtin_theme(&click_name).unwrap_or_else(theme::default_dark)
+            };
+            theme::apply_theme(palette);
+
+            // Invalidate agent icon drawing areas so they pick up new colors.
+            for card in click_ui.pane_cards.borrow().values() {
+                card.agent_icon.widget().queue_draw();
+            }
+
+            click_ui.toast("Theme applied.");
+        });
+
+        if let Some(flow) = &current_flow {
+            flow.insert(&card_button, -1);
+        }
+    }
+
+    // Flush the last FlowBox.
+    if let Some(flow) = current_flow.take() {
+        content.append(&flow);
+    }
+
+    scroll.set_child(Some(&content));
+    scroll
+}
+
+fn build_settings_general_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+
+    let content = GtkBox::new(Orientation::Vertical, 14);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    content.set_margin_top(14);
+    content.set_margin_bottom(18);
+
+    // Animations toggle
+    let anim_row = GtkBox::new(Orientation::Horizontal, 12);
+    anim_row.add_css_class("settings-row");
+    let anim_details = GtkBox::new(Orientation::Vertical, 4);
+    anim_details.set_hexpand(true);
+
+    let anim_title = Label::new(Some("Animations"));
+    anim_title.set_xalign(0.0);
+    anim_title.add_css_class("pane-title");
+    anim_details.append(&anim_title);
+
+    let anim_detail = Label::new(Some(
+        "Animate terminal lifecycle changes, including pane/window create-delete transitions and surface tab open-close motion.",
+    ));
+    anim_detail.set_xalign(0.0);
+    anim_detail.set_wrap(true);
+    anim_detail.add_css_class("dim-label");
+    anim_details.append(&anim_detail);
+    anim_row.append(&anim_details);
+
+    let anim_switch = gtk::Switch::new();
+    anim_switch.set_active(ui.settings.borrow().animations_enabled);
+    anim_switch.set_valign(Align::Center);
+    let anim_ui = Rc::clone(ui);
+    anim_switch.connect_state_set(move |_, active| {
+        let mut next_settings = anim_ui.settings.borrow().clone();
+        next_settings.animations_enabled = active;
+        if let Err(error) = settings_store::save_config(&anim_ui.config_path, &next_settings) {
+            anim_ui.toast(&format!("Failed to save settings: {error}"));
+        }
+        *anim_ui.settings.borrow_mut() = next_settings;
+        glib::Propagation::Proceed
+    });
+    anim_row.append(&anim_switch);
+    content.append(&anim_row);
+
+    // Shell program
+    let shell_row = GtkBox::new(Orientation::Horizontal, 12);
+    shell_row.add_css_class("settings-row");
+    let shell_details = GtkBox::new(Orientation::Vertical, 4);
+    shell_details.set_hexpand(true);
+
+    let shell_title = Label::new(Some("Shell program"));
+    shell_title.set_xalign(0.0);
+    shell_title.add_css_class("pane-title");
+    shell_details.append(&shell_title);
+
+    let system_shell = default_shell_program();
+    let shell_detail = Label::new(Some(&format!(
+        "Optional shell override for new panes. Leave empty to use the system login shell (currently {}). Relaunch Taskers after changing this.",
+        system_shell.display()
+    )));
+    shell_detail.set_xalign(0.0);
+    shell_detail.set_wrap(true);
+    shell_detail.add_css_class("dim-label");
+    shell_details.append(&shell_detail);
+    shell_row.append(&shell_details);
+
+    let shell_entry = Entry::new();
+    shell_entry.set_hexpand(true);
+    shell_entry.set_width_chars(24);
+    shell_entry.set_placeholder_text(Some("System default login shell"));
+    if let Some(program) = ui.settings.borrow().shell.program.as_deref() {
+        shell_entry.set_text(program);
+    }
+    let activate_ui = Rc::clone(ui);
+    shell_entry.connect_activate(move |entry| {
+        let text = entry.text().to_string();
+        if let Err(error) = activate_ui.set_shell_program(Some(text.clone())) {
+            activate_ui.toast(&error);
+            return;
+        }
+        let normalized = text.trim().to_string();
+        entry.set_text(&normalized);
+        activate_ui.toast("Shell setting saved. Relaunch Taskers to apply.");
+    });
+    let focus_ui = Rc::clone(ui);
+    shell_entry.connect_notify_local(Some("has-focus"), move |entry, _| {
+        if entry.has_focus() {
+            return;
+        }
+
+        let text = entry.text().to_string();
+        if let Err(error) = focus_ui.set_shell_program(Some(text.clone())) {
+            focus_ui.toast(&error);
+            return;
+        }
+        entry.set_text(text.trim());
+    });
+    shell_row.append(&shell_entry);
+
+    let reset_shell = Button::with_label("Use system");
+    let reset_ui = Rc::clone(ui);
+    let reset_entry = shell_entry.clone();
+    reset_shell.connect_clicked(move |_| {
+        if let Err(error) = reset_ui.set_shell_program(None) {
+            reset_ui.toast(&error);
+            return;
+        }
+        reset_entry.set_text("");
+        reset_ui.toast("Shell setting cleared. Relaunch Taskers to apply.");
+    });
+    shell_row.append(&reset_shell);
+    content.append(&shell_row);
+
+    scroll.set_child(Some(&content));
+    scroll
+}
+
+fn build_settings_shortcuts_page(ui: &Rc<UiHandle>) -> ScrolledWindow {
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_vexpand(true);
+
+    let content = GtkBox::new(Orientation::Vertical, 6);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    content.set_margin_top(14);
+    content.set_margin_bottom(18);
+
+    let intro = Label::new(Some(
+        "Workspace navigation, top-level window management, split actions, and overview are all configurable here.",
+    ));
+    intro.set_wrap(true);
+    intro.set_xalign(0.0);
+    intro.add_css_class("dim-label");
+    content.append(&intro);
+
+    let mut prev_category = "";
+
+    for action in ShortcutAction::ALL {
+        let category = action.category();
+
+        if category != prev_category {
+            let heading = Label::new(Some(category));
+            heading.set_xalign(0.0);
+            heading.add_css_class("settings-keybind-category");
+            content.append(&heading);
+            prev_category = category;
+        }
+
+        let row = GtkBox::new(Orientation::Horizontal, 12);
+        row.add_css_class("settings-row");
+
+        let details = GtkBox::new(Orientation::Vertical, 4);
+        details.set_hexpand(true);
+
+        let title = Label::new(Some(action.label()));
+        title.set_xalign(0.0);
+        title.add_css_class("pane-title");
+        details.append(&title);
+
+        let detail = Label::new(Some(action.detail()));
+        detail.set_xalign(0.0);
+        detail.set_wrap(true);
+        detail.add_css_class("dim-label");
+        details.append(&detail);
+
+        row.append(&details);
+
+        let shortcut_label = Label::new(Some(&ui.shortcut_label(action)));
+        shortcut_label.set_width_chars(28);
+        shortcut_label.set_xalign(1.0);
+        shortcut_label.add_css_class("monospace");
+        row.append(&shortcut_label);
+
+        let change_button = Button::with_label("Change");
+        let change_ui = Rc::clone(ui);
+        let change_label = shortcut_label.clone();
+        change_button.connect_clicked(move |_| {
+            change_ui.present_shortcut_capture_dialog(action, &change_label);
+        });
+        row.append(&change_button);
+
+        let reset_button = Button::with_label("Reset");
+        let reset_ui = Rc::clone(ui);
+        let reset_label = shortcut_label.clone();
+        reset_button.connect_clicked(move |_| {
+            match reset_ui.reset_shortcuts(action) {
+                Ok(next_label) => reset_label.set_text(&next_label),
+                Err(error) => reset_ui.toast(&error),
+            }
+        });
+        row.append(&reset_button);
+
+        content.append(&row);
+    }
+
+    scroll.set_child(Some(&content));
+    scroll
 }
 
 fn build_theme_swatch(color: theme::Color, size: i32) -> DrawingArea {
