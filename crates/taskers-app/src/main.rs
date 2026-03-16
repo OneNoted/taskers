@@ -12,10 +12,7 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     rc::Rc,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -168,18 +165,10 @@ struct WorkspaceTransitionMotionItem {
 #[derive(Clone, Default)]
 struct WorkspaceSceneVisuals {
     windows: HashMap<WorkspaceWindowId, WindowGhostVisual>,
-    panes: HashMap<taskers_domain::PaneId, PaneGhostVisual>,
 }
 
 #[derive(Clone, Copy)]
 struct WindowGhostVisual {
-    active: bool,
-    attention: AttentionState,
-}
-
-#[derive(Clone)]
-struct PaneGhostVisual {
-    title: String,
     active: bool,
     attention: AttentionState,
 }
@@ -3274,8 +3263,7 @@ fn update_layout(ui: &Rc<UiHandle>, shell: &ShellWidgets, model: &AppModel) {
             || previous_active_pane != Some(workspace.active_pane);
         let should_reveal = needs_rebuild
             || previous_workspace_id != Some(workspace.id)
-            || previous_active_window != Some(workspace.active_window)
-            || previous_active_pane != Some(workspace.active_pane);
+            || previous_active_window != Some(workspace.active_window);
         if should_focus_input {
             ui.queue_focus_active_pane_input(model);
         }
@@ -3416,32 +3404,13 @@ fn build_workspace_scene_visuals(workspace: &Workspace) -> WorkspaceSceneVisuals
             )
         })
         .collect::<HashMap<_, _>>();
-    let panes = workspace
-        .panes
-        .values()
-        .map(|pane| {
-            (
-                pane.id,
-                PaneGhostVisual {
-                    title: pane
-                        .active_surface()
-                        .map(display_surface_title)
-                        .unwrap_or_else(|| "Unnamed terminal pane".into()),
-                    active: pane.id == workspace.active_pane,
-                    attention: pane.active_attention(),
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
 
-    WorkspaceSceneVisuals { windows, panes }
+    WorkspaceSceneVisuals { windows }
 }
 
 fn has_terminal_lifecycle_change(previous: &Workspace, next: &Workspace) -> bool {
     previous.windows.keys().copied().collect::<HashSet<_>>()
         != next.windows.keys().copied().collect::<HashSet<_>>()
-        || previous.panes.keys().copied().collect::<HashSet<_>>()
-            != next.panes.keys().copied().collect::<HashSet<_>>()
 }
 
 fn start_workspace_transition(
@@ -3503,7 +3472,6 @@ fn workspace_transition_spec(
 ) -> terminal_transitions::LifecycleMotionSpec {
     match kind {
         TransitionItemKind::Window => TERMINAL_MOTION_SPEC.window,
-        TransitionItemKind::Pane => TERMINAL_MOTION_SPEC.pane,
     }
 }
 
@@ -3527,22 +3495,6 @@ fn build_workspace_transition_widget(
                 attention: AttentionState::Normal,
             });
             build_workspace_window_ghost(visual)
-        }
-        TransitionItemId::Pane(pane_id) => {
-            let visual = match item.phase {
-                TransitionPhase::Exit => previous_visuals.panes.get(&pane_id).cloned(),
-                _ => next_visuals
-                    .panes
-                    .get(&pane_id)
-                    .cloned()
-                    .or_else(|| previous_visuals.panes.get(&pane_id).cloned()),
-            }
-            .unwrap_or(PaneGhostVisual {
-                title: "Unnamed terminal pane".into(),
-                active: false,
-                attention: AttentionState::Normal,
-            });
-            build_pane_ghost(visual)
         }
     }
 }
@@ -3594,62 +3546,6 @@ fn build_workspace_window_ghost(visual: WindowGhostVisual) -> Widget {
     chrome.append(&body);
 
     root.append(&chrome);
-    root.upcast()
-}
-
-fn build_pane_ghost(visual: PaneGhostVisual) -> Widget {
-    let root = GtkBox::new(Orientation::Vertical, 0);
-    root.add_css_class("pane-card");
-    root.add_css_class("pane-ghost");
-    if visual.active {
-        root.add_css_class("pane-card-active");
-    }
-    if visual.attention != AttentionState::Normal {
-        root.add_css_class(&format!(
-            "pane-card-state-{}",
-            attention_state_slug(visual.attention)
-        ));
-    }
-
-    let header = GtkBox::new(Orientation::Horizontal, 4);
-    header.add_css_class("pane-header");
-    header.add_css_class("pane-ghost-header");
-    header.set_margin_start(6);
-    header.set_margin_end(6);
-    header.set_margin_top(2);
-    header.set_margin_bottom(2);
-    let title = Label::new(Some(&visual.title));
-    title.add_css_class("pane-title");
-    title.set_xalign(0.0);
-    title.set_hexpand(true);
-    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    header.append(&title);
-    let dot = Label::new(Some("\u{25cf}"));
-    dot.add_css_class("status-dot");
-    dot.add_css_class(&attention_dot_class(visual.attention));
-    header.append(&dot);
-    root.append(&header);
-
-    let tabs = GtkBox::new(Orientation::Horizontal, 4);
-    tabs.add_css_class("surface-tabs");
-    tabs.add_css_class("pane-ghost-tabs");
-    tabs.set_margin_start(8);
-    tabs.set_margin_end(8);
-    tabs.set_margin_top(4);
-    tabs.set_margin_bottom(6);
-    let tab = GtkBox::new(Orientation::Horizontal, 0);
-    tab.add_css_class("surface-tab");
-    tab.add_css_class("pane-ghost-tab");
-    tab.set_size_request(128, 22);
-    tabs.append(&tab);
-    root.append(&tabs);
-
-    let body = GtkBox::new(Orientation::Vertical, 0);
-    body.add_css_class("pane-ghost-body");
-    body.set_hexpand(true);
-    body.set_vexpand(true);
-    root.append(&body);
-
     root.upcast()
 }
 
@@ -3929,7 +3825,14 @@ fn build_workspace_window_widget(
     });
     root.add_controller(wctx_click);
 
-    let body = build_split_layout_widget(ui, workspace, window.id, &window.layout, Vec::new());
+    let body = build_split_layout_widget(
+        ui,
+        workspace,
+        window.id,
+        &window.layout,
+        display_frame,
+        Vec::new(),
+    );
     body.set_hexpand(true);
     body.set_vexpand(true);
     root.append(&body);
@@ -3952,6 +3855,7 @@ fn build_split_layout_widget(
     workspace: &Workspace,
     workspace_window_id: WorkspaceWindowId,
     node: &LayoutNode,
+    rect: WindowFrame,
     path: Vec<bool>,
 ) -> gtk::Widget {
     match node {
@@ -3971,6 +3875,7 @@ fn build_split_layout_widget(
             first,
             second,
         } => {
+            let (first_rect, second_rect) = split_layout_rects(rect, *axis, *ratio);
             let paned = Paned::builder()
                 .orientation(match axis {
                     taskers_domain::SplitAxis::Horizontal => Orientation::Horizontal,
@@ -3978,6 +3883,15 @@ fn build_split_layout_widget(
                 })
                 .wide_handle(false)
                 .build();
+            // Seed the Paned with its final divider position up front so split
+            // creation does not visibly "settle" on the next main-loop turn.
+            paned.set_position(split_position_for_extent(
+                match axis {
+                    taskers_domain::SplitAxis::Horizontal => rect.width,
+                    taskers_domain::SplitAxis::Vertical => rect.height,
+                },
+                *ratio,
+            ));
             let mut first_path = path.clone();
             first_path.push(false);
             paned.set_start_child(Some(&build_split_layout_widget(
@@ -3985,6 +3899,7 @@ fn build_split_layout_widget(
                 workspace,
                 workspace_window_id,
                 first,
+                first_rect,
                 first_path,
             )));
             let mut second_path = path.clone();
@@ -3994,17 +3909,10 @@ fn build_split_layout_widget(
                 workspace,
                 workspace_window_id,
                 second,
+                second_rect,
                 second_path,
             )));
-            bind_split_ratio_updates(
-                ui,
-                workspace.id,
-                workspace_window_id,
-                &paned,
-                *axis,
-                path,
-                *ratio,
-            );
+            bind_split_ratio_updates(ui, workspace.id, workspace_window_id, &paned, *axis, path);
             paned.upcast()
         }
     }
@@ -4143,32 +4051,13 @@ fn bind_split_ratio_updates(
     paned: &Paned,
     axis: taskers_domain::SplitAxis,
     path: Vec<bool>,
-    ratio: u16,
 ) {
-    let suppress = Arc::new(AtomicBool::new(false));
     let path = Arc::new(path);
     let pending_source = Arc::new(Mutex::new(None::<glib::SourceId>));
     let app_state = ui.app_state.clone();
-
-    let sync_paned = paned.clone();
-    let suppress_for_sync = Arc::clone(&suppress);
-    glib::idle_add_local_once(move || {
-        suppress_for_sync.store(true, Ordering::Release);
-        let extent = paned_extent(&sync_paned, axis);
-        if extent > 0 {
-            sync_paned.set_position(((extent * i32::from(ratio)) / 1000).max(1));
-        }
-        suppress_for_sync.store(false, Ordering::Release);
-    });
-
-    let suppress_for_notify = Arc::clone(&suppress);
     let pending_for_notify = Arc::clone(&pending_source);
     let path_for_notify = Arc::clone(&path);
     paned.connect_position_notify(move |paned| {
-        if suppress_for_notify.load(Ordering::Acquire) {
-            return;
-        }
-
         let previous_source = {
             let mut pending = pending_for_notify
                 .lock()
@@ -4214,6 +4103,47 @@ fn bind_split_ratio_updates(
             source.remove();
         }
     });
+}
+
+fn split_position_for_extent(extent: i32, ratio: u16) -> i32 {
+    ((extent * i32::from(ratio)) / 1000).max(1)
+}
+
+fn split_layout_rects(
+    rect: WindowFrame,
+    axis: taskers_domain::SplitAxis,
+    ratio: u16,
+) -> (WindowFrame, WindowFrame) {
+    match axis {
+        taskers_domain::SplitAxis::Horizontal => {
+            let first_width = split_position_for_extent(rect.width, ratio);
+            (
+                WindowFrame {
+                    width: first_width,
+                    ..rect
+                },
+                WindowFrame {
+                    x: rect.x + first_width,
+                    width: rect.width - first_width,
+                    ..rect
+                },
+            )
+        }
+        taskers_domain::SplitAxis::Vertical => {
+            let first_height = split_position_for_extent(rect.height, ratio);
+            (
+                WindowFrame {
+                    height: first_height,
+                    ..rect
+                },
+                WindowFrame {
+                    y: rect.y + first_height,
+                    height: rect.height - first_height,
+                    ..rect
+                },
+            )
+        }
+    }
 }
 
 fn initialize_terminal_body(
@@ -6683,34 +6613,6 @@ fn install_css() {
         .pane-card-active.pane-card-state-waiting .pane-header {
             background: rgba(96,165,250,0.10);
             border-bottom-color: rgba(96,165,250,0.24);
-        }
-
-        .pane-ghost {
-            background: rgba(18,20,28,0.82);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 6px;
-            box-shadow: 0 10px 24px rgba(0,0,0,0.20);
-        }
-
-        .pane-ghost-header {
-            margin: 0;
-        }
-
-        .pane-ghost-tabs {
-            margin: 4px 8px 6px;
-            min-height: 24px;
-        }
-
-        .pane-ghost-tab {
-            background: rgba(255,255,255,0.05);
-            border-color: rgba(255,255,255,0.10);
-        }
-
-        .pane-ghost-body {
-            margin: 0 8px 8px;
-            border-radius: 4px;
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.04);
         }
 
         .pane-title {

@@ -109,13 +109,11 @@ pub struct PaneSceneSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TransitionItemId {
     Window(WorkspaceWindowId),
-    Pane(PaneId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransitionItemKind {
     Window,
-    Pane,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,96 +261,8 @@ pub fn plan_workspace_transition(
         });
     }
 
-    let previous_panes = previous
-        .panes
-        .iter()
-        .filter(|pane| persistent_window_ids.contains(&pane.window_id))
-        .map(|pane| (pane.id, pane))
-        .collect::<HashMap<_, _>>();
-    let next_panes = next
-        .panes
-        .iter()
-        .filter(|pane| persistent_window_ids.contains(&pane.window_id))
-        .map(|pane| (pane.id, pane))
-        .collect::<HashMap<_, _>>();
-    let persistent_pane_ids = previous_panes
-        .keys()
-        .filter(|pane_id| next_panes.contains_key(pane_id))
-        .copied()
-        .collect::<HashSet<_>>();
-
-    for pane_id in &persistent_pane_ids {
-        let previous_pane = previous_panes
-            .get(pane_id)
-            .expect("persistent pane should exist in previous scene");
-        let next_pane = next_panes
-            .get(pane_id)
-            .expect("persistent pane should exist in next scene");
-        if previous_pane.rect != next_pane.rect {
-            items.push(TransitionItem {
-                id: TransitionItemId::Pane(*pane_id),
-                kind: TransitionItemKind::Pane,
-                phase: TransitionPhase::Reflow,
-                start_rect: previous_pane.rect,
-                end_rect: next_pane.rect,
-            });
-        }
-    }
-
-    for pane in next_panes.values() {
-        if persistent_pane_ids.contains(&pane.id) {
-            continue;
-        }
-        let edge = best_shared_edge(
-            pane.rect,
-            next.panes
-                .iter()
-                .filter(|candidate| {
-                    candidate.window_id == pane.window_id && candidate.id != pane.id
-                })
-                .map(|candidate| candidate.rect),
-        )
-        .unwrap_or_else(|| nearest_canvas_edge(pane.rect, next.canvas_width, next.canvas_height));
-        items.push(TransitionItem {
-            id: TransitionItemId::Pane(pane.id),
-            kind: TransitionItemKind::Pane,
-            phase: TransitionPhase::Enter,
-            start_rect: collapse_rect(pane.rect, edge, motion.pane.minimum_extent_px),
-            end_rect: pane.rect,
-        });
-    }
-
-    for pane in previous_panes.values() {
-        if persistent_pane_ids.contains(&pane.id) {
-            continue;
-        }
-        let edge = best_shared_edge(
-            pane.rect,
-            previous
-                .panes
-                .iter()
-                .filter(|candidate| {
-                    candidate.window_id == pane.window_id && candidate.id != pane.id
-                })
-                .map(|candidate| candidate.rect),
-        )
-        .unwrap_or_else(|| {
-            nearest_canvas_edge(pane.rect, previous.canvas_width, previous.canvas_height)
-        });
-        items.push(TransitionItem {
-            id: TransitionItemId::Pane(pane.id),
-            kind: TransitionItemKind::Pane,
-            phase: TransitionPhase::Exit,
-            start_rect: pane.rect,
-            end_rect: collapse_rect(pane.rect, edge, motion.pane.minimum_extent_px),
-        });
-    }
-
-    items.sort_by_key(|item| match item.kind {
-        TransitionItemKind::Window => 0_u8,
-        TransitionItemKind::Pane => 1_u8,
-    });
-
+    // In-window pane management now snaps to the live GtkPaned layout. Keep
+    // ghost transitions for top-level workspace windows only.
     TransitionPlan {
         canvas_width,
         canvas_height,
@@ -576,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_window_and_pane_transition_items() {
+    fn ignores_in_window_pane_transitions() {
         let window = WorkspaceWindowId::new();
         let pane_a = PaneId::new();
         let pane_b = PaneId::new();
@@ -624,20 +534,7 @@ mod tests {
 
         let plan = plan_workspace_transition(Some(&previous), &next, TERMINAL_MOTION_SPEC);
 
-        assert_eq!(plan.items.len(), 3);
-        assert!(plan.items.contains(&TransitionItem {
-            id: TransitionItemId::Pane(pane_a),
-            kind: TransitionItemKind::Pane,
-            phase: TransitionPhase::Reflow,
-            start_rect: rect(0, 0, 400, 480),
-            end_rect: rect(0, 0, 520, 480),
-        }));
-        assert!(plan.items.iter().any(|item| {
-            item.id == TransitionItemId::Pane(pane_b) && item.phase == TransitionPhase::Exit
-        }));
-        assert!(plan.items.iter().any(|item| {
-            item.id == TransitionItemId::Pane(pane_c) && item.phase == TransitionPhase::Enter
-        }));
+        assert!(plan.items.is_empty());
     }
 
     #[test]
@@ -713,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn collapses_removed_panes_toward_their_shared_split_seam() {
+    fn does_not_animate_removed_panes() {
         let window = WorkspaceWindowId::new();
         let left = PaneId::new();
         let right = PaneId::new();
@@ -752,16 +649,6 @@ mod tests {
         };
 
         let plan = plan_workspace_transition(Some(&previous), &next, TERMINAL_MOTION_SPEC);
-        let removed_pane = plan
-            .items
-            .iter()
-            .find(|item| item.id == TransitionItemId::Pane(right))
-            .expect("removed pane should animate");
-
-        assert_eq!(removed_pane.phase, TransitionPhase::Exit);
-        assert_eq!(
-            removed_pane.end_rect,
-            rect(400, 0, TERMINAL_MOTION_SPEC.pane.minimum_extent_px, 480)
-        );
+        assert!(plan.items.is_empty());
     }
 }
