@@ -314,6 +314,9 @@ const SURFACE_TAB_GAP: i32 = 4;
 const SURFACE_TAB_MIN_WIDTH: i32 = 72;
 const SURFACE_TAB_MAX_WIDTH: i32 = 220;
 const SIDEBAR_MIN_WIDTH: i32 = 224;
+const TOOLBAR_ACTION_NEW_GLYPH: &str = "+";
+const TOOLBAR_ACTION_RESIZE_GLYPH: &str = "\u{2922}";
+const TOOLBAR_ACTION_FOCUS_GLYPH: &str = "\u{25ce}";
 
 #[derive(Clone, Copy)]
 struct WorkspaceRenderContext {
@@ -1336,7 +1339,7 @@ impl UiHandle {
         header_actions.add_css_class("pane-action-cluster");
         header.append(&header_actions);
 
-        let new_window_btn = Button::with_label("New");
+        let new_window_btn = Button::with_label(TOOLBAR_ACTION_NEW_GLYPH);
         new_window_btn.add_css_class("pane-action");
         new_window_btn.add_css_class("pane-window-action");
         new_window_btn.set_tooltip_text(Some("Create a new top-level window"));
@@ -1378,7 +1381,7 @@ impl UiHandle {
         });
         header_actions.append(&split_down_btn);
 
-        let resize_button = Button::with_label("Resize");
+        let resize_button = Button::with_label(TOOLBAR_ACTION_RESIZE_GLYPH);
         resize_button.add_css_class("pane-action");
         resize_button.add_css_class("pane-window-action");
         resize_button.set_tooltip_text(Some("Resize this top-level window"));
@@ -3974,7 +3977,7 @@ fn build_workspace_window_widget(
     let window_id = window.id;
 
     if window.id != workspace.active_window {
-        let focus_button = Button::with_label("Focus");
+        let focus_button = Button::with_label(TOOLBAR_ACTION_FOCUS_GLYPH);
         focus_button.add_css_class("workspace-window-toolbar-action");
         focus_button.set_tooltip_text(Some("Focus this top-level window"));
         let focus_header_ui = Rc::clone(ui);
@@ -3987,7 +3990,7 @@ fn build_workspace_window_widget(
         toolbar_actions.append(&focus_button);
     }
 
-    let new_button = Button::with_label("New");
+    let new_button = Button::with_label(TOOLBAR_ACTION_NEW_GLYPH);
     new_button.add_css_class("workspace-window-toolbar-action");
     new_button.set_tooltip_text(Some("Create a new top-level window from this one"));
     let new_button_parent = new_button.clone();
@@ -4003,7 +4006,7 @@ fn build_workspace_window_widget(
     });
     toolbar_actions.append(&new_button);
 
-    let resize_button = Button::with_label("Resize");
+    let resize_button = Button::with_label(TOOLBAR_ACTION_RESIZE_GLYPH);
     resize_button.add_css_class("workspace-window-toolbar-action");
     resize_button.set_tooltip_text(Some("Resize this top-level window"));
     let resize_button_parent = resize_button.clone();
