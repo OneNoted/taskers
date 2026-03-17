@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build/macos"
 GHOSTTY_DIR="${ROOT_DIR}/vendor/ghostty"
+GHOSTTY_VERSION="$(sed -n 's/^.*\.version = "\([^"]*\)".*$/\1/p' "${GHOSTTY_DIR}/build.zig.zon" | head -n1)"
 
 mkdir -p "${BUILD_DIR}/bin" "${BUILD_DIR}/resources"
 
@@ -23,6 +24,7 @@ zig build \
   -Dapp-runtime=none \
   -Demit-xcframework=true \
   -Demit-macos-app=false \
+  "-Dversion-string=${GHOSTTY_VERSION}" \
   -Dxcframework-target=native
 popd >/dev/null
 

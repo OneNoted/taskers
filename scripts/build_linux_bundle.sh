@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo_root/Cargo.toml" | head -n1)"
+ghostty_version="$(sed -n 's/^.*\.version = "\([^"]*\)".*$/\1/p' "$repo_root/vendor/ghostty/build.zig.zon" | head -n1)"
 target="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
 out_dir="${2:-$repo_root/dist}"
 asset_name="taskers-linux-bundle-v${version}-${target}.tar.xz"
@@ -29,6 +30,7 @@ trap cleanup EXIT
     -Dgtk-wayland=false \
     -Dstrip=true \
     -Di18n=false \
+    "-Dversion-string=$ghostty_version" \
     --summary none \
     --prefix "$prefix_dir"
 )

@@ -1,5 +1,6 @@
 use std::{
     env,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -56,6 +57,8 @@ fn main() {
 }
 
 fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
+    let ghostty_version = vendored_ghostty_version(vendor_dir);
+    let version_arg = format!("-Dversion-string={ghostty_version}");
     let output = Command::new("zig")
         .current_dir(vendor_dir)
         .args([
@@ -66,6 +69,9 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
             "-Dgtk-wayland=false",
             "-Dstrip=true",
             "-Di18n=false",
+        ])
+        .arg(version_arg)
+        .args([
             "--summary",
             "none",
             "--prefix",
@@ -81,4 +87,16 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     panic!("failed to build vendored Ghostty bridge\nstdout:\n{stdout}\nstderr:\n{stderr}");
+}
+
+fn vendored_ghostty_version(vendor_dir: &Path) -> String {
+    let zon_path = vendor_dir.join("build.zig.zon");
+    let zon = fs::read_to_string(&zon_path).expect("failed to read vendored Ghostty build.zig.zon");
+    zon.lines()
+        .find_map(|line| {
+            let (_, rest) = line.split_once(".version = \"")?;
+            let (version, _) = rest.split_once('"')?;
+            Some(version.to_owned())
+        })
+        .expect("failed to parse vendored Ghostty version from build.zig.zon")
 }
