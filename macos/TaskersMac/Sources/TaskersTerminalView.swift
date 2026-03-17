@@ -481,7 +481,7 @@ final class TaskersTerminalView: NSView {
         if flags.contains(.command) {
             mods |= GHOSTTY_MODS_SUPER.rawValue
         }
-        ghostty_input_mods_e(rawValue: mods)
+        return ghostty_input_mods_e(rawValue: mods)
     }
 
     private static func modifierFlags(from mods: ghostty_input_mods_e) -> NSEvent.ModifierFlags {
