@@ -39,9 +39,9 @@ final class TaskersSmokeTests: XCTestCase {
             socketPath: tempDirectory.appendingPathComponent("taskers.sock").path,
             configuredShell: "/bin/sh",
             demo: false,
-            backend: "ghostty_embedded"
+            backend: "mock"
         ))
-        let host = TaskersGhosttyHost()
+        let host = TaskersMockSurfaceHost()
         let controller = TaskersWorkspaceController(core: core, ghosttyHost: host)
 
         smokeLog("show window")
@@ -100,14 +100,18 @@ final class TaskersSmokeTests: XCTestCase {
         let terminfo = resourcesRoot.appendingPathComponent("terminfo", isDirectory: true)
         let helper = repoRoot.appendingPathComponent("build/macos/bin/taskersctl")
 
-        for requiredPath in [ghosttyResources, terminfo, helper] {
+        for requiredPath in [helper] {
             guard FileManager.default.fileExists(atPath: requiredPath.path) else {
                 throw XCTSkip("missing preview dependency at \(requiredPath.path)")
             }
         }
 
-        setenv("GHOSTTY_RESOURCES_DIR", ghosttyResources.path, 1)
-        setenv("TERMINFO", terminfo.path, 1)
+        if FileManager.default.fileExists(atPath: ghosttyResources.path) {
+            setenv("GHOSTTY_RESOURCES_DIR", ghosttyResources.path, 1)
+        }
+        if FileManager.default.fileExists(atPath: terminfo.path) {
+            setenv("TERMINFO", terminfo.path, 1)
+        }
         setenv("TASKERS_CTL_PATH", helper.path, 1)
         setenv("TASKERS_DISABLE_SHELL_INTEGRATION", "1", 1)
     }

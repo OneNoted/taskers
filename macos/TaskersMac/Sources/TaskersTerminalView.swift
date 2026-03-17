@@ -143,7 +143,7 @@ final class TaskersGhosttyLaunchStorage {
     }
 }
 
-final class TaskersTerminalView: NSView {
+final class TaskersTerminalView: NSView, TaskersHostedSurface {
     let workspaceID: String
     let paneID: String
     let surfaceID: String
@@ -159,6 +159,8 @@ final class TaskersTerminalView: NSView {
     override var acceptsFirstResponder: Bool {
         true
     }
+
+    var hostingView: NSView { self }
 
     init(
         host: TaskersGhosttyHost,

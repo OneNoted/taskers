@@ -27,6 +27,11 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
 
             if TaskersEnvironment.isSmokeTestEnabled {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    guard let controller = self.workspaceController, controller.surfaceCount > 0 else {
+                        fputs("Taskers macOS smoke failed: no surfaces rendered\n", stderr)
+                        fflush(stderr)
+                        exit(1)
+                    }
                     NSApp.terminate(nil)
                 }
             }

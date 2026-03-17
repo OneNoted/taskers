@@ -2,20 +2,21 @@ import AppKit
 import Foundation
 
 final class TaskersSurfaceHostView: NSView {
-    let terminalView: TaskersTerminalView
+    let surface: any TaskersHostedSurface
 
-    init(terminalView: TaskersTerminalView) {
-        self.terminalView = terminalView
+    init(surface: any TaskersHostedSurface) {
+        self.surface = surface
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
-        terminalView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(terminalView)
+        let hostedView = surface.hostingView
+        hostedView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hostedView)
         NSLayoutConstraint.activate([
-            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            terminalView.topAnchor.constraint(equalTo: topAnchor),
-            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            hostedView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hostedView.topAnchor.constraint(equalTo: topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
     }
 
@@ -24,7 +25,7 @@ final class TaskersSurfaceHostView: NSView {
     }
 
     func dispose() {
-        terminalView.dispose()
+        surface.dispose()
     }
 }
 
@@ -63,7 +64,7 @@ final class WeightedSplitView: NSSplitView {
 
 final class TaskersWorkspaceController: NSWindowController {
     private let core: TaskersCoreBridge
-    private let ghosttyHost: TaskersGhosttyHost
+    private let surfaceHost: any TaskersSurfaceHosting
     private var surfaceRegistry: [String: TaskersSurfaceHostView] = [:]
     private var pollTimer: Timer?
     private var lastRevision: UInt64?
@@ -77,9 +78,9 @@ final class TaskersWorkspaceController: NSWindowController {
         Set(surfaceRegistry.keys)
     }
 
-    init(core: TaskersCoreBridge, ghosttyHost: TaskersGhosttyHost) {
+    init(core: TaskersCoreBridge, ghosttyHost: any TaskersSurfaceHosting) {
         self.core = core
-        self.ghosttyHost = ghosttyHost
+        self.surfaceHost = ghosttyHost
         let window = NSWindow(
             contentRect: NSRect(x: 80, y: 80, width: 1380, height: 900),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -89,7 +90,7 @@ final class TaskersWorkspaceController: NSWindowController {
         window.title = "Taskers"
         window.isReleasedWhenClosed = false
         super.init(window: window)
-        ghosttyHost.onSurfaceClosed = { [weak self] workspaceID, paneID, surfaceID in
+        surfaceHost.onSurfaceClosed = { [weak self] workspaceID, paneID, surfaceID in
             self?.closeSurface(workspaceID: workspaceID, paneID: paneID, surfaceID: surfaceID)
         }
     }
@@ -228,13 +229,13 @@ final class TaskersWorkspaceController: NSWindowController {
         }
 
         let descriptor = try core.surfaceDescriptor(workspaceId: workspace.id, paneId: paneID)
-        let terminalView = try ghosttyHost.makeSurface(
+        let surface = try surfaceHost.makeSurface(
             workspaceID: workspace.id,
             paneID: paneID,
             surfaceID: activeSurfaceID,
             descriptor: descriptor
         )
-        let hostView = TaskersSurfaceHostView(terminalView: terminalView)
+        let hostView = TaskersSurfaceHostView(surface: surface)
         surfaceRegistry[activeSurfaceID] = hostView
         return hostView
     }
@@ -285,7 +286,7 @@ final class TaskersWorkspaceController: NSWindowController {
         didShutdown = true
         pollTimer?.invalidate()
         pollTimer = nil
-        ghosttyHost.onSurfaceClosed = nil
+        surfaceHost.onSurfaceClosed = nil
         for surface in surfaceRegistry.values {
             surface.dispose()
             surface.removeFromSuperview()

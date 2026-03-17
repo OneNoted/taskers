@@ -15,7 +15,7 @@ enum TaskersGhosttyHostError: LocalizedError {
     }
 }
 
-final class TaskersGhosttyHost: NSObject {
+final class TaskersGhosttyHost: NSObject, TaskersSurfaceHosting {
     private var config: ghostty_config_t?
     private var app: ghostty_app_t?
     private let surfaces = NSHashTable<TaskersTerminalView>.weakObjects()
@@ -80,7 +80,7 @@ final class TaskersGhosttyHost: NSObject {
         paneID: String,
         surfaceID: String,
         descriptor: TaskersSurfaceDescriptor
-    ) throws -> TaskersTerminalView {
+    ) throws -> any TaskersHostedSurface {
         try bootstrap()
         guard let app else {
             throw TaskersGhosttyHostError.appCreationFailed
