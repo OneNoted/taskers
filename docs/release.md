@@ -40,6 +40,7 @@ bash scripts/smoke_taskers_focus_churn.sh
 
 ```bash
 bash scripts/build_linux_bundle.sh
+bash scripts/smoke_linux_release_launcher.sh
 ```
 
 The output asset name must match:
@@ -86,8 +87,8 @@ cargo publish --dry-run -p taskers
 
 ## 4. Publish
 
-- Create a GitHub release draft tagged `v<version>`.
-- Upload the generated assets from `dist/`:
+- Push the release tag so GitHub Actions can assemble the assets and attach them to a draft GitHub release.
+- Confirm the draft release tagged `v<version>` contains:
   - `taskers-manifest-v<version>.json`
   - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
   - `taskers-macos-app-v<version>-aarch64-apple-darwin.zip`

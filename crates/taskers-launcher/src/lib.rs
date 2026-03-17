@@ -285,12 +285,12 @@ impl ManagedInstallation {
         )
         .with_context(|| format!("failed to write {}", icons_dir.display()))?;
 
-        let notify_path = xdg_bin_home.join("taskers-codex-notify");
+        let notify_path = xdg_bin_home.join("taskers-notify");
         write_executable(
             &notify_path,
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/assets/taskers-codex-notify.sh"
+                "/assets/taskers-notify.sh"
             )),
         )?;
 

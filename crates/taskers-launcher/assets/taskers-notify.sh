@@ -24,5 +24,5 @@ if [ -z "$taskers_ctl" ] && command -v taskersctl >/dev/null 2>&1; then
 fi
 
 if [ -n "$taskers_ctl" ] && [ -x "$taskers_ctl" ]; then
-  "$taskers_ctl" notify --title Codex --body "$message" --agent codex >/dev/null 2>&1 || true
+  "$taskers_ctl" notify --title Taskers --body "$message" >/dev/null 2>&1 || true
 fi

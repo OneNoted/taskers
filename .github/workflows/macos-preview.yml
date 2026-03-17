@@ -68,7 +68,7 @@ jobs:
           TASKERS_SMOKE_TEST=1 \
             "${APP_PATH}/Contents/MacOS/Taskers"
 
-      - name: Package unsigned app
+      - name: Package signed app
         if: always()
         run: |
           APP_PATH="build/macos/DerivedData/Build/Products/Debug/Taskers.app"
