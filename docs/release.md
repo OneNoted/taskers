@@ -83,16 +83,20 @@ bash scripts/notarize_macos_dmg.sh dist/Taskers-v<version>-universal2.dmg
 python3 scripts/build_release_manifest.py
 ```
 
-- Dry-run crate publishing in dependency order:
+- Dry-run the leaf crates that do not depend on unpublished workspace siblings:
 
 ```bash
 cargo publish --dry-run -p taskers-domain
-cargo publish --dry-run -p taskers-control
-cargo publish --dry-run -p taskers-runtime
-cargo publish --dry-run -p taskers-ghostty
-cargo publish --dry-run -p taskers-cli
-cargo publish --dry-run -p taskers
+cargo publish --dry-run -p taskers-paths
 ```
+
+- After you bump the workspace to a new unpublished version, `cargo publish --dry-run` for dependent crates will still resolve dependencies from crates.io and fail until the earlier crates are actually published. That failure is expected for:
+  - `taskers-control`
+  - `taskers-runtime`
+  - `taskers-ghostty`
+  - `taskers-cli`
+  - `taskers`
+- Use the full local test/smoke suite as the pre-publish validation for those dependent crates, then publish them in order once the earlier versions are live on crates.io.
 
 ## 4. Publish
 
@@ -102,16 +106,19 @@ cargo publish --dry-run -p taskers
   - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
   - `Taskers-v<version>-universal2.dmg`
 - Publish the GitHub release so the launcher assets are publicly downloadable before publishing the crates.
-- Publish the crates to crates.io in the same order as the dry-run:
+- Publish the crates to crates.io in dependency order:
 
 ```bash
 cargo publish -p taskers-domain
+cargo publish -p taskers-paths
 cargo publish -p taskers-control
 cargo publish -p taskers-runtime
 cargo publish -p taskers-ghostty
 cargo publish -p taskers-cli
 cargo publish -p taskers
 ```
+
+- Wait for crates.io to index each published version before publishing the next dependent crate, or Cargo will reject the dependency resolution for the later package.
 
 ## 5. Post-Publish Check
 
