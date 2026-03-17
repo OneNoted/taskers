@@ -108,11 +108,11 @@ final class TaskersGhosttyLaunchStorage {
     }
 
     var workingDirectoryPointer: UnsafePointer<CChar>? {
-        workingDirectoryStorage.map(UnsafePointer.init)
+        workingDirectoryStorage.map { UnsafePointer<CChar>($0) }
     }
 
     var commandPointer: UnsafePointer<CChar>? {
-        commandStorage.map(UnsafePointer.init)
+        commandStorage.map { UnsafePointer<CChar>($0) }
     }
 
     func withEnvironment<T>(
@@ -481,7 +481,7 @@ final class TaskersTerminalView: NSView {
         if flags.contains(.command) {
             mods |= GHOSTTY_MODS_SUPER.rawValue
         }
-        return ghostty_input_mods_e(rawValue: mods) ?? GHOSTTY_MODS_NONE
+        ghostty_input_mods_e(rawValue: mods)
     }
 
     private static func modifierFlags(from mods: ghostty_input_mods_e) -> NSEvent.ModifierFlags {
