@@ -1,8 +1,8 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, ControlResponse, InMemoryController};
-use taskers_domain::{AppModel, PaneId, WorkspaceId};
+use taskers_domain::{AppModel, PaneId, PaneKind, WorkspaceId};
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
 
@@ -112,17 +112,25 @@ impl AppState {
             .active_surface()
             .ok_or_else(|| anyhow!("pane {pane_id} has no active surface"))?;
 
-        let mut env = self.shell_launch.env.clone();
-        env.insert("TASKERS_PANE_ID".into(), pane.id.to_string());
-        env.insert("TASKERS_WORKSPACE_ID".into(), workspace_id.to_string());
-        env.insert("TASKERS_SURFACE_ID".into(), surface.id.to_string());
+        let (command_argv, env) = match surface.kind {
+            PaneKind::Terminal => {
+                let mut env = self.shell_launch.env.clone();
+                env.insert("TASKERS_PANE_ID".into(), pane.id.to_string());
+                env.insert("TASKERS_WORKSPACE_ID".into(), workspace_id.to_string());
+                env.insert("TASKERS_SURFACE_ID".into(), surface.id.to_string());
+                (self.shell_launch.program_and_args(), env)
+            }
+            PaneKind::Browser => (Vec::new(), BTreeMap::new()),
+        };
 
         Ok(SurfaceDescriptor {
             cols: 120,
             rows: 40,
+            kind: surface.kind.clone(),
             cwd: surface.metadata.cwd.clone(),
             title: surface.metadata.title.clone(),
-            command_argv: self.shell_launch.program_and_args(),
+            url: surface.metadata.url.clone(),
+            command_argv,
             env,
         })
     }
@@ -133,7 +141,7 @@ mod tests {
     use std::path::PathBuf;
 
     use taskers_control::{ControlCommand, ControlQuery};
-    use taskers_domain::AppModel;
+    use taskers_domain::{AppModel, PaneKind, PaneMetadataPatch};
     use taskers_ghostty::BackendChoice;
     use taskers_runtime::ShellLaunchSpec;
 
@@ -164,6 +172,8 @@ mod tests {
             .surface_descriptor_for_pane(workspace, pane)
             .expect("descriptor");
 
+        assert_eq!(descriptor.kind, PaneKind::Terminal);
+        assert_eq!(descriptor.url, None);
         assert_eq!(descriptor.command_argv, vec!["/bin/zsh", "-i"]);
         assert_eq!(
             descriptor.env.get("TASKERS_WORKSPACE_ID"),
@@ -174,6 +184,47 @@ mod tests {
             Some(&pane.to_string())
         );
         assert!(descriptor.env.contains_key("TASKERS_SURFACE_ID"));
+    }
+
+    #[test]
+    fn browser_surface_descriptor_omits_shell_launch_and_keeps_url() {
+        let mut model = AppModel::new("Main");
+        let workspace = model.active_workspace_id().expect("workspace");
+        let pane = model.active_workspace().expect("workspace").active_pane;
+        let surface = model
+            .create_surface(workspace, pane, PaneKind::Browser)
+            .expect("browser surface");
+        model
+            .update_surface_metadata(
+                surface,
+                PaneMetadataPatch {
+                    title: Some("Taskers".into()),
+                    cwd: None,
+                    url: Some("https://example.com".into()),
+                    repo_name: None,
+                    git_branch: None,
+                    ports: None,
+                    agent_kind: None,
+                },
+            )
+            .expect("metadata updated");
+
+        let app_state = AppState::new(
+            model,
+            PathBuf::from("/tmp/taskers-session.json"),
+            BackendChoice::Mock,
+            ShellLaunchSpec::fallback(),
+        )
+        .expect("app state");
+
+        let descriptor = app_state
+            .surface_descriptor_for_pane(workspace, pane)
+            .expect("descriptor");
+
+        assert_eq!(descriptor.kind, PaneKind::Browser);
+        assert_eq!(descriptor.url.as_deref(), Some("https://example.com"));
+        assert!(descriptor.command_argv.is_empty());
+        assert!(descriptor.env.is_empty());
     }
 
     #[test]

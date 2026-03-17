@@ -1,6 +1,7 @@
 use crate::runtime::{runtime_bridge_path, runtime_resources_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use taskers_domain::PaneKind;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,8 +33,10 @@ pub struct BackendProbe {
 pub struct SurfaceDescriptor {
     pub cols: u16,
     pub rows: u16,
+    pub kind: PaneKind,
     pub cwd: Option<String>,
     pub title: Option<String>,
+    pub url: Option<String>,
     #[serde(default)]
     pub command_argv: Vec<String>,
     #[serde(default)]

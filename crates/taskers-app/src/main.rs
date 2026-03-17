@@ -773,6 +773,9 @@ impl UiHandle {
         }
 
         let surface = pane.active_surface()?;
+        if surface.kind != PaneKind::Terminal {
+            return None;
+        }
 
         if let Some(widget) = self.ghostty_surfaces.borrow().get(&surface.id) {
             detach_widget(widget);
@@ -1359,13 +1362,13 @@ impl UiHandle {
         agent_icon.add_css_class("pane-agent-icon");
         header.append(agent_icon.widget());
 
-        let title = Label::new(Some("Unnamed terminal pane"));
+        let title = Label::new(Some("Unnamed surface"));
         title.add_css_class("pane-title");
         title.set_xalign(0.0);
         title.set_hexpand(true);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title.set_cursor_from_name(Some("text"));
-        title.set_tooltip_text(Some("Click to rename terminal"));
+        title.set_tooltip_text(Some("Click to rename surface"));
         let title_parent: Widget = title.clone().upcast();
         let rename_title_ui = Rc::clone(self);
         let rename_title_pane_id = pane.id;
@@ -1485,7 +1488,7 @@ impl UiHandle {
             content.set_margin_top(4);
             content.set_margin_bottom(4);
 
-            let rename_terminal = Button::with_label("Rename terminal");
+            let rename_terminal = Button::with_label("Rename surface");
             rename_terminal.add_css_class("flat");
             rename_terminal.add_css_class("context-item");
             let rename_ui = Rc::clone(&ctx_ui);
@@ -1679,7 +1682,7 @@ impl UiHandle {
         let display_title = pane
             .active_surface()
             .map(display_surface_title)
-            .unwrap_or_else(|| "Unnamed terminal pane".into());
+            .unwrap_or_else(|| "Unnamed surface".into());
         configure_agent_icon(
             &card.agent_icon,
             pane.active_surface().and_then(surface_agent_kind),
@@ -1687,7 +1690,7 @@ impl UiHandle {
         );
         card.title.set_text(&display_title);
         card.title.set_tooltip_text(Some(&format!(
-            "{}\nClick to rename terminal",
+            "{}\nClick to rename surface",
             format_pane_meta(pane, snapshot.as_ref())
         )));
 
@@ -4613,6 +4616,13 @@ fn initialize_terminal_body(
     card.displayed_surface_id
         .set(pane.active_surface().map(|surface| surface.id));
 
+    if pane
+        .active_surface()
+        .is_some_and(|surface| surface.kind == PaneKind::Browser)
+    {
+        return initialize_browser_placeholder_body(ui, pane, card);
+    }
+
     if let Some(widget) = ui.terminal_widget(workspace_id, pane) {
         widget.set_focusable(true);
         card.terminal_host.append(&widget);
@@ -4697,6 +4707,68 @@ fn initialize_terminal_body(
 
     card.terminal_host.append(&root);
     entry.upcast()
+}
+
+fn initialize_browser_placeholder_body(
+    ui: &Rc<UiHandle>,
+    pane: &PaneRecord,
+    card: &PaneCardWidgets,
+) -> Widget {
+    let root = GtkBox::new(Orientation::Vertical, 10);
+    root.set_hexpand(true);
+    root.set_vexpand(true);
+    root.set_valign(Align::Center);
+    root.set_margin_start(20);
+    root.set_margin_end(20);
+    root.set_margin_top(20);
+    root.set_margin_bottom(20);
+    root.add_css_class("terminal-output");
+
+    let title = Label::new(Some(
+        "Browser surfaces currently render only in the native macOS host.",
+    ));
+    title.set_wrap(true);
+    title.set_xalign(0.0);
+    root.append(&title);
+
+    let detail = Label::new(Some(
+        "This Linux/GTK shell keeps the browser surface metadata in sync and can hand the URL off to your default browser.",
+    ));
+    detail.add_css_class("pane-meta");
+    detail.set_wrap(true);
+    detail.set_xalign(0.0);
+    root.append(&detail);
+
+    let mut focus_target: Widget = root.clone().upcast();
+    if let Some(url) = pane
+        .active_surface()
+        .and_then(browser_surface_url)
+        .map(str::to_string)
+    {
+        let url_label = Label::new(Some(&format!("URL: {url}")));
+        url_label.add_css_class("pane-meta");
+        url_label.set_wrap(true);
+        url_label.set_xalign(0.0);
+        url_label.set_selectable(true);
+        root.append(&url_label);
+
+        let open_uri = resolved_browser_uri(&url);
+        let open_button = Button::with_label("Open in Default Browser");
+        let open_ui = Rc::clone(ui);
+        open_button.connect_clicked(move |_| {
+            if let Err(error) = gtk::gio::AppInfo::launch_default_for_uri(
+                &open_uri,
+                None::<&gtk::gio::AppLaunchContext>,
+            ) {
+                open_ui.toast(&format!("failed to open browser URL: {error}"));
+            }
+        });
+        root.append(&open_button);
+        focus_target = open_button.upcast();
+    }
+
+    card.terminal_host.append(&root);
+    focus_target
 }
 
 fn sync_terminal_body(
@@ -6165,10 +6237,92 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
         return humanize_agent_kind(agent);
     }
 
+    if surface.kind == PaneKind::Browser
+        && let Some(url) = browser_surface_url(surface)
+    {
+        return url.to_string();
+    }
+
     match surface.kind {
         PaneKind::Terminal => "Terminal".into(),
         PaneKind::Browser => "Browser".into(),
     }
+}
+
+fn browser_surface_url(surface: &SurfaceRecord) -> Option<&str> {
+    surface
+        .metadata
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+}
+
+fn has_explicit_browser_scheme(value: &str) -> bool {
+    if value.contains("://") {
+        return true;
+    }
+
+    let Some((scheme, rest)) = value.split_once(':') else {
+        return false;
+    };
+    let Some(first) = scheme.chars().next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    if !scheme
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+    {
+        return false;
+    }
+    if rest.starts_with("//") {
+        return true;
+    }
+
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "about" | "data" | "file" | "javascript" | "mailto"
+    )
+}
+
+fn is_local_browser_target(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("localhost")
+        || lower.starts_with("127.0.0.1")
+        || lower.starts_with("[::1]")
+    {
+        return true;
+    }
+    if value.contains('/') {
+        return false;
+    }
+
+    value.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty()
+            && !host.contains('.')
+            && !host.contains(':')
+            && port.chars().all(|ch| ch.is_ascii_digit())
+    })
+}
+
+fn resolved_browser_uri(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if has_explicit_browser_scheme(trimmed) {
+        return trimmed.to_string();
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return format!(
+            "https://duckduckgo.com/?q={}",
+            trimmed.split_whitespace().collect::<Vec<_>>().join("+")
+        );
+    }
+    if is_local_browser_target(trimmed) {
+        return format!("http://{trimmed}");
+    }
+    format!("https://{trimmed}")
 }
 
 fn editable_surface_title(surface: &SurfaceRecord) -> String {
@@ -6860,6 +7014,7 @@ fn connect_ghostty_widget(
                 patch: PaneMetadataPatch {
                     title,
                     cwd: None,
+                    url: None,
                     repo_name: None,
                     git_branch: None,
                     ports: None,
@@ -6892,6 +7047,7 @@ fn connect_ghostty_widget(
                 patch: PaneMetadataPatch {
                     title: None,
                     cwd,
+                    url: None,
                     repo_name: None,
                     git_branch: None,
                     ports: None,
@@ -6984,6 +7140,20 @@ fn detach_widget(widget: &Widget) {
 }
 
 fn format_pane_meta(pane: &PaneRecord, snapshot: Option<&PaneRuntimeSnapshot>) -> String {
+    if let Some(surface) = pane.active_surface()
+        && surface.kind == PaneKind::Browser
+    {
+        let title = surface
+            .metadata
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("browser surface");
+        let url = browser_surface_url(surface).unwrap_or("no URL");
+        return format!("browser  \u{2022}  {title}  \u{2022}  {url}");
+    }
+
     let metadata = pane.active_metadata();
     let cwd = metadata
         .and_then(|meta| meta.cwd.as_deref())
