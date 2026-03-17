@@ -106,6 +106,7 @@ impl ManagedInstallation {
                     installation.target_triple
                 )
             })?;
+        validate_minimum_os_version(platform, artifact)?;
         installation.install_artifact(&manifest, artifact)?;
         installation.install_platform_integrations()?;
         Ok(installation)
@@ -453,6 +454,71 @@ fn current_target_triple(platform: HostPlatform) -> Result<&'static str> {
     }
 }
 
+fn validate_minimum_os_version(platform: HostPlatform, artifact: &ReleaseArtifact) -> Result<()> {
+    if platform != HostPlatform::Macos {
+        return Ok(());
+    }
+
+    let Some(minimum_version) = artifact.minimum_os_version.as_deref() else {
+        return Ok(());
+    };
+
+    let current_version = current_macos_version()?;
+    if version_meets_minimum(&current_version, minimum_version)? {
+        return Ok(());
+    }
+
+    bail!(
+        "taskers requires macOS {minimum_version} or newer, but this machine reports macOS {current_version}"
+    );
+}
+
+fn current_macos_version() -> Result<String> {
+    let output = Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .context("failed to invoke sw_vers to detect the current macOS version")?;
+    if !output.status.success() {
+        bail!("sw_vers -productVersion exited with {}", output.status);
+    }
+
+    let version = String::from_utf8(output.stdout)
+        .context("sw_vers -productVersion returned a non-UTF-8 version string")?;
+    let version = version.trim();
+    if version.is_empty() {
+        bail!("sw_vers -productVersion returned an empty version string");
+    }
+    Ok(version.to_string())
+}
+
+fn version_meets_minimum(current: &str, minimum: &str) -> Result<bool> {
+    let mut current_components = parse_version_components(current)?;
+    let mut minimum_components = parse_version_components(minimum)?;
+    let component_count = current_components.len().max(minimum_components.len());
+    current_components.resize(component_count, 0);
+    minimum_components.resize(component_count, 0);
+    Ok(current_components >= minimum_components)
+}
+
+fn parse_version_components(version: &str) -> Result<Vec<u64>> {
+    let mut components = Vec::new();
+    for component in version.split('.') {
+        if component.is_empty() {
+            bail!("invalid version {version}: empty component");
+        }
+        let value = component
+            .parse::<u64>()
+            .with_context(|| format!("invalid version {version}: {component} is not numeric"))?;
+        components.push(value);
+    }
+
+    if components.is_empty() {
+        bail!("invalid version: expected at least one component");
+    }
+
+    Ok(components)
+}
+
 fn bundle_root(
     install_root: &Path,
     version: &str,
@@ -714,7 +780,7 @@ where
 mod tests {
     use super::{
         ArtifactKind, ManagedInstallation, ReleaseArtifact, ReleaseManifest, bundle_root,
-        current_target_triple, default_manifest_url, sha256_path,
+        current_target_triple, default_manifest_url, sha256_path, version_meets_minimum,
     };
     use std::{collections::BTreeMap, fs, path::PathBuf};
     use tar::Builder;
@@ -820,5 +886,19 @@ mod tests {
         assert!(installation.taskersctl_path().is_file());
         assert!(installation.ghostty_resources_path().is_dir());
         assert!(installation.terminfo_path().is_dir());
+    }
+
+    #[test]
+    fn macos_version_check_pads_missing_components() {
+        assert!(version_meets_minimum("15", "14.0").expect("version compare"));
+        assert!(version_meets_minimum("14.0", "14").expect("version compare"));
+        assert!(!version_meets_minimum("14", "14.1").expect("version compare"));
+        assert!(!version_meets_minimum("14.0.5", "14.1").expect("version compare"));
+    }
+
+    #[test]
+    fn macos_version_check_rejects_invalid_versions() {
+        assert!(version_meets_minimum("14.a", "14.0").is_err());
+        assert!(version_meets_minimum("14.1", "14..0").is_err());
     }
 }

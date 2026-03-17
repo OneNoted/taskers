@@ -62,13 +62,6 @@ for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
         )
 
 manual_downloads = {}
-universal_dmg = dist_dir / f"Taskers-v{version}-universal2.dmg"
-if universal_dmg.exists():
-    manual_downloads["macos_universal2_dmg"] = {
-        "url": f"{base_url}/{universal_dmg.name}",
-        "sha256": sha256(universal_dmg),
-    }
-
 manifest = {
     "version": version,
     "artifacts": artifacts,

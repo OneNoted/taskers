@@ -159,7 +159,6 @@ jobs:
     needs:
       - linux-bundle
       - macos-preview
-      - macos-universal-dmg
     runs-on: ubuntu-latest
 
     steps:
@@ -202,7 +201,7 @@ jobs:
           mkdir -p dist/release
           find dist -type f -exec cp {} dist/release/ \;
 
-      - name: Publish draft GitHub release with assets
+      - name: Create draft GitHub release with assets
         uses: softprops/action-gh-release@v2
         with:
           draft: true
@@ -210,4 +209,3 @@ jobs:
             dist/release/taskers-manifest-v*.json
             dist/release/taskers-linux-bundle-v*.tar.xz
             dist/release/taskers-macos-app-v*.zip
-            dist/release/Taskers-v*-universal2.dmg

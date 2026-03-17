@@ -62,11 +62,11 @@ xcodebuild build \
   CODE_SIGNING_REQUIRED=NO
 bash scripts/sign_macos_app.sh
 bash scripts/package_macos_app_zip.sh
-bash scripts/build_macos_dmg.sh
 ```
 
 - By default `scripts/sign_macos_app.sh` applies an ad hoc signature so the published launcher can verify the app bundle before launch.
 - Set `TASKERS_MACOS_CODESIGN_IDENTITY` to a Developer ID Application certificate name when producing release assets you intend to distribute outside local testing.
+- `scripts/build_macos_dmg.sh` remains internal-only until notarization/stapling is wired into the release flow. Do not publish the DMG yet.
 
 - Build the release manifest from the generated assets:
 
@@ -93,7 +93,7 @@ cargo publish --dry-run -p taskers
   - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
   - `taskers-macos-app-v<version>-aarch64-apple-darwin.zip`
   - `taskers-macos-app-v<version>-x86_64-apple-darwin.zip`
-  - `Taskers-v<version>-universal2.dmg`
+- Publish the GitHub release so the launcher assets are publicly downloadable before publishing the crates.
 - Publish the crates to crates.io in the same order as the dry-run:
 
 ```bash
