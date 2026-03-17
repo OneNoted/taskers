@@ -1,12 +1,73 @@
 import AppKit
 import Foundation
 
+final class TaskersGhosttySurfaceContext {
+    private weak var host: TaskersGhosttyHost?
+    private(set) var isClosing = false
+
+    let workspaceID: String
+    let paneID: String
+    let surfaceID: String
+
+    init(host: TaskersGhosttyHost, workspaceID: String, paneID: String, surfaceID: String) {
+        self.host = host
+        self.workspaceID = workspaceID
+        self.paneID = paneID
+        self.surfaceID = surfaceID
+    }
+
+    func retainForUserdata() -> UnsafeMutableRawPointer {
+        Unmanaged.passRetained(self).toOpaque()
+    }
+
+    func beginTeardown() {
+        isClosing = true
+    }
+
+    func handleChildExited(exitCode: UInt32) {
+        _ = exitCode
+        closeSurfaceIfNeeded()
+    }
+
+    func handleSurfaceClosed() {
+        closeSurfaceIfNeeded()
+    }
+
+    private func closeSurfaceIfNeeded() {
+        guard !isClosing else {
+            return
+        }
+
+        isClosing = true
+        host?.surfaceDidClose(workspaceID: workspaceID, paneID: paneID, surfaceID: surfaceID)
+    }
+
+    static func from(surface: ghostty_surface_t) -> TaskersGhosttySurfaceContext? {
+        from(userdata: ghostty_surface_userdata(surface))
+    }
+
+    static func from(userdata: UnsafeMutableRawPointer?) -> TaskersGhosttySurfaceContext? {
+        guard let userdata else {
+            return nil
+        }
+
+        return Unmanaged<TaskersGhosttySurfaceContext>.fromOpaque(userdata).takeUnretainedValue()
+    }
+
+    static func releaseUserdata(_ userdata: UnsafeMutableRawPointer) {
+        Unmanaged<TaskersGhosttySurfaceContext>.fromOpaque(userdata).release()
+    }
+}
+
 final class TaskersTerminalView: NSView {
     let workspaceID: String
     let paneID: String
     let surfaceID: String
 
     private weak var host: TaskersGhosttyHost?
+    private let callbackContext: TaskersGhosttySurfaceContext
+    private var callbackContextHandle: UnsafeMutableRawPointer?
+    private var isDisposed = false
     private var surface: ghostty_surface_t?
     private var commandString: String
 
@@ -26,6 +87,13 @@ final class TaskersTerminalView: NSView {
         self.workspaceID = workspaceID
         self.paneID = paneID
         self.surfaceID = surfaceID
+        self.callbackContext = TaskersGhosttySurfaceContext(
+            host: host,
+            workspaceID: workspaceID,
+            paneID: paneID,
+            surfaceID: surfaceID
+        )
+        self.callbackContextHandle = callbackContext.retainForUserdata()
         self.commandString = Self.commandString(for: descriptor.commandArgv)
 
         super.init(frame: NSRect(x: 0, y: 0, width: 640, height: 420))
@@ -36,7 +104,8 @@ final class TaskersTerminalView: NSView {
             view: self,
             app: app,
             descriptor: descriptor,
-            commandString: commandString
+            commandString: commandString,
+            userdata: self.callbackContextHandle!
         )
         updateSurfaceMetrics()
     }
@@ -46,10 +115,7 @@ final class TaskersTerminalView: NSView {
     }
 
     deinit {
-        if let surface {
-            ghostty_surface_free(surface)
-        }
-        host?.unregisterSurface(self)
+        dispose()
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -135,13 +201,38 @@ final class TaskersTerminalView: NSView {
         needsDisplay = true
     }
 
-    func handleChildExited(exitCode: UInt32) {
-        _ = exitCode
-        host?.surfaceDidClose(workspaceID: workspaceID, paneID: paneID, surfaceID: surfaceID)
+    func beginTeardown() {
+        callbackContext.beginTeardown()
     }
 
-    func handleSurfaceClosed() {
-        host?.surfaceDidClose(workspaceID: workspaceID, paneID: paneID, surfaceID: surfaceID)
+    func dispose() {
+        guard !isDisposed else {
+            return
+        }
+
+        isDisposed = true
+        callbackContext.beginTeardown()
+        host?.unregisterSurface(self)
+
+        let surface = self.surface
+        self.surface = nil
+
+        guard let callbackContextHandle else {
+            return
+        }
+        self.callbackContextHandle = nil
+
+        let cleanup = {
+            if let surface {
+                ghostty_surface_free(surface)
+            }
+            TaskersGhosttySurfaceContext.releaseUserdata(callbackContextHandle)
+        }
+        if Thread.isMainThread {
+            cleanup()
+        } else {
+            DispatchQueue.main.async(execute: cleanup)
+        }
     }
 
     private func setFocused(_ focused: Bool) {
@@ -254,7 +345,8 @@ final class TaskersTerminalView: NSView {
         view: TaskersTerminalView,
         app: ghostty_app_t,
         descriptor: TaskersSurfaceDescriptor,
-        commandString: String
+        commandString: String,
+        userdata: UnsafeMutableRawPointer
     ) throws -> ghostty_surface_t {
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         var config = ghostty_surface_config_new()
@@ -262,7 +354,7 @@ final class TaskersTerminalView: NSView {
         config.platform = ghostty_platform_u(
             macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(view).toOpaque())
         )
-        config.userdata = Unmanaged.passUnretained(view).toOpaque()
+        config.userdata = userdata
         config.scale_factor = scale
         config.context = GHOSTTY_SURFACE_CONTEXT_SPLIT
 
@@ -394,17 +486,6 @@ final class TaskersTerminalView: NSView {
         return flags
     }
 
-    static func from(surface: ghostty_surface_t) -> TaskersTerminalView? {
-        from(userdata: ghostty_surface_userdata(surface))
-    }
-
-    static func from(userdata: UnsafeMutableRawPointer?) -> TaskersTerminalView? {
-        guard let userdata else {
-            return nil
-        }
-
-        return Unmanaged<TaskersTerminalView>.fromOpaque(userdata).takeUnretainedValue()
-    }
 }
 
 private extension NSEvent {

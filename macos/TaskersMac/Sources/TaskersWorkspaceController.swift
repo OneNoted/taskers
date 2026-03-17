@@ -40,6 +40,7 @@ final class TaskersWorkspaceController: NSWindowController {
     private var surfaceRegistry: [String: TaskersTerminalView] = [:]
     private var pollTimer: Timer?
     private var lastRevision: UInt64?
+    private var didShutdown = false
 
     var surfaceCount: Int {
         surfaceRegistry.count
@@ -71,7 +72,12 @@ final class TaskersWorkspaceController: NSWindowController {
     }
 
     deinit {
-        pollTimer?.invalidate()
+        shutdown()
+    }
+
+    override func close() {
+        shutdown()
+        super.close()
     }
 
     func start() throws {
@@ -208,8 +214,11 @@ final class TaskersWorkspaceController: NSWindowController {
 
     private func pruneSurfaceRegistry(keeping liveSurfaceIDs: Set<String>) {
         for surfaceID in Array(surfaceRegistry.keys) where !liveSurfaceIDs.contains(surfaceID) {
-            surfaceRegistry[surfaceID]?.removeFromSuperview()
-            surfaceRegistry.removeValue(forKey: surfaceID)
+            guard let surface = surfaceRegistry.removeValue(forKey: surfaceID) else {
+                continue
+            }
+            surface.dispose()
+            surface.removeFromSuperview()
         }
     }
 
@@ -237,5 +246,22 @@ final class TaskersWorkspaceController: NSWindowController {
             label.centerYAnchor.constraint(equalTo: view.centerYAnchor)
         ])
         return view
+    }
+
+    private func shutdown() {
+        guard !didShutdown else {
+            return
+        }
+
+        didShutdown = true
+        pollTimer?.invalidate()
+        pollTimer = nil
+        ghosttyHost.onSurfaceClosed = nil
+        for surface in surfaceRegistry.values {
+            surface.dispose()
+            surface.removeFromSuperview()
+        }
+        surfaceRegistry.removeAll()
+        window?.contentView = nil
     }
 }

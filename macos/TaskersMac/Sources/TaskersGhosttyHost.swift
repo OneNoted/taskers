@@ -61,7 +61,7 @@ final class TaskersGhosttyHost: NSObject {
             confirm_read_clipboard_cb: { _, _, _, _ in },
             write_clipboard_cb: { _, _, _, _, _ in },
             close_surface_cb: { userdata, _ in
-                TaskersTerminalView.from(userdata: userdata)?.handleSurfaceClosed()
+                TaskersGhosttySurfaceContext.from(userdata: userdata)?.handleSurfaceClosed()
             }
         )
 
@@ -144,13 +144,13 @@ final class TaskersGhosttyHost: NSObject {
             return false
         }
 
-        guard let view = TaskersTerminalView.from(surface: surface) else {
+        guard let context = TaskersGhosttySurfaceContext.from(surface: surface) else {
             return false
         }
 
         switch action.tag {
         case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
-            view.handleChildExited(exitCode: action.action.child_exited.exit_code)
+            context.handleChildExited(exitCode: action.action.child_exited.exit_code)
             return true
         default:
             return false
