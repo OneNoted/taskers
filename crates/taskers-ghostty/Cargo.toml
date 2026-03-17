@@ -13,6 +13,7 @@ build = "build.rs"
 libloading = "0.8"
 serde.workspace = true
 tar = "0.4"
+taskers-domain = { version = "0.3.0", path = "../taskers-domain" }
 taskers-paths.workspace = true
 thiserror.workspace = true
 ureq = "2.12"

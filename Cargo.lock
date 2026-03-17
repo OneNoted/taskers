@@ -1583,6 +1583,7 @@ dependencies = [
  "libloading",
  "serde",
  "tar",
+ "taskers-domain",
  "taskers-paths",
  "tempfile",
  "thiserror 2.0.18",
