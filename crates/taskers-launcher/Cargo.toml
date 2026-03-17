@@ -1,6 +1,6 @@
 [package]
 name = "taskers"
-description = "Cross-platform launcher for the taskers workspace app."
+description = "Linux launcher for the taskers workspace app."
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true
@@ -21,7 +21,6 @@ tar.workspace = true
 taskers-paths.workspace = true
 ureq.workspace = true
 xz2.workspace = true
-zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

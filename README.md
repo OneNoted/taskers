@@ -8,12 +8,19 @@ Taskers is a cross-platform terminal workspace for agent-heavy work. It gives yo
 
 ## Try it
 
+Linux (`x86_64-unknown-linux-gnu`):
+
 ```bash
 cargo install taskers --locked
 taskers --demo
 ```
 
-The first launch downloads the exact version-matched Taskers bundle for your platform when needed.
+The first launch downloads the exact version-matched Linux bundle from the tagged GitHub release.
+
+macOS:
+
+- Download the signed `Taskers-v<version>-universal2.dmg` from [GitHub Releases](https://github.com/OneNoted/taskers/releases).
+- Drag `Taskers.app` into `Applications`, then launch it normally from Finder or Spotlight.
 
 ## Develop
 

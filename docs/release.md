@@ -52,21 +52,30 @@ taskers-linux-bundle-v<version>-<target>.tar.xz
 - Build the macOS release assets on macOS:
 
 ```bash
+bash scripts/install_macos_codesign_certificate.sh
 bash scripts/generate_macos_project.sh
 xcodebuild build \
   -project macos/Taskers.xcodeproj \
   -scheme TaskersMac \
   -configuration Release \
   -derivedDataPath build/macos/DerivedData \
+  ARCHS="arm64 x86_64" \
+  ONLY_ACTIVE_ARCH=NO \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO
 bash scripts/sign_macos_app.sh
-bash scripts/package_macos_app_zip.sh
+bash scripts/build_macos_dmg.sh
+bash scripts/notarize_macos_dmg.sh dist/Taskers-v<version>-universal2.dmg
 ```
 
-- By default `scripts/sign_macos_app.sh` applies an ad hoc signature so the published launcher can verify the app bundle before launch.
-- Set `TASKERS_MACOS_CODESIGN_IDENTITY` to a Developer ID Application certificate name when producing release assets you intend to distribute outside local testing.
-- `scripts/build_macos_dmg.sh` remains internal-only until notarization/stapling is wired into the release flow. Do not publish the DMG yet.
+- Set these env vars before importing the certificate or notarizing:
+  - `TASKERS_MACOS_CERTIFICATE_P12_BASE64`
+  - `TASKERS_MACOS_CERTIFICATE_PASSWORD`
+  - `TASKERS_MACOS_CODESIGN_IDENTITY`
+  - `TASKERS_MACOS_NOTARY_APPLE_ID`
+  - `TASKERS_MACOS_NOTARY_TEAM_ID`
+  - `TASKERS_MACOS_NOTARY_PASSWORD`
+- `scripts/sign_macos_app.sh` still falls back to ad hoc signing when `TASKERS_MACOS_CODESIGN_IDENTITY` is unset, but public release builds should always use a Developer ID Application identity and notarize the DMG.
 
 - Build the release manifest from the generated assets:
 
@@ -91,8 +100,7 @@ cargo publish --dry-run -p taskers
 - Confirm the draft release tagged `v<version>` contains:
   - `taskers-manifest-v<version>.json`
   - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
-  - `taskers-macos-app-v<version>-aarch64-apple-darwin.zip`
-  - `taskers-macos-app-v<version>-x86_64-apple-darwin.zip`
+  - `Taskers-v<version>-universal2.dmg`
 - Publish the GitHub release so the launcher assets are publicly downloadable before publishing the crates.
 - Publish the crates to crates.io in the same order as the dry-run:
 
@@ -107,12 +115,14 @@ cargo publish -p taskers
 
 ## 5. Post-Publish Check
 
-- Verify clean launcher installs:
+- Verify the Linux launcher install:
 
 ```bash
 cargo install taskers --locked
 taskers --demo
 ```
 
-- Confirm the published launcher downloads the exact version-matched bundle on first launch.
+- Confirm the published Linux launcher downloads the exact version-matched bundle on first launch.
+- Confirm macOS installs from the published DMG and launches correctly after dragging `Taskers.app` into `Applications`.
+- Confirm `cargo install taskers --locked` fails on macOS with guidance to use the GitHub Releases DMG.
 - Confirm `cargo install taskers-cli --bin taskersctl --locked` still works as the standalone helper path.

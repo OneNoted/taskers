@@ -13,15 +13,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def artifact_entry(path: Path, kind: str, minimum_os_version: str | None = None) -> dict:
+def artifact_entry(path: Path, kind: str) -> dict:
     entry = {
         "kind": kind,
         "url": f"{base_url}/{path.name}",
         "sha256": sha256(path),
         "size_bytes": path.stat().st_size,
     }
-    if minimum_os_version is not None:
-        entry["minimum_os_version"] = minimum_os_version
     return entry
 
 
@@ -52,20 +50,9 @@ linux_bundle = dist_dir / f"taskers-linux-bundle-v{version}-x86_64-unknown-linux
 if linux_bundle.exists():
     artifacts["x86_64-unknown-linux-gnu"] = artifact_entry(linux_bundle, "linux_bundle_v1")
 
-for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
-    archive = dist_dir / f"taskers-macos-app-v{version}-{target}.zip"
-    if archive.exists():
-        artifacts[target] = artifact_entry(
-            archive,
-            "macos_app_zip_v1",
-            minimum_os_version="14.0",
-        )
-
-manual_downloads = {}
 manifest = {
     "version": version,
     "artifacts": artifacts,
-    "manual_downloads": manual_downloads,
 }
 
 output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

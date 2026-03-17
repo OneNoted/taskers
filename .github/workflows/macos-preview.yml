@@ -35,8 +35,24 @@ jobs:
 
       - name: Run shared Rust validation
         run: |
-          cargo test -p taskers-control -p taskers-core -p taskers-macos-ffi
-          cargo check --workspace
+          cargo test -p taskers-control -p taskers-core -p taskers-macos-ffi -p taskers-paths
+
+      - name: Confirm crates.io launcher is blocked on macOS
+        run: |
+          set +e
+          output="$(cargo install --locked --path crates/taskers-launcher 2>&1)"
+          status=$?
+          set -e
+
+          printf '%s\n' "$output"
+
+          if [[ $status -eq 0 ]]; then
+            echo "expected cargo install --path crates/taskers-launcher to fail on macOS" >&2
+            exit 1
+          fi
+
+          grep -F "taskers on crates.io currently supports x86_64 Linux only" <<<"$output"
+          grep -F "Download the macOS DMG" <<<"$output"
 
       - name: Generate Xcode project
         run: bash scripts/generate_macos_project.sh
