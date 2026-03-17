@@ -51,7 +51,9 @@ targets:
       - target: TaskersMac
     settings:
       base:
+        BUNDLE_LOADER: $(TEST_HOST)
         PRODUCT_BUNDLE_IDENTIFIER: dev.taskers.tests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Taskers.app/Contents/MacOS/Taskers
 schemes:
   TaskersMac:
     build:
