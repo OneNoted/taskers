@@ -22,6 +22,9 @@ targets:
       path: TaskersMac/Info.plist
     dependencies:
       - framework: ../build/macos/GhosttyKit.xcframework
+      - sdk: Carbon.framework
+      - sdk: libc++.tbd
+      - sdk: liblzma.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.taskers.app
