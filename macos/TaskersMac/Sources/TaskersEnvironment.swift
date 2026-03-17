@@ -1,6 +1,7 @@
 import Foundation
 
 enum TaskersEnvironment {
+    private static var didInitializeGhostty = false
     private static let inheritedTerminalEnvironmentKeys = [
         "TERM",
         "TERMINFO",
@@ -64,6 +65,23 @@ enum TaskersEnvironment {
 
         fputs("Taskers macOS smoke: \(message)\n", stderr)
         fflush(stderr)
+    }
+
+    static func ensureGhosttyInitialized() -> Bool {
+        if didInitializeGhostty {
+            return true
+        }
+
+        emitSmokeLog("initializing Ghostty globals")
+        let status = ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv)
+        guard status == GHOSTTY_SUCCESS else {
+            emitSmokeLog("Ghostty global init failed status=\(status)")
+            return false
+        }
+
+        didInitializeGhostty = true
+        emitSmokeLog("Ghostty globals initialized")
+        return true
     }
 
     private static func setPath(_ key: String, url: URL) {

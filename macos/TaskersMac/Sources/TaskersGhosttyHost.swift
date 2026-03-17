@@ -2,11 +2,14 @@ import AppKit
 import Foundation
 
 enum TaskersGhosttyHostError: LocalizedError {
+    case initializationFailed
     case configurationFailed
     case appCreationFailed
 
     var errorDescription: String? {
         switch self {
+        case .initializationFailed:
+            return "failed to initialize Ghostty globals"
         case .configurationFailed:
             return "failed to initialize Ghostty configuration"
         case .appCreationFailed:
@@ -41,6 +44,9 @@ final class TaskersGhosttyHost: NSObject, TaskersSurfaceHosting {
         }
 
         TaskersEnvironment.emitSmokeLog("Ghostty host bootstrap begin")
+        guard TaskersEnvironment.ensureGhosttyInitialized() else {
+            throw TaskersGhosttyHostError.initializationFailed
+        }
         guard let config = ghostty_config_new() else {
             throw TaskersGhosttyHostError.configurationFailed
         }
