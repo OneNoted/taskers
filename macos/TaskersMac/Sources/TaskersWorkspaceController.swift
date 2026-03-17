@@ -31,6 +31,13 @@ final class TaskersSurfaceHostView: NSView {
 
 final class WeightedSplitView: NSSplitView {
     private let weights: [CGFloat]
+    private var hasPendingWeightApplication = false
+    private var lastAppliedSignature: WeightApplicationSignature?
+
+    private struct WeightApplicationSignature: Equatable {
+        let size: CGSize
+        let arrangedSubviewCount: Int
+    }
 
     init(isVertical: Bool, weights: [CGFloat]) {
         self.weights = weights
@@ -46,19 +53,59 @@ final class WeightedSplitView: NSSplitView {
 
     override func layout() {
         super.layout()
+        scheduleWeightApplication()
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        scheduleWeightApplication()
+    }
+
+    private func scheduleWeightApplication() {
         guard arrangedSubviews.count > 1 else {
+            return
+        }
+
+        let signature = WeightApplicationSignature(
+            size: bounds.size,
+            arrangedSubviewCount: arrangedSubviews.count
+        )
+        guard signature != lastAppliedSignature || !hasPendingWeightApplication else {
+            return
+        }
+
+        hasPendingWeightApplication = true
+        DispatchQueue.main.async { [weak self] in
+            self?.applyWeightsIfNeeded(expectedSignature: signature)
+        }
+    }
+
+    private func applyWeightsIfNeeded(expectedSignature: WeightApplicationSignature) {
+        hasPendingWeightApplication = false
+        guard arrangedSubviews.count > 1 else {
+            lastAppliedSignature = expectedSignature
+            return
+        }
+
+        let currentSignature = WeightApplicationSignature(
+            size: bounds.size,
+            arrangedSubviewCount: arrangedSubviews.count
+        )
+        guard currentSignature == expectedSignature else {
+            scheduleWeightApplication()
             return
         }
 
         let totalWeight = max(weights.reduce(0, +), 1)
         let dividerCount = CGFloat(arrangedSubviews.count - 1)
-        let available = (isVertical ? bounds.width : bounds.height) - (dividerThickness * dividerCount)
+        let available = max((isVertical ? bounds.width : bounds.height) - (dividerThickness * dividerCount), 0)
 
         var consumed: CGFloat = 0
         for index in 0..<(arrangedSubviews.count - 1) {
             consumed += available * (weights[index] / totalWeight)
             setPosition(consumed + dividerThickness * CGFloat(index), ofDividerAt: index)
         }
+        lastAppliedSignature = currentSignature
     }
 }
 
