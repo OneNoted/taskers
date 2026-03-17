@@ -293,6 +293,7 @@ final class TaskersTerminalView: NSView {
 
         let surface = self.surface
         self.surface = nil
+        let launchStorage = self.launchStorage
 
         guard let callbackContextHandle else {
             return
@@ -300,16 +301,13 @@ final class TaskersTerminalView: NSView {
         self.callbackContextHandle = nil
 
         let cleanup = {
+            _ = launchStorage
             if let surface {
                 ghostty_surface_free(surface)
             }
             TaskersGhosttySurfaceContext.releaseUserdata(callbackContextHandle)
         }
-        if Thread.isMainThread {
-            cleanup()
-        } else {
-            DispatchQueue.main.async(execute: cleanup)
-        }
+        DispatchQueue.main.async(execute: cleanup)
     }
 
     private func setFocused(_ focused: Bool) {
