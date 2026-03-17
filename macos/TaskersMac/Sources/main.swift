@@ -10,6 +10,9 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
         _ = notification
         TaskersEnvironment.scrubInheritedTerminalEnvironment()
         TaskersEnvironment.configureBundledPaths()
+        if TaskersEnvironment.isRunningUnderXCTest {
+            return
+        }
 
         do {
             let core = try TaskersCoreBridge(options: TaskersEnvironment.defaultCoreOptions())
@@ -46,7 +49,7 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         _ = sender
-        return true
+        return !TaskersEnvironment.isRunningUnderXCTest
     }
 }
 

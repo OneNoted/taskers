@@ -25,6 +25,12 @@ enum TaskersEnvironment {
         ProcessInfo.processInfo.environment["TASKERS_SMOKE_TEST"] == "1"
     }
 
+    static var isRunningUnderXCTest: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
+    }
+
     static func scrubInheritedTerminalEnvironment() {
         for key in inheritedTerminalEnvironmentKeys {
             unsetenv(key)
