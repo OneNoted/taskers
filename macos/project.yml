@@ -1,6 +1,7 @@
 name: Taskers
 options:
   bundleIdPrefix: dev.taskers
+  projectFormat: xcode15_3
   deploymentTarget:
     macOS: "14.0"
 settings:

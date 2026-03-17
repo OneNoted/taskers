@@ -59,6 +59,7 @@ jobs:
 
       - name: Build and test Taskers.app
         run: |
+          mkdir -p build/macos
           set -o pipefail
           xcodebuild test \
             -project macos/Taskers.xcodeproj \
