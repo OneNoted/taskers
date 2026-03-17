@@ -38,7 +38,9 @@ targets:
     preBuildScripts:
       - name: Build macOS Preview Dependencies
         script: |
-          "${SRCROOT}/../scripts/macos-build-preview-deps.sh"
+          if [ "${TASKERS_SKIP_MACOS_PREBUILD_DEPS:-0}" != "1" ]; then
+            "${SRCROOT}/../scripts/macos-build-preview-deps.sh"
+          fi
         basedOnDependencyAnalysis: false
     postBuildScripts:
       - name: Stage App Bundle Support
