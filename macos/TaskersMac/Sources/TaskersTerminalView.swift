@@ -3,11 +3,11 @@ import Darwin
 import Foundation
 
 #if DEBUG
-private func taskersMacDebugLog(_ message: @autoclosure () -> String) {
+func taskersMacDebugLog(_ message: @autoclosure () -> String) {
     NSLog("[taskers-macos] %@", message())
 }
 #else
-private func taskersMacDebugLog(_ message: @autoclosure () -> String) {
+func taskersMacDebugLog(_ message: @autoclosure () -> String) {
     _ = message()
 }
 #endif
