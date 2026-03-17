@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 final class TaskersGhosttySurfaceContext {
@@ -59,6 +60,70 @@ final class TaskersGhosttySurfaceContext {
     }
 }
 
+final class TaskersGhosttyLaunchStorage {
+    private var workingDirectoryStorage: UnsafeMutablePointer<CChar>?
+    private var commandStorage: UnsafeMutablePointer<CChar>?
+    private var envKeyStorage: [UnsafeMutablePointer<CChar>] = []
+    private var envValueStorage: [UnsafeMutablePointer<CChar>] = []
+    private var envVars: [ghostty_env_var_s] = []
+
+    init(cwd: String?, command: String, environment: [String: String]) {
+        if let cwd {
+            workingDirectoryStorage = strdup(cwd)
+        }
+        commandStorage = strdup(command)
+
+        let entries = environment.sorted { $0.key < $1.key }
+        envKeyStorage.reserveCapacity(entries.count)
+        envValueStorage.reserveCapacity(entries.count)
+        envVars.reserveCapacity(entries.count)
+
+        for entry in entries {
+            guard
+                let key = strdup(entry.key),
+                let value = strdup(entry.value)
+            else {
+                continue
+            }
+
+            envKeyStorage.append(key)
+            envValueStorage.append(value)
+            envVars.append(ghostty_env_var_s(key: UnsafePointer(key), value: UnsafePointer(value)))
+        }
+    }
+
+    deinit {
+        if let workingDirectoryStorage {
+            free(workingDirectoryStorage)
+        }
+        if let commandStorage {
+            free(commandStorage)
+        }
+        for key in envKeyStorage {
+            free(key)
+        }
+        for value in envValueStorage {
+            free(value)
+        }
+    }
+
+    var workingDirectoryPointer: UnsafePointer<CChar>? {
+        workingDirectoryStorage.map(UnsafePointer.init)
+    }
+
+    var commandPointer: UnsafePointer<CChar>? {
+        commandStorage.map(UnsafePointer.init)
+    }
+
+    func withEnvironment<T>(
+        _ body: (UnsafeMutablePointer<ghostty_env_var_s>?, Int) throws -> T
+    ) rethrows -> T {
+        try envVars.withUnsafeMutableBufferPointer { buffer in
+            try body(buffer.baseAddress, buffer.count)
+        }
+    }
+}
+
 final class TaskersTerminalView: NSView {
     let workspaceID: String
     let paneID: String
@@ -67,6 +132,7 @@ final class TaskersTerminalView: NSView {
     private weak var host: TaskersGhosttyHost?
     private let callbackContext: TaskersGhosttySurfaceContext
     private var callbackContextHandle: UnsafeMutableRawPointer?
+    private let launchStorage: TaskersGhosttyLaunchStorage
     private var isDisposed = false
     private var surface: ghostty_surface_t?
     private var commandString: String
@@ -95,6 +161,11 @@ final class TaskersTerminalView: NSView {
         )
         self.callbackContextHandle = callbackContext.retainForUserdata()
         self.commandString = Self.commandString(for: descriptor.commandArgv)
+        self.launchStorage = TaskersGhosttyLaunchStorage(
+            cwd: descriptor.cwd,
+            command: commandString,
+            environment: descriptor.env
+        )
 
         super.init(frame: NSRect(x: 0, y: 0, width: 640, height: 420))
         wantsLayer = true
@@ -103,8 +174,7 @@ final class TaskersTerminalView: NSView {
         self.surface = try Self.createSurface(
             view: self,
             app: app,
-            descriptor: descriptor,
-            commandString: commandString,
+            launchStorage: launchStorage,
             userdata: self.callbackContextHandle!
         )
         updateSurfaceMetrics()
@@ -344,8 +414,7 @@ final class TaskersTerminalView: NSView {
     private static func createSurface(
         view: TaskersTerminalView,
         app: ghostty_app_t,
-        descriptor: TaskersSurfaceDescriptor,
-        commandString: String,
+        launchStorage: TaskersGhosttyLaunchStorage,
         userdata: UnsafeMutableRawPointer
     ) throws -> ghostty_surface_t {
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
@@ -357,20 +426,16 @@ final class TaskersTerminalView: NSView {
         config.userdata = userdata
         config.scale_factor = scale
         config.context = GHOSTTY_SURFACE_CONTEXT_SPLIT
+        config.working_directory = launchStorage.workingDirectoryPointer
+        config.command = launchStorage.commandPointer
 
-        return try withCString(descriptor.cwd) { workingDirectory in
-            config.working_directory = workingDirectory
-            return try commandString.withCString { command in
-                config.command = command
-                return try withEnvironment(descriptor.env) { envVars, count in
-                    config.env_vars = envVars
-                    config.env_var_count = count
-                    guard let surface = ghostty_surface_new(app, &config) else {
-                        throw TaskersGhosttyHostError.appCreationFailed
-                    }
-                    return surface
-                }
+        return try launchStorage.withEnvironment { envVars, count in
+            config.env_vars = envVars
+            config.env_var_count = count
+            guard let surface = ghostty_surface_new(app, &config) else {
+                throw TaskersGhosttyHostError.appCreationFailed
             }
+            return surface
         }
     }
 
@@ -389,55 +454,6 @@ final class TaskersTerminalView: NSView {
         }
 
         return "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-    }
-
-    private static func withCString<T>(_ value: String?, body: (UnsafePointer<CChar>?) throws -> T) rethrows -> T {
-        guard let value else {
-            return try body(nil)
-        }
-
-        return try value.withCString(body)
-    }
-
-    private static func withEnvironment<T>(
-        _ environment: [String: String],
-        body: (UnsafeMutablePointer<ghostty_env_var_s>?, Int) throws -> T
-    ) rethrows -> T {
-        let entries = Array(environment)
-        return try withCStringPairs(entries) { envVars in
-            var envVars = envVars
-            return try envVars.withUnsafeMutableBufferPointer { buffer in
-                try body(buffer.baseAddress, buffer.count)
-            }
-        }
-    }
-
-    private static func withCStringPairs<T>(
-        _ entries: [(key: String, value: String)],
-        body: ([ghostty_env_var_s]) throws -> T
-    ) rethrows -> T {
-        func recurse(
-            _ index: Int,
-            _ envVars: inout [ghostty_env_var_s],
-            _ body: ([ghostty_env_var_s]) throws -> T
-        ) rethrows -> T {
-            if index == entries.count {
-                return try body(envVars)
-            }
-
-            let entry = entries[index]
-            return try entry.key.withCString { keyPointer in
-                try entry.value.withCString { valuePointer in
-                    envVars.append(ghostty_env_var_s(key: keyPointer, value: valuePointer))
-                    defer { envVars.removeLast() }
-                    return try recurse(index + 1, &envVars, body)
-                }
-            }
-        }
-
-        var envVars: [ghostty_env_var_s] = []
-        envVars.reserveCapacity(entries.count)
-        return try recurse(0, &envVars, body)
     }
 
     private static func mouseButton(from buttonNumber: Int) -> ghostty_input_mouse_button_e {
