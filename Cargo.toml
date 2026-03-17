@@ -18,7 +18,7 @@ edition = "2024"
 homepage = "https://github.com/OneNoted/taskers"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/OneNoted/taskers"
-version = "0.2.1"
+version = "0.3.0"
 
 [workspace.dependencies]
 adw = { package = "libadwaita", version = "0.9.1" }
@@ -42,5 +42,5 @@ tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "rt-multi-
 ureq = "2.12"
 uuid = { version = "1.22.0", features = ["serde", "v7"] }
 xz2 = "0.1"
-taskers-core = { version = "0.2.1", path = "crates/taskers-core" }
-taskers-paths = { version = "0.2.1", path = "crates/taskers-paths" }
+taskers-core = { version = "0.3.0", path = "crates/taskers-core" }
+taskers-paths = { version = "0.3.0", path = "crates/taskers-paths" }

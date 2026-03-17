@@ -1507,7 +1507,7 @@ checksum = "df7f62577c25e07834649fc3b39fafdc597c0a3527dc1c60129201ccfcbaa50c"
 
 [[package]]
 name = "taskers"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-control"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-domain"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "indexmap",
  "serde",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-ghostty"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "gtk4",
  "libloading",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-gtk"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-macos-ffi"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1630,11 +1630,11 @@ dependencies = [
 
 [[package]]
 name = "taskers-paths"
-version = "0.2.1"
+version = "0.3.0"
 
 [[package]]
 name = "taskers-runtime"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",

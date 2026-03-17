@@ -570,16 +570,20 @@ mod tests {
 
     #[test]
     fn default_manifest_url_uses_exact_version() {
-        let url = default_manifest_url("0.2.1");
-        assert!(url.ends_with("/releases/download/v0.2.1/taskers-manifest-v0.2.1.json"));
+        let version = env!("CARGO_PKG_VERSION");
+        let url = default_manifest_url(version);
+        assert!(url.ends_with(&format!(
+            "/releases/download/v{version}/taskers-manifest-v{version}.json"
+        )));
     }
 
     #[test]
     fn bundle_roots_match_linux_layout() {
         let root = PathBuf::from("/tmp/taskers");
+        let version = env!("CARGO_PKG_VERSION");
         assert_eq!(
-            bundle_root(&root, "0.2.1", "x86_64-unknown-linux-gnu"),
-            PathBuf::from("/tmp/taskers/0.2.1/x86_64-unknown-linux-gnu")
+            bundle_root(&root, version, "x86_64-unknown-linux-gnu"),
+            PathBuf::from(format!("/tmp/taskers/{version}/x86_64-unknown-linux-gnu"))
         );
     }
 
@@ -603,7 +607,7 @@ mod tests {
         .expect("taskersctl");
         fs::write(
             bundle_dir.join("ghostty").join(".taskers-runtime-version"),
-            "0.2.1",
+            env!("CARGO_PKG_VERSION"),
         )
         .expect("ghostty version");
         fs::write(
