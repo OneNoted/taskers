@@ -35,6 +35,13 @@ final class TaskersGhosttySurfaceContext {
     }
 
     private func closeSurfaceIfNeeded() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [self] in
+                closeSurfaceIfNeeded()
+            }
+            return
+        }
+
         guard !isClosing else {
             return
         }

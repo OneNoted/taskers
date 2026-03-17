@@ -132,7 +132,14 @@ final class TaskersGhosttyHost: NSObject {
     }
 
     func surfaceDidClose(workspaceID: String, paneID: String, surfaceID: String) {
-        onSurfaceClosed?(workspaceID, paneID, surfaceID)
+        if Thread.isMainThread {
+            onSurfaceClosed?(workspaceID, paneID, surfaceID)
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.onSurfaceClosed?(workspaceID, paneID, surfaceID)
+        }
     }
 
     private static func handleAction(target: ghostty_target_s, action: ghostty_action_s) -> Bool {
