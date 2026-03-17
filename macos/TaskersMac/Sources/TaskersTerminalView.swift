@@ -4,7 +4,7 @@ import Foundation
 
 #if DEBUG
 private func taskersMacDebugLog(_ message: @autoclosure () -> String) {
-    fputs("[taskers-macos] \(message())\n", stderr)
+    NSLog("[taskers-macos] %@", message())
 }
 #else
 private func taskersMacDebugLog(_ message: @autoclosure () -> String) {

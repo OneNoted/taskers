@@ -4,7 +4,7 @@ import XCTest
 
 #if DEBUG
 private func smokeLog(_ message: @autoclosure () -> String) {
-    fputs("[taskers-smoke] \(message())\n", stderr)
+    NSLog("[taskers-smoke] %@", message())
 }
 #else
 private func smokeLog(_ message: @autoclosure () -> String) {
