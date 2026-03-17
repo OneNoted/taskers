@@ -62,6 +62,8 @@ display=":${display_number}"
 socket_path="$temp_dir/taskers.sock"
 session_path="$temp_dir/session.json"
 install_root="$temp_dir/install"
+xdg_data_home="$temp_dir/data"
+xdg_bin_home="$temp_dir/bin"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml" | head -n1)"
 target="$(rustc -vV | sed -n 's/^host: //p')"
 manifest_path="$temp_dir/taskers-manifest-v${version}.json"
@@ -89,7 +91,10 @@ wait_for_path "/tmp/.X11-unix/X${display_number}"
   export TASKERS_INSTALL_ROOT="$install_root"
   export TASKERS_NON_UNIQUE=1
   export TASKERS_RELEASE_MANIFEST_URL="$manifest_path"
+  export TASKERS_SKIP_DESKTOP_INTEGRATION=1
   export TASKERS_TERMINAL_BACKEND=mock
+  export XDG_BIN_HOME="$xdg_bin_home"
+  export XDG_DATA_HOME="$xdg_data_home"
   exec "$TARGET_DIR/taskers" \
     --demo \
     --socket "$socket_path" \

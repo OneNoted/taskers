@@ -23,6 +23,7 @@ use xz2::read::XzDecoder;
 
 const INSTALL_ROOT_ENV: &str = "TASKERS_INSTALL_ROOT";
 const MANIFEST_URL_ENV: &str = "TASKERS_RELEASE_MANIFEST_URL";
+const SKIP_DESKTOP_INTEGRATION_ENV: &str = "TASKERS_SKIP_DESKTOP_INTEGRATION";
 
 pub fn run() -> Result<ExitStatus> {
     let args = env::args_os().skip(1).collect::<Vec<_>>();
@@ -210,7 +211,13 @@ impl ManagedInstallation {
     }
 
     fn install_linux_user_assets(&self) -> Result<()> {
-        let launcher = env::current_exe().context("failed to resolve current launcher path")?;
+        if env::var_os(SKIP_DESKTOP_INTEGRATION_ENV).is_some() {
+            return Ok(());
+        }
+
+        let Some(launcher) = desktop_launcher_path()? else {
+            return Ok(());
+        };
         let xdg_data_home = xdg_data_home()?;
         let applications_dir = xdg_data_home.join("applications");
         let icons_dir = xdg_data_home
@@ -464,6 +471,63 @@ fn write_executable(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+fn desktop_launcher_path() -> Result<Option<PathBuf>> {
+    let current_exe = env::current_exe().context("failed to resolve current launcher path")?;
+
+    if let Some(path_launcher) = path_taskers_executable(&current_exe, env::var_os("PATH")) {
+        return Ok(Some(path_launcher));
+    }
+
+    if launcher_path_looks_installed(&current_exe) {
+        return Ok(Some(current_exe));
+    }
+
+    Ok(None)
+}
+
+fn path_taskers_executable(current_exe: &Path, path_env: Option<OsString>) -> Option<PathBuf> {
+    let path_env = path_env?;
+    let current_exe = fs::canonicalize(current_exe).ok()?;
+
+    env::split_paths(&path_env).find_map(|entry| {
+        let candidate = entry.join("taskers");
+        let candidate_exe = fs::canonicalize(&candidate).ok()?;
+        (candidate_exe == current_exe).then_some(candidate)
+    })
+}
+
+fn launcher_path_looks_installed(current_exe: &Path) -> bool {
+    let Some(parent) = current_exe.parent() else {
+        return false;
+    };
+
+    if xdg_bin_home().ok().as_deref() == Some(parent) {
+        return true;
+    }
+
+    if cargo_bin_home().as_deref() == Some(parent) {
+        return true;
+    }
+
+    matches!(
+        parent,
+        p if p == Path::new("/usr/local/bin")
+            || p == Path::new("/usr/bin")
+            || p == Path::new("/bin")
+    )
+}
+
+fn cargo_bin_home() -> Option<PathBuf> {
+    env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join("bin"))
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join(".cargo").join("bin"))
+        })
+}
+
 fn refresh_desktop_indexes(applications_dir: &Path) {
     run_if_available("update-desktop-database", [applications_dir.as_os_str()]);
 }
@@ -494,9 +558,12 @@ where
 mod tests {
     use super::{
         ArtifactKind, ManagedInstallation, ReleaseArtifact, ReleaseManifest, bundle_root,
-        current_target_triple, default_manifest_url, sha256_path,
+        current_target_triple, default_manifest_url, launcher_path_looks_installed,
+        path_taskers_executable, sha256_path,
     };
-    use std::{collections::BTreeMap, fs, path::PathBuf};
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf};
     use tar::Builder;
     use tempfile::tempdir;
     use xz2::write::XzEncoder;
@@ -598,5 +665,30 @@ mod tests {
         assert!(installation.taskersctl_path().is_file());
         assert!(installation.ghostty_resources_path().is_dir());
         assert!(installation.terminfo_path().is_dir());
+    }
+
+    #[test]
+    fn prefers_path_taskers_entry_when_it_matches_current_exe() {
+        let temp = tempdir().expect("tempdir");
+        let install_bin = temp.path().join("xdg-bin");
+        let real_bin = temp.path().join("cargo-bin");
+        fs::create_dir_all(&install_bin).expect("install bin");
+        fs::create_dir_all(&real_bin).expect("real bin");
+
+        let current_exe = real_bin.join("taskers");
+        fs::write(&current_exe, "#!/bin/sh\n").expect("current exe");
+        #[cfg(unix)]
+        symlink(&current_exe, install_bin.join("taskers")).expect("taskers symlink");
+
+        let path_env = OsString::from(install_bin.as_os_str());
+        let resolved = path_taskers_executable(&current_exe, Some(path_env)).expect("path taskers");
+
+        assert_eq!(resolved, install_bin.join("taskers"));
+    }
+
+    #[test]
+    fn repo_local_binaries_do_not_look_installed() {
+        let repo_binary = PathBuf::from("/home/notes/Projects/taskers/target/debug/taskers");
+        assert!(!launcher_path_looks_installed(&repo_binary));
     }
 }
