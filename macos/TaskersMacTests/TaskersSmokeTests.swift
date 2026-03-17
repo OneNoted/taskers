@@ -117,8 +117,10 @@ final class TaskersSmokeTests: XCTestCase {
     }
 
     private func drainMainRunLoop() {
-        controllerWindow?.contentView?.layoutSubtreeIfNeeded()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        let deadline = Date().addingTimeInterval(0.1)
+        while Date() < deadline {
+            _ = RunLoop.current.run(mode: .default, before: deadline)
+        }
     }
 
     private var controllerWindow: NSWindow? {
