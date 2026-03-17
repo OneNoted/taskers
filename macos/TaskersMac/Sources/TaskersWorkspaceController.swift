@@ -1,6 +1,33 @@
 import AppKit
 import Foundation
 
+final class TaskersSurfaceHostView: NSView {
+    let terminalView: TaskersTerminalView
+
+    init(terminalView: TaskersTerminalView) {
+        self.terminalView = terminalView
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        terminalView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(terminalView)
+        NSLayoutConstraint.activate([
+            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            terminalView.topAnchor.constraint(equalTo: topAnchor),
+            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    func dispose() {
+        terminalView.dispose()
+    }
+}
+
 final class WeightedSplitView: NSSplitView {
     private let weights: [CGFloat]
 
@@ -37,7 +64,7 @@ final class WeightedSplitView: NSSplitView {
 final class TaskersWorkspaceController: NSWindowController {
     private let core: TaskersCoreBridge
     private let ghosttyHost: TaskersGhosttyHost
-    private var surfaceRegistry: [String: TaskersTerminalView] = [:]
+    private var surfaceRegistry: [String: TaskersSurfaceHostView] = [:]
     private var pollTimer: Timer?
     private var lastRevision: UInt64?
     private var didShutdown = false
@@ -197,7 +224,6 @@ final class TaskersWorkspaceController: NSWindowController {
 
         let activeSurfaceID = pane.activeSurface
         if let existing = surfaceRegistry[activeSurfaceID] {
-            existing.removeFromSuperview()
             return existing
         }
 
@@ -208,8 +234,9 @@ final class TaskersWorkspaceController: NSWindowController {
             surfaceID: activeSurfaceID,
             descriptor: descriptor
         )
-        surfaceRegistry[activeSurfaceID] = terminalView
-        return terminalView
+        let hostView = TaskersSurfaceHostView(terminalView: terminalView)
+        surfaceRegistry[activeSurfaceID] = hostView
+        return hostView
     }
 
     private func pruneSurfaceRegistry(keeping liveSurfaceIDs: Set<String>) {
