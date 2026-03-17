@@ -17,7 +17,13 @@ cp "${ROOT_DIR}/target/release/taskersctl" "${BUILD_DIR}/bin/taskersctl"
 chmod +x "${BUILD_DIR}/bin/taskersctl"
 
 pushd "${GHOSTTY_DIR}" >/dev/null
-zig build -Dapp-runtime=none -Demit-xcframework=true -Dxcframework-target=native
+# Ghostty defaults `emit_macos_app` to `emit_xcframework`, but Taskers only
+# needs the embedded framework/resources for preview builds.
+zig build \
+  -Dapp-runtime=none \
+  -Demit-xcframework=true \
+  -Demit-macos-app=false \
+  -Dxcframework-target=native
 popd >/dev/null
 
 rm -rf "${BUILD_DIR}/GhosttyKit.xcframework"
