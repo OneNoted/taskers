@@ -234,13 +234,7 @@ pub struct ThemeDefinition {
 // ── Theme loading ──
 
 fn theme_dir() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
-        return Some(path.join("taskers").join("themes"));
-    }
-    if let Some(path) = std::env::var_os("HOME").map(PathBuf::from) {
-        return Some(path.join(".config").join("taskers").join("themes"));
-    }
-    None
+    Some(taskers_paths::default_theme_dir())
 }
 
 pub fn load_theme(

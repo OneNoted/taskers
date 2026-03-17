@@ -1,0 +1,22 @@
+[package]
+name = "taskers-core"
+description = "Shared application orchestration and runtime state for taskers."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+taskers-control = { version = "0.3.0", path = "../taskers-control" }
+taskers-domain = { version = "0.3.0", path = "../taskers-domain" }
+taskers-ghostty = { version = "0.3.0", path = "../taskers-ghostty" }
+taskers-paths.workspace = true
+taskers-runtime = { version = "0.3.0", path = "../taskers-runtime" }
+
+[dev-dependencies]
+tempfile.workspace = true

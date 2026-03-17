@@ -1,0 +1,26 @@
+[package]
+name = "taskers-macos-ffi"
+description = "C ABI bridge for a native macOS taskers shell."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+version.workspace = true
+
+[lib]
+name = "taskers_macos_ffi"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+taskers-core.workspace = true
+taskers-control = { version = "0.3.0", path = "../taskers-control" }
+taskers-domain = { version = "0.3.0", path = "../taskers-domain" }
+taskers-ghostty = { version = "0.3.0", path = "../taskers-ghostty" }
+taskers-paths.workspace = true
+taskers-runtime = { version = "0.3.0", path = "../taskers-runtime" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -138,7 +138,7 @@ start_scene() {
     export XDG_DATA_HOME="$temp_dir/data"
     export XDG_CACHE_HOME="$temp_dir/cache"
     export HOME="$temp_dir/home"
-    exec "$TARGET_DIR/taskers" \
+    exec "$TARGET_DIR/taskers-gtk" \
       --raw-shell \
       --socket "$socket_path" \
       --session "$session_path"
@@ -279,7 +279,7 @@ mkdir -p "$OUT_DIR"
 
 (
   cd "$REPO_ROOT"
-  cargo build -p taskers -p taskers-cli >/dev/null
+  cargo build -p taskers-gtk -p taskers-cli >/dev/null
 )
 
 capture_attention_scene

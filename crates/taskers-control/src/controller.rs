@@ -6,42 +6,63 @@ use crate::protocol::{ControlCommand, ControlQuery, ControlResponse};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryController {
-    state: Arc<Mutex<AppModel>>,
+    state: Arc<Mutex<ControllerState>>,
+}
+
+#[derive(Debug, Clone)]
+struct ControllerState {
+    model: AppModel,
+    revision: u64,
 }
 
 #[derive(Debug, Clone)]
 pub struct ControllerSnapshot {
     pub model: AppModel,
+    pub revision: u64,
 }
 
 impl InMemoryController {
     pub fn new(state: AppModel) -> Self {
         Self {
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(Mutex::new(ControllerState {
+                model: state,
+                revision: 0,
+            })),
         }
     }
 
     pub fn snapshot(&self) -> ControllerSnapshot {
         let state = self.state.lock().expect("state mutex poisoned").clone();
-        ControllerSnapshot { model: state }
+        ControllerSnapshot {
+            model: state.model,
+            revision: state.revision,
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.state.lock().expect("state mutex poisoned").revision
     }
 
     pub fn handle(&self, command: ControlCommand) -> Result<ControlResponse, DomainError> {
-        let mut model = self.state.lock().expect("state mutex poisoned");
+        let mut state = self.state.lock().expect("state mutex poisoned");
+        let model = &mut state.model;
 
-        match command {
+        let (response, mutated) = match command {
             ControlCommand::CreateWorkspace { label } => {
                 let workspace_id = model.create_workspace(label);
-                Ok(ControlResponse::WorkspaceCreated { workspace_id })
+                (ControlResponse::WorkspaceCreated { workspace_id }, true)
             }
             ControlCommand::RenameWorkspace {
                 workspace_id,
                 label,
             } => {
                 model.rename_workspace(workspace_id, label)?;
-                Ok(ControlResponse::Ack {
-                    message: "workspace renamed".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "workspace renamed".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::SwitchWorkspace {
                 window_id,
@@ -49,9 +70,12 @@ impl InMemoryController {
             } => {
                 let target_window = window_id.unwrap_or(model.active_window);
                 model.switch_workspace(target_window, workspace_id)?;
-                Ok(ControlResponse::Ack {
-                    message: "workspace switched".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "workspace switched".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::SplitPane {
                 workspace_id,
@@ -59,45 +83,60 @@ impl InMemoryController {
                 axis,
             } => {
                 let new_pane_id = model.split_pane(workspace_id, pane_id, axis)?;
-                Ok(ControlResponse::PaneSplit {
-                    pane_id: new_pane_id,
-                })
+                (
+                    ControlResponse::PaneSplit {
+                        pane_id: new_pane_id,
+                    },
+                    true,
+                )
             }
             ControlCommand::CreateWorkspaceWindow {
                 workspace_id,
                 direction,
             } => {
                 let new_pane_id = model.create_workspace_window(workspace_id, direction)?;
-                Ok(ControlResponse::WorkspaceWindowCreated {
-                    pane_id: new_pane_id,
-                })
+                (
+                    ControlResponse::WorkspaceWindowCreated {
+                        pane_id: new_pane_id,
+                    },
+                    true,
+                )
             }
             ControlCommand::FocusWorkspaceWindow {
                 workspace_id,
                 workspace_window_id,
             } => {
                 model.focus_workspace_window(workspace_id, workspace_window_id)?;
-                Ok(ControlResponse::Ack {
-                    message: "workspace window focused".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window focused".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::FocusPane {
                 workspace_id,
                 pane_id,
             } => {
                 model.focus_pane(workspace_id, pane_id)?;
-                Ok(ControlResponse::Ack {
-                    message: "pane focused".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "pane focused".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::FocusPaneDirection {
                 workspace_id,
                 direction,
             } => {
                 model.focus_pane_direction(workspace_id, direction)?;
-                Ok(ControlResponse::Ack {
-                    message: "pane focus moved".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "pane focus moved".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::ResizeActiveWindow {
                 workspace_id,
@@ -105,9 +144,12 @@ impl InMemoryController {
                 amount,
             } => {
                 model.resize_active_window(workspace_id, direction, amount)?;
-                Ok(ControlResponse::Ack {
-                    message: "workspace window resized".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window resized".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::ResizeActivePaneSplit {
                 workspace_id,
@@ -115,9 +157,12 @@ impl InMemoryController {
                 amount,
             } => {
                 model.resize_active_pane_split(workspace_id, direction, amount)?;
-                Ok(ControlResponse::Ack {
-                    message: "pane split resized".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "pane split resized".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::SetWorkspaceColumnWidth {
                 workspace_id,
@@ -125,9 +170,12 @@ impl InMemoryController {
                 width,
             } => {
                 model.set_workspace_column_width(workspace_id, workspace_column_id, width)?;
-                Ok(ControlResponse::Ack {
-                    message: "workspace column width updated".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "workspace column width updated".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::SetWorkspaceWindowHeight {
                 workspace_id,
@@ -135,9 +183,12 @@ impl InMemoryController {
                 height,
             } => {
                 model.set_workspace_window_height(workspace_id, workspace_window_id, height)?;
-                Ok(ControlResponse::Ack {
-                    message: "workspace window height updated".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window height updated".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::SetWindowSplitRatio {
                 workspace_id,
@@ -146,21 +197,30 @@ impl InMemoryController {
                 ratio,
             } => {
                 model.set_window_split_ratio(workspace_id, workspace_window_id, &path, ratio)?;
-                Ok(ControlResponse::Ack {
-                    message: "window split ratio updated".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "window split ratio updated".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::UpdatePaneMetadata { pane_id, patch } => {
                 model.update_pane_metadata(pane_id, patch)?;
-                Ok(ControlResponse::Ack {
-                    message: "pane metadata updated".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "pane metadata updated".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::UpdateSurfaceMetadata { surface_id, patch } => {
                 model.update_surface_metadata(surface_id, patch)?;
-                Ok(ControlResponse::Ack {
-                    message: "surface metadata updated".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "surface metadata updated".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::CreateSurface {
                 workspace_id,
@@ -168,7 +228,7 @@ impl InMemoryController {
                 kind,
             } => {
                 let surface_id = model.create_surface(workspace_id, pane_id, kind)?;
-                Ok(ControlResponse::SurfaceCreated { surface_id })
+                (ControlResponse::SurfaceCreated { surface_id }, true)
             }
             ControlCommand::FocusSurface {
                 workspace_id,
@@ -176,9 +236,12 @@ impl InMemoryController {
                 surface_id,
             } => {
                 model.focus_surface(workspace_id, pane_id, surface_id)?;
-                Ok(ControlResponse::Ack {
-                    message: "surface focused".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "surface focused".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::MarkSurfaceCompleted {
                 workspace_id,
@@ -186,9 +249,12 @@ impl InMemoryController {
                 surface_id,
             } => {
                 model.mark_surface_completed(workspace_id, pane_id, surface_id)?;
-                Ok(ControlResponse::Ack {
-                    message: "surface marked completed".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "surface marked completed".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::CloseSurface {
                 workspace_id,
@@ -196,9 +262,12 @@ impl InMemoryController {
                 surface_id,
             } => {
                 model.close_surface(workspace_id, pane_id, surface_id)?;
-                Ok(ControlResponse::Ack {
-                    message: "surface closed".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "surface closed".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::MoveSurface {
                 workspace_id,
@@ -207,33 +276,45 @@ impl InMemoryController {
                 to_index,
             } => {
                 model.move_surface(workspace_id, pane_id, surface_id, to_index)?;
-                Ok(ControlResponse::Ack {
-                    message: "surface moved".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "surface moved".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::SetWorkspaceViewport {
                 workspace_id,
                 viewport,
             } => {
                 model.set_workspace_viewport(workspace_id, viewport)?;
-                Ok(ControlResponse::Ack {
-                    message: "workspace viewport updated".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "workspace viewport updated".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::ClosePane {
                 workspace_id,
                 pane_id,
             } => {
                 model.close_pane(workspace_id, pane_id)?;
-                Ok(ControlResponse::Ack {
-                    message: "pane closed".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "pane closed".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::CloseWorkspace { workspace_id } => {
                 model.close_workspace(workspace_id)?;
-                Ok(ControlResponse::Ack {
-                    message: "workspace closed".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "workspace closed".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::EmitSignal {
                 workspace_id,
@@ -246,20 +327,32 @@ impl InMemoryController {
                 } else {
                     model.apply_signal(workspace_id, pane_id, event)?;
                 }
-                Ok(ControlResponse::Ack {
-                    message: "signal applied".into(),
-                })
+                (
+                    ControlResponse::Ack {
+                        message: "signal applied".into(),
+                    },
+                    true,
+                )
             }
             ControlCommand::QueryStatus { query } => match query {
-                ControlQuery::ActiveWindow | ControlQuery::All => Ok(ControlResponse::Status {
-                    session: model.snapshot(),
-                }),
-                ControlQuery::Window { window_id } => window_snapshot(&model, window_id),
+                ControlQuery::ActiveWindow | ControlQuery::All => (
+                    ControlResponse::Status {
+                        session: model.snapshot(),
+                    },
+                    false,
+                ),
+                ControlQuery::Window { window_id } => (window_snapshot(model, window_id)?, false),
                 ControlQuery::Workspace { workspace_id } => {
-                    workspace_snapshot(&model, workspace_id)
+                    (workspace_snapshot(model, workspace_id)?, false)
                 }
             },
+        };
+
+        if mutated {
+            state.revision = state.revision.saturating_add(1);
         }
+
+        Ok(response)
     }
 }
 
@@ -285,4 +378,52 @@ fn workspace_snapshot(
         workspace_id,
         session: model.snapshot(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use taskers_domain::{AppModel, SignalEvent, SignalKind};
+
+    use crate::{ControlCommand, ControlQuery};
+
+    use super::InMemoryController;
+
+    #[test]
+    fn revision_increments_for_mutations_but_not_queries() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        assert_eq!(controller.revision(), 0);
+
+        controller
+            .handle(ControlCommand::QueryStatus {
+                query: ControlQuery::All,
+            })
+            .expect("query status");
+        assert_eq!(controller.revision(), 0);
+
+        controller
+            .handle(ControlCommand::CreateWorkspace {
+                label: "Docs".into(),
+            })
+            .expect("create workspace");
+        assert_eq!(controller.revision(), 1);
+        assert_eq!(controller.snapshot().revision, 1);
+    }
+
+    #[test]
+    fn revision_increments_for_signal_mutations() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+
+        controller
+            .handle(ControlCommand::EmitSignal {
+                workspace_id: workspace.id,
+                pane_id: workspace.active_pane,
+                surface_id: None,
+                event: SignalEvent::new("pty", SignalKind::Progress, Some("Running".into())),
+            })
+            .expect("emit signal");
+
+        assert_eq!(controller.revision(), 1);
+    }
 }

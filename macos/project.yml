@@ -1,0 +1,68 @@
+name: Taskers
+options:
+  bundleIdPrefix: dev.taskers
+  projectFormat: xcode15_3
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    PRODUCT_NAME: Taskers
+    SWIFT_VERSION: 5.10
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    LD_RUNPATH_SEARCH_PATHS:
+      - $(inherited)
+      - "@executable_path/../Frameworks"
+targets:
+  TaskersMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: TaskersMac/Sources
+    info:
+      path: TaskersMac/Info.plist
+    dependencies:
+      - framework: ../build/macos/GhosttyKit.xcframework
+      - sdk: Carbon.framework
+      - sdk: libc++.tbd
+      - sdk: liblzma.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.taskers.app
+        PRODUCT_MODULE_NAME: TaskersMac
+        SWIFT_OBJC_BRIDGING_HEADER: TaskersMac/Sources/TaskersMac-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../build/macos
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -ltaskers_macos_ffi
+    preBuildScripts:
+      - name: Build macOS Preview Dependencies
+        script: |
+          "${SRCROOT}/../scripts/macos-build-preview-deps.sh"
+        basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: Stage App Bundle Support
+        script: |
+          "${SRCROOT}/../scripts/stage_macos_bundle_support.sh"
+        basedOnDependencyAnalysis: false
+  TaskersMacTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: TaskersMacTests
+    dependencies:
+      - target: TaskersMac
+    settings:
+      base:
+        BUNDLE_LOADER: $(TEST_HOST)
+        PRODUCT_BUNDLE_IDENTIFIER: dev.taskers.tests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Taskers.app/Contents/MacOS/Taskers
+schemes:
+  TaskersMac:
+    build:
+      targets:
+        TaskersMac: all
+        TaskersMacTests: [test]
+    test:
+      targets:
+        - TaskersMacTests

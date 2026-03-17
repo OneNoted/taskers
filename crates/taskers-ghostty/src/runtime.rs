@@ -274,19 +274,7 @@ fn explicit_runtime_dir() -> Option<PathBuf> {
 }
 
 fn default_installed_runtime_dir() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join("taskers").join("ghostty"))
-    {
-        return Some(path);
-    }
-
-    env::var_os("HOME").map(PathBuf::from).map(|path| {
-        path.join(".local")
-            .join("share")
-            .join("taskers")
-            .join("ghostty")
-    })
+    Some(taskers_paths::default_ghostty_runtime_dir())
 }
 
 fn default_runtime_bundle_url() -> String {

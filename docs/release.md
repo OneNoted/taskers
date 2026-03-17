@@ -15,7 +15,7 @@ Use this checklist before publishing a new `taskers` release.
 - Regenerate the README screenshots:
 
 ```bash
-./scripts/capture_demo_screenshots.sh
+bash scripts/capture_demo_screenshots.sh
 ```
 
 - Review the updated files in `docs/screenshots/`.
@@ -32,41 +32,85 @@ cargo test
 - Run the GTK smoke checks:
 
 ```bash
-./scripts/smoke_taskers_ui.sh
-./scripts/smoke_taskers_focus_churn.sh
+bash scripts/smoke_taskers_ui.sh
+bash scripts/smoke_taskers_focus_churn.sh
 ```
 
-- Build the Ghostty runtime asset that the published crate expects:
+- Build the Linux app bundle that the published launcher expects:
 
 ```bash
-./scripts/build_ghostty_runtime_bundle.sh
+bash scripts/build_linux_bundle.sh
+bash scripts/smoke_linux_release_launcher.sh
 ```
 
 The output asset name must match:
 
 ```text
-taskers-ghostty-runtime-v<version>-<target>.tar.xz
+taskers-linux-bundle-v<version>-<target>.tar.xz
 ```
 
-- Dry-run crate publishing in dependency order:
+- Build the macOS release assets on macOS:
+
+```bash
+bash scripts/install_macos_codesign_certificate.sh
+bash scripts/generate_macos_project.sh
+xcodebuild build \
+  -project macos/Taskers.xcodeproj \
+  -scheme TaskersMac \
+  -configuration Release \
+  -derivedDataPath build/macos/DerivedData \
+  ARCHS="arm64 x86_64" \
+  ONLY_ACTIVE_ARCH=NO \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO
+bash scripts/sign_macos_app.sh
+bash scripts/build_macos_dmg.sh
+bash scripts/notarize_macos_dmg.sh dist/Taskers-v<version>-universal2.dmg
+```
+
+- Set these env vars before importing the certificate or notarizing:
+  - `TASKERS_MACOS_CERTIFICATE_P12_BASE64`
+  - `TASKERS_MACOS_CERTIFICATE_PASSWORD`
+  - `TASKERS_MACOS_CODESIGN_IDENTITY`
+  - `TASKERS_MACOS_NOTARY_APPLE_ID`
+  - `TASKERS_MACOS_NOTARY_TEAM_ID`
+  - `TASKERS_MACOS_NOTARY_PASSWORD`
+- `scripts/sign_macos_app.sh` still falls back to ad hoc signing when `TASKERS_MACOS_CODESIGN_IDENTITY` is unset, but public release builds should always use a Developer ID Application identity and notarize the DMG.
+
+- Build the release manifest from the generated assets:
+
+```bash
+python3 scripts/build_release_manifest.py
+```
+
+- Dry-run the leaf crates that do not depend on unpublished workspace siblings:
 
 ```bash
 cargo publish --dry-run -p taskers-domain
-cargo publish --dry-run -p taskers-control
-cargo publish --dry-run -p taskers-runtime
-cargo publish --dry-run -p taskers-ghostty
-cargo publish --dry-run -p taskers-cli
-cargo publish --dry-run -p taskers
+cargo publish --dry-run -p taskers-paths
 ```
+
+- After you bump the workspace to a new unpublished version, `cargo publish --dry-run` for dependent crates will still resolve dependencies from crates.io and fail until the earlier crates are actually published. That failure is expected for:
+  - `taskers-control`
+  - `taskers-runtime`
+  - `taskers-ghostty`
+  - `taskers-cli`
+  - `taskers`
+- Use the full local test/smoke suite as the pre-publish validation for those dependent crates, then publish them in order once the earlier versions are live on crates.io.
 
 ## 4. Publish
 
-- Create a GitHub release draft tagged `v<version>`.
-- Upload the matching Ghostty runtime bundle from `dist/`.
-- Publish the crates to crates.io in the same order as the dry-run:
+- Push the release tag so GitHub Actions can assemble the assets and attach them to a draft GitHub release.
+- Confirm the draft release tagged `v<version>` contains:
+  - `taskers-manifest-v<version>.json`
+  - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
+  - `Taskers-v<version>-universal2.dmg`
+- Publish the GitHub release so the launcher assets are publicly downloadable before publishing the crates.
+- Publish the crates to crates.io in dependency order:
 
 ```bash
 cargo publish -p taskers-domain
+cargo publish -p taskers-paths
 cargo publish -p taskers-control
 cargo publish -p taskers-runtime
 cargo publish -p taskers-ghostty
@@ -74,13 +118,18 @@ cargo publish -p taskers-cli
 cargo publish -p taskers
 ```
 
+- Wait for crates.io to index each published version before publishing the next dependent crate, or Cargo will reject the dependency resolution for the later package.
+
 ## 5. Post-Publish Check
 
-- Verify a clean install path:
+- Verify the Linux launcher install:
 
 ```bash
 cargo install taskers --locked
 taskers --demo
 ```
 
-- Confirm the published crate can bootstrap the matching runtime asset on first launch.
+- Confirm the published Linux launcher downloads the exact version-matched bundle on first launch.
+- Confirm macOS installs from the published DMG and launches correctly after dragging `Taskers.app` into `Applications`.
+- Confirm `cargo install taskers --locked` fails on macOS with guidance to use the GitHub Releases DMG.
+- Confirm `cargo install taskers-cli --bin taskersctl --locked` still works as the standalone helper path.

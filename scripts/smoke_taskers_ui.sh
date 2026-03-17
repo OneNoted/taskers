@@ -64,7 +64,7 @@ session_path="$temp_dir/session.json"
 
 (
   cd "$REPO_ROOT"
-  cargo build -p taskers -p taskers-cli
+  cargo build -p taskers-gtk -p taskers-cli
 ) >/dev/null
 
 Xvfb "$display" -screen 0 1440x960x24 >"$temp_dir/xvfb.log" 2>&1 &
@@ -79,7 +79,7 @@ wait_for_path "/tmp/.X11-unix/X${display_number}"
   export LIBGL_ALWAYS_SOFTWARE=1
   export TASKERS_NON_UNIQUE=1
   export TASKERS_TERMINAL_BACKEND=mock
-  exec "$TARGET_DIR/taskers" \
+  exec "$TARGET_DIR/taskers-gtk" \
     --demo \
     --socket "$socket_path" \
     --session "$session_path"
