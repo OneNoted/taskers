@@ -1,41 +1,20 @@
 import Foundation
 
-struct OrderedMap<Value: Decodable>: Decodable {
+protocol TaskersIdentifiedRecord {
+    var id: String { get }
+}
+
+struct OrderedMap<Value: TaskersIdentifiedRecord> {
     let elements: [(String, Value)]
     private let storage: [String: Value]
 
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: DynamicCodingKey.self)
-        var elements: [(String, Value)] = []
-        var storage: [String: Value] = [:]
-        storage.reserveCapacity(container.allKeys.count)
-
-        for key in container.allKeys {
-            let value = try container.decode(Value.self, forKey: key)
-            elements.append((key.stringValue, value))
-            storage[key.stringValue] = value
-        }
-
-        self.elements = elements
-        self.storage = storage
+    init(values: [Value]) {
+        self.elements = values.map { ($0.id, $0) }
+        self.storage = Dictionary(uniqueKeysWithValues: elements)
     }
 
     subscript(key: String) -> Value? {
         storage[key]
-    }
-
-    struct DynamicCodingKey: CodingKey {
-        var stringValue: String
-        var intValue: Int?
-
-        init?(stringValue: String) {
-            self.stringValue = stringValue
-        }
-
-        init?(intValue: Int) {
-            self.stringValue = String(intValue)
-            self.intValue = intValue
-        }
     }
 }
 
@@ -48,6 +27,17 @@ struct TaskersSnapshot: Decodable {
         case activeWindow = "active_window"
         case windows
         case workspaces
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        activeWindow = try container.decode(String.self, forKey: .activeWindow)
+        windows = OrderedMap(values: try container.decode([TaskersWindowRecord].self, forKey: .windows))
+        workspaces = OrderedMap(values: try container.decode([TaskersWorkspace].self, forKey: .workspaces))
+    }
+
+    static func parse(data: Data) throws -> TaskersSnapshot {
+        try JSONDecoder().decode(Self.self, from: data)
     }
 
     var activeWorkspace: TaskersWorkspace? {
@@ -69,7 +59,7 @@ struct TaskersSnapshot: Decodable {
     }
 }
 
-struct TaskersWindowRecord: Decodable {
+struct TaskersWindowRecord: Decodable, TaskersIdentifiedRecord {
     let id: String
     let workspaceOrder: [String]
     let activeWorkspace: String
@@ -81,7 +71,7 @@ struct TaskersWindowRecord: Decodable {
     }
 }
 
-struct TaskersWorkspace: Decodable {
+struct TaskersWorkspace: Decodable, TaskersIdentifiedRecord {
     let id: String
     let label: String
     let columns: OrderedMap<TaskersWorkspaceColumn>
@@ -99,9 +89,20 @@ struct TaskersWorkspace: Decodable {
         case panes
         case activePane = "active_pane"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        columns = OrderedMap(values: try container.decode([TaskersWorkspaceColumn].self, forKey: .columns))
+        windows = OrderedMap(values: try container.decode([TaskersWorkspaceWindow].self, forKey: .windows))
+        activeWindow = try container.decode(String.self, forKey: .activeWindow)
+        panes = OrderedMap(values: try container.decode([TaskersPane].self, forKey: .panes))
+        activePane = try container.decode(String.self, forKey: .activePane)
+    }
 }
 
-struct TaskersWorkspaceColumn: Decodable {
+struct TaskersWorkspaceColumn: Decodable, TaskersIdentifiedRecord {
     let id: String
     let width: Int
     let windowOrder: [String]
@@ -115,7 +116,7 @@ struct TaskersWorkspaceColumn: Decodable {
     }
 }
 
-struct TaskersWorkspaceWindow: Decodable {
+struct TaskersWorkspaceWindow: Decodable, TaskersIdentifiedRecord {
     let id: String
     let height: Int
     let layout: TaskersLayoutNode
@@ -129,7 +130,7 @@ struct TaskersWorkspaceWindow: Decodable {
     }
 }
 
-struct TaskersPane: Decodable {
+struct TaskersPane: Decodable, TaskersIdentifiedRecord {
     let id: String
     let surfaces: OrderedMap<TaskersSurface>
     let activeSurface: String
@@ -139,9 +140,16 @@ struct TaskersPane: Decodable {
         case surfaces
         case activeSurface = "active_surface"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        surfaces = OrderedMap(values: try container.decode([TaskersSurface].self, forKey: .surfaces))
+        activeSurface = try container.decode(String.self, forKey: .activeSurface)
+    }
 }
 
-struct TaskersSurface: Decodable {
+struct TaskersSurface: Decodable, TaskersIdentifiedRecord {
     let id: String
     let metadata: TaskersSurfaceMetadata
 }
@@ -169,14 +177,14 @@ indirect enum TaskersLayoutNode: Decodable {
         case second
     }
 
-    enum NodeKind: String, Decodable {
+    enum Kind: String, Decodable {
         case leaf
         case split
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        switch try container.decode(NodeKind.self, forKey: .kind) {
+        switch try container.decode(Kind.self, forKey: .kind) {
         case .leaf:
             self = .leaf(paneID: try container.decode(String.self, forKey: .paneID))
         case .split:

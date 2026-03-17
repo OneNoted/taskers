@@ -80,7 +80,7 @@ final class TaskersCoreBridge {
         let json = try callString {
             taskers_macos_core_snapshot_json(handle)
         }
-        return try decode(TaskersSnapshot.self, from: json)
+        return try TaskersSnapshot.parse(data: Data(json.utf8))
     }
 
     @discardableResult

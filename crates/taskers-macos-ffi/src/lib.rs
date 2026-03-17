@@ -6,10 +6,14 @@ use std::{
     str::FromStr,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use taskers_control::{ControlCommand, default_socket_path};
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
-use taskers_domain::{PaneId, WorkspaceId};
+use taskers_domain::{
+    AppModel, PaneId, PaneRecord, SurfaceId, SurfaceRecord, WindowId, WindowRecord, Workspace,
+    WorkspaceColumnId, WorkspaceColumnRecord, WorkspaceId, WorkspaceWindowId,
+    WorkspaceWindowRecord,
+};
 use taskers_ghostty::BackendChoice;
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration};
 
@@ -30,6 +34,152 @@ struct CoreOptions {
     demo: bool,
     #[serde(default)]
     backend: Option<BackendChoice>,
+}
+
+#[derive(Serialize)]
+struct MacosSnapshot {
+    active_window: WindowId,
+    windows: Vec<MacosWindowRecord>,
+    workspaces: Vec<MacosWorkspace>,
+}
+
+#[derive(Serialize)]
+struct MacosWindowRecord {
+    id: WindowId,
+    workspace_order: Vec<WorkspaceId>,
+    active_workspace: WorkspaceId,
+}
+
+#[derive(Serialize)]
+struct MacosWorkspace {
+    id: WorkspaceId,
+    label: String,
+    columns: Vec<MacosWorkspaceColumn>,
+    windows: Vec<MacosWorkspaceWindow>,
+    active_window: WorkspaceWindowId,
+    panes: Vec<MacosPane>,
+    active_pane: PaneId,
+}
+
+#[derive(Serialize)]
+struct MacosWorkspaceColumn {
+    id: WorkspaceColumnId,
+    width: i32,
+    window_order: Vec<WorkspaceWindowId>,
+    active_window: WorkspaceWindowId,
+}
+
+#[derive(Serialize)]
+struct MacosWorkspaceWindow {
+    id: WorkspaceWindowId,
+    height: i32,
+    layout: taskers_domain::LayoutNode,
+    active_pane: PaneId,
+}
+
+#[derive(Serialize)]
+struct MacosPane {
+    id: PaneId,
+    surfaces: Vec<MacosSurface>,
+    active_surface: SurfaceId,
+}
+
+#[derive(Serialize)]
+struct MacosSurface {
+    id: SurfaceId,
+    metadata: MacosSurfaceMetadata,
+}
+
+#[derive(Serialize)]
+struct MacosSurfaceMetadata {
+    title: Option<String>,
+    cwd: Option<String>,
+}
+
+impl From<AppModel> for MacosSnapshot {
+    fn from(value: AppModel) -> Self {
+        Self {
+            active_window: value.active_window,
+            windows: value.windows.into_values().map(MacosWindowRecord::from).collect(),
+            workspaces: value.workspaces.into_values().map(MacosWorkspace::from).collect(),
+        }
+    }
+}
+
+impl From<WindowRecord> for MacosWindowRecord {
+    fn from(value: WindowRecord) -> Self {
+        Self {
+            id: value.id,
+            workspace_order: value.workspace_order,
+            active_workspace: value.active_workspace,
+        }
+    }
+}
+
+impl From<Workspace> for MacosWorkspace {
+    fn from(value: Workspace) -> Self {
+        Self {
+            id: value.id,
+            label: value.label,
+            columns: value
+                .columns
+                .into_values()
+                .map(MacosWorkspaceColumn::from)
+                .collect(),
+            windows: value
+                .windows
+                .into_values()
+                .map(MacosWorkspaceWindow::from)
+                .collect(),
+            active_window: value.active_window,
+            panes: value.panes.into_values().map(MacosPane::from).collect(),
+            active_pane: value.active_pane,
+        }
+    }
+}
+
+impl From<WorkspaceColumnRecord> for MacosWorkspaceColumn {
+    fn from(value: WorkspaceColumnRecord) -> Self {
+        Self {
+            id: value.id,
+            width: value.width,
+            window_order: value.window_order,
+            active_window: value.active_window,
+        }
+    }
+}
+
+impl From<WorkspaceWindowRecord> for MacosWorkspaceWindow {
+    fn from(value: WorkspaceWindowRecord) -> Self {
+        Self {
+            id: value.id,
+            height: value.height,
+            layout: value.layout,
+            active_pane: value.active_pane,
+        }
+    }
+}
+
+impl From<PaneRecord> for MacosPane {
+    fn from(value: PaneRecord) -> Self {
+        Self {
+            id: value.id,
+            surfaces: value.surfaces.into_values().map(MacosSurface::from).collect(),
+            active_surface: value.active_surface,
+        }
+    }
+}
+
+impl From<SurfaceRecord> for MacosSurface {
+    fn from(value: SurfaceRecord) -> Self {
+        Self {
+            id: value.id,
+            metadata: MacosSurfaceMetadata {
+                title: value.metadata.title,
+                cwd: value.metadata.cwd,
+            },
+        }
+    }
 }
 
 thread_local! {
@@ -99,7 +249,7 @@ impl TaskersMacosCore {
     }
 
     fn snapshot_json(&self) -> Result<String, String> {
-        serde_json::to_string(&self.app_state.snapshot_model())
+        serde_json::to_string(&MacosSnapshot::from(self.app_state.snapshot_model()))
             .map_err(|error| format!("failed to serialize snapshot: {error}"))
     }
 
@@ -399,7 +549,17 @@ mod tests {
 
         let snapshot = core.snapshot_json().expect("snapshot");
         let snapshot: Value = serde_json::from_str(&snapshot).expect("snapshot json");
-        assert!(snapshot.get("workspaces").is_some());
+        let workspaces = snapshot
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .expect("workspaces array");
+        assert!(!workspaces.is_empty());
+        assert!(
+            workspaces[0]
+                .get("columns")
+                .and_then(Value::as_array)
+                .is_some()
+        );
 
         let response = core
             .dispatch_json(r#"{"command":"create_workspace","label":"Docs"}"#)
