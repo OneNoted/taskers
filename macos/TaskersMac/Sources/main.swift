@@ -9,6 +9,7 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        TaskersEnvironment.scrubInheritedTerminalEnvironment()
         TaskersEnvironment.configureBundledPaths()
 
         do {

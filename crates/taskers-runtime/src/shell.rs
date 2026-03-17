@@ -18,6 +18,26 @@ enum ShellKind {
     Other,
 }
 
+const INHERITED_TERMINAL_ENV_KEYS: &[&str] = &[
+    "TERM",
+    "TERMINFO",
+    "TERMINFO_DIRS",
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "COLORTERM",
+    "NO_COLOR",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "KITTY_INSTALLATION_DIR",
+    "KITTY_LISTEN_ON",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_WINDOW_ID",
+    "GHOSTTY_BIN_DIR",
+    "GHOSTTY_RESOURCES_DIR",
+    "GHOSTTY_SHELL_FEATURES",
+    "GHOSTTY_SHELL_INTEGRATION_XDG_DIR",
+];
+
 #[derive(Debug, Clone)]
 pub struct ShellIntegration {
     root: PathBuf,
@@ -206,6 +226,14 @@ impl ShellIntegration {
 
 pub fn install_shell_integration(configured_shell: Option<&str>) -> Result<ShellIntegration> {
     ShellIntegration::install(configured_shell)
+}
+
+pub fn scrub_inherited_terminal_env() {
+    for key in INHERITED_TERMINAL_ENV_KEYS {
+        unsafe {
+            env::remove_var(key);
+        }
+    }
 }
 
 pub fn default_shell_program() -> PathBuf {
@@ -454,7 +482,10 @@ fn fish_source_command() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_home_prefix, fish_source_command, normalize_shell_override};
+    use super::{
+        INHERITED_TERMINAL_ENV_KEYS, expand_home_prefix, fish_source_command,
+        normalize_shell_override,
+    };
 
     #[test]
     fn shell_override_normalizes_blank_values() {
@@ -482,6 +513,16 @@ mod tests {
             assert_ne!(expanded, original);
         } else {
             assert_eq!(expanded, original);
+        }
+    }
+
+    #[test]
+    fn inherited_terminal_env_keys_cover_color_and_terminfo_leaks() {
+        for key in ["NO_COLOR", "TERMINFO", "TERMINFO_DIRS", "TERM_PROGRAM"] {
+            assert!(
+                INHERITED_TERMINAL_ENV_KEYS.contains(&key),
+                "expected {key} to be scrubbed from inherited terminal env"
+            );
         }
     }
 }

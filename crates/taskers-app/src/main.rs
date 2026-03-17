@@ -43,7 +43,8 @@ use taskers_ghostty::{
     ensure_runtime_installed,
 };
 use taskers_runtime::{
-    ShellLaunchSpec, default_shell_program, install_shell_integration, validate_shell_program,
+    ShellLaunchSpec, default_shell_program, install_shell_integration,
+    scrub_inherited_terminal_env, validate_shell_program,
 };
 use terminal_transitions::{
     PaneSceneSnapshot, PresentedTransitionRect, TERMINAL_MOTION_SPEC, TransitionItemId,
@@ -1861,6 +1862,7 @@ impl UiHandle {
 
 fn main() -> gtk::glib::ExitCode {
     let cli = Cli::parse();
+    scrub_inherited_terminal_env();
     if cli.internal_ghostty_probe {
         return run_internal_ghostty_probe();
     }
