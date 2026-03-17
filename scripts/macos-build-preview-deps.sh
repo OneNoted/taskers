@@ -27,7 +27,7 @@ zig build \
 popd >/dev/null
 
 rm -rf "${BUILD_DIR}/GhosttyKit.xcframework"
-cp -R "${GHOSTTY_DIR}/zig-out/macos/GhosttyKit.xcframework" "${BUILD_DIR}/GhosttyKit.xcframework"
+cp -R "${GHOSTTY_DIR}/macos/GhosttyKit.xcframework" "${BUILD_DIR}/GhosttyKit.xcframework"
 
 rm -rf "${BUILD_DIR}/resources/ghostty" "${BUILD_DIR}/resources/terminfo"
 cp -R "${GHOSTTY_DIR}/zig-out/share/ghostty" "${BUILD_DIR}/resources/ghostty"
