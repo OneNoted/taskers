@@ -62,6 +62,30 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Decide whether to build signed macOS release
+        id: release-gate
+        run: |
+          signed_release=true
+          missing=()
+          for name in \
+            TASKERS_MACOS_CERTIFICATE_P12_BASE64 \
+            TASKERS_MACOS_CERTIFICATE_PASSWORD \
+            TASKERS_MACOS_CODESIGN_IDENTITY \
+            TASKERS_MACOS_NOTARY_APPLE_ID \
+            TASKERS_MACOS_NOTARY_TEAM_ID \
+            TASKERS_MACOS_NOTARY_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("${name}")
+              signed_release=false
+            fi
+          done
+
+          echo "signed_release=${signed_release}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${signed_release}" != "true" ]]; then
+            echo "Building unsigned macOS DMG; missing signing/notary secrets: ${missing[*]}"
+          fi
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -78,27 +102,8 @@ jobs:
           brew update
           brew install xcodegen
 
-      - name: Validate macOS release credentials
-        run: |
-          missing=0
-          for name in \
-            TASKERS_MACOS_CERTIFICATE_P12_BASE64 \
-            TASKERS_MACOS_CERTIFICATE_PASSWORD \
-            TASKERS_MACOS_CODESIGN_IDENTITY \
-            TASKERS_MACOS_NOTARY_APPLE_ID \
-            TASKERS_MACOS_NOTARY_TEAM_ID \
-            TASKERS_MACOS_NOTARY_PASSWORD; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "::error::Missing required secret ${name}"
-              missing=1
-            fi
-          done
-
-          if [[ $missing -ne 0 ]]; then
-            exit 1
-          fi
-
       - name: Install Developer ID certificate
+        if: steps.release-gate.outputs.signed_release == 'true'
         run: bash scripts/install_macos_codesign_certificate.sh
 
       - name: Generate Xcode project
@@ -123,6 +128,7 @@ jobs:
         run: bash scripts/build_macos_dmg.sh
 
       - name: Notarize and staple universal DMG
+        if: steps.release-gate.outputs.signed_release == 'true'
         run: |
           version="$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
           bash scripts/notarize_macos_dmg.sh "dist/Taskers-v${version}-universal2.dmg"
@@ -179,11 +185,21 @@ jobs:
           mkdir -p dist/release
           find dist -type f -exec cp {} dist/release/ \;
 
+      - name: Prepare release asset list
+        id: release-files
+        run: |
+          {
+            echo 'files<<EOF'
+            echo 'dist/release/taskers-manifest-v*.json'
+            echo 'dist/release/taskers-linux-bundle-v*.tar.xz'
+            if compgen -G 'dist/release/Taskers-v*-universal2.dmg' > /dev/null; then
+              echo 'dist/release/Taskers-v*-universal2.dmg'
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create draft GitHub release with assets
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: |
-            dist/release/taskers-manifest-v*.json
-            dist/release/taskers-linux-bundle-v*.tar.xz
-            dist/release/Taskers-v*-universal2.dmg
+          files: ${{ steps.release-files.outputs.files }}
