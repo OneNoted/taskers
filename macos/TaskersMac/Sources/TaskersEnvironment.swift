@@ -57,6 +57,15 @@ enum TaskersEnvironment {
         )
     }
 
+    static func emitSmokeLog(_ message: String) {
+        guard isSmokeTestEnabled else {
+            return
+        }
+
+        fputs("Taskers macOS smoke: \(message)\n", stderr)
+        fflush(stderr)
+    }
+
     private static func setPath(_ key: String, url: URL) {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return

@@ -8,6 +8,7 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        TaskersEnvironment.emitSmokeLog("applicationDidFinishLaunching")
         TaskersEnvironment.scrubInheritedTerminalEnvironment()
         TaskersEnvironment.configureBundledPaths()
         if TaskersEnvironment.isRunningUnderXCTest {
@@ -15,15 +16,20 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
         }
 
         do {
+            TaskersEnvironment.emitSmokeLog("creating core bridge")
             let core = try TaskersCoreBridge(options: TaskersEnvironment.defaultCoreOptions())
+            TaskersEnvironment.emitSmokeLog("creating Ghostty host")
             let ghosttyHost = TaskersGhosttyHost()
+            TaskersEnvironment.emitSmokeLog("creating workspace controller")
             let controller = TaskersWorkspaceController(core: core, ghosttyHost: ghosttyHost)
 
             self.core = core
             self.ghosttyHost = ghosttyHost
             self.workspaceController = controller
 
+            TaskersEnvironment.emitSmokeLog("starting workspace controller")
             try controller.start()
+            TaskersEnvironment.emitSmokeLog("workspace controller started")
 
             if TaskersEnvironment.isSmokeTestEnabled {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {

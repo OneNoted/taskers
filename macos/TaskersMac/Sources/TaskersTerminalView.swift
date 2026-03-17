@@ -198,7 +198,7 @@ final class TaskersTerminalView: NSView, TaskersHostedSurface {
             launchStorage: launchStorage,
             userdata: self.callbackContextHandle!
         )
-        updateSurfaceMetrics()
+        TaskersEnvironment.emitSmokeLog("surface created \(surfaceID)")
     }
 
     required init?(coder: NSCoder) {
@@ -236,6 +236,7 @@ final class TaskersTerminalView: NSView, TaskersHostedSurface {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        TaskersEnvironment.emitSmokeLog("surface moved to window \(surfaceID) window=\(window != nil)")
         updateSurfaceMetrics()
     }
 
@@ -338,6 +339,9 @@ final class TaskersTerminalView: NSView, TaskersHostedSurface {
 
     private func updateSurfaceMetrics() {
         guard let surface else {
+            return
+        }
+        guard window != nil else {
             return
         }
 

@@ -40,6 +40,7 @@ final class TaskersGhosttyHost: NSObject, TaskersSurfaceHosting {
             return
         }
 
+        TaskersEnvironment.emitSmokeLog("Ghostty host bootstrap begin")
         guard let config = ghostty_config_new() else {
             throw TaskersGhosttyHostError.configurationFailed
         }
@@ -73,6 +74,7 @@ final class TaskersGhosttyHost: NSObject, TaskersSurfaceHosting {
         self.config = config
         self.app = app
         ghostty_app_set_focus(app, NSApp.isActive)
+        TaskersEnvironment.emitSmokeLog("Ghostty host bootstrap end")
     }
 
     func makeSurface(
@@ -86,6 +88,7 @@ final class TaskersGhosttyHost: NSObject, TaskersSurfaceHosting {
             throw TaskersGhosttyHostError.appCreationFailed
         }
 
+        TaskersEnvironment.emitSmokeLog("creating Ghostty surface \(surfaceID)")
         let view = try TaskersTerminalView(
             host: self,
             app: app,
@@ -95,6 +98,7 @@ final class TaskersGhosttyHost: NSObject, TaskersSurfaceHosting {
             descriptor: descriptor
         )
         registerSurface(view)
+        TaskersEnvironment.emitSmokeLog("created Ghostty surface \(surfaceID)")
         return view
     }
 
