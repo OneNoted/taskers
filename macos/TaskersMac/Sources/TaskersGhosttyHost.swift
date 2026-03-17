@@ -131,7 +131,7 @@ final class TaskersGhosttyHost: NSObject {
         }
     }
 
-    fileprivate func surfaceDidClose(workspaceID: String, paneID: String, surfaceID: String) {
+    func surfaceDidClose(workspaceID: String, paneID: String, surfaceID: String) {
         onSurfaceClosed?(workspaceID, paneID, surfaceID)
     }
 

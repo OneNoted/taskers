@@ -156,7 +156,7 @@ enum TaskersSplitAxis: String, Decodable {
     case vertical
 }
 
-enum TaskersLayoutNode: Decodable {
+indirect enum TaskersLayoutNode: Decodable {
     case leaf(paneID: String)
     case split(axis: TaskersSplitAxis, ratio: UInt16, first: TaskersLayoutNode, second: TaskersLayoutNode)
 

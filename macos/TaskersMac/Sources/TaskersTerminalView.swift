@@ -313,7 +313,8 @@ final class TaskersTerminalView: NSView {
     ) rethrows -> T {
         let entries = Array(environment)
         return try withCStringPairs(entries) { envVars in
-            try envVars.withUnsafeMutableBufferPointer { buffer in
+            var envVars = envVars
+            return try envVars.withUnsafeMutableBufferPointer { buffer in
                 try body(buffer.baseAddress, buffer.count)
             }
         }
@@ -359,35 +360,35 @@ final class TaskersTerminalView: NSView {
     }
 
     fileprivate static func modifiers(from flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
-        var mods = Int32(GHOSTTY_MODS_NONE.rawValue)
+        var mods = GHOSTTY_MODS_NONE.rawValue
         if flags.contains(.shift) {
-            mods |= Int32(GHOSTTY_MODS_SHIFT.rawValue)
+            mods |= GHOSTTY_MODS_SHIFT.rawValue
         }
         if flags.contains(.control) {
-            mods |= Int32(GHOSTTY_MODS_CTRL.rawValue)
+            mods |= GHOSTTY_MODS_CTRL.rawValue
         }
         if flags.contains(.option) {
-            mods |= Int32(GHOSTTY_MODS_ALT.rawValue)
+            mods |= GHOSTTY_MODS_ALT.rawValue
         }
         if flags.contains(.command) {
-            mods |= Int32(GHOSTTY_MODS_SUPER.rawValue)
+            mods |= GHOSTTY_MODS_SUPER.rawValue
         }
-        return ghostty_input_mods_e(mods)
+        return ghostty_input_mods_e(rawValue: mods) ?? GHOSTTY_MODS_NONE
     }
 
     private static func modifierFlags(from mods: ghostty_input_mods_e) -> NSEvent.ModifierFlags {
-        let raw = Int32(mods.rawValue)
+        let raw = mods.rawValue
         var flags: NSEvent.ModifierFlags = []
-        if raw & Int32(GHOSTTY_MODS_SHIFT.rawValue) != 0 {
+        if raw & GHOSTTY_MODS_SHIFT.rawValue != 0 {
             flags.insert(.shift)
         }
-        if raw & Int32(GHOSTTY_MODS_CTRL.rawValue) != 0 {
+        if raw & GHOSTTY_MODS_CTRL.rawValue != 0 {
             flags.insert(.control)
         }
-        if raw & Int32(GHOSTTY_MODS_ALT.rawValue) != 0 {
+        if raw & GHOSTTY_MODS_ALT.rawValue != 0 {
             flags.insert(.option)
         }
-        if raw & Int32(GHOSTTY_MODS_SUPER.rawValue) != 0 {
+        if raw & GHOSTTY_MODS_SUPER.rawValue != 0 {
             flags.insert(.command)
         }
         return flags

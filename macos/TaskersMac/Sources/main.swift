@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 
-@main
 final class TaskersMacApplication: NSObject, NSApplicationDelegate {
     private var core: TaskersCoreBridge?
     private var ghosttyHost: TaskersGhosttyHost?
@@ -50,3 +49,9 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
         return true
     }
 }
+
+let app = NSApplication.shared
+let delegate = TaskersMacApplication()
+app.delegate = delegate
+app.setActivationPolicy(.regular)
+app.run()
