@@ -2,6 +2,16 @@ import AppKit
 import Darwin
 import Foundation
 
+#if DEBUG
+private func taskersMacDebugLog(_ message: @autoclosure () -> String) {
+    fputs("[taskers-macos] \(message())\n", stderr)
+}
+#else
+private func taskersMacDebugLog(_ message: @autoclosure () -> String) {
+    _ = message()
+}
+#endif
+
 final class TaskersGhosttySurfaceContext {
     private weak var host: TaskersGhosttyHost?
     private(set) var isClosing = false
@@ -27,10 +37,12 @@ final class TaskersGhosttySurfaceContext {
 
     func handleChildExited(exitCode: UInt32) {
         _ = exitCode
+        taskersMacDebugLog("surface \(surfaceID) child exited")
         closeSurfaceIfNeeded()
     }
 
     func handleSurfaceClosed() {
+        taskersMacDebugLog("surface \(surfaceID) close callback")
         closeSurfaceIfNeeded()
     }
 
@@ -290,6 +302,7 @@ final class TaskersTerminalView: NSView {
         isDisposed = true
         callbackContext.beginTeardown()
         host?.unregisterSurface(self)
+        taskersMacDebugLog("dispose start surface=\(surfaceID)")
 
         let surface = self.surface
         self.surface = nil
@@ -302,10 +315,12 @@ final class TaskersTerminalView: NSView {
 
         let cleanup = {
             _ = launchStorage
+            taskersMacDebugLog("dispose cleanup begin surface=\(self.surfaceID)")
             if let surface {
                 ghostty_surface_free(surface)
             }
             TaskersGhosttySurfaceContext.releaseUserdata(callbackContextHandle)
+            taskersMacDebugLog("dispose cleanup end surface=\(self.surfaceID)")
         }
         DispatchQueue.main.async(execute: cleanup)
     }

@@ -2,6 +2,16 @@ import AppKit
 import XCTest
 @testable import TaskersMac
 
+#if DEBUG
+private func smokeLog(_ message: @autoclosure () -> String) {
+    fputs("[taskers-smoke] \(message())\n", stderr)
+}
+#else
+private func smokeLog(_ message: @autoclosure () -> String) {
+    _ = message()
+}
+#endif
+
 @MainActor
 final class TaskersSmokeTests: XCTestCase {
     private var tempDirectory: URL!
@@ -34,15 +44,19 @@ final class TaskersSmokeTests: XCTestCase {
         let host = TaskersGhosttyHost()
         let controller = TaskersWorkspaceController(core: core, ghosttyHost: host)
 
+        smokeLog("show window")
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         drainMainRunLoop()
 
+        smokeLog("initial refresh begin")
         try controller.refresh(force: true)
+        smokeLog("initial refresh end surfaces=\(controller.surfaceCount)")
         XCTAssertEqual(controller.surfaceCount, 1)
         let initialSurfaceIDs = controller.lastRenderedSurfaceIDs
 
         let initialWorkspace = try XCTUnwrap(try core.snapshot().activeWorkspace)
+        smokeLog("split pane dispatch")
         _ = try core.dispatch(command: [
             "command": "split_pane",
             "workspace_id": initialWorkspace.id,
@@ -50,23 +64,30 @@ final class TaskersSmokeTests: XCTestCase {
             "axis": "vertical"
         ])
         drainMainRunLoop()
+        smokeLog("split refresh begin")
         try controller.refresh(force: true)
+        smokeLog("split refresh end surfaces=\(controller.surfaceCount)")
         XCTAssertEqual(controller.surfaceCount, 2)
         XCTAssertTrue(initialSurfaceIDs.isSubset(of: controller.lastRenderedSurfaceIDs))
 
         let updatedWorkspace = try XCTUnwrap(try core.snapshot().activeWorkspace)
+        smokeLog("close pane dispatch")
         _ = try core.dispatch(command: [
             "command": "close_pane",
             "workspace_id": updatedWorkspace.id,
             "pane_id": updatedWorkspace.activePane
         ])
         drainMainRunLoop()
+        smokeLog("close refresh begin")
         try controller.refresh(force: true)
+        smokeLog("close refresh end surfaces=\(controller.surfaceCount)")
         XCTAssertEqual(controller.surfaceCount, 1)
         XCTAssertEqual(controller.lastRenderedSurfaceIDs.count, 1)
 
+        smokeLog("controller close begin")
         controller.close()
         drainMainRunLoop()
+        smokeLog("controller close end")
     }
 
     private func bootstrapTestEnvironment() throws {

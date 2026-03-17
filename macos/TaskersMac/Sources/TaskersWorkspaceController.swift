@@ -241,6 +241,7 @@ final class TaskersWorkspaceController: NSWindowController {
 
     private func pruneSurfaceRegistry(keeping liveSurfaceIDs: Set<String>) {
         for surfaceID in Array(surfaceRegistry.keys) where !liveSurfaceIDs.contains(surfaceID) {
+            taskersMacDebugLog("prune surface=\(surfaceID)")
             guard let surface = surfaceRegistry.removeValue(forKey: surfaceID) else {
                 continue
             }
@@ -250,6 +251,7 @@ final class TaskersWorkspaceController: NSWindowController {
     }
 
     private func closeSurface(workspaceID: String, paneID: String, surfaceID: String) {
+        taskersMacDebugLog("close surface command workspace=\(workspaceID) pane=\(paneID) surface=\(surfaceID)")
         _ = try? core.dispatch(command: [
             "command": "close_surface",
             "workspace_id": workspaceID,
