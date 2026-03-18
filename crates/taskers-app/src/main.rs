@@ -7,6 +7,7 @@ mod themes;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
+    fs,
     future::pending,
     path::PathBuf,
     process::{Command, Stdio},
@@ -27,7 +28,7 @@ use serde_json::json;
 use settings_store::{AppConfig, ShortcutAction, ShortcutPreset};
 use svgtypes::{SimplePathSegment, SimplifyingPathParser};
 use taskers_control::{
-    ControlCommand, InMemoryController, bind_socket, default_socket_path, serve,
+    ControlCommand, ControlResponse, InMemoryController, bind_socket, default_socket_path, serve,
 };
 use taskers_core::{AppState, PaneRuntimeSnapshot, default_session_path, load_or_bootstrap};
 use taskers_domain::{
@@ -50,6 +51,10 @@ use terminal_transitions::{
     PaneSceneSnapshot, PresentedTransitionRect, TERMINAL_MOTION_SPEC, TransitionItemId,
     TransitionItemKind, TransitionPhase, WorkspaceSceneSnapshot, WorkspaceWindowSnapshot,
     derive_pane_frames, plan_workspace_transition, retarget_transition_plan,
+};
+use webkit6::{
+    LoadEvent, NavigationPolicyDecision, NetworkSession, PolicyDecisionType,
+    ResponsePolicyDecision, Settings as WebKitSettings, WebView, prelude::*,
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -89,6 +94,8 @@ struct UiHandle {
     crash_reporter: CrashReporter,
     ghostty_host: Option<GhosttyHost>,
     ghostty_surfaces: RefCell<HashMap<SurfaceId, Widget>>,
+    browser_surfaces: RefCell<HashMap<SurfaceId, BrowserSurfaceWidgets>>,
+    browser_network_session: RefCell<Option<NetworkSession>>,
     shell: RefCell<Option<ShellWidgets>>,
     pane_cards: RefCell<HashMap<taskers_domain::PaneId, PaneCardWidgets>>,
     settings: RefCell<AppConfig>,
@@ -138,6 +145,18 @@ struct PaneCardWidgets {
 struct WorkspaceStageWidgets {
     root: Overlay,
     ghost_layer: Fixed,
+}
+
+#[derive(Clone)]
+struct BrowserSurfaceWidgets {
+    root: GtkBox,
+    web_view: WebView,
+    address_entry: Entry,
+    back_button: Button,
+    forward_button: Button,
+    reload_button: Button,
+    devtools_button: Button,
+    devtools_open: Rc<Cell<bool>>,
 }
 
 #[derive(Default)]
@@ -331,6 +350,7 @@ const SURFACE_TAB_MIN_WIDTH: i32 = 72;
 const SURFACE_TAB_MAX_WIDTH: i32 = 220;
 const SIDEBAR_MIN_WIDTH: i32 = 224;
 const TOOLBAR_ACTION_NEW_GLYPH: &str = "+";
+const TOOLBAR_ACTION_BROWSER_GLYPH: &str = "Web";
 const TOOLBAR_ACTION_RESIZE_GLYPH: &str = "\u{2922}";
 const TOOLBAR_ACTION_FOCUS_GLYPH: &str = "\u{25ce}";
 
@@ -399,6 +419,8 @@ impl UiHandle {
             crash_reporter,
             ghostty_host,
             ghostty_surfaces: RefCell::new(HashMap::new()),
+            browser_surfaces: RefCell::new(HashMap::new()),
+            browser_network_session: RefCell::new(None),
             shell: RefCell::new(None),
             pane_cards: RefCell::new(HashMap::new()),
             settings: RefCell::new(app_config),
@@ -455,6 +477,20 @@ impl UiHandle {
         }
         let after = self.app_state.snapshot_model();
         self.refresh(before != after);
+    }
+
+    fn dispatch_with_response(self: &Rc<Self>, command: ControlCommand) -> Option<ControlResponse> {
+        let before = self.app_state.snapshot_model();
+        let response = match self.app_state.dispatch(command) {
+            Ok(response) => response,
+            Err(error) => {
+                self.toast(&error.to_string());
+                return None;
+            }
+        };
+        let after = self.app_state.snapshot_model();
+        self.refresh(before != after);
+        Some(response)
     }
 
     fn active_top_level_resize_preview(
@@ -807,6 +843,48 @@ impl UiHandle {
         Some(widget)
     }
 
+    fn browser_network_session(&self) -> NetworkSession {
+        if let Some(session) = self.browser_network_session.borrow().clone() {
+            return session;
+        }
+
+        let session = match build_browser_network_session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.toast(&format!(
+                    "failed to initialize persistent browser profile: {error}; using an ephemeral browser session"
+                ));
+                NetworkSession::new_ephemeral()
+            }
+        };
+        *self.browser_network_session.borrow_mut() = Some(session.clone());
+        session
+    }
+
+    fn browser_widget(
+        self: &Rc<Self>,
+        workspace_id: taskers_domain::WorkspaceId,
+        pane_id: taskers_domain::PaneId,
+        surface: &SurfaceRecord,
+    ) -> Option<BrowserSurfaceWidgets> {
+        if surface.kind != PaneKind::Browser {
+            return None;
+        }
+
+        if let Some(widgets) = self.browser_surfaces.borrow().get(&surface.id).cloned() {
+            detach_widget(widgets.root.upcast_ref());
+            sync_browser_surface_state(self, surface, &widgets);
+            return Some(widgets);
+        }
+
+        let widgets = build_browser_surface_widgets(self, workspace_id, pane_id, surface)?;
+        self.browser_surfaces
+            .borrow_mut()
+            .insert(surface.id, widgets.clone());
+        sync_browser_surface_state(self, surface, &widgets);
+        Some(widgets)
+    }
+
     fn present_window(&self) {
         self.window.present();
     }
@@ -839,6 +917,9 @@ impl UiHandle {
                 .any(|workspace| workspace.panes.contains_key(id))
         });
         self.ghostty_surfaces
+            .borrow_mut()
+            .retain(|id, _| live.contains(id));
+        self.browser_surfaces
             .borrow_mut()
             .retain(|id, _| live.contains(id));
     }
@@ -1095,6 +1176,18 @@ impl UiHandle {
                 })),
             )
         };
+        let (cached_browser_surface_ids, attached_browser_surface_ids) = {
+            let browser_surfaces = self.browser_surfaces.borrow();
+            (
+                sorted_id_strings(browser_surfaces.keys().copied()),
+                sorted_id_strings(browser_surfaces.iter().filter_map(|(id, widgets)| {
+                    live_layout_host.as_ref().and_then(|layout_host| {
+                        widget_is_descendant_of(widgets.root.upcast_ref(), layout_host)
+                            .then_some(*id)
+                    })
+                })),
+            )
+        };
 
         let (
             layout_host_child_count,
@@ -1165,6 +1258,17 @@ impl UiHandle {
                     widget_contains_window_focus(&self.window, card.root.upcast_ref())
                 })
         });
+        let active_browser_uri = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&workspace.active_pane))
+            .and_then(|pane| pane.active_surface())
+            .filter(|surface| surface.kind == PaneKind::Browser)
+            .and_then(browser_surface_url)
+            .map(str::to_string);
+        let active_browser_widget_type = model
+            .active_workspace()
+            .and_then(|workspace| active_browser_widgets(self, workspace))
+            .map(|widgets| widgets.web_view.type_().name().to_string());
 
         let all_live_pane_ids = sorted_id_strings(
             model
@@ -1287,6 +1391,8 @@ impl UiHandle {
             "attached_pane_card_ids": attached_pane_card_ids,
             "cached_ghostty_surface_ids": cached_ghostty_surface_ids,
             "attached_ghostty_surface_ids": attached_ghostty_surface_ids,
+            "cached_browser_surface_ids": cached_browser_surface_ids,
+            "attached_browser_surface_ids": attached_browser_surface_ids,
             "layout_host_child_count": layout_host_child_count,
             "layout_root_widget_type": layout_root_widget_type,
             "viewport_x": viewport.x,
@@ -1299,6 +1405,8 @@ impl UiHandle {
             "active_pane_focus_widget_type": active_pane_focus_widget_type,
             "active_pane_focus_has_focus": active_pane_focus_has_focus,
             "active_pane_card_has_focus": active_pane_card_has_focus,
+            "active_browser_uri": active_browser_uri,
+            "active_browser_widget_type": active_browser_widget_type,
             "overview_mode": self.overview_mode.get(),
         });
 
@@ -1439,6 +1547,17 @@ impl UiHandle {
             });
         });
         header_actions.append(&split_down_btn);
+
+        let browser_split_btn = Button::with_label(TOOLBAR_ACTION_BROWSER_GLYPH);
+        browser_split_btn.add_css_class("pane-action");
+        browser_split_btn.add_css_class("pane-split-action");
+        browser_split_btn.set_tooltip_text(Some("Open browser in split"));
+        let browser_ui = Rc::clone(self);
+        let browser_pane_id = pane.id;
+        browser_split_btn.connect_clicked(move |_| {
+            open_browser_split(&browser_ui, workspace_id, browser_pane_id, None);
+        });
+        header_actions.append(&browser_split_btn);
 
         let resize_button = Button::with_label(TOOLBAR_ACTION_RESIZE_GLYPH);
         resize_button.add_css_class("pane-action");
@@ -1596,6 +1715,17 @@ impl UiHandle {
                 });
             });
             content.append(&split_down);
+
+            let browser_split = Button::with_label("Open Browser in Split");
+            browser_split.add_css_class("flat");
+            browser_split.add_css_class("context-item");
+            let browser_ui = Rc::clone(&ctx_ui);
+            let browser_pop = popover.clone();
+            browser_split.connect_clicked(move |_| {
+                browser_pop.popdown();
+                open_browser_split(&browser_ui, workspace_id, ctx_pane_id, None);
+            });
+            content.append(&browser_split);
 
             let sep = Separator::new(Orientation::Horizontal);
             sep.add_css_class("context-separator");
@@ -2228,6 +2358,29 @@ fn connect_navigation_shortcuts(ui: &Rc<UiHandle>) {
         let Some(workspace) = model.active_workspace() else {
             return glib::Propagation::Proceed;
         };
+
+        if shortcuts_ui.shortcut_matches(ShortcutAction::OpenBrowserSplit, key, state) {
+            open_browser_split(&shortcuts_ui, workspace.id, workspace.active_pane, None);
+            return glib::Propagation::Stop;
+        }
+
+        if shortcuts_ui.shortcut_matches(ShortcutAction::FocusBrowserAddress, key, state)
+            && focus_active_browser_address(&shortcuts_ui, workspace)
+        {
+            return glib::Propagation::Stop;
+        }
+
+        if shortcuts_ui.shortcut_matches(ShortcutAction::ReloadBrowserPage, key, state)
+            && reload_active_browser(&shortcuts_ui, workspace)
+        {
+            return glib::Propagation::Stop;
+        }
+
+        if shortcuts_ui.shortcut_matches(ShortcutAction::ToggleBrowserDevtools, key, state)
+            && toggle_active_browser_devtools(&shortcuts_ui, workspace)
+        {
+            return glib::Propagation::Stop;
+        }
 
         if shortcuts_ui.shortcut_matches(ShortcutAction::CloseTerminal, key, state) {
             shortcuts_ui.dispatch(ControlCommand::ClosePane {
@@ -4620,7 +4773,7 @@ fn initialize_terminal_body(
         .active_surface()
         .is_some_and(|surface| surface.kind == PaneKind::Browser)
     {
-        return initialize_browser_placeholder_body(ui, pane, card);
+        return initialize_browser_body(ui, workspace_id, pane, card);
     }
 
     if let Some(widget) = ui.terminal_widget(workspace_id, pane) {
@@ -4709,66 +4862,32 @@ fn initialize_terminal_body(
     entry.upcast()
 }
 
-fn initialize_browser_placeholder_body(
+fn initialize_browser_body(
     ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) -> Widget {
-    let root = GtkBox::new(Orientation::Vertical, 10);
-    root.set_hexpand(true);
-    root.set_vexpand(true);
-    root.set_valign(Align::Center);
-    root.set_margin_start(20);
-    root.set_margin_end(20);
-    root.set_margin_top(20);
-    root.set_margin_bottom(20);
-    root.add_css_class("terminal-output");
+    let Some(surface) = pane.active_surface() else {
+        let unavailable = Label::new(Some("Browser surface unavailable."));
+        unavailable.add_css_class("pane-meta");
+        unavailable.set_xalign(0.0);
+        card.terminal_host.append(&unavailable);
+        return unavailable.upcast();
+    };
 
-    let title = Label::new(Some(
-        "Browser surfaces currently render only in the native macOS host.",
-    ));
-    title.set_wrap(true);
-    title.set_xalign(0.0);
-    root.append(&title);
-
-    let detail = Label::new(Some(
-        "This Linux/GTK shell keeps the browser surface metadata in sync and can hand the URL off to your default browser.",
-    ));
-    detail.add_css_class("pane-meta");
-    detail.set_wrap(true);
-    detail.set_xalign(0.0);
-    root.append(&detail);
-
-    let mut focus_target: Widget = root.clone().upcast();
-    if let Some(url) = pane
-        .active_surface()
-        .and_then(browser_surface_url)
-        .map(str::to_string)
-    {
-        let url_label = Label::new(Some(&format!("URL: {url}")));
-        url_label.add_css_class("pane-meta");
-        url_label.set_wrap(true);
-        url_label.set_xalign(0.0);
-        url_label.set_selectable(true);
-        root.append(&url_label);
-
-        let open_uri = resolved_browser_uri(&url);
-        let open_button = Button::with_label("Open in Default Browser");
-        let open_ui = Rc::clone(ui);
-        open_button.connect_clicked(move |_| {
-            if let Err(error) = gtk::gio::AppInfo::launch_default_for_uri(
-                &open_uri,
-                None::<&gtk::gio::AppLaunchContext>,
-            ) {
-                open_ui.toast(&format!("failed to open browser URL: {error}"));
-            }
-        });
-        root.append(&open_button);
-        focus_target = open_button.upcast();
+    if let Some(widgets) = ui.browser_widget(workspace_id, pane.id, surface) {
+        widgets.root.set_hexpand(true);
+        widgets.root.set_vexpand(true);
+        card.terminal_host.append(&widgets.root);
+        return widgets.web_view.clone().upcast();
     }
 
-    card.terminal_host.append(&root);
-    focus_target
+    let unavailable = Label::new(Some("Browser surface unavailable."));
+    unavailable.add_css_class("pane-meta");
+    unavailable.set_xalign(0.0);
+    card.terminal_host.append(&unavailable);
+    unavailable.upcast()
 }
 
 fn sync_terminal_body(
@@ -4777,16 +4896,24 @@ fn sync_terminal_body(
     pane: &PaneRecord,
     card: &PaneCardWidgets,
 ) {
-    if !terminal_body_needs_refresh(
+    let needs_refresh = terminal_body_needs_refresh(
         card.displayed_surface_id.get(),
         pane.active_surface().map(|surface| surface.id),
         card.terminal_host.first_child().is_some(),
-    ) {
-        return;
+    );
+
+    if needs_refresh {
+        clear_box(&card.terminal_host);
+        let _ = initialize_terminal_body(ui, workspace_id, pane, card);
     }
 
-    clear_box(&card.terminal_host);
-    let _ = initialize_terminal_body(ui, workspace_id, pane, card);
+    if let Some(surface) = pane
+        .active_surface()
+        .filter(|surface| surface.kind == PaneKind::Browser)
+        && let Some(widgets) = ui.browser_surfaces.borrow().get(&surface.id).cloned()
+    {
+        sync_browser_surface_state(ui, surface, &widgets);
+    }
 }
 
 fn terminal_body_needs_refresh(
@@ -4795,6 +4922,424 @@ fn terminal_body_needs_refresh(
     has_child: bool,
 ) -> bool {
     !has_child || displayed_surface_id != next_surface_id
+}
+
+fn build_browser_surface_widgets(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+    surface: &SurfaceRecord,
+) -> Option<BrowserSurfaceWidgets> {
+    let root = GtkBox::new(Orientation::Vertical, 0);
+    root.set_hexpand(true);
+    root.set_vexpand(true);
+
+    let toolbar = GtkBox::new(Orientation::Horizontal, 6);
+    toolbar.set_margin_start(10);
+    toolbar.set_margin_end(10);
+    toolbar.set_margin_top(8);
+    toolbar.set_margin_bottom(8);
+    root.append(&toolbar);
+
+    let back_button = Button::with_label("\u{2190}");
+    back_button.set_tooltip_text(Some("Back"));
+    toolbar.append(&back_button);
+
+    let forward_button = Button::with_label("\u{2192}");
+    forward_button.set_tooltip_text(Some("Forward"));
+    toolbar.append(&forward_button);
+
+    let reload_button = Button::with_label("\u{21bb}");
+    reload_button.set_tooltip_text(Some("Reload"));
+    toolbar.append(&reload_button);
+
+    let address_entry = Entry::new();
+    address_entry.set_hexpand(true);
+    address_entry.set_placeholder_text(Some("Enter URL or search query"));
+    toolbar.append(&address_entry);
+
+    let devtools_button = Button::with_label("Devtools");
+    devtools_button.set_tooltip_text(Some("Toggle browser devtools"));
+    toolbar.append(&devtools_button);
+
+    let settings = WebKitSettings::builder()
+        .enable_back_forward_navigation_gestures(true)
+        .enable_developer_extras(true)
+        .build();
+    let network_session = ui.browser_network_session();
+    let web_view = WebView::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .focusable(true)
+        .network_session(&network_session)
+        .settings(&settings)
+        .build();
+    root.append(&web_view);
+
+    let widgets = BrowserSurfaceWidgets {
+        root,
+        web_view,
+        address_entry,
+        back_button,
+        forward_button,
+        reload_button,
+        devtools_button,
+        devtools_open: Rc::new(Cell::new(false)),
+    };
+
+    let focus_click = gtk::GestureClick::new();
+    let focus_ui = Rc::clone(ui);
+    focus_click.connect_pressed(move |_, _, _, _| {
+        focus_ui.dispatch(ControlCommand::FocusPane {
+            workspace_id,
+            pane_id,
+        });
+    });
+    widgets.web_view.add_controller(focus_click);
+
+    let nav_widgets = widgets.clone();
+    widgets.back_button.connect_clicked(move |_| {
+        nav_widgets.web_view.go_back();
+        nav_widgets.web_view.grab_focus();
+        sync_browser_navigation_controls(&nav_widgets);
+    });
+
+    let nav_widgets = widgets.clone();
+    widgets.forward_button.connect_clicked(move |_| {
+        nav_widgets.web_view.go_forward();
+        nav_widgets.web_view.grab_focus();
+        sync_browser_navigation_controls(&nav_widgets);
+    });
+
+    let nav_widgets = widgets.clone();
+    widgets.reload_button.connect_clicked(move |_| {
+        nav_widgets.web_view.reload();
+        nav_widgets.web_view.grab_focus();
+    });
+
+    let load_widgets = widgets.clone();
+    widgets.address_entry.connect_activate(move |entry| {
+        let raw = entry.text().to_string();
+        if raw.trim().is_empty() {
+            return;
+        }
+
+        let target = resolved_browser_uri(&raw);
+        entry.set_text(&target);
+        load_widgets.web_view.load_uri(&target);
+        load_widgets.web_view.grab_focus();
+    });
+
+    let devtools_widgets = widgets.clone();
+    widgets.devtools_button.connect_clicked(move |_| {
+        toggle_browser_devtools(&devtools_widgets);
+    });
+
+    let sync_widgets = widgets.clone();
+    widgets.web_view.connect_load_changed(move |_, _| {
+        sync_browser_navigation_controls(&sync_widgets);
+    });
+
+    let sync_widgets = widgets.clone();
+    widgets.web_view.connect_uri_notify(move |web_view| {
+        sync_browser_navigation_controls(&sync_widgets);
+        if sync_widgets.address_entry.has_focus() {
+            return;
+        }
+        if let Some(uri) = web_view.uri().map(|value| value.to_string()) {
+            sync_widgets.address_entry.set_text(&uri);
+        }
+    });
+
+    if let Some(inspector) = widgets.web_view.inspector() {
+        let inspector_widgets = widgets.clone();
+        inspector.connect_closed(move |_| {
+            inspector_widgets.devtools_open.set(false);
+            sync_browser_navigation_controls(&inspector_widgets);
+        });
+    }
+
+    let title_ui = Rc::clone(ui);
+    let surface_id = surface.id;
+    widgets.web_view.connect_title_notify(move |web_view| {
+        let title = web_view.title().map(|value| value.to_string());
+        let current = title_ui.app_state.snapshot_model();
+        let current = surface_record_by_id(&current, surface_id)
+            .and_then(|surface| surface.metadata.title.clone());
+        if current == title {
+            return;
+        }
+        let deferred_ui = Rc::clone(&title_ui);
+        glib::idle_add_local_once(move || {
+            deferred_ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+                surface_id,
+                patch: PaneMetadataPatch {
+                    title,
+                    ..PaneMetadataPatch::default()
+                },
+            });
+        });
+    });
+
+    let url_ui = Rc::clone(ui);
+    let surface_id = surface.id;
+    widgets.web_view.connect_uri_notify(move |web_view| {
+        let url = web_view.uri().map(|value| value.to_string());
+        let current = url_ui.app_state.snapshot_model();
+        let current = surface_record_by_id(&current, surface_id)
+            .and_then(browser_surface_url)
+            .map(str::to_string);
+        if current == url {
+            return;
+        }
+        let deferred_ui = Rc::clone(&url_ui);
+        glib::idle_add_local_once(move || {
+            deferred_ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+                surface_id,
+                patch: PaneMetadataPatch {
+                    url,
+                    ..PaneMetadataPatch::default()
+                },
+            });
+        });
+    });
+
+    let error_ui = Rc::clone(ui);
+    widgets
+        .web_view
+        .connect_load_failed(move |_, _, uri, error| {
+            error_ui.toast(&format!("failed to load {uri}: {error}"));
+            false
+        });
+
+    let policy_ui = Rc::clone(ui);
+    widgets
+        .web_view
+        .connect_decide_policy(move |_, decision, decision_type| {
+            match decision_type {
+                PolicyDecisionType::NavigationAction | PolicyDecisionType::NewWindowAction => {
+                    let Some(nav_decision) = decision.downcast_ref::<NavigationPolicyDecision>()
+                    else {
+                        return false;
+                    };
+                    let Some(uri) = nav_decision
+                        .navigation_action()
+                        .and_then(|action| action.request())
+                        .and_then(|request| request.uri())
+                        .map(|uri| uri.to_string())
+                    else {
+                        return false;
+                    };
+                    if matches!(decision_type, PolicyDecisionType::NewWindowAction)
+                        || browser_uri_prefers_external(&uri)
+                    {
+                        if let Err(error) = launch_default_browser_uri(&uri) {
+                            policy_ui
+                                .toast(&format!("failed to open external browser URL: {error}"));
+                        }
+                        decision.ignore();
+                        return true;
+                    }
+                }
+                PolicyDecisionType::Response => {
+                    let Some(response_decision) = decision.downcast_ref::<ResponsePolicyDecision>()
+                    else {
+                        return false;
+                    };
+                    if !response_decision.is_mime_type_supported() {
+                        if let Some(uri) = response_decision
+                            .request()
+                            .and_then(|request| request.uri())
+                            .map(|uri| uri.to_string())
+                            && let Err(error) = launch_default_browser_uri(&uri)
+                        {
+                            policy_ui
+                                .toast(&format!("failed to open external browser URL: {error}"));
+                        }
+                        decision.ignore();
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+            false
+        });
+
+    let create_ui = Rc::clone(ui);
+    widgets
+        .web_view
+        .connect_create(move |_, navigation_action| {
+            if let Some(uri) = navigation_action
+                .request()
+                .and_then(|request| request.uri())
+                .map(|uri| uri.to_string())
+                && let Err(error) = launch_default_browser_uri(&uri)
+            {
+                create_ui.toast(&format!("failed to open popup externally: {error}"));
+            }
+            None
+        });
+
+    sync_browser_surface_state(ui, surface, &widgets);
+    Some(widgets)
+}
+
+fn sync_browser_surface_state(
+    _ui: &Rc<UiHandle>,
+    surface: &SurfaceRecord,
+    widgets: &BrowserSurfaceWidgets,
+) {
+    let target_uri = browser_surface_target_uri(surface);
+    let current_uri = widgets.web_view.uri().map(|value| value.to_string());
+    if current_uri.as_deref() != Some(target_uri.as_str()) {
+        widgets.web_view.load_uri(&target_uri);
+    }
+
+    if !widgets.address_entry.has_focus() {
+        let visible_uri = current_uri.unwrap_or(target_uri);
+        if widgets.address_entry.text().as_str() != visible_uri {
+            widgets.address_entry.set_text(&visible_uri);
+        }
+    }
+
+    sync_browser_navigation_controls(widgets);
+}
+
+fn sync_browser_navigation_controls(widgets: &BrowserSurfaceWidgets) {
+    widgets
+        .back_button
+        .set_sensitive(widgets.web_view.can_go_back());
+    widgets
+        .forward_button
+        .set_sensitive(widgets.web_view.can_go_forward());
+    widgets.reload_button.set_sensitive(true);
+    widgets
+        .devtools_button
+        .set_sensitive(widgets.web_view.inspector().is_some());
+    widgets
+        .devtools_button
+        .set_label(if widgets.devtools_open.get() {
+            "Hide Devtools"
+        } else {
+            "Devtools"
+        });
+}
+
+fn toggle_browser_devtools(widgets: &BrowserSurfaceWidgets) {
+    let Some(inspector) = widgets.web_view.inspector() else {
+        return;
+    };
+
+    if widgets.devtools_open.get() {
+        inspector.close();
+        widgets.devtools_open.set(false);
+    } else {
+        if inspector.can_attach() {
+            inspector.attach();
+        }
+        inspector.show();
+        widgets.devtools_open.set(true);
+    }
+    sync_browser_navigation_controls(widgets);
+}
+
+fn open_browser_split(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    pane_id: taskers_domain::PaneId,
+    url: Option<String>,
+) {
+    let new_pane_id = match ui.dispatch_with_response(ControlCommand::SplitPane {
+        workspace_id,
+        pane_id: Some(pane_id),
+        axis: taskers_domain::SplitAxis::Horizontal,
+    }) {
+        Some(ControlResponse::PaneSplit { pane_id }) => pane_id,
+        Some(other) => {
+            ui.toast(&format!("unexpected split response: {other:?}"));
+            return;
+        }
+        None => return,
+    };
+
+    let placeholder_surface_id = ui
+        .app_state
+        .snapshot_model()
+        .workspaces
+        .get(&workspace_id)
+        .and_then(|workspace| workspace.panes.get(&new_pane_id))
+        .map(|pane| pane.active_surface);
+
+    let browser_surface_id = match ui.dispatch_with_response(ControlCommand::CreateSurface {
+        workspace_id,
+        pane_id: new_pane_id,
+        kind: PaneKind::Browser,
+    }) {
+        Some(ControlResponse::SurfaceCreated { surface_id }) => surface_id,
+        Some(other) => {
+            ui.toast(&format!("unexpected surface response: {other:?}"));
+            return;
+        }
+        None => return,
+    };
+
+    if let Some(url) = url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+    {
+        ui.dispatch(ControlCommand::UpdateSurfaceMetadata {
+            surface_id: browser_surface_id,
+            patch: PaneMetadataPatch {
+                url: Some(url),
+                ..PaneMetadataPatch::default()
+            },
+        });
+    }
+
+    if let Some(placeholder_surface_id) = placeholder_surface_id {
+        ui.dispatch(ControlCommand::CloseSurface {
+            workspace_id,
+            pane_id: new_pane_id,
+            surface_id: placeholder_surface_id,
+        });
+    }
+}
+
+fn active_browser_widgets(ui: &UiHandle, workspace: &Workspace) -> Option<BrowserSurfaceWidgets> {
+    workspace
+        .panes
+        .get(&workspace.active_pane)
+        .and_then(|pane| pane.active_surface())
+        .filter(|surface| surface.kind == PaneKind::Browser)
+        .and_then(|surface| ui.browser_surfaces.borrow().get(&surface.id).cloned())
+}
+
+fn focus_active_browser_address(ui: &Rc<UiHandle>, workspace: &Workspace) -> bool {
+    let Some(widgets) = active_browser_widgets(ui, workspace) else {
+        return false;
+    };
+    widgets.address_entry.grab_focus();
+    widgets.address_entry.select_region(0, -1);
+    true
+}
+
+fn reload_active_browser(ui: &Rc<UiHandle>, workspace: &Workspace) -> bool {
+    let Some(widgets) = active_browser_widgets(ui, workspace) else {
+        return false;
+    };
+    widgets.web_view.reload();
+    widgets.web_view.grab_focus();
+    true
+}
+
+fn toggle_active_browser_devtools(ui: &Rc<UiHandle>, workspace: &Workspace) -> bool {
+    let Some(widgets) = active_browser_widgets(ui, workspace) else {
+        return false;
+    };
+    toggle_browser_devtools(&widgets);
+    true
 }
 
 fn create_workspace_window_from_pane(
@@ -6171,12 +6716,20 @@ fn pane_focus_target(
     pane_id: taskers_domain::PaneId,
     card: &PaneCardWidgets,
 ) -> Widget {
-    let active_surface_widget = workspace
+    let active_surface_id = workspace
         .panes
         .get(&pane_id)
-        .and_then(|pane| pane.active_surface().map(|surface| surface.id))
+        .and_then(|pane| pane.active_surface().map(|surface| surface.id));
+
+    let active_surface_widget = active_surface_id
         .and_then(|surface_id| ui.ghostty_surfaces.borrow().get(&surface_id).cloned())
-        .filter(|widget| widget.parent().is_some());
+        .filter(|widget| widget.parent().is_some())
+        .or_else(|| {
+            active_surface_id
+                .and_then(|surface_id| ui.browser_surfaces.borrow().get(&surface_id).cloned())
+                .map(|widgets| widgets.web_view.upcast::<Widget>())
+                .filter(|widget| widget.parent().is_some())
+        });
 
     active_surface_widget
         .or_else(|| card.terminal_host.first_child())
@@ -6249,6 +6802,14 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     }
 }
 
+fn surface_record_by_id(model: &AppModel, surface_id: SurfaceId) -> Option<&SurfaceRecord> {
+    model
+        .workspaces
+        .values()
+        .flat_map(|workspace| workspace.panes.values())
+        .find_map(|pane| pane.surfaces.get(&surface_id))
+}
+
 fn browser_surface_url(surface: &SurfaceRecord) -> Option<&str> {
     surface
         .metadata
@@ -6256,6 +6817,12 @@ fn browser_surface_url(surface: &SurfaceRecord) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|url| !url.is_empty())
+}
+
+fn browser_surface_target_uri(surface: &SurfaceRecord) -> String {
+    browser_surface_url(surface)
+        .map(resolved_browser_uri)
+        .unwrap_or_else(|| "about:blank".into())
 }
 
 fn has_explicit_browser_scheme(value: &str) -> bool {
@@ -6308,6 +6875,21 @@ fn is_local_browser_target(value: &str) -> bool {
     })
 }
 
+fn browser_uri_prefers_external(uri: &str) -> bool {
+    if !has_explicit_browser_scheme(uri) {
+        return false;
+    }
+
+    let scheme = uri
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase())
+        .unwrap_or_default();
+    !matches!(
+        scheme.as_str(),
+        "http" | "https" | "about" | "data" | "file"
+    )
+}
+
 fn resolved_browser_uri(raw: &str) -> String {
     let trimmed = raw.trim();
     if has_explicit_browser_scheme(trimmed) {
@@ -6323,6 +6905,24 @@ fn resolved_browser_uri(raw: &str) -> String {
         return format!("http://{trimmed}");
     }
     format!("https://{trimmed}")
+}
+
+fn launch_default_browser_uri(uri: &str) -> Result<(), glib::Error> {
+    gtk::gio::AppInfo::launch_default_for_uri(uri, None::<&gtk::gio::AppLaunchContext>)
+}
+
+fn build_browser_network_session() -> anyhow::Result<NetworkSession> {
+    let paths = taskers_paths::TaskersPaths::detect();
+    let data_dir = paths.data_dir().join("browser");
+    let cache_dir = paths.cache_dir().join("browser");
+    fs::create_dir_all(&data_dir)?;
+    fs::create_dir_all(&cache_dir)?;
+    let data_dir = data_dir.to_string_lossy().into_owned();
+    let cache_dir = cache_dir.to_string_lossy().into_owned();
+    Ok(NetworkSession::new(
+        Some(&data_dir),
+        Some(&cache_dir),
+    ))
 }
 
 fn editable_surface_title(surface: &SurfaceRecord) -> String {
@@ -7952,6 +8552,23 @@ mod tests {
         let surface = SurfaceRecord::new(PaneKind::Terminal);
 
         assert_eq!(editable_surface_title(&surface), "");
+    }
+
+    #[test]
+    fn browser_surface_target_uri_defaults_to_about_blank() {
+        let surface = SurfaceRecord::new(PaneKind::Browser);
+
+        assert_eq!(browser_surface_target_uri(&surface), "about:blank");
+    }
+
+    #[test]
+    fn browser_uri_prefers_external_for_non_embedded_schemes_only() {
+        assert!(browser_uri_prefers_external("mailto:test@example.com"));
+        assert!(browser_uri_prefers_external("tel:+123456789"));
+        assert!(!browser_uri_prefers_external("https://example.com"));
+        assert!(!browser_uri_prefers_external("http://localhost:3000"));
+        assert!(!browser_uri_prefers_external("about:blank"));
+        assert!(!browser_uri_prefers_external("file:///tmp/index.html"));
     }
 
     #[test]
