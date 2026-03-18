@@ -18,6 +18,17 @@ pub const MIN_WORKSPACE_WINDOW_WIDTH: i32 = 720;
 pub const MIN_WORKSPACE_WINDOW_HEIGHT: i32 = 420;
 pub const KEYBOARD_RESIZE_STEP: i32 = 80;
 
+fn split_top_level_extent(extent: i32, min_extent: i32) -> (i32, i32) {
+    let extent = extent.max(min_extent);
+    if extent < min_extent * 2 {
+        return (min_extent, min_extent);
+    }
+
+    let retained_extent = (extent + 1) / 2;
+    let new_extent = extent - retained_extent;
+    (retained_extent.max(min_extent), new_extent.max(min_extent))
+}
+
 #[derive(Debug, Error)]
 pub enum DomainError {
     #[error("window {0} was not found")]
@@ -1056,7 +1067,21 @@ impl AppModel {
 
         match direction {
             Direction::Left | Direction::Right => {
-                let new_column = WorkspaceColumnRecord::new(new_window_id);
+                let source_width = workspace
+                    .columns
+                    .get(&source_column_id)
+                    .map(|column| column.width)
+                    .expect("active column should exist");
+                let (retained_width, new_width) =
+                    split_top_level_extent(source_width, MIN_WORKSPACE_WINDOW_WIDTH);
+                let column = workspace
+                    .columns
+                    .get_mut(&source_column_id)
+                    .expect("active column should exist");
+                column.width = retained_width;
+
+                let mut new_column = WorkspaceColumnRecord::new(new_window_id);
+                new_column.width = new_width;
                 let insert_index = if matches!(direction, Direction::Left) {
                     source_column_index
                 } else {
@@ -1065,6 +1090,24 @@ impl AppModel {
                 workspace.insert_column_at(insert_index, new_column);
             }
             Direction::Up | Direction::Down => {
+                let source_window_height = workspace
+                    .windows
+                    .get(&workspace.active_window)
+                    .map(|window| window.height)
+                    .ok_or(DomainError::MissingWorkspaceWindow(workspace.active_window))?;
+                let (retained_height, new_height) =
+                    split_top_level_extent(source_window_height, MIN_WORKSPACE_WINDOW_HEIGHT);
+                let source_window = workspace
+                    .windows
+                    .get_mut(&workspace.active_window)
+                    .ok_or(DomainError::MissingWorkspaceWindow(workspace.active_window))?;
+                source_window.height = retained_height;
+                let new_window = workspace
+                    .windows
+                    .get_mut(&new_window_id)
+                    .ok_or(DomainError::MissingWorkspaceWindow(new_window_id))?;
+                new_window.height = new_height;
+
                 let column = workspace
                     .columns
                     .get_mut(&source_column_id)
@@ -2018,13 +2061,17 @@ mod tests {
         assert_eq!(workspace.windows.len(), 3);
         assert_eq!(workspace.columns.len(), 2);
         assert_eq!(workspace.active_pane, stacked_pane);
+        assert_eq!(right_column.width, MIN_WORKSPACE_WINDOW_WIDTH);
         assert_eq!(right_column.window_order.len(), 2);
         assert_ne!(workspace.active_window, first_window_id);
         assert!(
             workspace
                 .columns
                 .values()
-                .any(|column| column.window_order == vec![first_window_id])
+                .any(|column| {
+                    column.window_order == vec![first_window_id]
+                        && column.width == MIN_WORKSPACE_WINDOW_WIDTH
+                })
         );
         let upper_window_id = right_column.window_order[0];
         assert_eq!(
@@ -2035,6 +2082,70 @@ mod tests {
                 .active_pane,
             right_pane
         );
+        assert_eq!(
+            workspace
+                .windows
+                .get(&upper_window_id)
+                .expect("window")
+                .height,
+            (DEFAULT_WORKSPACE_WINDOW_HEIGHT + 1) / 2
+        );
+        assert_eq!(
+            workspace
+                .windows
+                .get(&workspace.active_window)
+                .expect("window")
+                .height,
+            DEFAULT_WORKSPACE_WINDOW_HEIGHT / 2
+        );
+    }
+
+    #[test]
+    fn creating_workspace_window_clamps_split_column_width_to_minimum() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let workspace = model.active_workspace().expect("workspace");
+        let column_id = workspace.active_column_id().expect("active column");
+
+        model
+            .set_workspace_column_width(workspace_id, column_id, MIN_WORKSPACE_WINDOW_WIDTH + 80)
+            .expect("set width");
+        model
+            .create_workspace_window(workspace_id, Direction::Right)
+            .expect("window created");
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let widths = workspace
+            .columns
+            .values()
+            .map(|column| column.width)
+            .collect::<Vec<_>>();
+        assert_eq!(widths, vec![MIN_WORKSPACE_WINDOW_WIDTH, MIN_WORKSPACE_WINDOW_WIDTH]);
+    }
+
+    #[test]
+    fn creating_workspace_window_clamps_split_window_height_to_minimum() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let window_id = model
+            .active_workspace()
+            .map(|workspace| workspace.active_window)
+            .expect("active window");
+
+        model
+            .set_workspace_window_height(workspace_id, window_id, MIN_WORKSPACE_WINDOW_HEIGHT + 50)
+            .expect("set height");
+        model
+            .create_workspace_window(workspace_id, Direction::Down)
+            .expect("window created");
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let heights = workspace
+            .windows
+            .values()
+            .map(|window| window.height)
+            .collect::<Vec<_>>();
+        assert_eq!(heights, vec![MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_HEIGHT]);
     }
 
     #[test]
