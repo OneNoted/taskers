@@ -8,5 +8,5 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 dioxus-desktop.workspace = true
+gtk.workspace = true
 taskers-core.workspace = true
-

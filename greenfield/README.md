@@ -9,12 +9,12 @@ Current scope:
 
 - shared Rust core for workspace/pane/surface state
 - Dioxus desktop shell with CSS-driven chrome
-- native browser child-webview portal mounted against the Dioxus window
-- explicit terminal host seam for future Ghostty integration
+- Linux GTK portal runtime that mounts browser panes into the Dioxus window
+- startup/runtime bootstrap that scrubs inherited terminal env and installs shell integration
+- explicit terminal host fallback until the Ghostty GTK4 bridge is reconciled with the GTK3 Dioxus host
 
 Run it from this workspace:
 
 ```bash
 cargo run -p taskers
 ```
-

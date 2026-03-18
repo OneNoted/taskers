@@ -17,9 +17,12 @@ version = "0.1.0-alpha.1"
 anyhow = "1"
 dioxus = { version = "0.7.3", features = ["desktop"] }
 dioxus-desktop = "0.7.3"
+gtk = "0.18"
 indexmap = "2"
 parking_lot = "0.12"
+tokio = { version = "1.50.0", features = ["sync"] }
 taskers-core = { path = "crates/taskers-core" }
 taskers-host = { path = "crates/taskers-host" }
+taskers-paths = { path = "../crates/taskers-paths" }
+taskers-runtime = { path = "../crates/taskers-runtime" }
 taskers-shell = { path = "crates/taskers-shell" }
-

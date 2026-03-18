@@ -1,6 +1,9 @@
 use dioxus::prelude::*;
 use std::sync::Arc;
-use taskers_core::{LayoutNodeSnapshot, PaneId, SharedCore, SplitAxis, SurfaceKind};
+use taskers_core::{
+    LayoutNodeSnapshot, PaneId, RuntimeCapability, RuntimeStatus, SharedCore, SplitAxis,
+    SurfaceKind,
+};
 
 const APP_CSS: &str = r#"
 html, body, #main {
@@ -14,9 +17,7 @@ html, body, #main {
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 * { box-sizing: border-box; }
-button {
-  font: inherit;
-}
+button { font: inherit; }
 .app-shell {
   width: 100vw;
   height: 100vh;
@@ -24,7 +25,7 @@ button {
   overflow: hidden;
 }
 .sidebar {
-  width: 248px;
+  width: 276px;
   padding: 18px 16px;
   background: rgba(8, 13, 28, 0.78);
   border-right: 1px solid rgba(163, 191, 255, 0.12);
@@ -55,6 +56,9 @@ button {
   border-radius: 16px;
   background: rgba(18, 28, 53, 0.78);
   border: 1px solid rgba(163, 191, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 .workspace-pill {
   display: flex;
@@ -65,11 +69,43 @@ button {
   background: linear-gradient(135deg, rgba(58, 104, 206, 0.35), rgba(35, 48, 92, 0.45));
   border: 1px solid rgba(163, 191, 255, 0.18);
 }
-.workspace-pill strong {
-  font-size: 15px;
-}
-.workspace-pill span, .sidebar-card p, .toolbar-subtitle {
+.workspace-pill strong { font-size: 15px; }
+.workspace-pill span, .sidebar-card p, .toolbar-subtitle, .status-note, .placeholder-note {
   color: #b4c7ec;
+}
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.status-label {
+  font-size: 13px;
+  color: #dce8ff;
+}
+.status-badge {
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.status-badge.ready {
+  background: rgba(91, 224, 160, 0.14);
+  color: #8cf1be;
+}
+.status-badge.fallback {
+  background: rgba(255, 197, 87, 0.14);
+  color: #ffd37f;
+}
+.status-badge.unavailable {
+  background: rgba(255, 128, 128, 0.14);
+  color: #ffb4b4;
+}
+.status-note {
+  font-size: 12px;
+  line-height: 1.45;
 }
 .main-column {
   min-width: 0;
@@ -93,9 +129,7 @@ button {
   flex-direction: column;
   gap: 2px;
 }
-.toolbar-title strong {
-  font-size: 16px;
-}
+.toolbar-title strong { font-size: 16px; }
 .toolbar-actions {
   display: flex;
   align-items: center;
@@ -204,21 +238,27 @@ button {
   background:
     linear-gradient(180deg, rgba(9, 12, 21, 0.9), rgba(12, 18, 34, 0.96));
 }
-.placeholder-note {
-  max-width: 520px;
-  color: #b4c7ec;
-  line-height: 1.5;
+.surface-backdrop {
+  width: 100%;
+  height: 100%;
+  border-radius: 0 0 20px 20px;
+  border: 1px dashed rgba(144, 184, 255, 0.12);
 }
-.terminal-lines {
-  margin: 0;
-  padding: 16px;
-  border-radius: 16px;
-  background: rgba(4, 6, 12, 0.84);
-  border: 1px solid rgba(91, 114, 165, 0.22);
-  color: #9ff3b0;
-  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
-  font-size: 13px;
-  white-space: pre-wrap;
+.surface-backdrop.browser {
+  background:
+    linear-gradient(180deg, rgba(11, 16, 29, 0.15), rgba(11, 16, 29, 0.02));
+}
+.surface-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.surface-chip {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d9e8ff;
 }
 @media (max-width: 900px) {
   .sidebar { display: none; }
@@ -230,9 +270,22 @@ button {
 pub fn app() -> Element {
     let core = consume_context::<SharedCore>();
     let revision = use_signal(|| core.revision());
+
+    {
+        let core = core.clone();
+        let mut revision = revision;
+        use_hook(move || {
+            let mut revisions = core.subscribe_revisions();
+            spawn(async move {
+                while revisions.changed().await.is_ok() {
+                    revision.set(*revisions.borrow());
+                }
+            });
+        });
+    }
+
     let _ = revision();
     let snapshot = core.snapshot();
-    let terminal_status = taskers_host::terminal_host_status();
 
     let focus = {
         let core = core.clone();
@@ -281,8 +334,14 @@ pub fn app() -> Element {
                     span { "{snapshot.workspace_count} workspace · revision {snapshot.revision}" }
                 }
                 div { class: "sidebar-card",
-                    div { class: "eyebrow", "Surface portal" }
-                    p { "Browser panes are mounted as native child webviews against the Dioxus window. Terminal panes already reserve the same host slot shape." }
+                    div { class: "eyebrow", "Portal runtime" }
+                    p { "Browser panes are mounted through the Linux GTK portal layer. Terminal startup is bootstrapped too, but native Ghostty mounting is still blocked by the GTK3/GTK4 split." }
+                }
+                div { class: "sidebar-card",
+                    div { class: "eyebrow", "Runtime status" }
+                    {render_runtime_capability("Ghostty runtime", &snapshot.runtime_status.ghostty_runtime)}
+                    {render_runtime_capability("Shell integration", &snapshot.runtime_status.shell_integration)}
+                    {render_runtime_capability("Terminal host", &snapshot.runtime_status.terminal_host)}
                 }
             }
 
@@ -291,7 +350,7 @@ pub fn app() -> Element {
                     div { class: "toolbar-title",
                         strong { "Unified shell bootstrap" }
                         div { class: "toolbar-subtitle",
-                            "Dioxus chrome + native surface portal"
+                            "Dioxus chrome + Linux GTK portal runtime"
                         }
                     }
                     div { class: "toolbar-actions",
@@ -301,8 +360,28 @@ pub fn app() -> Element {
                 }
 
                 div { class: "workspace-canvas",
-                    {render_layout(&snapshot.layout, focus.clone(), terminal_status)}
+                    {render_layout(&snapshot.layout, focus.clone(), &snapshot.runtime_status)}
                 }
+            }
+        }
+    }
+}
+
+fn render_runtime_capability(label: &'static str, capability: &RuntimeCapability) -> Element {
+    let class = match capability {
+        RuntimeCapability::Ready => "status-badge ready",
+        RuntimeCapability::Fallback { .. } => "status-badge fallback",
+        RuntimeCapability::Unavailable { .. } => "status-badge unavailable",
+    };
+
+    rsx! {
+        div {
+            div { class: "status-row",
+                span { class: "status-label", "{label}" }
+                span { class: "{class}", "{capability.label()}" }
+            }
+            if let Some(message) = capability.message() {
+                div { class: "status-note", "{message}" }
             }
         }
     }
@@ -311,7 +390,7 @@ pub fn app() -> Element {
 fn render_layout(
     node: &LayoutNodeSnapshot,
     focus: Arc<dyn Fn(PaneId) + 'static>,
-    terminal_status: &'static str,
+    runtime_status: &RuntimeStatus,
 ) -> Element {
     match node {
         LayoutNodeSnapshot::Split {
@@ -332,10 +411,10 @@ fn render_layout(
             rsx! {
                 div { class: "split-container", style: "flex-direction: {direction};",
                     div { class: "split-child", style: "{first_style}",
-                        {render_layout(first, focus.clone(), terminal_status)}
+                        {render_layout(first, focus.clone(), runtime_status)}
                     }
                     div { class: "split-child", style: "{second_style}",
-                        {render_layout(second, focus.clone(), terminal_status)}
+                        {render_layout(second, focus.clone(), runtime_status)}
                     }
                 }
             }
@@ -360,28 +439,35 @@ fn render_layout(
                         div { class: "surface-placeholder browser",
                             div { class: "eyebrow", "Native browser surface" }
                             p { class: "placeholder-note",
-                                "This pane is backed by a real child webview mounted by the host runtime."
+                                "This pane is mounted through the Linux GTK portal overlay."
                             }
-                            p { class: "placeholder-note",
-                                "Current URL: {url}"
+                            div { class: "surface-meta",
+                                span { class: "surface-chip", "URL: {url}" }
                             }
+                            div { class: "surface-backdrop browser" }
                         }
                     }
                 }
-                SurfaceKind::Terminal => rsx! {
-                    div { class: "surface-placeholder terminal",
-                        div { class: "eyebrow", "Terminal host seam" }
-                        p { class: "placeholder-note",
-                            "{terminal_status}"
-                        }
-                        pre { class: "terminal-lines",
-                            "$ jj status\n"
-                            "Working copy  (@): chore: bootstrap greenfield taskers rewrite\n"
-                            "$ cargo run -p taskers\n"
-                            "Launching Dioxus shell with native surface portal..."
+                SurfaceKind::Terminal => {
+                    let host_message = runtime_status
+                        .terminal_host
+                        .message()
+                        .unwrap_or("Terminal hosting is ready.");
+                    rsx! {
+                        div { class: "surface-placeholder terminal",
+                            div { class: "eyebrow", "Terminal runtime" }
+                            p { class: "placeholder-note",
+                                "{host_message}"
+                            }
+                            if let Some(cwd) = &pane.surface.cwd {
+                                div { class: "surface-meta",
+                                    span { class: "surface-chip", "cwd: {cwd}" }
+                                }
+                            }
+                            div { class: "surface-backdrop" }
                         }
                     }
-                },
+                }
             };
 
             rsx! {
