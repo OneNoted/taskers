@@ -16,6 +16,7 @@ taskers --demo
 ```
 
 The first launch downloads the exact version-matched Linux bundle from the tagged GitHub release.
+The Linux app now requires the host WebKitGTK 6.0 runtime in addition to GTK4/libadwaita.
 
 macOS:
 
@@ -23,6 +24,12 @@ macOS:
 - Drag `Taskers.app` into `Applications`, then launch it normally from Finder or Spotlight.
 
 ## Develop
+
+On Ubuntu 24.04, install the Linux UI dependencies first:
+
+```bash
+sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev
+```
 
 ```bash
 cargo run -p taskers-gtk --bin taskers-gtk -- --demo

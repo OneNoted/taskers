@@ -23,6 +23,12 @@ bash scripts/capture_demo_screenshots.sh
 
 ## 3. Run Local Verification
 
+- On Ubuntu 24.04, install the Linux UI build dependencies first:
+
+```bash
+sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev
+```
+
 - Run the full test suite:
 
 ```bash
@@ -35,6 +41,8 @@ cargo test
 bash scripts/smoke_taskers_ui.sh
 bash scripts/smoke_taskers_focus_churn.sh
 ```
+
+- The GTK smoke suite now expects a working embedded browser load through WebKitGTK 6.0, not just a placeholder pane.
 
 - Build the Linux app bundle that the published launcher expects:
 
@@ -130,6 +138,7 @@ taskers --demo
 ```
 
 - Confirm the published Linux launcher downloads the exact version-matched bundle on first launch.
+- Confirm the published Linux launcher can open an embedded browser split after install.
 - Confirm macOS installs from the published DMG and launches correctly after dragging `Taskers.app` into `Applications`.
 - Confirm `cargo install taskers --locked` fails on macOS with guidance to use the GitHub Releases DMG.
 - Confirm `cargo install taskers-cli --bin taskersctl --locked` still works as the standalone helper path.

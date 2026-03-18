@@ -31,7 +31,15 @@ jobs:
       - name: Install Linux bundle tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y meson ninja-build python3-gi xvfb libgtk-4-dev libadwaita-1-dev
+          sudo apt-get install -y \
+            meson \
+            ninja-build \
+            python3-gi \
+            xvfb \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libjavascriptcoregtk-6.0-dev \
+            libwebkitgtk-6.0-dev
 
       - name: Install pinned blueprint-compiler
         run: |
