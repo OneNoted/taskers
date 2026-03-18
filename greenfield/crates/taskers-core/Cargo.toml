@@ -1,0 +1,11 @@
+[package]
+name = "taskers-core"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+indexmap.workspace = true
+parking_lot.workspace = true
+

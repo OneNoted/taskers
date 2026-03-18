@@ -1,0 +1,18 @@
+[package]
+name = "taskers"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "taskers"
+path = "src/main.rs"
+
+[dependencies]
+dioxus.workspace = true
+dioxus-desktop.workspace = true
+taskers-core.workspace = true
+taskers-host.workspace = true
+taskers-shell.workspace = true
+

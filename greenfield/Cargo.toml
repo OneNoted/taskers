@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/taskers",
+    "crates/taskers-core",
+    "crates/taskers-host",
+    "crates/taskers-shell",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/OneNoted/taskers"
+version = "0.1.0-alpha.1"
+
+[workspace.dependencies]
+anyhow = "1"
+dioxus = { version = "0.7.3", features = ["desktop"] }
+dioxus-desktop = "0.7.3"
+indexmap = "2"
+parking_lot = "0.12"
+taskers-core = { path = "crates/taskers-core" }
+taskers-host = { path = "crates/taskers-host" }
+taskers-shell = { path = "crates/taskers-shell" }
+

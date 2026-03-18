@@ -1,0 +1,12 @@
+[package]
+name = "taskers-shell"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+dioxus.workspace = true
+taskers-core.workspace = true
+taskers-host.workspace = true
+

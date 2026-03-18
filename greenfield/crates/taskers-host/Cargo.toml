@@ -1,0 +1,12 @@
+[package]
+name = "taskers-host"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dioxus-desktop.workspace = true
+taskers-core.workspace = true
+
