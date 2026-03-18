@@ -3,7 +3,7 @@ import Foundation
 
 final class TaskersMacApplication: NSObject, NSApplicationDelegate {
     private var core: TaskersCoreBridge?
-    private var ghosttyHost: TaskersGhosttyHost?
+    private var surfaceHost: TaskersDefaultSurfaceHost?
     private var workspaceController: TaskersWorkspaceController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -16,15 +16,16 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
         }
 
         do {
+            configureMenus()
             TaskersEnvironment.emitSmokeLog("creating core bridge")
             let core = try TaskersCoreBridge(options: TaskersEnvironment.defaultCoreOptions())
-            TaskersEnvironment.emitSmokeLog("creating Ghostty host")
-            let ghosttyHost = TaskersGhosttyHost()
+            TaskersEnvironment.emitSmokeLog("creating surface host")
+            let surfaceHost = TaskersDefaultSurfaceHost(core: core)
             TaskersEnvironment.emitSmokeLog("creating workspace controller")
-            let controller = TaskersWorkspaceController(core: core, ghosttyHost: ghosttyHost)
+            let controller = TaskersWorkspaceController(core: core, surfaceHost: surfaceHost)
 
             self.core = core
-            self.ghosttyHost = ghosttyHost
+            self.surfaceHost = surfaceHost
             self.workspaceController = controller
 
             TaskersEnvironment.emitSmokeLog("starting workspace controller")
@@ -50,17 +51,56 @@ final class TaskersMacApplication: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         _ = notification
-        ghosttyHost?.setFocused(true)
+        surfaceHost?.setFocused(true)
     }
 
     func applicationDidResignActive(_ notification: Notification) {
         _ = notification
-        ghosttyHost?.setFocused(false)
+        surfaceHost?.setFocused(false)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         _ = sender
         return !TaskersEnvironment.isRunningUnderXCTest
+    }
+
+    @objc private func openBrowserInSplit(_ sender: Any?) {
+        _ = sender
+        do {
+            try workspaceController?.openBrowserSplit()
+        } catch {
+            NSApp.presentError(error)
+        }
+    }
+
+    private func configureMenus() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: "Taskers")
+        appMenu.addItem(
+            withTitle: "Quit Taskers",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let surfaceMenuItem = NSMenuItem()
+        let surfaceMenu = NSMenu(title: "Surface")
+        let browserItem = NSMenuItem(
+            title: "Open Browser in Split",
+            action: #selector(openBrowserInSplit(_:)),
+            keyEquivalent: "L"
+        )
+        browserItem.keyEquivalentModifierMask = [.command, .shift]
+        browserItem.target = self
+        surfaceMenu.addItem(browserItem)
+        surfaceMenuItem.title = "Surface"
+        surfaceMenuItem.submenu = surfaceMenu
+        mainMenu.addItem(surfaceMenuItem)
+
+        NSApp.mainMenu = mainMenu
     }
 }
 

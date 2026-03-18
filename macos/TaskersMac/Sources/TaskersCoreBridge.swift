@@ -16,19 +16,28 @@ struct TaskersCoreOptions: Encodable {
     }
 }
 
+enum TaskersSurfaceKind: String, Codable {
+    case terminal
+    case browser
+}
+
 struct TaskersSurfaceDescriptor: Decodable {
     let cols: UInt16
     let rows: UInt16
+    let kind: TaskersSurfaceKind
     let cwd: String?
     let title: String?
+    let url: String?
     let commandArgv: [String]
     let env: [String: String]
 
     enum CodingKeys: String, CodingKey {
         case cols
         case rows
+        case kind
         case cwd
         case title
+        case url
         case commandArgv = "command_argv"
         case env
     }
@@ -115,12 +124,75 @@ final class TaskersCoreBridge {
         return try decode(TaskersSurfaceDescriptor.self, from: json)
     }
 
+    func splitPane(workspaceId: String, paneId: String, axis: String) throws -> String {
+        let response = try dispatch(command: [
+            "command": "split_pane",
+            "workspace_id": workspaceId,
+            "pane_id": paneId,
+            "axis": axis
+        ])
+        return try requiredString("pane_id", in: response, context: "split pane")
+    }
+
+    func createSurface(
+        workspaceId: String,
+        paneId: String,
+        kind: TaskersSurfaceKind
+    ) throws -> String {
+        let response = try dispatch(command: [
+            "command": "create_surface",
+            "workspace_id": workspaceId,
+            "pane_id": paneId,
+            "kind": kind.rawValue
+        ])
+        return try requiredString("surface_id", in: response, context: "create surface")
+    }
+
+    func closeSurface(workspaceID: String, paneID: String, surfaceID: String) throws {
+        _ = try dispatch(command: [
+            "command": "close_surface",
+            "workspace_id": workspaceID,
+            "pane_id": paneID,
+            "surface_id": surfaceID
+        ])
+    }
+
+    func updateSurfaceMetadata(surfaceId: String, title: String? = nil, url: String? = nil) throws {
+        var patch: [String: Any] = [:]
+        if let title {
+            patch["title"] = title
+        }
+        if let url {
+            patch["url"] = url
+        }
+        guard !patch.isEmpty else {
+            return
+        }
+
+        _ = try dispatch(command: [
+            "command": "update_surface_metadata",
+            "surface_id": surfaceId,
+            "patch": patch
+        ])
+    }
+
     private func decode<T: Decodable>(_ type: T.Type, from string: String) throws -> T {
         do {
             return try decoder.decode(T.self, from: Data(string.utf8))
         } catch {
             throw TaskersCoreBridgeError.invalidResponse(error.localizedDescription)
         }
+    }
+
+    private func requiredString(
+        _ key: String,
+        in payload: [String: Any],
+        context: String
+    ) throws -> String {
+        guard let value = payload[key] as? String else {
+            throw TaskersCoreBridgeError.invalidResponse("\(context) response missing \(key)")
+        }
+        return value
     }
 
     private func callString(_ body: () -> UnsafeMutablePointer<CChar>?) throws -> String {

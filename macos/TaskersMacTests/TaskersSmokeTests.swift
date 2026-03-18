@@ -42,7 +42,7 @@ final class TaskersSmokeTests: XCTestCase {
             backend: "mock"
         ))
         let host = TaskersMockSurfaceHost()
-        let controller = TaskersWorkspaceController(core: core, ghosttyHost: host)
+        let controller = TaskersWorkspaceController(core: core, surfaceHost: host)
 
         smokeLog("show window")
         controller.showWindow(nil)
@@ -88,6 +88,42 @@ final class TaskersSmokeTests: XCTestCase {
         controller.close()
         drainMainRunLoop()
         smokeLog("controller close end")
+    }
+
+    func testWorkspaceControllerOpensBrowserSplitInActivePane() throws {
+        let core = try TaskersCoreBridge(options: TaskersCoreOptions(
+            sessionPath: tempDirectory.appendingPathComponent("session.json").path,
+            socketPath: tempDirectory.appendingPathComponent("taskers.sock").path,
+            configuredShell: "/bin/sh",
+            demo: false,
+            backend: "mock"
+        ))
+        let host = TaskersMockSurfaceHost()
+        let controller = TaskersWorkspaceController(core: core, surfaceHost: host)
+
+        try controller.start()
+        drainMainRunLoop()
+
+        try controller.openBrowserSplit(url: "taskers.dev")
+        drainMainRunLoop()
+
+        let workspace = try XCTUnwrap(try core.snapshot().activeWorkspace)
+        var browserDescriptor: TaskersSurfaceDescriptor?
+        for (paneID, _) in workspace.panes.elements {
+            let descriptor = try core.surfaceDescriptor(workspaceId: workspace.id, paneId: paneID)
+            if descriptor.kind == .browser {
+                browserDescriptor = descriptor
+                break
+            }
+        }
+
+        XCTAssertEqual(controller.surfaceCount, 2)
+        let descriptor = try XCTUnwrap(browserDescriptor)
+        XCTAssertEqual(descriptor.kind, .browser)
+        XCTAssertEqual(descriptor.url, "taskers.dev")
+
+        controller.close()
+        drainMainRunLoop()
     }
 
     private func bootstrapTestEnvironment() throws {
