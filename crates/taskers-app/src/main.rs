@@ -53,8 +53,8 @@ use terminal_transitions::{
     derive_pane_frames, plan_workspace_transition, retarget_transition_plan,
 };
 use webkit6::{
-    LoadEvent, NavigationPolicyDecision, NetworkSession, PolicyDecisionType,
-    ResponsePolicyDecision, Settings as WebKitSettings, WebView, prelude::*,
+    NavigationPolicyDecision, NetworkSession, PolicyDecisionType, ResponsePolicyDecision,
+    Settings as WebKitSettings, WebView, prelude::*,
 };
 
 #[derive(Debug, Clone, Parser)]
@@ -105,6 +105,7 @@ struct UiHandle {
     suppress_viewport_events: RefCell<bool>,
     pending_viewport: RefCell<Option<(taskers_domain::WorkspaceId, WorkspaceViewport)>>,
     pending_viewport_source: RefCell<Option<glib::SourceId>>,
+    pending_viewport_refresh_source: RefCell<Option<glib::SourceId>>,
     pending_focus_source: RefCell<Option<glib::SourceId>>,
     desktop_notifications: RefCell<HashSet<String>>,
     overview_mode: Cell<bool>,
@@ -358,6 +359,8 @@ const TOOLBAR_ACTION_FOCUS_GLYPH: &str = "\u{25ce}";
 struct WorkspaceRenderContext {
     overview_mode: bool,
     overview_scale: f64,
+    viewport_width: i32,
+    viewport_height: i32,
     top_level_resize_preview: Option<TopLevelResizePreview>,
 }
 
@@ -430,6 +433,7 @@ impl UiHandle {
             suppress_viewport_events: RefCell::new(false),
             pending_viewport: RefCell::new(None),
             pending_viewport_source: RefCell::new(None),
+            pending_viewport_refresh_source: RefCell::new(None),
             pending_focus_source: RefCell::new(None),
             desktop_notifications: RefCell::new(HashSet::new()),
             overview_mode: Cell::new(false),
@@ -1071,6 +1075,23 @@ impl UiHandle {
             return;
         };
         self.queue_viewport_persist(workspace.id, current_workspace_viewport(&shell));
+    }
+
+    fn queue_viewport_layout_refresh(self: &Rc<Self>) {
+        let Some(_) = self.shell.borrow().as_ref() else {
+            return;
+        };
+        if let Some(source) = self.pending_viewport_refresh_source.borrow_mut().take() {
+            source.remove();
+        }
+
+        let refresh_ui = Rc::clone(self);
+        let source = glib::timeout_add_local(Duration::from_millis(20), move || {
+            *refresh_ui.pending_viewport_refresh_source.borrow_mut() = None;
+            refresh_ui.refresh(false);
+            glib::ControlFlow::Break
+        });
+        *self.pending_viewport_refresh_source.borrow_mut() = Some(source);
     }
 
     fn set_workspace_viewport(&self, shell: &ShellWidgets, viewport: &WorkspaceViewport) {
@@ -2679,6 +2700,26 @@ fn build_shell_scaffold(ui: &Rc<UiHandle>) -> ShellWidgets {
     layout_scroll.vadjustment().connect_value_changed(move |_| {
         vertical_ui.queue_active_workspace_viewport_persist();
     });
+    let horizontal_refresh_ui = Rc::clone(ui);
+    layout_scroll.hadjustment().connect_changed(move |_| {
+        horizontal_refresh_ui.queue_viewport_layout_refresh();
+    });
+    let vertical_refresh_ui = Rc::clone(ui);
+    layout_scroll.vadjustment().connect_changed(move |_| {
+        vertical_refresh_ui.queue_viewport_layout_refresh();
+    });
+    let horizontal_page_refresh_ui = Rc::clone(ui);
+    layout_scroll
+        .hadjustment()
+        .connect_notify_local(Some("page-size"), move |_, _| {
+            horizontal_page_refresh_ui.queue_viewport_layout_refresh();
+        });
+    let vertical_page_refresh_ui = Rc::clone(ui);
+    layout_scroll
+        .vadjustment()
+        .connect_notify_local(Some("page-size"), move |_, _| {
+            vertical_page_refresh_ui.queue_viewport_layout_refresh();
+        });
 
     main_column.append(&layout_scroll);
 
@@ -4521,6 +4562,89 @@ fn build_split_layout_widget(
     }
 }
 
+fn commit_top_level_resize(
+    ui: &Rc<UiHandle>,
+    workspace_id: taskers_domain::WorkspaceId,
+    workspace_column_id: WorkspaceColumnId,
+    workspace_window_id: WorkspaceWindowId,
+    edge: ResizeHandleEdge,
+    target_size: i32,
+) {
+    let Some(shell) = ui.shell.borrow().as_ref().cloned() else {
+        return;
+    };
+    let before = ui.app_state.snapshot_model();
+    let Some(workspace) = before.workspaces.get(&workspace_id) else {
+        return;
+    };
+    let preview = TopLevelResizePreview {
+        workspace_id,
+        target: match edge {
+            ResizeHandleEdge::Right => TopLevelResizePreviewTarget::ColumnWidth {
+                workspace_column_id,
+                width: target_size,
+            },
+            ResizeHandleEdge::Bottom => TopLevelResizePreviewTarget::WindowHeight {
+                workspace_window_id,
+                height: target_size,
+            },
+        },
+    };
+    let placements = workspace_window_placements(
+        workspace,
+        workspace_viewport_width(ui.as_ref(), Some(&shell)),
+        workspace_viewport_height(ui.as_ref(), Some(&shell)),
+        Some(preview),
+    );
+
+    let commands = match edge {
+        ResizeHandleEdge::Right => workspace
+            .columns
+            .values()
+            .filter_map(|column| {
+                placements.iter().find(|placement| placement.column_id == column.id).map(
+                    |placement| ControlCommand::SetWorkspaceColumnWidth {
+                        workspace_id,
+                        workspace_column_id: column.id,
+                        width: placement.frame.width,
+                    },
+                )
+            })
+            .collect::<Vec<_>>(),
+        ResizeHandleEdge::Bottom => {
+            let Some(column_id) = workspace.column_for_window(workspace_window_id) else {
+                return;
+            };
+            let Some(column) = workspace.columns.get(&column_id) else {
+                return;
+            };
+            column
+                .window_order
+                .iter()
+                .filter_map(|window_id| {
+                    placements.iter().find(|placement| placement.window_id == *window_id).map(
+                        |placement| ControlCommand::SetWorkspaceWindowHeight {
+                            workspace_id,
+                            workspace_window_id: *window_id,
+                            height: placement.frame.height,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+
+    for command in commands {
+        if let Err(error) = ui.app_state.dispatch(command) {
+            ui.toast(&error.to_string());
+            return;
+        }
+    }
+
+    let after = ui.app_state.snapshot_model();
+    ui.refresh(before != after);
+}
+
 fn attach_workspace_window_resize_handles(
     ui: &Rc<UiHandle>,
     overlay: &Overlay,
@@ -4593,27 +4717,11 @@ fn build_workspace_window_resize_handle(
     let active_handle_for_begin = handle.clone();
     let active_handle_for_end = handle.clone();
     drag.connect_drag_begin(move |_, _, _| {
-        let start = drag_begin_ui
-            .app_state
-            .snapshot_model()
-            .workspaces
-            .get(&workspace_id)
-            .map(|workspace| match edge {
-                ResizeHandleEdge::Right => workspace
-                    .columns
-                    .get(&workspace_column_id)
-                    .map(|column| column.width)
-                    .unwrap_or(display_frame.width),
-                ResizeHandleEdge::Bottom => workspace
-                    .windows
-                    .get(&workspace_window_id)
-                    .map(|window| window.height)
-                    .unwrap_or(display_frame.height),
-            })
-            .unwrap_or(match edge {
-                ResizeHandleEdge::Right => display_frame.width,
-                ResizeHandleEdge::Bottom => display_frame.height,
-            });
+        let _ = &drag_begin_ui;
+        let start = match edge {
+            ResizeHandleEdge::Right => display_frame.width,
+            ResizeHandleEdge::Bottom => display_frame.height,
+        };
         start_size_for_begin.set(start);
         current_size_for_begin.set(start);
         active_handle_for_begin.add_css_class("workspace-window-resize-handle-active");
@@ -4657,19 +4765,14 @@ fn build_workspace_window_resize_handle(
             drag_end_ui.sync_layout_state(&model);
             return;
         }
-        let command = match edge {
-            ResizeHandleEdge::Right => ControlCommand::SetWorkspaceColumnWidth {
-                workspace_id,
-                workspace_column_id,
-                width: current_size.get(),
-            },
-            ResizeHandleEdge::Bottom => ControlCommand::SetWorkspaceWindowHeight {
-                workspace_id,
-                workspace_window_id,
-                height: current_size.get(),
-            },
-        };
-        drag_end_ui.dispatch(command);
+        commit_top_level_resize(
+            &drag_end_ui,
+            workspace_id,
+            workspace_column_id,
+            workspace_window_id,
+            edge,
+            current_size.get(),
+        );
     });
     handle.add_controller(drag);
 
@@ -6851,7 +6954,7 @@ fn has_explicit_browser_scheme(value: &str) -> bool {
 
     matches!(
         scheme.to_ascii_lowercase().as_str(),
-        "about" | "data" | "file" | "javascript" | "mailto"
+        "about" | "data" | "file" | "javascript" | "mailto" | "tel"
     )
 }
 
@@ -7352,7 +7455,158 @@ fn scale_window_frame(frame: WindowFrame, scale: f64) -> WindowFrame {
     }
 }
 
-fn workspace_window_placements(
+fn distribute_weighted_total(weights: &[i32], total: i32) -> Vec<i32> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+
+    let weights = weights
+        .iter()
+        .map(|weight| (*weight).max(1))
+        .collect::<Vec<_>>();
+    let weight_sum = weights.iter().map(|weight| i64::from(*weight)).sum::<i64>();
+    if weight_sum <= 0 {
+        let base = total / weights.len() as i32;
+        let remainder = total - (base * weights.len() as i32);
+        return (0..weights.len())
+            .map(|index| base + i32::from(index < remainder.max(0) as usize))
+            .collect();
+    }
+
+    let mut distributed = Vec::with_capacity(weights.len());
+    let mut allocated = 0;
+    let mut remainders = Vec::with_capacity(weights.len());
+    for (index, weight) in weights.into_iter().enumerate() {
+        let scaled = i64::from(total) * i64::from(weight);
+        let base = (scaled / weight_sum) as i32;
+        distributed.push(base);
+        allocated += base;
+        remainders.push((index, scaled % weight_sum));
+    }
+
+    let mut remaining = total - allocated;
+    remainders.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    for (index, _) in remainders.into_iter().take(remaining.max(0) as usize) {
+        distributed[index] += 1;
+        remaining -= 1;
+        if remaining <= 0 {
+            break;
+        }
+    }
+
+    distributed
+}
+
+fn fit_track_extents(preferred_extents: &[i32], available_total: i32, min_extent: i32) -> Vec<i32> {
+    if preferred_extents.is_empty() {
+        return Vec::new();
+    }
+
+    let count = preferred_extents.len() as i32;
+    let min_total = min_extent.saturating_mul(count);
+    if available_total <= min_total {
+        return vec![min_extent; preferred_extents.len()];
+    }
+
+    let preferred_extents = preferred_extents
+        .iter()
+        .map(|extent| (*extent).max(1))
+        .collect::<Vec<_>>();
+    let mut result = vec![0; preferred_extents.len()];
+    let mut active = (0..preferred_extents.len()).collect::<Vec<_>>();
+    let mut remaining_total = available_total;
+
+    loop {
+        if active.is_empty() {
+            break;
+        }
+
+        let remaining_weight = active
+            .iter()
+            .map(|index| i64::from(preferred_extents[*index]))
+            .sum::<i64>()
+            .max(1);
+        let below_minimum = active
+            .iter()
+            .copied()
+            .filter(|index| {
+                (f64::from(remaining_total) * f64::from(preferred_extents[*index]))
+                    / (remaining_weight as f64)
+                    < f64::from(min_extent)
+            })
+            .collect::<Vec<_>>();
+
+        if below_minimum.is_empty() {
+            let distributed = distribute_weighted_total(
+                &active
+                    .iter()
+                    .map(|index| preferred_extents[*index])
+                    .collect::<Vec<_>>(),
+                remaining_total,
+            );
+            for (slot, index) in active.iter().enumerate() {
+                result[*index] = distributed[slot];
+            }
+            break;
+        }
+
+        for index in below_minimum {
+            result[index] = min_extent;
+            remaining_total -= min_extent;
+            active.retain(|candidate| *candidate != index);
+        }
+    }
+
+    result
+}
+
+fn fit_track_extents_with_fixed(
+    preferred_extents: &[i32],
+    available_total: i32,
+    min_extent: i32,
+    fixed: Option<(usize, i32)>,
+) -> Vec<i32> {
+    let Some((fixed_index, fixed_extent)) = fixed else {
+        return fit_track_extents(preferred_extents, available_total, min_extent);
+    };
+    if preferred_extents.is_empty() {
+        return Vec::new();
+    }
+
+    let count = preferred_extents.len() as i32;
+    let min_total = min_extent.saturating_mul(count);
+    if available_total <= min_total {
+        return vec![min_extent; preferred_extents.len()];
+    }
+
+    let max_fixed_extent =
+        available_total - min_extent.saturating_mul((preferred_extents.len() - 1) as i32);
+    let fixed_extent = fixed_extent.clamp(min_extent, max_fixed_extent.max(min_extent));
+    let remaining_preferred = preferred_extents
+        .iter()
+        .enumerate()
+        .filter_map(|(index, extent)| (index != fixed_index).then_some(*extent))
+        .collect::<Vec<_>>();
+    let remaining = fit_track_extents(
+        &remaining_preferred,
+        available_total - fixed_extent,
+        min_extent,
+    );
+
+    let mut result = Vec::with_capacity(preferred_extents.len());
+    let mut remaining_iter = remaining.into_iter();
+    for index in 0..preferred_extents.len() {
+        if index == fixed_index {
+            result.push(fixed_extent);
+        } else {
+            result.push(remaining_iter.next().unwrap_or(min_extent));
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+fn preferred_workspace_window_placements(
     workspace: &Workspace,
     top_level_resize_preview: Option<TopLevelResizePreview>,
 ) -> Vec<WorkspaceWindowPlacement> {
@@ -7405,11 +7659,144 @@ fn workspace_window_placements(
     placements
 }
 
+fn workspace_window_placements(
+    workspace: &Workspace,
+    viewport_width: i32,
+    viewport_height: i32,
+    top_level_resize_preview: Option<TopLevelResizePreview>,
+) -> Vec<WorkspaceWindowPlacement> {
+    let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
+    if ordered_columns.is_empty() {
+        return Vec::new();
+    }
+
+    let horizontal_gap_total =
+        DEFAULT_WORKSPACE_WINDOW_GAP * ordered_columns.len().saturating_sub(1) as i32;
+    let available_width = (viewport_width - horizontal_gap_total).max(0);
+    let preferred_column_widths = ordered_columns
+        .iter()
+        .map(|column| match top_level_resize_preview {
+            Some(TopLevelResizePreview {
+                workspace_id: _,
+                target:
+                    TopLevelResizePreviewTarget::ColumnWidth {
+                        workspace_column_id,
+                        width,
+                    },
+            }) if workspace_column_id == column.id => width.max(MIN_WORKSPACE_WINDOW_WIDTH),
+            _ => column.width.max(1),
+        })
+        .collect::<Vec<_>>();
+    let fixed_column = match top_level_resize_preview {
+        Some(TopLevelResizePreview {
+            workspace_id: _,
+            target:
+                TopLevelResizePreviewTarget::ColumnWidth {
+                    workspace_column_id,
+                    width,
+                },
+        }) => ordered_columns
+            .iter()
+            .position(|column| column.id == workspace_column_id)
+            .map(|index| (index, width.max(MIN_WORKSPACE_WINDOW_WIDTH))),
+        _ => None,
+    };
+    let column_widths = fit_track_extents_with_fixed(
+        &preferred_column_widths,
+        available_width,
+        MIN_WORKSPACE_WINDOW_WIDTH,
+        fixed_column,
+    );
+
+    let mut placements = Vec::new();
+    let mut x = 0;
+    for (column_index, column) in ordered_columns.into_iter().enumerate() {
+        let column_width = column_widths
+            .get(column_index)
+            .copied()
+            .unwrap_or(MIN_WORKSPACE_WINDOW_WIDTH);
+        let vertical_gap_total =
+            DEFAULT_WORKSPACE_WINDOW_GAP * column.window_order.len().saturating_sub(1) as i32;
+        let available_height = (viewport_height - vertical_gap_total).max(0);
+        let preferred_window_heights = column
+            .window_order
+            .iter()
+            .filter_map(|window_id| {
+                workspace.windows.get(window_id).map(|window| match top_level_resize_preview {
+                    Some(TopLevelResizePreview {
+                        workspace_id: _,
+                        target:
+                            TopLevelResizePreviewTarget::WindowHeight {
+                                workspace_window_id,
+                                height,
+                            },
+                    }) if workspace_window_id == *window_id => {
+                        height.max(MIN_WORKSPACE_WINDOW_HEIGHT)
+                    }
+                    _ => window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT),
+                })
+            })
+            .collect::<Vec<_>>();
+        let fixed_window = match top_level_resize_preview {
+            Some(TopLevelResizePreview {
+                workspace_id: _,
+                target:
+                    TopLevelResizePreviewTarget::WindowHeight {
+                        workspace_window_id,
+                        height,
+                    },
+            }) => column
+                .window_order
+                .iter()
+                .position(|window_id| *window_id == workspace_window_id)
+                .map(|index| (index, height.max(MIN_WORKSPACE_WINDOW_HEIGHT))),
+            _ => None,
+        };
+        let window_heights = fit_track_extents_with_fixed(
+            &preferred_window_heights,
+            available_height,
+            MIN_WORKSPACE_WINDOW_HEIGHT,
+            fixed_window,
+        );
+
+        let mut y = 0;
+        for (window_index, window_id) in column.window_order.iter().enumerate() {
+            if !workspace.windows.contains_key(window_id) {
+                continue;
+            }
+            let window_height = window_heights
+                .get(window_index)
+                .copied()
+                .unwrap_or(MIN_WORKSPACE_WINDOW_HEIGHT);
+            placements.push(WorkspaceWindowPlacement {
+                window_id: *window_id,
+                column_id: column.id,
+                frame: WindowFrame {
+                    x,
+                    y,
+                    width: column_width,
+                    height: window_height,
+                },
+            });
+            y += window_height + DEFAULT_WORKSPACE_WINDOW_GAP;
+        }
+
+        x += column_width + DEFAULT_WORKSPACE_WINDOW_GAP;
+    }
+
+    placements
+}
+
 fn workspace_display_window_placements(
     workspace: &Workspace,
     render_context: WorkspaceRenderContext,
 ) -> Vec<WorkspaceWindowPlacement> {
-    workspace_window_placements(workspace, render_context.top_level_resize_preview)
+    workspace_window_placements(
+        workspace,
+        render_context.viewport_width,
+        render_context.viewport_height,
+        render_context.top_level_resize_preview,
+    )
         .into_iter()
         .map(|mut placement| {
             if render_context.overview_mode {
@@ -7457,19 +7844,22 @@ fn workspace_render_context(
         return WorkspaceRenderContext {
             overview_mode: false,
             overview_scale: 1.0,
+            viewport_width,
+            viewport_height,
             top_level_resize_preview: ui.active_top_level_resize_preview(workspace.id),
         };
     }
 
-    let base_frames = workspace_window_placements(workspace, None)
+    let base_frames =
+        workspace_window_placements(workspace, viewport_width, viewport_height, None)
         .into_iter()
         .map(|placement| placement.frame)
         .collect::<Vec<_>>();
     let base_metrics = canvas_metrics_from_frames(&base_frames);
     let content_width = (base_metrics.width - (WORKSPACE_CANVAS_PADDING * 2)).max(1);
     let content_height = (base_metrics.height - (WORKSPACE_CANVAS_PADDING * 2)).max(1);
-    let available_width = (viewport_width - (WORKSPACE_CANVAS_PADDING * 2)).max(1) as f64;
-    let available_height = (viewport_height - (WORKSPACE_CANVAS_PADDING * 2)).max(1) as f64;
+    let available_width = viewport_width.max(1) as f64;
+    let available_height = viewport_height.max(1) as f64;
     let overview_scale = (available_width / f64::from(content_width))
         .min(available_height / f64::from(content_height))
         .clamp(0.05, 1.0);
@@ -7477,6 +7867,8 @@ fn workspace_render_context(
     WorkspaceRenderContext {
         overview_mode: true,
         overview_scale,
+        viewport_width,
+        viewport_height,
         top_level_resize_preview: None,
     }
 }
@@ -8428,6 +8820,34 @@ fn humanize_theme_name(name: &str) -> String {
 mod tests {
     use super::*;
 
+    fn single_window_test_workspace() -> Workspace {
+        let pane = PaneRecord::new(PaneKind::Terminal);
+        let window = taskers_domain::WorkspaceWindowRecord {
+            id: WorkspaceWindowId::new(),
+            height: 620,
+            layout: LayoutNode::leaf(pane.id),
+            active_pane: pane.id,
+        };
+        let column = taskers_domain::WorkspaceColumnRecord {
+            id: WorkspaceColumnId::new(),
+            width: 840,
+            window_order: vec![window.id],
+            active_window: window.id,
+        };
+
+        Workspace {
+            id: taskers_domain::WorkspaceId::new(),
+            label: "Single window".into(),
+            columns: [(column.id, column)].into_iter().collect(),
+            windows: [(window.id, window.clone())].into_iter().collect(),
+            active_window: window.id,
+            panes: [(pane.id, pane)].into_iter().collect(),
+            active_pane: window.active_pane,
+            viewport: WorkspaceViewport::default(),
+            notifications: Vec::new(),
+        }
+    }
+
     fn preview_test_workspace() -> Workspace {
         let left_pane = PaneRecord::new(PaneKind::Terminal);
         let top_right_pane = PaneRecord::new(PaneKind::Terminal);
@@ -8588,7 +9008,7 @@ mod tests {
             },
         };
 
-        let placements = workspace_window_placements(&workspace, Some(preview));
+        let placements = preferred_workspace_window_placements(&workspace, Some(preview));
 
         assert_eq!(placements[0].frame.width, 1080);
         assert_eq!(placements[1].frame.x, 1080 + DEFAULT_WORKSPACE_WINDOW_GAP);
@@ -8607,12 +9027,86 @@ mod tests {
             },
         };
 
-        let placements = workspace_window_placements(&workspace, Some(preview));
+        let placements = preferred_workspace_window_placements(&workspace, Some(preview));
 
         assert_eq!(placements[1].frame.height, MIN_WORKSPACE_WINDOW_HEIGHT);
         assert_eq!(
             placements[2].frame.y,
             MIN_WORKSPACE_WINDOW_HEIGHT + DEFAULT_WORKSPACE_WINDOW_GAP
+        );
+    }
+
+    #[test]
+    fn workspace_window_placements_fit_single_window_to_viewport() {
+        let workspace = single_window_test_workspace();
+
+        let placements = workspace_window_placements(&workspace, 1320, 880, None);
+
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].frame.width, 1320);
+        assert_eq!(placements[0].frame.height, 880);
+    }
+
+    #[test]
+    fn workspace_window_placements_fit_columns_to_viewport_width() {
+        let workspace = preview_test_workspace();
+
+        let placements = workspace_window_placements(&workspace, 1600, 1002, None);
+
+        assert_eq!(placements[0].frame.width, 746);
+        assert_eq!(placements[1].frame.x, 746 + DEFAULT_WORKSPACE_WINDOW_GAP);
+        assert_eq!(placements[1].frame.width, 852);
+        assert_eq!(
+            placements[0].frame.width + placements[1].frame.width + DEFAULT_WORKSPACE_WINDOW_GAP,
+            1600
+        );
+    }
+
+    #[test]
+    fn workspace_window_placements_fit_stacked_windows_to_viewport_height() {
+        let workspace = preview_test_workspace();
+
+        let placements = workspace_window_placements(&workspace, 1600, 1002, None);
+
+        assert_eq!(placements[1].frame.height, 509);
+        assert_eq!(placements[2].frame.y, 509 + DEFAULT_WORKSPACE_WINDOW_GAP);
+        assert_eq!(placements[2].frame.height, 491);
+        assert_eq!(
+            placements[1].frame.height + placements[2].frame.height + DEFAULT_WORKSPACE_WINDOW_GAP,
+            1002
+        );
+    }
+
+    #[test]
+    fn workspace_window_placements_only_overflow_when_minimums_exceed_viewport() {
+        let workspace = preview_test_workspace();
+
+        let fitting = workspace_window_placements(
+            &workspace,
+            (MIN_WORKSPACE_WINDOW_WIDTH * 2) + DEFAULT_WORKSPACE_WINDOW_GAP,
+            1002,
+            None,
+        );
+        assert_eq!(fitting[0].frame.width, MIN_WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(fitting[1].frame.width, MIN_WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(
+            fitting[0].frame.width + fitting[1].frame.width + DEFAULT_WORKSPACE_WINDOW_GAP,
+            (MIN_WORKSPACE_WINDOW_WIDTH * 2) + DEFAULT_WORKSPACE_WINDOW_GAP
+        );
+
+        let overflowing = workspace_window_placements(
+            &workspace,
+            (MIN_WORKSPACE_WINDOW_WIDTH * 2) + DEFAULT_WORKSPACE_WINDOW_GAP - 1,
+            1002,
+            None,
+        );
+        assert_eq!(overflowing[0].frame.width, MIN_WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(overflowing[1].frame.width, MIN_WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(
+            overflowing[0].frame.width
+                + overflowing[1].frame.width
+                + DEFAULT_WORKSPACE_WINDOW_GAP,
+            (MIN_WORKSPACE_WINDOW_WIDTH * 2) + DEFAULT_WORKSPACE_WINDOW_GAP
         );
     }
 
