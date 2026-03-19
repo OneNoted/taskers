@@ -182,11 +182,15 @@ mod tests {
     use super::{
         BackendAvailability, BackendChoice, DefaultBackend, GhosttyHostOptions, TerminalBackend,
     };
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
     use taskers_runtime::ShellLaunchSpec;
+
+    static BACKEND_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn auto_probe_matches_runtime_availability() {
+        let _guard = BACKEND_ENV_LOCK.lock().expect("env lock");
+        unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
         let probe = DefaultBackend::probe(BackendChoice::Auto);
         match probe.availability {
             BackendAvailability::Ready => assert_eq!(probe.selected, BackendChoice::Ghostty),
@@ -210,6 +214,7 @@ mod tests {
 
     #[test]
     fn env_override_accepts_hyphenated_embedded_backend() {
+        let _guard = BACKEND_ENV_LOCK.lock().expect("env lock");
         unsafe { std::env::set_var("TASKERS_TERMINAL_BACKEND", "ghostty-embedded") };
         let probe = DefaultBackend::probe(BackendChoice::Mock);
         unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };

@@ -6,14 +6,15 @@ use gtk::glib;
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
-    fs::File,
+    fs::{File, OpenOptions, remove_file},
     io::{self, Write},
     net::TcpListener,
     path::PathBuf,
+    process::{Command, Stdio},
     rc::Rc,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use taskers_core::{
     BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
@@ -36,11 +37,28 @@ struct Cli {
     diagnostic_log: Option<String>,
     #[arg(long)]
     quit_after_ms: Option<u64>,
+    #[arg(long, hide = true, value_enum)]
+    internal_ghostty_probe: Option<GhosttyProbeMode>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SmokeScript {
     Baseline,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum GhosttyProbeMode {
+    Host,
+    Surface,
+}
+
+impl GhosttyProbeMode {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Surface => "surface",
+        }
+    }
 }
 
 struct BootstrapContext {
@@ -49,8 +67,19 @@ struct BootstrapContext {
     startup_notes: Vec<String>,
 }
 
+struct RuntimeBootstrap {
+    ghostty_runtime: RuntimeCapability,
+    shell_integration: RuntimeCapability,
+    terminal_defaults: TerminalDefaults,
+    host_options: GhosttyHostOptions,
+    startup_notes: Vec<String>,
+}
+
 fn main() -> glib::ExitCode {
     let cli = Cli::parse();
+    if let Some(mode) = cli.internal_ghostty_probe {
+        return run_internal_ghostty_probe(mode);
+    }
     let app = adw::Application::builder().application_id(APP_ID).build();
     let hold_guard = Rc::new(RefCell::new(None));
     let hold_guard_for_startup = hold_guard.clone();
@@ -181,6 +210,57 @@ fn build_ui_result(
 }
 
 fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> BootstrapContext {
+    let runtime = resolve_runtime_bootstrap();
+    let mut startup_notes = runtime.startup_notes;
+
+    let (ghostty_host, terminal_host, terminal_note) =
+        match probe_ghostty_backend_process(GhosttyProbeMode::Surface) {
+            Ok(()) => match GhosttyHost::new_with_options(&runtime.host_options) {
+                Ok(host) => {
+                    let _ = host.tick();
+                    (Some(host), RuntimeCapability::Ready, None)
+                }
+                Err(error) => (
+                    None,
+                    RuntimeCapability::Fallback {
+                        message: format!("Ghostty host unavailable: {error}"),
+                    },
+                    Some(format!("Ghostty host unavailable after probe: {error}")),
+                ),
+            },
+            Err(error) => (
+                None,
+                RuntimeCapability::Fallback {
+                    message: format!("Ghostty surface self-probe failed: {error}"),
+                },
+                Some(format!("Ghostty surface self-probe failed: {error}")),
+            ),
+        };
+
+    if let Some(note) = terminal_note {
+        startup_notes.push(note);
+    }
+
+    let runtime_status = RuntimeStatus {
+        ghostty_runtime: runtime.ghostty_runtime,
+        shell_integration: runtime.shell_integration,
+        terminal_host,
+    };
+    let core = SharedCore::bootstrap(BootstrapModel {
+        runtime_status,
+        terminal_defaults: runtime.terminal_defaults,
+    });
+
+    log_runtime_status(diagnostics, &core.snapshot().runtime_status);
+
+    BootstrapContext {
+        core,
+        ghostty_host,
+        startup_notes,
+    }
+}
+
+fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
     scrub_inherited_terminal_env();
 
     let mut startup_notes = Vec::new();
@@ -208,43 +288,42 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> BootstrapContex
         ),
     };
 
+    let terminal_defaults = terminal_defaults_from(shell_launch.clone());
     let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch);
-    let (ghostty_host, terminal_host, terminal_note) = match GhosttyHost::new_with_options(&host_options) {
-        Ok(host) => {
-            let _ = host.tick();
-            (Some(host), RuntimeCapability::Ready, None)
-        }
-        Err(error) => (
-            None,
-            RuntimeCapability::Fallback {
-                message: format!("Ghostty host unavailable: {error}"),
-            },
-            Some(format!("Ghostty host unavailable: {error}")),
-        ),
-    };
 
-    if let Some(note) = terminal_note {
-        startup_notes.push(note);
-    }
-
-    let runtime_status = RuntimeStatus {
+    RuntimeBootstrap {
         ghostty_runtime,
         shell_integration,
-        terminal_host,
-    };
-    let terminal_defaults = terminal_defaults_from(shell_launch);
-    let core = SharedCore::bootstrap(BootstrapModel {
-        runtime_status,
         terminal_defaults,
-    });
-
-    log_runtime_status(diagnostics, &core.snapshot().runtime_status);
-
-    BootstrapContext {
-        core,
-        ghostty_host,
+        host_options,
         startup_notes,
     }
+}
+
+fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
+    let runtime = resolve_runtime_bootstrap();
+    if let Err(error) = gtk::init() {
+        eprintln!("ghostty {} self-probe failed during gtk init: {error}", mode.as_arg());
+        return glib::ExitCode::FAILURE;
+    }
+
+    let host = match GhosttyHost::new_with_options(&runtime.host_options) {
+        Ok(host) => {
+            let _ = host.tick();
+            host
+        }
+        Err(error) => {
+            eprintln!("ghostty {} self-probe failed during host init: {error}", mode.as_arg());
+            return glib::ExitCode::FAILURE;
+        }
+    };
+
+    if matches!(mode, GhosttyProbeMode::Surface) {
+        return run_internal_surface_probe(host, runtime.terminal_defaults, mode);
+    }
+
+    spin_probe_main_context(Duration::from_millis(350));
+    glib::ExitCode::SUCCESS
 }
 
 fn terminal_defaults_from(shell_launch: ShellLaunchSpec) -> TerminalDefaults {
@@ -260,6 +339,161 @@ fn terminal_defaults_from(shell_launch: ShellLaunchSpec) -> TerminalDefaults {
         rows: 40,
         command_argv,
         env,
+    }
+}
+
+fn run_internal_surface_probe(
+    host: GhosttyHost,
+    terminal_defaults: TerminalDefaults,
+    mode: GhosttyProbeMode,
+) -> glib::ExitCode {
+    let settings = WebKitSettings::builder()
+        .enable_developer_extras(true)
+        .build();
+    let shell_view = WebView::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .focusable(true)
+        .settings(&settings)
+        .build();
+    shell_view.load_html(
+        "<!DOCTYPE html><html><body></body></html>",
+        Some("http://127.0.0.1/"),
+    );
+
+    let core = SharedCore::bootstrap(BootstrapModel {
+        runtime_status: RuntimeStatus {
+            ghostty_runtime: RuntimeCapability::Ready,
+            shell_integration: RuntimeCapability::Ready,
+            terminal_host: RuntimeCapability::Ready,
+        },
+        terminal_defaults,
+    });
+    core.set_window_size(PixelSize::new(1200, 800));
+
+    let event_sink = Rc::new(|_| {});
+    let mut taskers_host = TaskersHost::new(&shell_view, Some(host), event_sink, None);
+    let host_widget = taskers_host.widget();
+    let window = gtk::Window::builder()
+        .title("Taskers Ghostty Probe")
+        .default_width(1200)
+        .default_height(800)
+        .child(&host_widget)
+        .build();
+    window.present();
+
+    spin_probe_main_context(Duration::from_millis(80));
+    if let Err(error) = taskers_host.sync_snapshot(&core.snapshot()) {
+        eprintln!(
+            "ghostty {} self-probe failed during snapshot sync: {error}",
+            mode.as_arg()
+        );
+        return glib::ExitCode::FAILURE;
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(350);
+    let context = glib::MainContext::default();
+    while Instant::now() < deadline {
+        taskers_host.tick();
+        while context.pending() {
+            let _ = context.iteration(false);
+        }
+        thread::sleep(Duration::from_millis(16));
+    }
+
+    window.close();
+    spin_probe_main_context(Duration::from_millis(100));
+    glib::ExitCode::SUCCESS
+}
+
+fn spin_probe_main_context(duration: Duration) {
+    let deadline = Instant::now() + duration;
+    let context = glib::MainContext::default();
+    while Instant::now() < deadline {
+        while context.pending() {
+            let _ = context.iteration(false);
+        }
+        thread::sleep(Duration::from_millis(16));
+    }
+}
+
+fn probe_ghostty_backend_process(mode: GhosttyProbeMode) -> Result<()> {
+    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let log_path = ghostty_probe_log_path(mode);
+    let stdout = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open probe log {}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("failed to clone probe log {}", log_path.display()))?;
+
+    let mut child = Command::new(current_exe)
+        .arg("--internal-ghostty-probe")
+        .arg(mode.as_arg())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .context("failed to launch Ghostty self-probe")?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let _ = remove_file(&log_path);
+                return Ok(());
+            }
+            Ok(Some(status)) => {
+                anyhow::bail!(
+                    "{}; probe log: {}",
+                    describe_exit_status(status),
+                    log_path.display()
+                );
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("Ghostty self-probe timed out; probe log: {}", log_path.display());
+            }
+            Err(error) => {
+                anyhow::bail!(
+                    "failed to wait for Ghostty self-probe: {error}; probe log: {}",
+                    log_path.display()
+                );
+            }
+        }
+    }
+}
+
+fn ghostty_probe_log_path(mode: GhosttyProbeMode) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "taskers-ghostty-probe-{}-{}-{timestamp}.log",
+        mode.as_arg(),
+        std::process::id()
+    ))
+}
+
+fn describe_exit_status(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        if let Some(signal) = status.signal() {
+            return format!("Ghostty self-probe crashed with signal {signal}");
+        }
+    }
+
+    match status.code() {
+        Some(code) => format!("Ghostty self-probe exited with status {code}"),
+        None => "Ghostty self-probe exited unsuccessfully".into(),
     }
 }
 

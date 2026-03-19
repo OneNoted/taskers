@@ -2271,7 +2271,16 @@ fn initialize_terminal_backend(
 }
 
 fn run_internal_ghostty_probe() -> gtk::glib::ExitCode {
-    match GhosttyHost::new() {
+    let shell_launch = match install_shell_integration(None) {
+        Ok(integration) => integration.launch_spec(),
+        Err(error) => {
+            eprintln!("ghostty self-probe falling back to default shell launch: {error}");
+            ShellLaunchSpec::fallback()
+        }
+    };
+    let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+
+    match GhosttyHost::new_with_options(&host_options) {
         Ok(host) => {
             let _ = host.tick();
             thread::sleep(Duration::from_millis(250));
