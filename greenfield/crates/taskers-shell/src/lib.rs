@@ -511,6 +511,13 @@ fn render_pane(pane: &PaneSnapshot, core: SharedCore, runtime_status: &RuntimeSt
                     {render_surface_tab(pane.id, pane.active_surface, surface, core.clone())}
                 }
             }
+            if matches!(active_surface.kind, SurfaceKind::Browser) {
+                BrowserToolbar {
+                    key: "{active_surface.id}",
+                    surface: active_surface.clone(),
+                    core: core.clone(),
+                }
+            }
             div { class: "pane-body",
                 {render_surface_backdrop(active_surface, runtime_status)}
             }
@@ -541,6 +548,65 @@ fn render_surface_tab(
         button { class: "{tab_class}", onclick: focus_surface,
             span { class: "surface-tab-label", "{surface.kind.label()}" }
             span { class: "pane-meta", "{surface.title}" }
+        }
+    }
+}
+
+#[component]
+fn BrowserToolbar(surface: SurfaceSnapshot, core: SharedCore) -> Element {
+    let initial_url = surface.url.clone().unwrap_or_else(|| "about:blank".into());
+    let mut address = use_signal(|| initial_url.clone());
+    let surface_id = surface.id;
+
+    let navigate = {
+        let core = core.clone();
+        let address = address.clone();
+        move |event: Event<FormData>| {
+            event.prevent_default();
+            let target = address.read().trim().to_string();
+            if target.is_empty() {
+                return;
+            }
+            core.dispatch_shell_action(ShellAction::NavigateBrowser {
+                surface_id,
+                url: target,
+            });
+        }
+    };
+    let go_back = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::BrowserBack { surface_id })
+    };
+    let go_forward = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::BrowserForward { surface_id })
+    };
+    let reload = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::BrowserReload { surface_id })
+    };
+    let toggle_devtools = move |_| {
+        core.dispatch_shell_action(ShellAction::ToggleBrowserDevtools { surface_id })
+    };
+
+    rsx! {
+        form { class: "browser-toolbar", onsubmit: navigate,
+            button { r#type: "button", class: "browser-toolbar-button", onclick: go_back, "←" }
+            button { r#type: "button", class: "browser-toolbar-button", onclick: go_forward, "→" }
+            button { r#type: "button", class: "browser-toolbar-button", onclick: reload, "↻" }
+            input {
+                class: "browser-address",
+                r#type: "text",
+                value: "{address}",
+                oninput: move |event| address.set(event.value()),
+            }
+            button { r#type: "submit", class: "browser-toolbar-button browser-toolbar-button-primary", "Go" }
+            button {
+                r#type: "button",
+                class: "browser-toolbar-button",
+                onclick: toggle_devtools,
+                "Devtools"
+            }
         }
     }
 }

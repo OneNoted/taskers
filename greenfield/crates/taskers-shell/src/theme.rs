@@ -822,6 +822,55 @@ button {{
   box-shadow: inset 0 0 0 1px {error_10};
 }}
 
+.browser-toolbar {{
+  min-height: 42px;
+  border-bottom: 1px solid {border_06};
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: {overlay_05};
+}}
+
+.browser-toolbar-button {{
+  min-width: 34px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid {border_10};
+  background: {overlay_05};
+  color: {text_subtle};
+  font-size: 11px;
+  font-weight: 600;
+}}
+
+.browser-toolbar-button:hover {{
+  background: {overlay_16};
+  color: {text_bright};
+}}
+
+.browser-toolbar-button-primary {{
+  border-color: {accent_24};
+  color: {text_bright};
+}}
+
+.browser-address {{
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid {border_10};
+  padding: 0 10px;
+  background: {overlay_05};
+  color: {text_bright};
+  font-size: 12px;
+}}
+
+.browser-address:focus {{
+  outline: none;
+  border-color: {accent_24};
+  box-shadow: 0 0 0 1px {accent_20};
+}}
+
 .pane-body {{
   flex: 1;
   min-height: 0;

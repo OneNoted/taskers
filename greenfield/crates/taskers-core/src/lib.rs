@@ -1,6 +1,6 @@
 use parking_lot::Mutex;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fmt,
     path::PathBuf,
     sync::Arc,
@@ -461,6 +461,14 @@ pub struct ActivityItemSnapshot {
     pub unread: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserChromeSnapshot {
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub title: String,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStateSnapshot {
     Working,
@@ -547,6 +555,7 @@ pub struct ShellSnapshot {
     pub overview_mode: bool,
     pub workspaces: Vec<WorkspaceSummary>,
     pub current_workspace: WorkspaceViewSnapshot,
+    pub browser_chrome: Option<BrowserChromeSnapshot>,
     pub agents: Vec<AgentSessionSnapshot>,
     pub activity: Vec<ActivityItemSnapshot>,
     pub done_activity: Vec<ActivityItemSnapshot>,
@@ -566,6 +575,14 @@ pub enum HostEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostCommand {
+    BrowserBack { surface_id: SurfaceId },
+    BrowserForward { surface_id: SurfaceId },
+    BrowserReload { surface_id: SurfaceId },
+    BrowserToggleDevtools { surface_id: SurfaceId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellAction {
     ShowSection { section: ShellSection },
     ToggleOverview,
@@ -580,6 +597,11 @@ pub enum ShellAction {
     AddTerminalSurface { pane_id: Option<PaneId> },
     FocusPane { pane_id: PaneId },
     FocusSurface { pane_id: PaneId, surface_id: SurfaceId },
+    NavigateBrowser { surface_id: SurfaceId, url: String },
+    BrowserBack { surface_id: SurfaceId },
+    BrowserForward { surface_id: SurfaceId },
+    BrowserReload { surface_id: SurfaceId },
+    ToggleBrowserDevtools { surface_id: SurfaceId },
     CloseSurface { pane_id: PaneId, surface_id: SurfaceId },
     DismissActivity { activity_id: ActivityId },
     SelectTheme { theme_id: String },
@@ -626,6 +648,7 @@ struct TaskersCore {
     metrics: LayoutMetrics,
     runtime_status: RuntimeStatus,
     ui: UiState,
+    host_commands: VecDeque<HostCommand>,
 }
 
 impl TaskersCore {
@@ -645,6 +668,7 @@ impl TaskersCore {
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 window_size: PixelSize::new(1440, 900),
             },
+            host_commands: VecDeque::new(),
         }
     }
 
@@ -722,6 +746,7 @@ impl TaskersCore {
                 columns: self.workspace_columns_snapshot(workspace, &window_frames),
                 layout: self.snapshot_layout(workspace, &active_window.layout),
             },
+            browser_chrome: self.browser_chrome_snapshot(workspace),
             agents: self.agent_sessions_snapshot(&model),
             activity: self.activity_snapshot(&model),
             done_activity: self.done_activity_snapshot(&model),
@@ -980,6 +1005,21 @@ impl TaskersCore {
         }
     }
 
+    fn browser_chrome_snapshot(&self, workspace: &Workspace) -> Option<BrowserChromeSnapshot> {
+        let pane = workspace.panes.get(&workspace.active_pane)?;
+        let surface = pane.active_surface()?;
+        if surface.kind != PaneKind::Browser {
+            return None;
+        }
+
+        Some(BrowserChromeSnapshot {
+            pane_id: pane.id,
+            surface_id: surface.id,
+            title: display_surface_title(surface),
+            url: normalized_surface_url(surface).unwrap_or_else(|| "about:blank".into()),
+        })
+    }
+
     fn collect_workspace_surface_plans(
         &self,
         workspace_id: WorkspaceId,
@@ -1019,7 +1059,7 @@ impl TaskersCore {
                         pane_id: pane.id,
                         surface_id: active_surface.id,
                         active: workspace.active_pane == pane.id,
-                        frame: pane_body_frame(frame, self.metrics),
+                        frame: pane_body_frame(frame, self.metrics, &active_surface.kind),
                         mount: self.mount_spec_for_active_surface(workspace_id, pane, active_surface),
                     })
                 })
@@ -1131,6 +1171,21 @@ impl TaskersCore {
             ShellAction::FocusPane { pane_id } => self.focus_pane_by_id(pane_id),
             ShellAction::FocusSurface { pane_id, surface_id } => {
                 self.focus_surface_by_id(pane_id, surface_id)
+            }
+            ShellAction::NavigateBrowser { surface_id, url } => {
+                self.navigate_browser_surface(surface_id, &url)
+            }
+            ShellAction::BrowserBack { surface_id } => {
+                self.queue_host_command(HostCommand::BrowserBack { surface_id })
+            }
+            ShellAction::BrowserForward { surface_id } => {
+                self.queue_host_command(HostCommand::BrowserForward { surface_id })
+            }
+            ShellAction::BrowserReload { surface_id } => {
+                self.queue_host_command(HostCommand::BrowserReload { surface_id })
+            }
+            ShellAction::ToggleBrowserDevtools { surface_id } => {
+                self.queue_host_command(HostCommand::BrowserToggleDevtools { surface_id })
             }
             ShellAction::CloseSurface { pane_id, surface_id } => {
                 self.close_surface_by_id(pane_id, surface_id)
@@ -1323,6 +1378,22 @@ impl TaskersCore {
         })
     }
 
+    fn navigate_browser_surface(&mut self, surface_id: SurfaceId, raw_url: &str) -> bool {
+        let normalized = resolved_browser_uri(raw_url);
+        self.dispatch_control(ControlCommand::UpdateSurfaceMetadata {
+            surface_id,
+            patch: PaneMetadataPatch {
+                url: Some(normalized),
+                ..PaneMetadataPatch::default()
+            },
+        })
+    }
+
+    fn queue_host_command(&mut self, command: HostCommand) -> bool {
+        self.host_commands.push_back(command);
+        true
+    }
+
     fn dismiss_activity(&mut self, activity_id: ActivityId) -> bool {
         self.dispatch_control(ControlCommand::MarkSurfaceCompleted {
             workspace_id: activity_id.workspace_id,
@@ -1406,6 +1477,10 @@ impl TaskersCore {
     fn bump_local_revision(&mut self) {
         self.revision = self.revision.max(self.observed_app_revision).saturating_add(1);
     }
+
+    fn drain_host_commands(&mut self) -> Vec<HostCommand> {
+        self.host_commands.drain(..).collect()
+    }
 }
 
 #[derive(Clone)]
@@ -1471,6 +1546,10 @@ impl SharedCore {
         if inner.sync_revision_from_app() {
             let _ = self.revisions.send(inner.revision());
         }
+    }
+
+    pub fn drain_host_commands(&self) -> Vec<HostCommand> {
+        self.inner.lock().drain_host_commands()
     }
 
     pub fn split_with_browser(&self) {
@@ -1923,8 +2002,14 @@ fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, F
     }
 }
 
-fn pane_body_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
-    frame.inset_top(metrics.pane_header_height + metrics.surface_tab_height)
+fn pane_body_frame(frame: Frame, metrics: LayoutMetrics, kind: &PaneKind) -> Frame {
+    let browser_toolbar_height = match kind {
+        PaneKind::Terminal => 0,
+        PaneKind::Browser => 42,
+    };
+    frame.inset_top(
+        metrics.pane_header_height + metrics.surface_tab_height + browser_toolbar_height,
+    )
 }
 
 fn workspace_preview(summary: &DomainWorkspaceSummary) -> String {
@@ -2192,8 +2277,9 @@ mod tests {
     use taskers_control::ControlCommand;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, HostEvent, RuntimeCapability, RuntimeStatus, SharedCore,
-        ShellAction, ShellSection, SurfaceMountSpec, default_preview_app_state,
+        BootstrapModel, BrowserMountSpec, HostCommand, HostEvent, RuntimeCapability,
+        RuntimeStatus, SharedCore, ShellAction, ShellSection, SurfaceMountSpec,
+        default_preview_app_state,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -2294,6 +2380,35 @@ mod tests {
             .expect("browser surface");
         assert_eq!(surface.title, "Taskers Docs");
         assert_eq!(surface.url.as_deref(), Some("https://example.com/docs"));
+    }
+
+    #[test]
+    fn browser_snapshot_and_host_commands_follow_active_browser_surface() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+
+        let snapshot = core.snapshot();
+        let browser = snapshot.browser_chrome.expect("active browser chrome");
+        assert!(!browser.url.trim().is_empty());
+
+        core.dispatch_shell_action(ShellAction::BrowserReload {
+            surface_id: browser.surface_id,
+        });
+        core.dispatch_shell_action(ShellAction::BrowserBack {
+            surface_id: browser.surface_id,
+        });
+
+        assert_eq!(
+            core.drain_host_commands(),
+            vec![
+                HostCommand::BrowserReload {
+                    surface_id: browser.surface_id
+                },
+                HostCommand::BrowserBack {
+                    surface_id: browser.surface_id
+                },
+            ]
+        );
     }
 
     #[test]

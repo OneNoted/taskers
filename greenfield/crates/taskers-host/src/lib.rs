@@ -10,8 +10,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use taskers_core::{
-    BrowserMountSpec, HostEvent, PortalSurfacePlan, ShellSnapshot, SurfaceId, SurfaceMountSpec,
-    SurfacePortalPlan, TerminalMountSpec,
+    BrowserMountSpec, HostCommand, HostEvent, PortalSurfacePlan, ShellSnapshot, SurfaceId,
+    SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
 };
 use taskers_domain::PaneKind;
 use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
@@ -155,6 +155,51 @@ impl TaskersHost {
         }
     }
 
+    pub fn handle_command(&mut self, command: HostCommand) -> Result<()> {
+        match command {
+            HostCommand::BrowserBack { surface_id } => {
+                self.with_browser_surface(surface_id, "browser back", |surface| surface.go_back())
+            }
+            HostCommand::BrowserForward { surface_id } => self.with_browser_surface(
+                surface_id,
+                "browser forward",
+                |surface| surface.go_forward(),
+            ),
+            HostCommand::BrowserReload { surface_id } => self.with_browser_surface(
+                surface_id,
+                "browser reload",
+                |surface| surface.reload(),
+            ),
+            HostCommand::BrowserToggleDevtools { surface_id } => self.with_browser_surface(
+                surface_id,
+                "browser devtools toggle",
+                |surface| surface.toggle_devtools(),
+            ),
+        }
+    }
+
+    fn with_browser_surface(
+        &mut self,
+        surface_id: SurfaceId,
+        action: &'static str,
+        callback: impl FnOnce(&mut BrowserSurface),
+    ) -> Result<()> {
+        let Some(surface) = self.browser_surfaces.get_mut(&surface_id) else {
+            return Ok(());
+        };
+        callback(surface);
+        emit_diagnostic(
+            self.diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::HostEvent,
+                None,
+                format!("{action} command handled"),
+            )
+            .with_surface(surface_id),
+        );
+        Ok(())
+    }
+
     fn sync_browser_surfaces(
         &mut self,
         portal: &SurfacePortalPlan,
@@ -277,6 +322,7 @@ impl TaskersHost {
 struct BrowserSurface {
     webview: WebView,
     url: String,
+    devtools_open: bool,
 }
 
 impl BrowserSurface {
@@ -403,7 +449,11 @@ impl BrowserSurface {
             .with_surface(plan.surface_id),
         );
 
-        Ok(Self { webview, url })
+        Ok(Self {
+            webview,
+            url,
+            devtools_open: false,
+        })
     }
 
     fn sync(
@@ -436,6 +486,42 @@ impl BrowserSurface {
         );
 
         Ok(())
+    }
+
+    fn go_back(&mut self) {
+        if self.webview.can_go_back() {
+            self.webview.go_back();
+        }
+        self.webview.grab_focus();
+    }
+
+    fn go_forward(&mut self) {
+        if self.webview.can_go_forward() {
+            self.webview.go_forward();
+        }
+        self.webview.grab_focus();
+    }
+
+    fn reload(&mut self) {
+        self.webview.reload();
+        self.webview.grab_focus();
+    }
+
+    fn toggle_devtools(&mut self) {
+        let Some(inspector) = self.webview.inspector() else {
+            return;
+        };
+        if self.devtools_open {
+            inspector.close();
+            self.devtools_open = false;
+        } else {
+            if inspector.can_attach() {
+                inspector.attach();
+            }
+            inspector.show();
+            self.devtools_open = true;
+        }
+        self.webview.grab_focus();
     }
 }
 

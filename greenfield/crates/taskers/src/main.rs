@@ -586,6 +586,20 @@ fn sync_window(
 ) {
     core.sync_external_changes();
 
+    for command in core.drain_host_commands() {
+        if let Err(error) = host.borrow_mut().handle_command(command) {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    Some(core.revision()),
+                    format!("host command failed: {error}"),
+                ),
+            );
+            eprintln!("taskers host command failed: {error}");
+        }
+    }
+
     let size = PixelSize::new(window.width().max(1), window.height().max(1));
     if last_size.get() != (size.width, size.height) {
         core.set_window_size(size);
