@@ -300,6 +300,10 @@ impl BrowserSurface {
             .settings(&settings)
             .build();
         webview.load_uri(&url);
+        (event_sink)(HostEvent::SurfaceUrlChanged {
+            surface_id: plan.surface_id,
+            url: url.clone(),
+        });
         position_widget(fixed, webview.upcast_ref(), plan.frame);
 
         let pane_id = plan.pane_id;

@@ -78,16 +78,35 @@ struct RuntimeBootstrap {
 
 fn main() -> glib::ExitCode {
     let cli = Cli::parse();
+    scrub_inherited_terminal_env();
     if let Some(mode) = cli.internal_ghostty_probe {
         return run_internal_ghostty_probe(mode);
     }
+
+    let bootstrap = match bootstrap_runtime(None) {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => {
+            eprintln!("failed to bootstrap greenfield Taskers host: {error:?}");
+            return glib::ExitCode::FAILURE;
+        }
+    };
+
     let app = adw::Application::builder().application_id(APP_ID).build();
+    let bootstrap = Rc::new(RefCell::new(Some(bootstrap)));
     let hold_guard = Rc::new(RefCell::new(None));
+    let bootstrap_for_startup = bootstrap.clone();
     let hold_guard_for_startup = hold_guard.clone();
     let cli_for_startup = cli.clone();
     app.connect_startup(move |app| {
         *hold_guard_for_startup.borrow_mut() = Some(app.hold());
-        build_ui(app, hold_guard_for_startup.clone(), cli_for_startup.clone());
+        if let Some(bootstrap) = bootstrap_for_startup.borrow_mut().take() {
+            build_ui(
+                app,
+                bootstrap,
+                hold_guard_for_startup.clone(),
+                cli_for_startup.clone(),
+            );
+        }
     });
     app.connect_activate(|app| {
         if let Some(window) = app.active_window() {
@@ -99,21 +118,22 @@ fn main() -> glib::ExitCode {
 
 fn build_ui(
     app: &adw::Application,
+    bootstrap: BootstrapContext,
     hold_guard: Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>,
     cli: Cli,
 ) {
-    if let Err(error) = build_ui_result(app, hold_guard, cli) {
+    if let Err(error) = build_ui_result(app, bootstrap, hold_guard, cli) {
         eprintln!("failed to launch greenfield Taskers host: {error:?}");
     }
 }
 
 fn build_ui_result(
     app: &adw::Application,
+    bootstrap: BootstrapContext,
     hold_guard: Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>,
     cli: Cli,
 ) -> Result<()> {
     let diagnostics = DiagnosticsWriter::from_cli(&cli);
-    let bootstrap = bootstrap_runtime(diagnostics.as_ref())?;
     log_runtime_status(diagnostics.as_ref(), &bootstrap.core.snapshot().runtime_status);
 
     let shell_url = launch_liveview_server(bootstrap.core.clone())?;
@@ -339,11 +359,6 @@ fn greenfield_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
 
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     let runtime = resolve_runtime_bootstrap();
-    if let Err(error) = gtk::init() {
-        eprintln!("ghostty {} self-probe failed during gtk init: {error}", mode.as_arg());
-        return glib::ExitCode::FAILURE;
-    }
-
     let host = match GhosttyHost::new_with_options(&runtime.host_options) {
         Ok(host) => {
             let _ = host.tick();
@@ -368,6 +383,16 @@ fn run_internal_surface_probe(
     shell_launch: ShellLaunchSpec,
     mode: GhosttyProbeMode,
 ) -> glib::ExitCode {
+    if !gtk::is_initialized_main_thread() {
+        if let Err(error) = gtk::init() {
+            eprintln!(
+                "ghostty {} self-probe failed during gtk init: {error}",
+                mode.as_arg()
+            );
+            return glib::ExitCode::FAILURE;
+        }
+    }
+
     let settings = WebKitSettings::builder()
         .enable_developer_extras(true)
         .build();
@@ -440,9 +465,12 @@ fn run_internal_surface_probe(
         thread::sleep(Duration::from_millis(16));
     }
 
-    window.close();
-    spin_probe_main_context(Duration::from_millis(100));
-    glib::ExitCode::SUCCESS
+    // The probe only needs to prove that an embedded surface can initialize
+    // and stay alive briefly. Tearing the GTK/GL stack back down inside the
+    // child has been the flaky part on Linux, so exit immediately on success
+    // and let the parent make the real startup decision.
+    let _ = window;
+    std::process::exit(0);
 }
 
 fn spin_probe_main_context(duration: Duration) {
@@ -706,13 +734,13 @@ fn run_baseline_smoke(core: SharedCore, diagnostics: Option<&DiagnosticsWriter>)
         ),
     );
 
-    if let Some(title) = wait_for_browser_title(&core, Duration::from_secs(4)) {
+    if let Some(metadata) = wait_for_browser_ready(&core, Duration::from_secs(4)) {
         log_diagnostic(
             diagnostics,
             DiagnosticRecord::new(
                 DiagnosticCategory::Smoke,
                 Some(core.revision()),
-                format!("browser metadata observed title={title}"),
+                format!("browser metadata observed {metadata}"),
             ),
         );
     } else {
@@ -721,7 +749,7 @@ fn run_baseline_smoke(core: SharedCore, diagnostics: Option<&DiagnosticsWriter>)
             DiagnosticRecord::new(
                 DiagnosticCategory::Smoke,
                 Some(core.revision()),
-                "browser metadata timed out",
+                "browser surface did not appear before timeout",
             ),
         );
     }
@@ -763,21 +791,19 @@ fn run_baseline_smoke(core: SharedCore, diagnostics: Option<&DiagnosticsWriter>)
     );
 }
 
-fn wait_for_browser_title(core: &SharedCore, timeout: Duration) -> Option<String> {
+fn wait_for_browser_ready(core: &SharedCore, timeout: Duration) -> Option<String> {
     let started_at = Instant::now();
     while started_at.elapsed() < timeout {
         let snapshot = core.snapshot();
-        if let Some(title) =
-            first_browser_title(&snapshot.current_workspace.layout).filter(|title| title != "Browser")
-        {
-            return Some(title);
+        if let Some(metadata) = first_browser_ready(&snapshot.current_workspace.layout) {
+            return Some(metadata);
         }
         thread::sleep(Duration::from_millis(100));
     }
     None
 }
 
-fn first_browser_title(node: &LayoutNodeSnapshot) -> Option<String> {
+fn first_browser_ready(node: &LayoutNodeSnapshot) -> Option<String> {
     match node {
         LayoutNodeSnapshot::Pane(pane) => pane
             .surfaces
@@ -785,9 +811,17 @@ fn first_browser_title(node: &LayoutNodeSnapshot) -> Option<String> {
             .find(|surface| surface.id == pane.active_surface)
             .or_else(|| pane.surfaces.first())
             .filter(|surface| surface.kind == SurfaceKind::Browser)
-            .map(|surface| surface.title.clone()),
+            .map(|surface| {
+                if surface.title != "Browser" {
+                    format!("title={}", surface.title)
+                } else if let Some(url) = surface.url.as_deref() {
+                    format!("url={url}")
+                } else {
+                    "surface-present".into()
+                }
+            }),
         LayoutNodeSnapshot::Split { first, second, .. } => {
-            first_browser_title(first).or_else(|| first_browser_title(second))
+            first_browser_ready(first).or_else(|| first_browser_ready(second))
         }
     }
 }

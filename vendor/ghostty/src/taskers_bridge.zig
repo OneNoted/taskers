@@ -119,13 +119,7 @@ pub export fn taskers_ghostty_surface_new(
 ) ?*gtk.Widget {
     const ptr = host orelse return null;
     const opts = options orelse &SurfaceOptions{};
-    const command = command: {
-        if (ptr.command_argv.len == 0) break :command null;
-        break :command configpkg.Command{ .direct = ptr.command_argv };
-    };
-
     const surface = Surface.newForApp(ptr.rt_app.app, .{
-        .command = command,
         .working_directory = if (opts.working_directory) |value| std.mem.span(value) else null,
         .title = if (opts.title) |value| std.mem.span(value) else null,
     });
@@ -155,7 +149,10 @@ fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOpti
     var cloned = try base.get().clone(alloc);
     defer cloned.deinit();
 
-    cloned.command = null;
+    cloned.command = if (ptr.command_argv.len == 0)
+        null
+    else
+        configpkg.Command{ .direct = ptr.command_argv };
     cloned.@"shell-integration" = .none;
     cloned.@"shell-integration-features" = .{};
     cloned.@"linux-cgroup" = .never;

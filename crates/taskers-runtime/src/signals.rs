@@ -34,7 +34,10 @@ impl SignalStreamParser {
 
         let mut frames = Vec::new();
         let mut cursor = 0usize;
-        let mut keep_from = self.pending.len().saturating_sub(OSC_PREFIX.len());
+        let mut keep_from = floor_char_boundary(
+            &self.pending,
+            self.pending.len().saturating_sub(OSC_PREFIX.len()),
+        );
 
         while let Some(found) = self.pending[cursor..].find(OSC_PREFIX) {
             let frame_start = cursor + found;
@@ -54,7 +57,7 @@ impl SignalStreamParser {
             keep_from = cursor;
         }
 
-        self.pending = self.pending[keep_from..].to_string();
+        self.pending = self.pending[floor_char_boundary(&self.pending, keep_from)..].to_string();
         frames
     }
 }
@@ -201,6 +204,14 @@ fn frame_slice(remainder: &str) -> Option<(&str, usize)> {
     None
 }
 
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 #[cfg(test)]
 mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -245,6 +256,20 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].kind, SignalKind::WaitingInput);
         assert_eq!(frames[0].message.as_deref(), Some("Need approval"));
+    }
+
+    #[test]
+    fn stream_parser_keeps_partial_prefix_on_utf8_boundary() {
+        let mut parser = SignalStreamParser::default();
+        let noisy_prefix = "abbr'...\n⠙ ";
+        let partial = format!("{noisy_prefix}\u{1b}]777;taskers;kind=progress;message=Working");
+
+        assert!(parser.push(&partial).is_empty());
+
+        let frames = parser.push("\u{7}");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].kind, SignalKind::Progress);
+        assert_eq!(frames[0].message.as_deref(), Some("Working"));
     }
 
     #[test]
