@@ -14,15 +14,20 @@ repository = "https://github.com/OneNoted/taskers"
 version = "0.1.0-alpha.1"
 
 [workspace.dependencies]
+adw = { package = "libadwaita", version = "0.9.1" }
 anyhow = "1"
+axum = { version = "0.8.4", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
-dioxus = { version = "0.7.3", features = ["desktop"] }
-dioxus-desktop = "0.7.3"
-gtk = "0.18"
+dioxus = { version = "0.7.3", default-features = false, features = ["hooks", "html", "macro", "signals"] }
+dioxus-liveview = { version = "0.7.3", features = ["axum"] }
+gtk = { package = "gtk4", version = "0.11.0" }
 indexmap = "2"
 parking_lot = "0.12"
-tokio = { version = "1.50.0", features = ["sync"] }
+tokio = { version = "1.50.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+webkit6 = { version = "0.6.1", features = ["v2_50"] }
 taskers-core = { path = "crates/taskers-core" }
+taskers-domain = { path = "../crates/taskers-domain" }
+taskers-ghostty = { path = "../crates/taskers-ghostty" }
 taskers-host = { path = "crates/taskers-host" }
 taskers-paths = { path = "../crates/taskers-paths" }
 taskers-runtime = { path = "../crates/taskers-runtime" }

@@ -1,13 +1,23 @@
-use anyhow::Result;
-use dioxus_desktop::tao::window::Window;
+use anyhow::{Result, anyhow, bail};
+use gtk::{
+    EventControllerFocus, Fixed, GestureClick, Overlay, Widget, glib,
+    prelude::*,
+};
 use std::{
-    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use taskers_core::{HostEvent, PaneId, RuntimeCapability, ShellSnapshot, SurfaceId};
+use taskers_core::{
+    BrowserMountSpec, HostEvent, PortalSurfacePlan, ShellSnapshot, SurfaceId, SurfaceMountSpec,
+    SurfacePortalPlan, TerminalMountSpec,
+};
+use taskers_domain::PaneKind;
+use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
+use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
-type HostEventSink = Arc<dyn Fn(HostEvent) + Send + Sync + 'static>;
+pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +37,7 @@ pub struct DiagnosticRecord {
     pub revision: Option<u64>,
     pub category: DiagnosticCategory,
     pub message: String,
-    pub pane_id: Option<PaneId>,
+    pub pane_id: Option<taskers_core::PaneId>,
     pub surface_id: Option<SurfaceId>,
 }
 
@@ -47,7 +57,7 @@ impl DiagnosticRecord {
         }
     }
 
-    pub fn with_pane(mut self, pane_id: PaneId) -> Self {
+    pub fn with_pane(mut self, pane_id: taskers_core::PaneId) -> Self {
         self.pane_id = Some(pane_id);
         self
     }
@@ -78,73 +88,597 @@ impl DiagnosticRecord {
     }
 }
 
-thread_local! {
-    static HOST_RUNTIME: RefCell<HostRuntimeState> = RefCell::new(HostRuntimeState::default());
-}
-
-#[derive(Default)]
-struct HostRuntimeState {
-    window: Option<Arc<Window>>,
-    event_sink: Option<HostEventSink>,
-    diagnostics: Option<DiagnosticsSink>,
-    #[cfg(target_os = "linux")]
-    linux: linux::LinuxHostRuntime,
-}
-
-pub fn attach_window(
-    window: Arc<Window>,
+pub struct TaskersHost {
+    root: Overlay,
+    surface_layer: Fixed,
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
-) -> Result<()> {
-    HOST_RUNTIME.with(|slot| {
-        let mut state = slot.borrow_mut();
-        state.window = Some(window);
-        state.event_sink = Some(event_sink);
-        state.diagnostics = diagnostics.clone();
-        emit_diagnostic(
-            diagnostics.as_ref(),
-            DiagnosticRecord::new(DiagnosticCategory::Window, None, "host window attached"),
-        );
-        Ok(())
-    })
+    ghostty_host: Option<GhosttyHost>,
+    browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
+    terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
 }
 
-pub fn sync_snapshot(snapshot: &ShellSnapshot) -> Result<()> {
-    HOST_RUNTIME.with(|slot| {
-        let mut state = slot.borrow_mut();
-        let Some(window) = state.window.clone() else {
-            return Ok(());
-        };
+impl TaskersHost {
+    pub fn new(
+        shell_widget: &impl IsA<Widget>,
+        ghostty_host: Option<GhosttyHost>,
+        event_sink: HostEventSink,
+        diagnostics: Option<DiagnosticsSink>,
+    ) -> Self {
+        let root = Overlay::new();
+        root.set_hexpand(true);
+        root.set_vexpand(true);
+        root.set_child(Some(shell_widget));
 
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(event_sink) = state.event_sink.clone() {
-                let diagnostics = state.diagnostics.clone();
-                return state
-                    .linux
-                    .sync_snapshot(&window, snapshot, &event_sink, diagnostics.as_ref());
+        let surface_layer = Fixed::new();
+        surface_layer.set_hexpand(true);
+        surface_layer.set_vexpand(true);
+        root.add_overlay(&surface_layer);
+
+        emit_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(DiagnosticCategory::Window, None, "created GTK4 host overlay"),
+        );
+
+        Self {
+            root,
+            surface_layer,
+            event_sink,
+            diagnostics,
+            ghostty_host,
+            browser_surfaces: HashMap::new(),
+            terminal_surfaces: HashMap::new(),
+        }
+    }
+
+    pub fn widget(&self) -> Overlay {
+        self.root.clone()
+    }
+
+    pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
+        emit_diagnostic(
+            self.diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::Sync,
+                Some(snapshot.revision),
+                format!("host sync start panes={}", snapshot.portal.panes.len()),
+            ),
+        );
+        self.sync_browser_surfaces(&snapshot.portal, snapshot.revision)?;
+        self.sync_terminal_surfaces(&snapshot.portal, snapshot.revision)?;
+        Ok(())
+    }
+
+    pub fn tick(&self) {
+        if let Some(host) = &self.ghostty_host {
+            let _ = host.tick();
+        }
+    }
+
+    fn sync_browser_surfaces(
+        &mut self,
+        portal: &SurfacePortalPlan,
+        revision: u64,
+    ) -> Result<()> {
+        let desired = browser_plans(portal);
+        let desired_ids = desired
+            .iter()
+            .map(|plan| plan.surface_id)
+            .collect::<HashSet<_>>();
+
+        let stale = self
+            .browser_surfaces
+            .keys()
+            .copied()
+            .filter(|surface_id| !desired_ids.contains(surface_id))
+            .collect::<Vec<_>>();
+
+        for surface_id in stale {
+            if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
+                detach_from_fixed(&self.surface_layer, surface.webview.upcast_ref());
+                emit_diagnostic(
+                    self.diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::SurfaceLifecycle,
+                        Some(revision),
+                        "browser surface removed",
+                    )
+                    .with_surface(surface_id),
+                );
             }
         }
 
-        let _ = snapshot;
+        for plan in desired {
+            match self.browser_surfaces.get_mut(&plan.surface_id) {
+                Some(surface) => {
+                    surface.sync(&self.surface_layer, &plan, revision, self.diagnostics.as_ref())?
+                }
+                None => {
+                    let surface = BrowserSurface::new(
+                        &self.surface_layer,
+                        &plan,
+                        revision,
+                        self.event_sink.clone(),
+                        self.diagnostics.clone(),
+                    )?;
+                    self.browser_surfaces.insert(plan.surface_id, surface);
+                }
+            }
+        }
+
         Ok(())
-    })
+    }
+
+    fn sync_terminal_surfaces(
+        &mut self,
+        portal: &SurfacePortalPlan,
+        revision: u64,
+    ) -> Result<()> {
+        let desired = terminal_plans(portal);
+        let desired_ids = desired
+            .iter()
+            .map(|plan| plan.surface_id)
+            .collect::<HashSet<_>>();
+
+        let stale = self
+            .terminal_surfaces
+            .keys()
+            .copied()
+            .filter(|surface_id| !desired_ids.contains(surface_id))
+            .collect::<Vec<_>>();
+
+        for surface_id in stale {
+            if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
+                detach_from_fixed(&self.surface_layer, &surface.widget);
+                emit_diagnostic(
+                    self.diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::SurfaceLifecycle,
+                        Some(revision),
+                        "terminal surface removed",
+                    )
+                    .with_surface(surface_id),
+                );
+            }
+        }
+
+        let Some(host) = self.ghostty_host.as_ref() else {
+            return Ok(());
+        };
+
+        for plan in desired {
+            match self.terminal_surfaces.get_mut(&plan.surface_id) {
+                Some(surface) => surface.sync(
+                    &self.surface_layer,
+                    plan.frame,
+                    plan.active,
+                    revision,
+                    host,
+                    self.diagnostics.as_ref(),
+                ),
+                None => {
+                    let surface = TerminalSurface::new(
+                        &self.surface_layer,
+                        &plan,
+                        revision,
+                        self.event_sink.clone(),
+                        self.diagnostics.clone(),
+                        host,
+                    )?;
+                    self.terminal_surfaces.insert(plan.surface_id, surface);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
-pub fn terminal_host_capability() -> RuntimeCapability {
-    #[cfg(target_os = "linux")]
-    {
-        RuntimeCapability::Fallback {
-            message: "Linux Ghostty embedding is still blocked here: the existing bridge exposes GTK4 widgets, but the Dioxus desktop host is GTK3.".into(),
+struct BrowserSurface {
+    webview: WebView,
+    url: String,
+}
+
+impl BrowserSurface {
+    fn new(
+        fixed: &Fixed,
+        plan: &PortalSurfacePlan,
+        revision: u64,
+        event_sink: HostEventSink,
+        diagnostics: Option<DiagnosticsSink>,
+    ) -> Result<Self> {
+        let BrowserMountSpec { url } = browser_spec(plan)?.clone();
+
+        let settings = WebKitSettings::builder()
+            .enable_back_forward_navigation_gestures(true)
+            .enable_developer_extras(true)
+            .build();
+        let webview = WebView::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .focusable(true)
+            .settings(&settings)
+            .build();
+        webview.load_uri(&url);
+        position_widget(fixed, webview.upcast_ref(), plan.frame);
+
+        let pane_id = plan.pane_id;
+        let surface_id = plan.surface_id;
+        let focus_sink = event_sink.clone();
+        let focus_diagnostics = diagnostics.clone();
+        let click = GestureClick::new();
+        click.connect_pressed(move |_, _, _, _| {
+            emit_diagnostic(
+                focus_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    "browser click focus event received",
+                )
+                .with_pane(pane_id)
+                .with_surface(surface_id),
+            );
+            (focus_sink)(HostEvent::PaneFocused { pane_id });
+        });
+        webview.add_controller(click);
+
+        let pane_id = plan.pane_id;
+        let surface_id = plan.surface_id;
+        let focus_sink = event_sink.clone();
+        let focus_diagnostics = diagnostics.clone();
+        let focus = EventControllerFocus::new();
+        focus.connect_enter(move |_| {
+            emit_diagnostic(
+                focus_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    "browser focus event received",
+                )
+                .with_pane(pane_id)
+                .with_surface(surface_id),
+            );
+            (focus_sink)(HostEvent::PaneFocused { pane_id });
+        });
+        webview.add_controller(focus);
+
+        let surface_id = plan.surface_id;
+        let title_sink = event_sink.clone();
+        let title_diagnostics = diagnostics.clone();
+        webview.connect_title_notify(move |web_view| {
+            if let Some(title) = web_view.title() {
+                emit_diagnostic(
+                    title_diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::BrowserMetadata,
+                        None,
+                        format!("browser title observed: {title}"),
+                    )
+                    .with_surface(surface_id),
+                );
+                (title_sink)(HostEvent::SurfaceTitleChanged {
+                    surface_id,
+                    title: title.to_string(),
+                });
+            }
+        });
+
+        let surface_id = plan.surface_id;
+        let url_sink = event_sink;
+        let url_diagnostics = diagnostics.clone();
+        webview.connect_uri_notify(move |web_view| {
+            if let Some(url) = web_view.uri() {
+                emit_diagnostic(
+                    url_diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::BrowserMetadata,
+                        None,
+                        format!("browser url observed: {url}"),
+                    )
+                    .with_surface(surface_id),
+                );
+                (url_sink)(HostEvent::SurfaceUrlChanged {
+                    surface_id,
+                    url: url.to_string(),
+                });
+            }
+        });
+
+        if plan.active {
+            webview.grab_focus();
         }
+
+        emit_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::SurfaceLifecycle,
+                Some(revision),
+                "browser surface created",
+            )
+            .with_pane(plan.pane_id)
+            .with_surface(plan.surface_id),
+        );
+
+        Ok(Self { webview, url })
     }
 
-    #[cfg(not(target_os = "linux"))]
-    {
-        RuntimeCapability::Unavailable {
-            message: "This greenfield checkpoint only wires the Linux host runtime.".into(),
+    fn sync(
+        &mut self,
+        fixed: &Fixed,
+        plan: &PortalSurfacePlan,
+        revision: u64,
+        diagnostics: Option<&DiagnosticsSink>,
+    ) -> Result<()> {
+        position_widget(fixed, self.webview.upcast_ref(), plan.frame);
+
+        let BrowserMountSpec { url } = browser_spec(plan)?;
+        if self.url != *url {
+            self.webview.load_uri(url);
+            self.url = url.clone();
         }
+        if plan.active {
+            self.webview.grab_focus();
+        }
+
+        emit_diagnostic(
+            diagnostics,
+            DiagnosticRecord::new(
+                DiagnosticCategory::SurfaceLifecycle,
+                Some(revision),
+                "browser surface updated",
+            )
+            .with_pane(plan.pane_id)
+            .with_surface(plan.surface_id),
+        );
+
+        Ok(())
     }
+}
+
+struct TerminalSurface {
+    widget: Widget,
+}
+
+impl TerminalSurface {
+    fn new(
+        fixed: &Fixed,
+        plan: &PortalSurfacePlan,
+        revision: u64,
+        event_sink: HostEventSink,
+        diagnostics: Option<DiagnosticsSink>,
+        host: &GhosttyHost,
+    ) -> Result<Self> {
+        let spec = terminal_spec(plan)?.clone();
+        let descriptor = surface_descriptor_from(&spec);
+        let widget = host
+            .create_surface(&descriptor)
+            .map_err(|error| anyhow!(error.to_string()))?;
+        widget.set_hexpand(true);
+        widget.set_vexpand(true);
+        widget.set_focusable(true);
+        position_widget(fixed, &widget, plan.frame);
+
+        connect_ghostty_widget(host, &widget, plan, event_sink, diagnostics.clone());
+
+        if plan.active {
+            let _ = host.focus_surface(&widget);
+        }
+
+        emit_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::SurfaceLifecycle,
+                Some(revision),
+                "terminal surface created",
+            )
+            .with_pane(plan.pane_id)
+            .with_surface(plan.surface_id),
+        );
+
+        Ok(Self { widget })
+    }
+
+    fn sync(
+        &mut self,
+        fixed: &Fixed,
+        frame: taskers_core::Frame,
+        active: bool,
+        revision: u64,
+        host: &GhosttyHost,
+        diagnostics: Option<&DiagnosticsSink>,
+    ) {
+        position_widget(fixed, &self.widget, frame);
+        if active {
+            let _ = host.focus_surface(&self.widget);
+        }
+
+        emit_diagnostic(
+            diagnostics,
+            DiagnosticRecord::new(
+                DiagnosticCategory::SurfaceLifecycle,
+                Some(revision),
+                "terminal surface updated",
+            ),
+        );
+    }
+}
+
+fn connect_ghostty_widget(
+    host: &GhosttyHost,
+    widget: &Widget,
+    plan: &PortalSurfacePlan,
+    event_sink: HostEventSink,
+    diagnostics: Option<DiagnosticsSink>,
+) {
+    let _ = host;
+
+    let pane_id = plan.pane_id;
+    let surface_id = plan.surface_id;
+    let focus_sink = event_sink.clone();
+    let focus_diagnostics = diagnostics.clone();
+    let click = GestureClick::new();
+    click.connect_pressed(move |_, _, _, _| {
+        emit_diagnostic(
+            focus_diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::HostEvent,
+                None,
+                "terminal click focus event received",
+            )
+            .with_pane(pane_id)
+            .with_surface(surface_id),
+        );
+        (focus_sink)(HostEvent::PaneFocused { pane_id });
+    });
+    widget.add_controller(click);
+
+    let pane_id = plan.pane_id;
+    let surface_id = plan.surface_id;
+    let focus_sink = event_sink.clone();
+    let focus_diagnostics = diagnostics.clone();
+    let focus = EventControllerFocus::new();
+    focus.connect_enter(move |_| {
+        emit_diagnostic(
+            focus_diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::HostEvent,
+                None,
+                "terminal focus event received",
+            )
+            .with_pane(pane_id)
+            .with_surface(surface_id),
+        );
+        (focus_sink)(HostEvent::PaneFocused { pane_id });
+    });
+    widget.add_controller(focus);
+
+    let surface_id = plan.surface_id;
+    let title_sink = event_sink.clone();
+    let title_diagnostics = diagnostics.clone();
+    widget.connect_notify_local(Some("title"), move |widget, _| {
+        if let Some(title) = widget.property::<Option<glib::GString>>("title") {
+            emit_diagnostic(
+                title_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    format!("terminal title observed: {title}"),
+                )
+                .with_surface(surface_id),
+            );
+            (title_sink)(HostEvent::SurfaceTitleChanged {
+                surface_id,
+                title: title.to_string(),
+            });
+        }
+    });
+
+    let surface_id = plan.surface_id;
+    let cwd_sink = event_sink.clone();
+    let cwd_diagnostics = diagnostics.clone();
+    widget.connect_notify_local(Some("pwd"), move |widget, _| {
+        if let Some(cwd) = widget.property::<Option<glib::GString>>("pwd") {
+            emit_diagnostic(
+                cwd_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    format!("terminal cwd observed: {cwd}"),
+                )
+                .with_surface(surface_id),
+            );
+            (cwd_sink)(HostEvent::SurfaceCwdChanged {
+                surface_id,
+                cwd: cwd.to_string(),
+            });
+        }
+    });
+
+    let pane_id = plan.pane_id;
+    let surface_id = plan.surface_id;
+    let exit_sink = event_sink;
+    let exit_diagnostics = diagnostics;
+    widget.connect_notify_local(Some("child-exited"), move |widget, _| {
+        if widget.property::<bool>("child-exited") {
+            emit_diagnostic(
+                exit_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    "terminal child exited",
+                )
+                .with_pane(pane_id)
+                .with_surface(surface_id),
+            );
+            (exit_sink)(HostEvent::SurfaceClosed {
+                pane_id,
+                surface_id,
+            });
+        }
+    });
+}
+
+fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
+    SurfaceDescriptor {
+        cols: spec.cols,
+        rows: spec.rows,
+        kind: PaneKind::Terminal,
+        cwd: spec.cwd.clone(),
+        title: None,
+        url: None,
+        // The current Ghostty bridge is more stable when it controls shell
+        // selection itself, so keep command overrides empty until that path is
+        // proven across hosts.
+        command_argv: Vec::new(),
+        env: spec.env.clone(),
+    }
+}
+
+fn browser_spec(plan: &PortalSurfacePlan) -> Result<&BrowserMountSpec> {
+    match &plan.mount {
+        SurfaceMountSpec::Browser(spec) => Ok(spec),
+        SurfaceMountSpec::Terminal(_) => bail!("surface {} is not a browser", plan.surface_id),
+    }
+}
+
+fn terminal_spec(plan: &PortalSurfacePlan) -> Result<&TerminalMountSpec> {
+    match &plan.mount {
+        SurfaceMountSpec::Terminal(spec) => Ok(spec),
+        SurfaceMountSpec::Browser(_) => bail!("surface {} is not a terminal", plan.surface_id),
+    }
+}
+
+fn position_widget(fixed: &Fixed, widget: &Widget, frame: taskers_core::Frame) {
+    widget.set_size_request(frame.width.max(1), frame.height.max(1));
+    if widget.parent().is_some() {
+        fixed.move_(widget, f64::from(frame.x), f64::from(frame.y));
+    } else {
+        fixed.put(widget, f64::from(frame.x), f64::from(frame.y));
+    }
+}
+
+fn detach_from_fixed(fixed: &Fixed, widget: &Widget) {
+    if widget.parent().is_some() {
+        fixed.remove(widget);
+    }
+}
+
+pub fn browser_plans(portal: &SurfacePortalPlan) -> Vec<PortalSurfacePlan> {
+    portal
+        .panes
+        .iter()
+        .filter(|plan| matches!(plan.mount, SurfaceMountSpec::Browser(_)))
+        .cloned()
+        .collect()
+}
+
+pub fn terminal_plans(portal: &SurfacePortalPlan) -> Vec<PortalSurfacePlan> {
+    portal
+        .panes
+        .iter()
+        .filter(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
+        .cloned()
+        .collect()
 }
 
 fn emit_diagnostic(sink: Option<&DiagnosticsSink>, record: DiagnosticRecord) {
@@ -160,325 +694,23 @@ fn current_timestamp_ms() -> u128 {
         .unwrap_or_default()
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
-    use super::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, HostEventSink, emit_diagnostic};
-    use anyhow::{Context, Result};
-    use dioxus_desktop::{
-        tao::{
-            dpi::{LogicalPosition, LogicalSize},
-            platform::unix::WindowExtUnix,
-            window::Window,
-        },
-        wry::{PageLoadEvent, Rect, WebView, WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix},
-    };
-    use gtk::{Fixed, Overlay, Widget, glib::Propagation, prelude::*};
-    use std::{collections::{HashMap, HashSet}, sync::Arc};
-    use taskers_core::{BrowserMountSpec, HostEvent, PortalSurfacePlan, ShellSnapshot, SurfaceId, SurfaceMountSpec};
+#[cfg(test)]
+mod tests {
+    use super::{browser_plans, terminal_plans};
+    use taskers_core::{BootstrapModel, SharedCore, SurfaceMountSpec};
 
-    #[derive(Default)]
-    pub struct LinuxHostRuntime {
-        portal_overlay: Option<Overlay>,
-        portal_fixed: Option<Fixed>,
-        browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
-    }
+    #[test]
+    fn partitions_portal_plans_by_surface_kind() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        core.split_with_browser();
+        let snapshot = core.snapshot();
 
-    impl LinuxHostRuntime {
-        pub fn sync_snapshot(
-            &mut self,
-            window: &Arc<Window>,
-            snapshot: &ShellSnapshot,
-            event_sink: &HostEventSink,
-            diagnostics: Option<&DiagnosticsSink>,
-        ) -> Result<()> {
-            emit_diagnostic(
-                diagnostics,
-                DiagnosticRecord::new(
-                    DiagnosticCategory::Sync,
-                    Some(snapshot.revision),
-                    format!("host sync start panes={}", snapshot.portal.panes.len()),
-                ),
-            );
+        let browsers = browser_plans(&snapshot.portal);
+        let terminals = terminal_plans(&snapshot.portal);
 
-            let Some(fixed) = self.ensure_portal_layer(window, diagnostics)? else {
-                return Ok(());
-            };
-
-            let desired: Vec<_> = snapshot
-                .portal
-                .panes
-                .iter()
-                .filter(|pane| matches!(pane.mount, SurfaceMountSpec::Browser(_)))
-                .cloned()
-                .collect();
-
-            let diff = browser_surface_diff(
-                self.browser_surfaces.keys().copied(),
-                desired.iter().map(|plan| plan.surface_id),
-            );
-
-            for surface_id in diff.removed {
-                self.browser_surfaces.remove(&surface_id);
-                emit_diagnostic(
-                    diagnostics,
-                    DiagnosticRecord::new(
-                        DiagnosticCategory::SurfaceLifecycle,
-                        Some(snapshot.revision),
-                        "browser surface removed",
-                    )
-                    .with_surface(surface_id),
-                );
-            }
-
-            for plan in desired {
-                match self.browser_surfaces.get_mut(&plan.surface_id) {
-                    Some(surface) => surface.sync(&plan, snapshot.revision, diagnostics)?,
-                    None => {
-                        let surface =
-                            BrowserSurface::new(&fixed, &plan, snapshot.revision, event_sink, diagnostics)?;
-                        self.browser_surfaces.insert(plan.surface_id, surface);
-                    }
-                }
-            }
-
-            Ok(())
-        }
-
-        fn ensure_portal_layer(
-            &mut self,
-            window: &Arc<Window>,
-            diagnostics: Option<&DiagnosticsSink>,
-        ) -> Result<Option<Fixed>> {
-            if let Some(fixed) = &self.portal_fixed {
-                return Ok(Some(fixed.clone()));
-            }
-
-            let Some(vbox) = window.default_vbox() else {
-                return Ok(None);
-            };
-            let children = vbox.children();
-            let Some(webview_child) = children.into_iter().next_back() else {
-                return Ok(None);
-            };
-
-            let overlay = Overlay::new();
-            overlay.set_hexpand(true);
-            overlay.set_vexpand(true);
-
-            let fixed = Fixed::new();
-            fixed.set_hexpand(true);
-            fixed.set_vexpand(true);
-
-            vbox.remove(&webview_child);
-            overlay.add(&webview_child);
-            overlay.add_overlay(&fixed);
-            vbox.pack_start(&overlay, true, true, 0);
-            overlay.show_all();
-
-            self.portal_overlay = Some(overlay);
-            self.portal_fixed = Some(fixed.clone());
-            emit_diagnostic(
-                diagnostics,
-                DiagnosticRecord::new(
-                    DiagnosticCategory::Window,
-                    None,
-                    "created linux portal overlay layer",
-                ),
-            );
-            Ok(Some(fixed))
-        }
-    }
-
-    struct BrowserSurface {
-        webview: WebView,
-        url: String,
-    }
-
-    impl BrowserSurface {
-        fn new(
-            fixed: &Fixed,
-            plan: &PortalSurfacePlan,
-            revision: u64,
-            event_sink: &HostEventSink,
-            diagnostics: Option<&DiagnosticsSink>,
-        ) -> Result<Self> {
-            let BrowserMountSpec { url } = browser_spec(plan)?.clone();
-            let surface_id = plan.surface_id;
-            let pane_id = plan.pane_id;
-
-            let title_sink = event_sink.clone();
-            let title_diag = diagnostics.cloned();
-            let url_sink = event_sink.clone();
-            let url_diag = diagnostics.cloned();
-            let webview = WebViewBuilder::new()
-                .with_url(&url)
-                .with_bounds(rect_from_frame(plan.frame))
-                .with_document_title_changed_handler(move |title| {
-                    emit_diagnostic(
-                        title_diag.as_ref(),
-                        DiagnosticRecord::new(
-                            DiagnosticCategory::BrowserMetadata,
-                            None,
-                            format!("browser title observed: {title}"),
-                        )
-                        .with_pane(pane_id)
-                        .with_surface(surface_id),
-                    );
-                    (title_sink)(HostEvent::SurfaceTitleChanged { surface_id, title });
-                })
-                .with_on_page_load_handler(move |event, url| {
-                    if matches!(event, PageLoadEvent::Finished) {
-                        emit_diagnostic(
-                            url_diag.as_ref(),
-                            DiagnosticRecord::new(
-                                DiagnosticCategory::BrowserMetadata,
-                                None,
-                                format!("browser url observed: {url}"),
-                            )
-                            .with_pane(pane_id)
-                            .with_surface(surface_id),
-                        );
-                        (url_sink)(HostEvent::SurfaceUrlChanged { surface_id, url });
-                    }
-                })
-                .build_gtk(fixed)
-                .with_context(|| format!("failed to create browser surface {}", plan.surface_id.0))?;
-
-            let widget = webview.webview();
-            let focus_sink = event_sink.clone();
-            let focus_diag = diagnostics.cloned();
-            widget.connect_focus_in_event(move |_, _| {
-                emit_diagnostic(
-                    focus_diag.as_ref(),
-                    DiagnosticRecord::new(
-                        DiagnosticCategory::HostEvent,
-                        None,
-                        "browser focus event received",
-                    )
-                    .with_pane(pane_id)
-                    .with_surface(surface_id),
-                );
-                (focus_sink)(HostEvent::PaneFocused { pane_id });
-                Propagation::Proceed
-            });
-
-            if plan.active {
-                let _ = webview.focus();
-            }
-
-            emit_diagnostic(
-                diagnostics,
-                DiagnosticRecord::new(
-                    DiagnosticCategory::SurfaceLifecycle,
-                    Some(revision),
-                    "browser surface created",
-                )
-                .with_pane(plan.pane_id)
-                .with_surface(plan.surface_id),
-            );
-
-            Ok(Self { webview, url })
-        }
-
-        fn sync(
-            &mut self,
-            plan: &PortalSurfacePlan,
-            revision: u64,
-            diagnostics: Option<&DiagnosticsSink>,
-        ) -> Result<()> {
-            self.webview
-                .set_bounds(rect_from_frame(plan.frame))
-                .context("failed to update browser bounds")?;
-
-            let BrowserMountSpec { url } = browser_spec(plan)?;
-            if self.url != *url {
-                self.webview
-                    .load_url(url)
-                    .with_context(|| format!("failed to navigate browser surface {}", plan.surface_id.0))?;
-                self.url = url.clone();
-            }
-
-            if plan.active {
-                let _ = self.webview.focus();
-            }
-
-            emit_diagnostic(
-                diagnostics,
-                DiagnosticRecord::new(
-                    DiagnosticCategory::SurfaceLifecycle,
-                    Some(revision),
-                    "browser surface updated",
-                )
-                .with_pane(plan.pane_id)
-                .with_surface(plan.surface_id),
-            );
-
-            Ok(())
-        }
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct BrowserSurfaceDiff {
-        removed: Vec<SurfaceId>,
-    }
-
-    fn browser_surface_diff(
-        existing: impl IntoIterator<Item = SurfaceId>,
-        desired: impl IntoIterator<Item = SurfaceId>,
-    ) -> BrowserSurfaceDiff {
-        let desired = desired.into_iter().collect::<HashSet<_>>();
-        let removed = existing
-            .into_iter()
-            .filter(|surface_id| !desired.contains(surface_id))
-            .collect::<Vec<_>>();
-
-        BrowserSurfaceDiff { removed }
-    }
-
-    fn browser_spec(plan: &PortalSurfacePlan) -> Result<&BrowserMountSpec> {
-        match &plan.mount {
-            SurfaceMountSpec::Browser(spec) => Ok(spec),
-            SurfaceMountSpec::Terminal(_) => anyhow::bail!(
-                "surface {} is not a browser mount",
-                plan.surface_id.0
-            ),
-        }
-    }
-
-    fn rect_from_frame(frame: taskers_core::Frame) -> Rect {
-        Rect {
-            position: LogicalPosition::new(frame.x, frame.y).into(),
-            size: LogicalSize::new(frame.width.max(1), frame.height.max(1)).into(),
-        }
-    }
-
-    #[allow(dead_code)]
-    fn _widget_debug_name(widget: &Widget) -> &'static str {
-        widget.type_().name()
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{BrowserSurfaceDiff, browser_surface_diff};
-        use taskers_core::SurfaceId;
-
-        #[test]
-        fn browser_surface_diff_returns_removed_ids() {
-            let diff =
-                browser_surface_diff([SurfaceId(1), SurfaceId(2), SurfaceId(3)], [SurfaceId(2)]);
-
-            assert_eq!(
-                diff,
-                BrowserSurfaceDiff {
-                    removed: vec![SurfaceId(1), SurfaceId(3)],
-                }
-            );
-        }
-
-        #[test]
-        fn browser_surface_diff_keeps_matching_ids() {
-            let diff = browser_surface_diff([SurfaceId(7)], [SurfaceId(7)]);
-            assert_eq!(diff, BrowserSurfaceDiff { removed: vec![] });
-        }
+        assert_eq!(browsers.len(), 1);
+        assert_eq!(terminals.len(), 1);
+        assert!(matches!(browsers[0].mount, SurfaceMountSpec::Browser(_)));
+        assert!(matches!(terminals[0].mount, SurfaceMountSpec::Terminal(_)));
     }
 }

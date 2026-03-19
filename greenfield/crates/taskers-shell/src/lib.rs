@@ -10,7 +10,10 @@ fn app_css() -> String {
     theme::generate_css(&theme::default_dark())
 }
 
-pub fn app() -> Element {
+#[component]
+pub fn TaskersShell(core: SharedCore) -> Element {
+    use_context_provider(move || core.clone());
+
     let core = consume_context::<SharedCore>();
     let revision = use_signal(|| core.revision());
 

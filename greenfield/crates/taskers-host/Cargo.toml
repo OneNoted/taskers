@@ -7,6 +7,8 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-dioxus-desktop.workspace = true
 gtk.workspace = true
 taskers-core.workspace = true
+taskers-domain.workspace = true
+taskers-ghostty.workspace = true
+webkit6.workspace = true

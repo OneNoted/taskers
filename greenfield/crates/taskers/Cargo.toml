@@ -10,13 +10,18 @@ name = "taskers"
 path = "src/main.rs"
 
 [dependencies]
+adw.workspace = true
+anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
 dioxus.workspace = true
-dioxus-desktop.workspace = true
+dioxus-liveview.workspace = true
 gtk.workspace = true
 taskers-core.workspace = true
+taskers-ghostty.workspace = true
 taskers-host.workspace = true
 taskers-paths.workspace = true
 taskers-runtime.workspace = true
 taskers-shell.workspace = true
 tokio.workspace = true
+webkit6.workspace = true
