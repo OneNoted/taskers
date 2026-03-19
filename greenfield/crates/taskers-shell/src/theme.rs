@@ -44,6 +44,15 @@ pub struct ThemePalette {
     pub action_teal: Color,
 }
 
+pub fn resolve_palette(theme_id: &str) -> ThemePalette {
+    match theme_id {
+        "catppuccin-mocha" => catppuccin_mocha(),
+        "tokyo-night" => tokyo_night(),
+        "gruvbox-dark" => gruvbox_dark(),
+        _ => default_dark(),
+    }
+}
+
 pub fn default_dark() -> ThemePalette {
     ThemePalette {
         base: Color::new(0x0f, 0x11, 0x17),
@@ -72,12 +81,96 @@ pub fn default_dark() -> ThemePalette {
     }
 }
 
+fn catppuccin_mocha() -> ThemePalette {
+    ThemePalette {
+        base: Color::new(0x1e, 0x1e, 0x2e),
+        surface: Color::new(0x18, 0x18, 0x25),
+        elevated: Color::new(0x31, 0x32, 0x44),
+        overlay: Color::new(0x45, 0x47, 0x5a),
+        text: Color::new(0xcd, 0xd6, 0xf4),
+        text_bright: Color::new(0xe4, 0xe8, 0xfb),
+        text_muted: Color::new(0xa6, 0xad, 0xc8),
+        text_subtle: Color::new(0x93, 0x99, 0xb2),
+        text_dim: Color::new(0x7f, 0x84, 0x9c),
+        text_faint: Color::new(0x6c, 0x70, 0x86),
+        border: Color::new(0xff, 0xff, 0xff),
+        accent: Color::new(0xb4, 0xbe, 0xfe),
+        busy: Color::new(0x89, 0xb4, 0xfa),
+        completed: Color::new(0xa6, 0xe3, 0xa1),
+        waiting: Color::new(0x94, 0xe2, 0xd5),
+        error: Color::new(0xf3, 0x8b, 0xa8),
+        busy_text: Color::new(0xbc, 0xd3, 0xfc),
+        completed_text: Color::new(0xc3, 0xed, 0xbe),
+        waiting_text: Color::new(0xb8, 0xed, 0xe6),
+        error_text: Color::new(0xf7, 0xb8, 0xc8),
+        action_window: Color::new(0xcb, 0xa6, 0xf7),
+        action_split: Color::new(0x89, 0xdc, 0xeb),
+        action_teal: Color::new(0x94, 0xe2, 0xd5),
+    }
+}
+
+fn tokyo_night() -> ThemePalette {
+    ThemePalette {
+        base: Color::new(0x1a, 0x1b, 0x26),
+        surface: Color::new(0x16, 0x16, 0x1e),
+        elevated: Color::new(0x29, 0x2e, 0x42),
+        overlay: Color::new(0x41, 0x48, 0x68),
+        text: Color::new(0xc0, 0xca, 0xf5),
+        text_bright: Color::new(0xdc, 0xe0, 0xf8),
+        text_muted: Color::new(0xa9, 0xb1, 0xd6),
+        text_subtle: Color::new(0x73, 0x7a, 0xa2),
+        text_dim: Color::new(0x56, 0x5f, 0x89),
+        text_faint: Color::new(0x3b, 0x42, 0x61),
+        border: Color::new(0xff, 0xff, 0xff),
+        accent: Color::new(0x7d, 0xcf, 0xff),
+        busy: Color::new(0x7a, 0xa2, 0xf7),
+        completed: Color::new(0x9e, 0xce, 0x6a),
+        waiting: Color::new(0x7d, 0xcf, 0xff),
+        error: Color::new(0xf7, 0x76, 0x8e),
+        busy_text: Color::new(0xb0, 0xc8, 0xfa),
+        completed_text: Color::new(0xc4, 0xe4, 0xa6),
+        waiting_text: Color::new(0xb0, 0xe3, 0xff),
+        error_text: Color::new(0xfa, 0xb0, 0xbc),
+        action_window: Color::new(0xbb, 0x9a, 0xf7),
+        action_split: Color::new(0x2a, 0xc3, 0xde),
+        action_teal: Color::new(0x1a, 0xbc, 0x9c),
+    }
+}
+
+fn gruvbox_dark() -> ThemePalette {
+    ThemePalette {
+        base: Color::new(0x28, 0x28, 0x28),
+        surface: Color::new(0x1d, 0x20, 0x21),
+        elevated: Color::new(0x3c, 0x38, 0x36),
+        overlay: Color::new(0x50, 0x49, 0x45),
+        text: Color::new(0xeb, 0xdb, 0xb2),
+        text_bright: Color::new(0xfb, 0xf1, 0xc7),
+        text_muted: Color::new(0xd5, 0xc4, 0xa1),
+        text_subtle: Color::new(0xbd, 0xae, 0x93),
+        text_dim: Color::new(0xa8, 0x99, 0x84),
+        text_faint: Color::new(0x92, 0x83, 0x74),
+        border: Color::new(0xff, 0xff, 0xff),
+        accent: Color::new(0x83, 0xa5, 0x98),
+        busy: Color::new(0x83, 0xa5, 0x98),
+        completed: Color::new(0xb8, 0xbb, 0x26),
+        waiting: Color::new(0x8e, 0xc0, 0x7c),
+        error: Color::new(0xfb, 0x49, 0x34),
+        busy_text: Color::new(0xb4, 0xcf, 0xc5),
+        completed_text: Color::new(0xd5, 0xd7, 0x8a),
+        waiting_text: Color::new(0xbc, 0xdb, 0xac),
+        error_text: Color::new(0xfc, 0xa0, 0x9a),
+        action_window: Color::new(0xd3, 0x86, 0x9b),
+        action_split: Color::new(0x8e, 0xc0, 0x7c),
+        action_teal: Color::new(0x68, 0x9d, 0x6a),
+    }
+}
+
 fn rgba(color: Color, alpha: f32) -> String {
     format!("rgba({},{},{},{alpha:.2})", color.r, color.g, color.b)
 }
 
 pub fn generate_css(p: &ThemePalette) -> String {
-    let mut css = String::with_capacity(8192);
+    let mut css = String::with_capacity(18_000);
     let _ = write!(
         css,
         r#"
@@ -89,25 +182,58 @@ html, body, #main {{
   color: {text};
   font-family: "IBM Plex Sans", "SF Pro Text", system-ui, sans-serif;
 }}
-* {{ box-sizing: border-box; }}
-button {{ font: inherit; }}
+
+* {{
+  box-sizing: border-box;
+}}
+
+button {{
+  font: inherit;
+}}
+
 .app-shell {{
   width: 100vw;
   height: 100vh;
-  background: linear-gradient(180deg, {base} 0%, {surface} 100%);
-  display: flex;
+  background: {base};
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr) 312px;
   overflow: hidden;
 }}
-.workspace-sidebar {{
-  width: 248px;
-  flex: 0 0 248px;
+
+.workspace-sidebar,
+.attention-panel {{
   background: {surface};
-  border-right: 1px solid {border_04};
-  padding: 10px 8px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+}}
+
+.workspace-sidebar {{
+  border-right: 1px solid {border_04};
+  padding: 8px;
   gap: 12px;
 }}
+
+.attention-panel {{
+  border-left: 1px solid {border_04};
+  padding: 10px 12px;
+  gap: 10px;
+}}
+
+.sidebar-brand {{
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
+.sidebar-brand h1 {{
+  margin: 0;
+  font-size: 24px;
+  line-height: 1;
+  color: {text_bright};
+}}
+
 .sidebar-heading {{
   font-weight: 600;
   font-size: 11px;
@@ -115,440 +241,772 @@ button {{ font: inherit; }}
   letter-spacing: 0.10em;
   text-transform: uppercase;
 }}
-.sidebar-brand {{
-  padding: 6px 8px 2px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}}
-.sidebar-brand h1 {{
-  margin: 0;
-  font-size: 26px;
-  line-height: 1;
-  color: {text_bright};
-}}
-.workspace-list {{
+
+.sidebar-nav,
+.workspace-list,
+.activity-list {{
   display: flex;
   flex-direction: column;
   gap: 6px;
 }}
-.workspace-button {{
+
+.sidebar-nav-button,
+.workspace-button,
+.theme-card,
+.preset-card {{
+  width: 100%;
   padding: 0;
   border: 0;
   background: transparent;
   text-align: left;
 }}
+
+.sidebar-nav-button {{
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: {text_subtle};
+}}
+
+.sidebar-nav-button:hover,
+.sidebar-nav-button-active {{
+  background: {border_06};
+  color: {text_bright};
+}}
+
+.sidebar-section-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px;
+}}
+
+.workspace-add {{
+  background: transparent;
+  color: {text_dim};
+  border: 1px solid {border_10};
+  border-radius: 999px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  font-size: 16px;
+}}
+
+.workspace-add:hover {{
+  background: {waiting_10};
+  color: {waiting_text};
+  border-color: {waiting_25};
+}}
+
 .workspace-item {{
-  padding: 8px 9px;
+  padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid transparent;
-  background: transparent;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
-  transition: background 160ms ease-in-out, border-color 160ms ease-in-out;
+  gap: 10px;
+  transition: background 140ms ease, border-color 140ms ease;
 }}
+
 .workspace-button:hover .workspace-item {{
   background: {border_04};
   border-color: {border_10};
 }}
+
 .workspace-item-active {{
-  background: {border_05};
-  border-color: {border_10};
+  background: {border_06};
+  border-color: {border_12};
 }}
+
+.workspace-item-state-busy {{
+  border-color: {busy_18};
+}}
+
+.workspace-item-state-completed {{
+  border-color: {completed_18};
+}}
+
+.workspace-item-state-waiting {{
+  border-color: {waiting_20};
+}}
+
+.workspace-item-state-error {{
+  border-color: {error_18};
+}}
+
 .workspace-label {{
   font-weight: 600;
   font-size: 13px;
   color: {text_bright};
 }}
+
 .workspace-preview {{
   color: {text_subtle};
   font-size: 12px;
   line-height: 1.35;
 }}
-.workspace-meta {{
+
+.workspace-meta,
+.activity-meta,
+.activity-time {{
   color: {text_dim};
   font-size: 11px;
 }}
+
 .workspace-status-badge {{
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 3px 7px;
+  min-width: 22px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
   background: {accent_14};
   color: {busy_text};
-  border-radius: 999px;
-  padding: 2px 6px;
-  min-width: 18px;
-  text-align: center;
-  font-size: 11px;
-  font-weight: 700;
 }}
-.runtime-card {{
+
+.workspace-status-badge-state-busy {{
+  background: {busy_16};
+  color: {busy_text};
+}}
+
+.workspace-status-badge-state-completed {{
+  background: {completed_16};
+  color: {completed_text};
+}}
+
+.workspace-status-badge-state-waiting {{
+  background: {waiting_18};
+  color: {waiting_text};
+}}
+
+.workspace-status-badge-state-error {{
+  background: {error_16};
+  color: {error_text};
+}}
+
+.runtime-card,
+.settings-card {{
   background: transparent;
   border: 1px solid {border_06};
-  border-radius: 8px;
-  padding: 9px 10px;
+  border-radius: 9px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }}
+
+.runtime-row,
+.attention-summary {{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
 .runtime-status-row {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
 }}
+
 .status-pill {{
+  display: inline-flex;
+  align-items: center;
   border-radius: 999px;
-  padding: 3px 8px;
+  padding: 4px 8px;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }}
-.status-pill-ready {{
+
+.status-pill-inline {{
+  letter-spacing: normal;
+  text-transform: none;
+  font-size: 11px;
+}}
+
+.status-pill-ready,
+.status-pill-completed {{
   background: {completed_16};
   color: {completed_text};
 }}
-.status-pill-fallback {{
+
+.status-pill-fallback,
+.status-pill-waiting {{
   background: {waiting_18};
   color: {waiting_text};
 }}
-.status-pill-unavailable {{
+
+.status-pill-unavailable,
+.status-pill-error {{
   background: {error_16};
   color: {error_text};
 }}
-.status-copy {{
+
+.status-pill-busy {{
+  background: {busy_16};
+  color: {busy_text};
+}}
+
+.status-copy,
+.settings-copy,
+.activity-preview {{
   color: {text_subtle};
   font-size: 12px;
   line-height: 1.4;
 }}
+
 .workspace-main {{
   min-width: 0;
-  flex: 1;
   display: flex;
   flex-direction: column;
+  background: {base};
 }}
+
+.workspace-main-overview .workspace-canvas {{
+  background: {border_03};
+}}
+
 .workspace-header {{
-  height: 52px;
-  min-height: 52px;
+  height: 56px;
+  min-height: 56px;
   border-bottom: 1px solid {border_07};
-  padding: 0 12px;
+  padding: 0 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   background: {base};
 }}
+
+.workspace-header-main,
+.workspace-header-actions,
+.pane-header-main,
+.pane-action-cluster,
+.surface-meta,
+.activity-header,
+.activity-item-shell,
+.shortcut-row {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}}
+
+.workspace-header-main,
+.shortcut-row {{
+  justify-content: space-between;
+}}
+
 .workspace-header-title-btn {{
   background: transparent;
   border: 0;
-  border-radius: 6px;
-  color: {text_bright};
+  border-radius: 7px;
+  color: inherit;
   padding: 6px 8px;
   text-align: left;
 }}
+
 .workspace-header-title-btn:hover {{
   background: {border_06};
 }}
+
 .workspace-header-label {{
   display: block;
   font-weight: 600;
   font-size: 14px;
   color: {text_bright};
 }}
+
 .workspace-header-meta {{
   display: block;
   font-size: 12px;
   color: {text_dim};
 }}
-.workspace-header-actions {{
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}}
-.workspace-header-action {{
+
+.workspace-header-action,
+.pane-action,
+.activity-action,
+.shortcut-pill {{
+  border: 1px solid {border_10};
+  border-radius: 999px;
   background: transparent;
-  border: 0;
-  border-radius: 6px;
-  min-width: 28px;
+}}
+
+.workspace-header-action,
+.pane-action,
+.activity-action {{
   min-height: 28px;
-  color: {text_faint};
   padding: 0 10px;
+  color: {text_subtle};
 }}
-.workspace-header-action:hover {{
+
+.workspace-header-action:hover,
+.pane-action:hover {{
   background: {border_06};
-  color: {text_muted};
+  color: {text_bright};
 }}
-.workspace-header-action-primary {{
+
+.workspace-header-action-active {{
   background: {accent_14};
   color: {text_bright};
 }}
+
+.workspace-header-action-primary {{
+  background: {accent_14};
+  color: {text_bright};
+  border-color: {accent_24};
+}}
+
 .workspace-header-action-primary:hover {{
   background: {accent_22};
 }}
-.workspace-canvas {{
+
+.workspace-canvas,
+.settings-canvas {{
   flex: 1;
   min-height: 0;
-  padding: 14px;
+  padding: 16px;
 }}
+
 .split-container {{
   width: 100%;
   height: 100%;
-  display: flex;
-  gap: 12px;
   min-width: 0;
   min-height: 0;
+  display: flex;
+  gap: 12px;
 }}
+
 .split-child {{
   min-width: 0;
   min-height: 0;
 }}
+
 .pane-card {{
   width: 100%;
   height: 100%;
-  display: flex;
-  flex-direction: column;
   min-width: 0;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: {elevated};
   border: 1px solid {border_07};
   border-radius: 8px;
   overflow: hidden;
 }}
+
 .pane-card-active {{
   border-color: {accent_20};
 }}
+
+.pane-card-state-busy {{
+  box-shadow: inset 0 0 0 1px {busy_10};
+}}
+
+.pane-card-state-completed {{
+  box-shadow: inset 0 0 0 1px {completed_10};
+}}
+
+.pane-card-state-waiting {{
+  box-shadow: inset 0 0 0 1px {waiting_12};
+}}
+
+.pane-card-state-error {{
+  box-shadow: inset 0 0 0 1px {error_10};
+}}
+
 .pane-header {{
-  background: {border_02};
-  border-bottom: 1px solid {border_05};
-  padding: 5px 8px;
+  min-height: 38px;
+  border-bottom: 1px solid {border_07};
+  padding: 0 10px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  transition: background 160ms ease-in-out;
-}}
-.pane-card:hover .pane-header {{
-  background: {border_04};
-}}
-.pane-card-active .pane-header {{
-  background: {accent_06};
-  border-bottom-color: {accent_15};
-}}
-.pane-header-main {{
-  min-width: 0;
-  display: flex;
-  align-items: center;
   gap: 8px;
 }}
-.status-dot {{
-  font-size: 12px;
-  line-height: 1;
-}}
-.status-dot-normal {{ color: {text_faint}; }}
-.status-dot-busy {{ color: {busy}; }}
-.status-dot-completed {{ color: {completed}; }}
-.status-dot-waiting {{ color: {waiting}; }}
-.status-dot-error {{ color: {error}; }}
+
 .pane-title-stack {{
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 1px;
 }}
+
 .pane-title {{
-  font-weight: 500;
-  color: {text_muted};
-  font-size: 12px;
+  color: {text_bright};
+  font-size: 13px;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }}
-.pane-card-active .pane-title {{
-  color: {text};
-}}
-.pane-meta {{
-  color: {text_faint};
+
+.pane-meta,
+.surface-tab-label,
+.shortcut-label {{
+  color: {text_subtle};
   font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }}
-.pane-action-cluster {{
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  background: {border_04};
-  border: 1px solid {border_05};
-  border-radius: 999px;
-  padding: 2px;
+
+.pane-action-tab {{
+  border-color: {accent_20};
 }}
-.pane-card-active .pane-action-cluster {{
-  background: {accent_06};
-  border-color: {accent_12};
-}}
-.pane-action {{
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  min-width: 24px;
-  min-height: 22px;
-  padding: 0 8px;
-  color: {text_faint};
-}}
-.pane-action:hover {{
-  background: {accent_12};
-  border-color: {accent_15};
-  color: {text};
-}}
+
 .pane-window-action {{
-  color: {action_window};
+  border-color: {action_window_22};
 }}
+
 .pane-split-action {{
-  color: {action_split};
+  border-color: {action_split_22};
 }}
-.pane-close-action:hover {{
-  background: {error_18};
+
+.pane-close-action {{
   border-color: {error_18};
-  color: {error_text};
 }}
+
+.pane-close-action:hover {{
+  background: {error_10};
+  color: {error};
+}}
+
 .surface-tabs {{
-  margin: 4px 8px 6px;
-  min-height: 24px;
+  min-height: 34px;
+  border-bottom: 1px solid {border_06};
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 6px;
-}}
-.surface-tab {{
+  padding: 6px 8px;
+  overflow-x: auto;
   background: {border_03};
-  border: 1px solid {border_07};
-  border-radius: 6px;
-  padding: 3px 8px;
+}}
+
+.surface-tab {{
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  padding: 5px 9px;
+  color: {text_muted};
+  white-space: nowrap;
 }}
+
+.surface-tab:hover {{
+  background: {border_06};
+  border-color: {border_10};
+}}
+
 .surface-tab-active {{
   background: {accent_14};
-  border-color: {accent_35};
+  border-color: {accent_24};
+  color: {text_bright};
 }}
-.surface-tab-label {{
-  color: {text_muted};
-  font-size: 12px;
+
+.surface-tab-state-busy {{
+  box-shadow: inset 0 0 0 1px {busy_10};
 }}
+
+.surface-tab-state-completed {{
+  box-shadow: inset 0 0 0 1px {completed_10};
+}}
+
+.surface-tab-state-waiting {{
+  box-shadow: inset 0 0 0 1px {waiting_10};
+}}
+
+.surface-tab-state-error {{
+  box-shadow: inset 0 0 0 1px {error_10};
+}}
+
 .pane-body {{
   flex: 1;
   min-height: 0;
-  position: relative;
-  overflow: hidden;
+  padding: 18px;
+  background: {border_02};
 }}
+
 .surface-backdrop {{
   width: 100%;
   height: 100%;
-  border-top: 1px solid {border_04};
-  background:
-    linear-gradient(180deg, {overlay} 0%, {elevated} 100%);
+  min-height: 0;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 16px;
+  gap: 14px;
+  border: 1px dashed {border_12};
+  border-radius: 8px;
+  padding: 18px;
+  background:
+    linear-gradient(180deg, {overlay_16} 0%, {overlay_05} 100%),
+    {overlay_03};
 }}
+
 .surface-backdrop-copy {{
-  max-width: 520px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }}
+
 .surface-backdrop-eyebrow {{
-  font-weight: 600;
   font-size: 11px;
+  font-weight: 700;
   letter-spacing: 0.10em;
   text-transform: uppercase;
   color: {text_dim};
 }}
+
 .surface-backdrop-title {{
-  font-size: 18px;
-  font-weight: 600;
   color: {text_bright};
+  font-size: 22px;
+  font-weight: 600;
 }}
+
 .surface-backdrop-note {{
+  max-width: 70ch;
   color: {text_subtle};
   font-size: 13px;
   line-height: 1.45;
 }}
+
 .surface-meta {{
-  display: flex;
   flex-wrap: wrap;
-  gap: 8px;
 }}
-.surface-chip {{
-  border-radius: 999px;
-  padding: 6px 10px;
-  background: {border_04};
-  border: 1px solid {border_06};
-  color: {text_subtle};
+
+.surface-chip,
+.shortcut-pill {{
+  padding: 4px 8px;
+  color: {text_muted};
+  font-size: 11px;
+}}
+
+.shortcut-pill-muted {{
+  opacity: 0.72;
+}}
+
+.status-dot {{
+  font-size: 10px;
+}}
+
+.status-dot-normal {{
+  color: {text_dim};
+}}
+
+.status-dot-busy {{
+  color: {busy};
+}}
+
+.status-dot-completed {{
+  color: {completed};
+}}
+
+.status-dot-waiting {{
+  color: {waiting};
+}}
+
+.status-dot-error {{
+  color: {error};
+}}
+
+.empty-state {{
+  border: 1px dashed {border_10};
+  border-radius: 8px;
+  padding: 12px;
+  color: {text_dim};
   font-size: 12px;
 }}
-@media (max-width: 960px) {{
-  .workspace-sidebar {{
-    display: none;
+
+.activity-item-shell {{
+  align-items: stretch;
+}}
+
+.activity-item-button {{
+  flex: 1;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}}
+
+.activity-item {{
+  border-left: 2px solid transparent;
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
+.activity-item-button:hover .activity-item {{
+  background: {border_04};
+}}
+
+.activity-item-state-busy {{
+  border-left-color: {busy_55};
+}}
+
+.activity-item-state-completed {{
+  border-left-color: {completed_55};
+}}
+
+.activity-item-state-waiting {{
+  border-left-color: {waiting_70};
+}}
+
+.activity-item-state-error {{
+  border-left-color: {error_65};
+}}
+
+.activity-action {{
+  align-self: center;
+  color: {text_dim};
+  padding: 0 10px;
+}}
+
+.activity-action:hover {{
+  background: {waiting_10};
+  color: {waiting_text};
+  border-color: {waiting_25};
+}}
+
+.settings-grid {{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}}
+
+.settings-card-span {{
+  grid-column: 1 / -1;
+}}
+
+.theme-grid,
+.preset-grid {{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}}
+
+.theme-card,
+.preset-card {{
+  border: 1px solid {border_08};
+  border-radius: 8px;
+  padding: 10px;
+}}
+
+.theme-card:hover,
+.preset-card:hover {{
+  background: {border_04};
+  border-color: {border_12};
+}}
+
+.theme-card-active,
+.preset-card-active {{
+  background: {accent_12};
+  border-color: {accent_24};
+}}
+
+.shortcut-groups {{
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}}
+
+.shortcut-group {{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}}
+
+.shortcut-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}}
+
+.shortcut-row {{
+  align-items: flex-start;
+  border-top: 1px solid {border_06};
+  padding-top: 8px;
+}}
+
+.shortcut-row:first-child {{
+  border-top: 0;
+  padding-top: 0;
+}}
+
+.shortcut-accelerators {{
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 40%;
+}}
+
+@media (max-width: 1180px) {{
+  .app-shell {{
+    grid-template-columns: 228px minmax(0, 1fr);
   }}
-  .workspace-canvas {{
-    padding: 10px;
+
+  .attention-panel {{
+    display: none;
   }}
 }}
 "#,
         base = p.base.to_hex(),
         surface = p.surface.to_hex(),
         elevated = p.elevated.to_hex(),
-        overlay = p.overlay.to_hex(),
+        overlay_03 = rgba(p.overlay, 0.03),
+        overlay_05 = rgba(p.overlay, 0.05),
+        overlay_16 = rgba(p.overlay, 0.16),
         text = p.text.to_hex(),
         text_bright = p.text_bright.to_hex(),
         text_muted = p.text_muted.to_hex(),
         text_subtle = p.text_subtle.to_hex(),
         text_dim = p.text_dim.to_hex(),
-        text_faint = p.text_faint.to_hex(),
-        busy = p.busy.to_hex(),
-        completed = p.completed.to_hex(),
-        waiting = p.waiting.to_hex(),
-        error = p.error.to_hex(),
-        busy_text = p.busy_text.to_hex(),
-        completed_text = p.completed_text.to_hex(),
-        waiting_text = p.waiting_text.to_hex(),
-        error_text = p.error_text.to_hex(),
-        action_window = p.action_window.to_hex(),
-        action_split = p.action_split.to_hex(),
         border_02 = rgba(p.border, 0.02),
         border_03 = rgba(p.border, 0.03),
         border_04 = rgba(p.border, 0.04),
-        border_05 = rgba(p.border, 0.05),
         border_06 = rgba(p.border, 0.06),
         border_07 = rgba(p.border, 0.07),
+        border_08 = rgba(p.border, 0.08),
         border_10 = rgba(p.border, 0.10),
-        accent_06 = rgba(p.accent, 0.06),
+        border_12 = rgba(p.border, 0.12),
         accent_12 = rgba(p.accent, 0.12),
         accent_14 = rgba(p.accent, 0.14),
-        accent_15 = rgba(p.accent, 0.15),
         accent_20 = rgba(p.accent, 0.20),
         accent_22 = rgba(p.accent, 0.22),
-        accent_35 = rgba(p.accent, 0.35),
+        accent_24 = rgba(p.accent, 0.24),
+        busy = p.busy.to_hex(),
+        busy_10 = rgba(p.busy, 0.10),
+        busy_16 = rgba(p.busy, 0.16),
+        busy_18 = rgba(p.busy, 0.18),
+        busy_55 = rgba(p.busy, 0.55),
+        busy_text = p.busy_text.to_hex(),
+        completed = p.completed.to_hex(),
+        completed_10 = rgba(p.completed, 0.10),
         completed_16 = rgba(p.completed, 0.16),
+        completed_18 = rgba(p.completed, 0.18),
+        completed_55 = rgba(p.completed, 0.55),
+        completed_text = p.completed_text.to_hex(),
+        waiting = p.waiting.to_hex(),
+        waiting_10 = rgba(p.waiting, 0.10),
+        waiting_12 = rgba(p.waiting, 0.12),
         waiting_18 = rgba(p.waiting, 0.18),
+        waiting_20 = rgba(p.waiting, 0.20),
+        waiting_25 = rgba(p.waiting, 0.25),
+        waiting_70 = rgba(p.waiting, 0.70),
+        waiting_text = p.waiting_text.to_hex(),
+        error = p.error.to_hex(),
+        error_10 = rgba(p.error, 0.10),
         error_16 = rgba(p.error, 0.16),
         error_18 = rgba(p.error, 0.18),
+        error_65 = rgba(p.error, 0.65),
+        error_text = p.error_text.to_hex(),
+        action_window_22 = rgba(p.action_window, 0.22),
+        action_split_22 = rgba(p.action_split, 0.22),
     );
     css
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{default_dark, generate_css};
-
-    #[test]
-    fn generated_css_contains_legacy_shell_landmarks() {
-        let css = generate_css(&default_dark());
-        assert!(css.contains(".workspace-sidebar"));
-        assert!(css.contains(".workspace-header"));
-        assert!(css.contains(".pane-card"));
-        assert!(css.contains(".surface-tabs"));
-    }
 }

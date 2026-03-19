@@ -702,7 +702,6 @@ mod tests {
     #[test]
     fn partitions_portal_plans_by_surface_kind() {
         let core = SharedCore::bootstrap(BootstrapModel::default());
-        core.split_with_browser();
         let snapshot = core.snapshot();
 
         let browsers = browser_plans(&snapshot.portal);

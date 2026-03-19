@@ -530,7 +530,7 @@ fn sync_window(
                 format!(
                     "syncing snapshot panes={} active={}",
                     snapshot.portal.panes.len(),
-                    snapshot.active_pane
+                    snapshot.current_workspace.active_pane
                 ),
             ),
         );
@@ -707,7 +707,7 @@ fn run_baseline_smoke(core: SharedCore, diagnostics: Option<&DiagnosticsWriter>)
         ),
     );
 
-    let (browser_count, terminal_count) = surface_counts(&snapshot.layout);
+    let (browser_count, terminal_count) = surface_counts(&snapshot.current_workspace.layout);
     log_diagnostic(
         diagnostics,
         DiagnosticRecord::new(
@@ -718,7 +718,7 @@ fn run_baseline_smoke(core: SharedCore, diagnostics: Option<&DiagnosticsWriter>)
                 snapshot.portal.panes.len(),
                 browser_count,
                 terminal_count,
-                snapshot.active_pane
+                snapshot.current_workspace.active_pane
             ),
         ),
     );
@@ -728,7 +728,8 @@ fn wait_for_browser_title(core: &SharedCore, timeout: Duration) -> Option<String
     let started_at = Instant::now();
     while started_at.elapsed() < timeout {
         let snapshot = core.snapshot();
-        if let Some(title) = first_browser_title(&snapshot.layout).filter(|title| title != "Browser")
+        if let Some(title) =
+            first_browser_title(&snapshot.current_workspace.layout).filter(|title| title != "Browser")
         {
             return Some(title);
         }
@@ -739,10 +740,13 @@ fn wait_for_browser_title(core: &SharedCore, timeout: Duration) -> Option<String
 
 fn first_browser_title(node: &LayoutNodeSnapshot) -> Option<String> {
     match node {
-        LayoutNodeSnapshot::Pane(pane) if pane.surface.kind == SurfaceKind::Browser => {
-            Some(pane.surface.title.clone())
-        }
-        LayoutNodeSnapshot::Pane(_) => None,
+        LayoutNodeSnapshot::Pane(pane) => pane
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == pane.active_surface)
+            .or_else(|| pane.surfaces.first())
+            .filter(|surface| surface.kind == SurfaceKind::Browser)
+            .map(|surface| surface.title.clone()),
         LayoutNodeSnapshot::Split { first, second, .. } => {
             first_browser_title(first).or_else(|| first_browser_title(second))
         }
@@ -751,10 +755,13 @@ fn first_browser_title(node: &LayoutNodeSnapshot) -> Option<String> {
 
 fn surface_counts(node: &LayoutNodeSnapshot) -> (usize, usize) {
     match node {
-        LayoutNodeSnapshot::Pane(pane) => match pane.surface.kind {
-            SurfaceKind::Browser => (1, 0),
-            SurfaceKind::Terminal => (0, 1),
-        },
+        LayoutNodeSnapshot::Pane(pane) => pane.surfaces.iter().fold(
+            (0usize, 0usize),
+            |(browser_count, terminal_count), surface| match surface.kind {
+                SurfaceKind::Browser => (browser_count + 1, terminal_count),
+                SurfaceKind::Terminal => (browser_count, terminal_count + 1),
+            },
+        ),
         LayoutNodeSnapshot::Split { first, second, .. } => {
             let (first_browser, first_terminal) = surface_counts(first);
             let (second_browser, second_terminal) = surface_counts(second);
