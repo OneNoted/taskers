@@ -6,6 +6,7 @@ use gtk::glib;
 use std::{
     cell::{Cell, RefCell},
     fs::{File, OpenOptions, remove_file},
+    future::pending,
     io::{self, Write},
     net::TcpListener,
     path::PathBuf,
@@ -20,6 +21,7 @@ use taskers_core::{
     ShortcutPreset, SurfaceKind,
 };
 use taskers_app_core::{AppState, load_or_bootstrap};
+use taskers_control::{bind_socket, default_socket_path, serve_with_handler};
 use taskers_domain::AppModel;
 use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
@@ -73,6 +75,7 @@ struct RuntimeBootstrap {
     shell_integration: RuntimeCapability,
     shell_launch: ShellLaunchSpec,
     host_options: GhosttyHostOptions,
+    socket_path: PathBuf,
     startup_notes: Vec<String>,
 }
 
@@ -288,6 +291,10 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         runtime.shell_launch,
     )
     .context("failed to initialize greenfield app state")?;
+    startup_notes.push(spawn_control_server(
+        app_state.clone(),
+        runtime.socket_path.clone(),
+    ));
     let core = SharedCore::bootstrap(BootstrapModel {
         app_state,
         runtime_status,
@@ -308,6 +315,7 @@ fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
     scrub_inherited_terminal_env();
 
     let mut startup_notes = Vec::new();
+    let socket_path = default_socket_path();
     let ghostty_runtime = match ensure_runtime_installed() {
         Ok(Some(runtime)) => {
             startup_notes.push(format!(
@@ -322,7 +330,7 @@ fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
         },
     };
 
-    let (shell_launch, shell_integration) = match install_shell_integration(None) {
+    let (mut shell_launch, shell_integration) = match install_shell_integration(None) {
         Ok(integration) => (integration.launch_spec(), RuntimeCapability::Ready),
         Err(error) => (
             ShellLaunchSpec::fallback(),
@@ -331,6 +339,9 @@ fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
             },
         ),
     };
+    shell_launch
+        .env
+        .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
 
     let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch);
 
@@ -339,6 +350,7 @@ fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
         shell_integration,
         shell_launch,
         host_options,
+        socket_path,
         startup_notes,
     }
 }
@@ -572,6 +584,8 @@ fn sync_window(
     last_size: &Cell<(i32, i32)>,
     diagnostics: Option<&DiagnosticsWriter>,
 ) {
+    core.sync_external_changes();
+
     let size = PixelSize::new(window.width().max(1), window.height().max(1));
     if last_size.get() != (size.width, size.height) {
         core.set_window_size(size);
@@ -616,6 +630,49 @@ fn sync_window(
     }
 
     host.borrow().tick();
+}
+
+fn spawn_control_server(app_state: AppState, socket_path: PathBuf) -> String {
+    if let Some(parent) = socket_path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return format!(
+            "Control server disabled: failed to prepare socket directory for {} ({error})",
+            socket_path.display()
+        );
+    }
+
+    let note = format!("Control server starting on {}", socket_path.display());
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        runtime.block_on(async move {
+            match bind_socket(&socket_path) {
+                Ok(listener) => {
+                    let handler = move |command| {
+                        app_state
+                            .dispatch(command)
+                            .map_err(|error| error.to_string())
+                    };
+                    if let Err(error) =
+                        serve_with_handler(listener, handler, pending::<()>()).await
+                    {
+                        eprintln!("control server error: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "control server unavailable at {}: {error}",
+                        socket_path.display()
+                    );
+                }
+            }
+        });
+    });
+
+    note
 }
 
 fn launch_liveview_server(core: SharedCore) -> Result<String> {

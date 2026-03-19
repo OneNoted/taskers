@@ -492,6 +492,7 @@ struct UiState {
 struct TaskersCore {
     app_state: AppState,
     revision: u64,
+    observed_app_revision: u64,
     metrics: LayoutMetrics,
     runtime_status: RuntimeStatus,
     ui: UiState,
@@ -499,10 +500,12 @@ struct TaskersCore {
 
 impl TaskersCore {
     fn with_bootstrap(bootstrap: BootstrapModel) -> Self {
-        let revision = bootstrap.app_state.revision().max(1);
+        let observed_app_revision = bootstrap.app_state.revision();
+        let revision = observed_app_revision.max(1);
         Self {
             app_state: bootstrap.app_state,
             revision,
+            observed_app_revision,
             metrics: LayoutMetrics::default(),
             runtime_status: bootstrap.runtime_status,
             ui: UiState {
@@ -1032,7 +1035,7 @@ impl TaskersCore {
     ) -> Option<ControlResponse> {
         match self.app_state.dispatch(command) {
             Ok(response) => {
-                self.sync_revision_from_app();
+                let _ = self.sync_revision_from_app();
                 Some(response)
             }
             Err(error) => {
@@ -1042,12 +1045,18 @@ impl TaskersCore {
         }
     }
 
-    fn sync_revision_from_app(&mut self) {
-        self.revision = self.revision.max(self.app_state.revision());
+    fn sync_revision_from_app(&mut self) -> bool {
+        let app_revision = self.app_state.revision();
+        if self.observed_app_revision == app_revision {
+            return false;
+        }
+        self.observed_app_revision = app_revision;
+        self.revision = self.revision.saturating_add(1).max(app_revision);
+        true
     }
 
     fn bump_local_revision(&mut self) {
-        self.revision = self.revision.max(self.app_state.revision()) + 1;
+        self.revision = self.revision.max(self.observed_app_revision).saturating_add(1);
     }
 }
 
@@ -1105,6 +1114,13 @@ impl SharedCore {
     pub fn apply_host_event(&self, event: HostEvent) {
         let mut inner = self.inner.lock();
         if inner.apply_host_event(event) {
+            let _ = self.revisions.send(inner.revision());
+        }
+    }
+
+    pub fn sync_external_changes(&self) {
+        let mut inner = self.inner.lock();
+        if inner.sync_revision_from_app() {
             let _ = self.revisions.send(inner.revision());
         }
     }
@@ -1500,6 +1516,8 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use taskers_control::ControlCommand;
+
     use super::{
         BootstrapModel, BrowserMountSpec, HostEvent, RuntimeCapability, RuntimeStatus, SharedCore,
         ShellAction, ShellSection, SurfaceMountSpec, default_preview_app_state,
@@ -1616,5 +1634,31 @@ mod tests {
 
         assert!(core.revision() > before);
         assert!(matches!(core.snapshot().section, ShellSection::Settings));
+    }
+
+    #[test]
+    fn external_app_state_mutations_advance_shared_core_revision() {
+        let app_state = default_preview_app_state();
+        let core = SharedCore::bootstrap(BootstrapModel {
+            app_state: app_state.clone(),
+            ..bootstrap()
+        });
+        let before = core.revision();
+
+        let _ = app_state
+            .dispatch(ControlCommand::CreateWorkspace {
+                label: "External".into(),
+            })
+            .expect("external mutation");
+
+        assert_eq!(core.revision(), before);
+        core.sync_external_changes();
+        assert!(core.revision() > before);
+        assert!(
+            core.snapshot()
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.title == "External")
+        );
     }
 }

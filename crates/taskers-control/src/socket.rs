@@ -6,7 +6,11 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 
-use crate::{RequestFrame, controller::InMemoryController, protocol::ResponseFrame};
+use crate::{
+    RequestFrame,
+    controller::InMemoryController,
+    protocol::{ControlCommand, ControlResponse, ResponseFrame},
+};
 
 pub fn bind_socket(path: impl AsRef<Path>) -> io::Result<UnixListener> {
     let path = path.as_ref();
@@ -26,6 +30,18 @@ pub async fn serve<S>(
 where
     S: Future<Output = ()> + Send,
 {
+    serve_with_handler(listener, move |command| controller.handle(command).map_err(|error| error.to_string()), shutdown).await
+}
+
+pub async fn serve_with_handler<S, H>(
+    listener: UnixListener,
+    handler: H,
+    shutdown: S,
+) -> io::Result<()>
+where
+    S: Future<Output = ()> + Send,
+    H: Fn(ControlCommand) -> Result<ControlResponse, String> + Clone + Send + Sync + 'static,
+{
     tokio::pin!(shutdown);
 
     loop {
@@ -33,9 +49,9 @@ where
             _ = &mut shutdown => break,
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                let controller = controller.clone();
+                let handler = handler.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, controller).await;
+                    let _ = handle_connection_with_handler(stream, handler).await;
                 });
             }
         }
@@ -44,7 +60,10 @@ where
     Ok(())
 }
 
-async fn handle_connection(stream: UnixStream, controller: InMemoryController) -> io::Result<()> {
+async fn handle_connection_with_handler<H>(stream: UnixStream, handler: H) -> io::Result<()>
+where
+    H: Fn(ControlCommand) -> Result<ControlResponse, String> + Clone + Send + Sync + 'static,
+{
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -53,9 +72,7 @@ async fn handle_connection(stream: UnixStream, controller: InMemoryController) -
     let request: RequestFrame = from_slice(line.trim_end().as_bytes()).map_err(invalid_data)?;
     let response = ResponseFrame {
         request_id: request.request_id,
-        response: controller
-            .handle(request.command)
-            .map_err(|error| error.to_string()),
+        response: handler(request.command),
     };
     let payload = to_vec(&response).map_err(invalid_data)?;
     write_half.write_all(&payload).await?;

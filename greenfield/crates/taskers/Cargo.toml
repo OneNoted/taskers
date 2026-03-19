@@ -18,6 +18,7 @@ dioxus.workspace = true
 dioxus-liveview.workspace = true
 gtk.workspace = true
 taskers-app-core.workspace = true
+taskers-control.workspace = true
 taskers-core.workspace = true
 taskers-domain.workspace = true
 taskers-ghostty.workspace = true

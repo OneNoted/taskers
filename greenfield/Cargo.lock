@@ -2391,6 +2391,7 @@ dependencies = [
  "dioxus-liveview",
  "gtk4",
  "libadwaita",
+ "taskers-control",
  "taskers-core 0.1.0-alpha.1",
  "taskers-core 0.3.0",
  "taskers-domain",
