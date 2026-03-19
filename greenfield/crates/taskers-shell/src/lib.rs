@@ -352,6 +352,23 @@ fn render_workspace_strip(
     core: SharedCore,
     runtime_status: &RuntimeStatus,
 ) -> Element {
+    let scroll_viewport = {
+        let core = core.clone();
+        let overview_scale = workspace.overview_scale;
+        move |event: Event<WheelData>| {
+            if overview_scale < 1.0 {
+                return;
+            }
+            event.prevent_default();
+            let delta = event.delta().strip_units();
+            let dx = delta.x.round() as i32;
+            let dy = delta.y.round() as i32;
+            if dx == 0 && dy == 0 {
+                return;
+            }
+            core.dispatch_shell_action(ShellAction::ScrollViewport { dx, dy });
+        }
+    };
     let translate_x = if workspace.overview_scale < 1.0 {
         0
     } else {
@@ -368,7 +385,7 @@ fn render_workspace_strip(
     );
 
     rsx! {
-        div { class: "workspace-viewport",
+        div { class: "workspace-viewport", onwheel: scroll_viewport,
             div { class: "workspace-strip-canvas", style: "{canvas_style}",
                 for column in &workspace.columns {
                     for window in &column.windows {
