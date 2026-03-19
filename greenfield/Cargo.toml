@@ -15,6 +15,7 @@ version = "0.1.0-alpha.1"
 
 [workspace.dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 dioxus = { version = "0.7.3", features = ["desktop"] }
 dioxus-desktop = "0.7.3"
 gtk = "0.18"

@@ -10,6 +10,7 @@ name = "taskers"
 path = "src/main.rs"
 
 [dependencies]
+clap.workspace = true
 dioxus.workspace = true
 dioxus-desktop.workspace = true
 gtk.workspace = true

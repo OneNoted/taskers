@@ -1,3 +1,4 @@
+use clap::{Parser, ValueEnum};
 use dioxus::LaunchBuilder;
 use dioxus_desktop::{
     Config, WindowBuilder,
@@ -14,18 +15,41 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 use taskers_core::{
-    BootstrapModel, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore, TerminalDefaults,
+    BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
+    SurfaceKind, TerminalDefaults,
 };
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink};
 use taskers_paths::default_ghostty_runtime_dir;
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
 
+#[derive(Debug, Clone, Parser)]
+#[command(name = "taskers")]
+#[command(about = "Greenfield Taskers desktop baseline")]
+struct Cli {
+    #[arg(long, value_enum)]
+    smoke_script: Option<SmokeScript>,
+    #[arg(long)]
+    diagnostic_log: Option<String>,
+    #[arg(long)]
+    quit_after_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SmokeScript {
+    Baseline,
+}
+
 fn main() {
+    let cli = Cli::parse();
     scrub_inherited_terminal_env();
 
-    let diagnostics = DiagnosticsWriter::from_env();
+    let diagnostics = DiagnosticsWriter::from_cli(&cli);
+    let smoke_script = cli.smoke_script;
+    let smoke_quit_after_ms = cli.quit_after_ms.unwrap_or(8_000);
+
     let (terminal_defaults, runtime_status) = bootstrap_runtime();
     log_runtime_status(diagnostics.as_ref(), &runtime_status);
     let core = SharedCore::bootstrap(BootstrapModel {
@@ -97,6 +121,15 @@ fn main() {
                             ),
                         );
                         eprintln!("taskers host initial sync failed: {error}");
+                    }
+
+                    if let Some(script) = smoke_script {
+                        spawn_smoke_script(
+                            script,
+                            core_for_window.clone(),
+                            diagnostics_for_window.clone(),
+                            smoke_quit_after_ms,
+                        );
                     }
                 })
                 .with_custom_event_handler(move |event, _target| {
@@ -227,6 +260,153 @@ fn spawn_revision_sync_relay(core: SharedCore, diagnostics: Option<DiagnosticsWr
     });
 }
 
+fn spawn_smoke_script(
+    script: SmokeScript,
+    core: SharedCore,
+    diagnostics: Option<DiagnosticsWriter>,
+    quit_after_ms: u64,
+) {
+    thread::spawn(move || {
+        let started_at = Instant::now();
+        match script {
+            SmokeScript::Baseline => run_baseline_smoke(core.clone(), diagnostics.as_ref()),
+        }
+
+        let remaining = Duration::from_millis(quit_after_ms).saturating_sub(started_at.elapsed());
+        if !remaining.is_zero() {
+            thread::sleep(remaining);
+        }
+
+        log_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::Smoke,
+                Some(core.revision()),
+                format!("smoke script exiting after {}ms", quit_after_ms),
+            ),
+        );
+        let _ = io::stderr().lock().flush();
+        std::process::exit(0);
+    });
+}
+
+fn run_baseline_smoke(core: SharedCore, diagnostics: Option<&DiagnosticsWriter>) {
+    log_diagnostic(
+        diagnostics,
+        DiagnosticRecord::new(DiagnosticCategory::Smoke, Some(core.revision()), "baseline smoke started"),
+    );
+
+    thread::sleep(Duration::from_millis(300));
+    core.split_with_browser();
+    log_diagnostic(
+        diagnostics,
+        DiagnosticRecord::new(
+            DiagnosticCategory::Smoke,
+            Some(core.revision()),
+            "split browser pane",
+        ),
+    );
+
+    if let Some(title) = wait_for_browser_title(&core, Duration::from_secs(4)) {
+        log_diagnostic(
+            diagnostics,
+            DiagnosticRecord::new(
+                DiagnosticCategory::Smoke,
+                Some(core.revision()),
+                format!("browser metadata observed title={title}"),
+            ),
+        );
+    } else {
+        log_diagnostic(
+            diagnostics,
+            DiagnosticRecord::new(
+                DiagnosticCategory::Smoke,
+                Some(core.revision()),
+                "browser metadata timed out",
+            ),
+        );
+    }
+
+    core.split_with_terminal();
+    let snapshot = core.snapshot();
+    let terminal_status = snapshot.runtime_status.terminal_host.label();
+    let terminal_message = snapshot
+        .runtime_status
+        .terminal_host
+        .message()
+        .unwrap_or("no terminal host note");
+    log_diagnostic(
+        diagnostics,
+        DiagnosticRecord::new(
+            DiagnosticCategory::Smoke,
+            Some(snapshot.revision),
+            format!(
+                "split terminal pane terminal_host={} message={terminal_message}",
+                terminal_status
+            ),
+        ),
+    );
+
+    let (browser_count, terminal_count) = surface_counts(&snapshot.layout);
+    log_diagnostic(
+        diagnostics,
+        DiagnosticRecord::new(
+            DiagnosticCategory::Smoke,
+            Some(snapshot.revision),
+            format!(
+                "final snapshot panes={} browsers={} terminals={} active={}",
+                snapshot.portal.panes.len(),
+                browser_count,
+                terminal_count,
+                snapshot.active_pane
+            ),
+        ),
+    );
+}
+
+fn wait_for_browser_title(core: &SharedCore, timeout: Duration) -> Option<String> {
+    let started_at = Instant::now();
+    while started_at.elapsed() < timeout {
+        let snapshot = core.snapshot();
+        if let Some(title) = first_browser_title(&snapshot.layout)
+            .filter(|title| title != "Browser")
+        {
+            return Some(title);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+fn first_browser_title(node: &LayoutNodeSnapshot) -> Option<String> {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) if pane.surface.kind == SurfaceKind::Browser => {
+            Some(pane.surface.title.clone())
+        }
+        LayoutNodeSnapshot::Pane(_) => None,
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            first_browser_title(first).or_else(|| first_browser_title(second))
+        }
+    }
+}
+
+fn surface_counts(node: &LayoutNodeSnapshot) -> (usize, usize) {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) => match pane.surface.kind {
+            SurfaceKind::Browser => (1, 0),
+            SurfaceKind::Terminal => (0, 1),
+        },
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            let (first_browser, first_terminal) = surface_counts(first);
+            let (second_browser, second_terminal) = surface_counts(second);
+            (
+                first_browser + second_browser,
+                first_terminal + second_terminal,
+            )
+        }
+    }
+}
+
 fn log_runtime_status(diagnostics: Option<&DiagnosticsWriter>, status: &RuntimeStatus) {
     let summary = format!(
         "runtime status ghostty={} shell={} terminal={}",
@@ -258,19 +438,32 @@ enum DiagnosticsTarget {
 }
 
 impl DiagnosticsWriter {
-    fn from_env() -> Option<Self> {
-        let value = std::env::var_os("TASKERS_GREENFIELD_DIAGNOSTIC_LOG")?;
-        if value == "stderr" {
+    fn from_cli(cli: &Cli) -> Option<Self> {
+        let target = cli
+            .diagnostic_log
+            .clone()
+            .or_else(|| {
+                std::env::var("TASKERS_GREENFIELD_DIAGNOSTIC_LOG")
+                    .ok()
+                    .filter(|value| !value.is_empty())
+            })
+            .or_else(|| cli.smoke_script.map(|_| "stderr".into()))?;
+
+        if target == "stderr" {
             return Some(Self {
                 target: DiagnosticsTarget::Stderr,
             });
         }
 
-        let path = PathBuf::from(value);
-        let file = File::create(path).ok()?;
-        Some(Self {
-            target: DiagnosticsTarget::File(Arc::new(Mutex::new(file))),
-        })
+        match File::create(PathBuf::from(&target)) {
+            Ok(file) => Some(Self {
+                target: DiagnosticsTarget::File(Arc::new(Mutex::new(file))),
+            }),
+            Err(error) => {
+                eprintln!("taskers diagnostics log path failed: {error}");
+                None
+            }
+        }
     }
 
     fn sink(&self) -> DiagnosticsSink {
