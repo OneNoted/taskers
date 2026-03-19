@@ -398,6 +398,8 @@ pub struct WorkspaceSummary {
     pub active: bool,
     pub pane_count: usize,
     pub surface_count: usize,
+    pub agent_count: usize,
+    pub waiting_agent_count: usize,
     pub unread_activity: usize,
     pub attention: AttentionState,
 }
@@ -459,6 +461,52 @@ pub struct ActivityItemSnapshot {
     pub unread: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStateSnapshot {
+    Working,
+    Waiting,
+    Inactive,
+}
+
+impl AgentStateSnapshot {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Working => "Working",
+            Self::Waiting => "Waiting",
+            Self::Inactive => "Inactive",
+        }
+    }
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Working => "busy",
+            Self::Waiting => "waiting",
+            Self::Inactive => "completed",
+        }
+    }
+}
+
+impl From<taskers_domain::WorkspaceAgentState> for AgentStateSnapshot {
+    fn from(value: taskers_domain::WorkspaceAgentState) -> Self {
+        match value {
+            taskers_domain::WorkspaceAgentState::Working => Self::Working,
+            taskers_domain::WorkspaceAgentState::Waiting => Self::Waiting,
+            taskers_domain::WorkspaceAgentState::Inactive => Self::Inactive,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSessionSnapshot {
+    pub workspace_id: WorkspaceId,
+    pub workspace_title: String,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub agent_kind: String,
+    pub title: String,
+    pub state: AgentStateSnapshot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemeOptionSnapshot {
     pub id: String,
@@ -499,7 +547,9 @@ pub struct ShellSnapshot {
     pub overview_mode: bool,
     pub workspaces: Vec<WorkspaceSummary>,
     pub current_workspace: WorkspaceViewSnapshot,
+    pub agents: Vec<AgentSessionSnapshot>,
     pub activity: Vec<ActivityItemSnapshot>,
+    pub done_activity: Vec<ActivityItemSnapshot>,
     pub portal: SurfacePortalPlan,
     pub metrics: LayoutMetrics,
     pub runtime_status: RuntimeStatus,
@@ -672,7 +722,9 @@ impl TaskersCore {
                 columns: self.workspace_columns_snapshot(workspace, &window_frames),
                 layout: self.snapshot_layout(workspace, &active_window.layout),
             },
+            agents: self.agent_sessions_snapshot(&model),
             activity: self.activity_snapshot(&model),
+            done_activity: self.done_activity_snapshot(&model),
             portal: SurfacePortalPlan {
                 window: Frame::new(
                     0,
@@ -745,8 +797,39 @@ impl TaskersCore {
                     .get(&summary.workspace_id)
                     .map(workspace_surface_count)
                     .unwrap_or_default(),
+                agent_count: summary.agent_summaries.len(),
+                waiting_agent_count: summary
+                    .agent_summaries
+                    .iter()
+                    .filter(|agent| {
+                        matches!(agent.state, taskers_domain::WorkspaceAgentState::Waiting)
+                    })
+                    .count(),
                 unread_activity: summary.unread_count,
                 attention: summary.display_attention.into(),
+            })
+            .collect()
+    }
+
+    fn agent_sessions_snapshot(&self, model: &AppModel) -> Vec<AgentSessionSnapshot> {
+        let active_window = model.active_window;
+        model
+            .workspace_summaries(active_window)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|summary| {
+                summary.agent_summaries.into_iter().map(move |agent| AgentSessionSnapshot {
+                    workspace_id: summary.workspace_id,
+                    workspace_title: summary.label.clone(),
+                    pane_id: agent.pane_id,
+                    surface_id: agent.surface_id,
+                    agent_kind: agent.agent_kind.clone(),
+                    title: agent
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("{} {}", agent.agent_kind, agent.state.label())),
+                    state: agent.state.into(),
+                })
             })
             .collect()
     }
@@ -754,21 +837,35 @@ impl TaskersCore {
     fn activity_snapshot(&self, model: &AppModel) -> Vec<ActivityItemSnapshot> {
         model.activity_items()
             .into_iter()
-            .map(|item| ActivityItemSnapshot {
-                id: ActivityId {
-                    workspace_id: item.workspace_id,
-                    pane_id: item.pane_id,
-                    surface_id: item.surface_id,
-                },
-                title: activity_title(model, &item),
-                preview: compact_preview(&item.message),
-                meta: activity_context_line(model, &item),
-                attention: item.state.into(),
-                workspace_id: item.workspace_id,
-                pane_id: Some(item.pane_id),
-                surface_id: Some(item.surface_id),
-                unread: true,
+            .map(|item| activity_item_snapshot(model, &item, true))
+            .collect()
+    }
+
+    fn done_activity_snapshot(&self, model: &AppModel) -> Vec<ActivityItemSnapshot> {
+        let mut items = model
+            .workspaces
+            .values()
+            .flat_map(|workspace| {
+                workspace
+                    .notifications
+                    .iter()
+                    .filter(|notification| notification.cleared_at.is_some())
+                    .map(move |notification| ActivityItem {
+                        workspace_id: workspace.id,
+                        workspace_window_id: workspace.window_for_pane(notification.pane_id),
+                        pane_id: notification.pane_id,
+                        surface_id: notification.surface_id,
+                        kind: notification.kind.clone(),
+                        state: notification.state,
+                        message: notification.message.clone(),
+                        created_at: notification.created_at,
+                    })
             })
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        items
+            .into_iter()
+            .map(|item| activity_item_snapshot(model, &item, false))
             .collect()
     }
 
@@ -1957,6 +2054,28 @@ fn activity_title(model: &AppModel, item: &ActivityItem) -> String {
         })
         .map(display_surface_title)
         .unwrap_or_else(|| "Terminal pane".into())
+}
+
+fn activity_item_snapshot(
+    model: &AppModel,
+    item: &ActivityItem,
+    unread: bool,
+) -> ActivityItemSnapshot {
+    ActivityItemSnapshot {
+        id: ActivityId {
+            workspace_id: item.workspace_id,
+            pane_id: item.pane_id,
+            surface_id: item.surface_id,
+        },
+        title: activity_title(model, item),
+        preview: compact_preview(&item.message),
+        meta: activity_context_line(model, item),
+        attention: item.state.into(),
+        workspace_id: item.workspace_id,
+        pane_id: Some(item.pane_id),
+        surface_id: Some(item.surface_id),
+        unread,
+    }
 }
 
 fn activity_context_line(model: &AppModel, item: &ActivityItem) -> String {

@@ -549,6 +549,13 @@ button {{
   color: {text_bright};
 }}
 
+.activity-action-passive {{
+  display: inline-flex;
+  align-items: center;
+  color: {text_dim};
+  background: {border_04};
+}}
+
 .workspace-header-action-active {{
   background: {accent_14};
   color: {text_bright};

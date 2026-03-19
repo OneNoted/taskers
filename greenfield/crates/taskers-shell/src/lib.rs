@@ -2,10 +2,10 @@ mod theme;
 
 use dioxus::prelude::*;
 use taskers_core::{
-    ActivityItemSnapshot, AttentionState, LayoutNodeSnapshot, PaneSnapshot, RuntimeCapability,
-    RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
-    ShortcutBindingSnapshot, SplitAxis, SurfaceKind, SurfaceSnapshot, WorkspaceDirection,
-    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowSnapshot,
+    ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, LayoutNodeSnapshot, PaneSnapshot,
+    RuntimeCapability, RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection,
+    ShellSnapshot, ShortcutBindingSnapshot, SplitAxis, SurfaceKind, SurfaceSnapshot,
+    WorkspaceDirection, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowSnapshot,
 };
 
 fn app_css(snapshot: &ShellSnapshot) -> String {
@@ -208,16 +208,35 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             }
 
             aside { class: "attention-panel",
-                div { class: "sidebar-heading", "Attention" }
+                div { class: "sidebar-heading", "Agents" }
                 div { class: "attention-summary",
-                    div { class: "workspace-label", "{snapshot.activity.len()} unread items" }
-                    div { class: "workspace-meta", "Focus stays in the shared shell while native hosts report metadata and lifecycle changes back into core." }
+                    div { class: "workspace-label", "{snapshot.agents.len()} live agents" }
+                    div { class: "workspace-meta", "{snapshot.activity.len()} unread · {snapshot.done_activity.len()} done" }
                 }
+                if snapshot.agents.is_empty() {
+                    div { class: "empty-state", "No live agents." }
+                } else {
+                    div { class: "sidebar-heading", "Live sessions" }
+                    div { class: "activity-list",
+                        for agent in &snapshot.agents {
+                            {render_agent_item(agent, core.clone(), &snapshot.current_workspace)}
+                        }
+                    }
+                }
+                div { class: "sidebar-heading", "Inbox" }
                 if snapshot.activity.is_empty() {
                     div { class: "empty-state", "No unread items." }
                 } else {
                     div { class: "activity-list",
                         for item in &snapshot.activity {
+                            {render_activity_item(item, core.clone(), &snapshot.current_workspace)}
+                        }
+                    }
+                }
+                if !snapshot.done_activity.is_empty() {
+                    div { class: "sidebar-heading", "Done" }
+                    div { class: "activity-list",
+                        for item in snapshot.done_activity.iter().take(6) {
                             {render_activity_item(item, core.clone(), &snapshot.current_workspace)}
                         }
                     }
@@ -242,6 +261,13 @@ fn render_workspace_item(workspace: &WorkspaceSummary, core: SharedCore) -> Elem
             workspace.attention.slug()
         )
     };
+    let badge_text = if workspace.unread_activity > 0 {
+        workspace.unread_activity.to_string()
+    } else if workspace.waiting_agent_count > 0 {
+        workspace.waiting_agent_count.to_string()
+    } else {
+        workspace.attention.label().to_string()
+    };
     let workspace_id = workspace.id;
     let focus_workspace = move |_| {
         core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
@@ -254,15 +280,11 @@ fn render_workspace_item(workspace: &WorkspaceSummary, core: SharedCore) -> Elem
                     div { class: "workspace-label", "{workspace.title}" }
                     div { class: "workspace-preview", "{workspace.preview}" }
                     div { class: "workspace-meta",
-                        "{workspace.pane_count} panes · {workspace.surface_count} surfaces"
+                        "{workspace.pane_count} panes · {workspace.surface_count} surfaces · {workspace.agent_count} agents"
                     }
                 }
                 div { class: "{badge_class}",
-                    if workspace.unread_activity > 0 {
-                        "{workspace.unread_activity}"
-                    } else {
-                        "{workspace.attention.label()}"
-                    }
+                    "{badge_text}"
                 }
             }
         }
@@ -571,6 +593,36 @@ fn render_surface_backdrop(surface: &SurfaceSnapshot, runtime_status: &RuntimeSt
     }
 }
 
+fn render_agent_item(
+    agent: &AgentSessionSnapshot,
+    core: SharedCore,
+    current_workspace: &taskers_core::WorkspaceViewSnapshot,
+) -> Element {
+    let row_class = format!("activity-item activity-item-state-{}", agent.state.slug());
+    let workspace_id = agent.workspace_id;
+    let pane_id = agent.pane_id;
+    let surface_id = agent.surface_id;
+    let current_workspace_id = current_workspace.id;
+    let focus_target = move |_| {
+        if workspace_id != current_workspace_id {
+            core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
+        }
+        core.dispatch_shell_action(ShellAction::FocusSurface { pane_id, surface_id });
+    };
+
+    rsx! {
+        button { class: "activity-item-button", onclick: focus_target,
+            div { class: "{row_class}",
+                div { class: "activity-header",
+                    div { class: "workspace-label", "{agent.title}" }
+                    div { class: "activity-time", "{agent.state.label()}" }
+                }
+                div { class: "activity-meta", "{agent.workspace_title} · {agent.agent_kind}" }
+            }
+        }
+    }
+}
+
 fn render_activity_item(
     item: &ActivityItemSnapshot,
     core: SharedCore,
@@ -613,7 +665,11 @@ fn render_activity_item(
                     div { class: "activity-preview", "{item.preview}" }
                 }
             }
-            button { class: "activity-action", onclick: dismiss, "Done" }
+            if item.unread {
+                button { class: "activity-action", onclick: dismiss, "Done" }
+            } else {
+                div { class: "activity-action activity-action-passive", "Seen" }
+            }
         }
     }
 }

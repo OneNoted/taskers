@@ -114,20 +114,42 @@ taskers__emit_with_metadata() {
   [[ -n "${TASKERS_WORKSPACE_ID:-}" ]] || return 0
   [[ -n "${TASKERS_PANE_ID:-}" ]] || return 0
 
-  argv=(
-    "$TASKERS_CTL_PATH"
-    signal
-    --source shell
-    --kind "$kind"
-    --title "$TASKERS_META_TITLE"
-    --cwd "$TASKERS_META_CWD"
-    --agent "$TASKERS_META_AGENT"
-    --agent-active "$agent_active"
-  )
+  if [[ "$kind" = "metadata" ]]; then
+    argv=(
+      "$TASKERS_CTL_PATH"
+      signal
+      --source shell
+      --kind "$kind"
+      --title "$TASKERS_META_TITLE"
+      --cwd "$TASKERS_META_CWD"
+      --agent "$TASKERS_META_AGENT"
+      --agent-active "$agent_active"
+    )
 
-  [[ -n "$TASKERS_META_REPO_NAME" ]] && argv+=(--repo "$TASKERS_META_REPO_NAME")
-  [[ -n "$TASKERS_META_BRANCH" ]] && argv+=(--branch "$TASKERS_META_BRANCH")
-  [[ -n "$message" ]] && argv+=(--message "$message")
+    [[ -n "$TASKERS_META_REPO_NAME" ]] && argv+=(--repo "$TASKERS_META_REPO_NAME")
+    [[ -n "$TASKERS_META_BRANCH" ]] && argv+=(--branch "$TASKERS_META_BRANCH")
+    [[ -n "$message" ]] && argv+=(--message "$message")
+  else
+    local subcommand
+    case "$kind" in
+      started) subcommand=session-start ;;
+      progress) subcommand=progress ;;
+      waiting_input) subcommand=waiting ;;
+      notification) subcommand=notification ;;
+      completed|error) subcommand=stop ;;
+      *) subcommand=active ;;
+    esac
+
+    argv=(
+      "$TASKERS_CTL_PATH"
+      agent-hook
+      "$subcommand"
+      --agent "$TASKERS_META_AGENT"
+      --title "$TASKERS_META_TITLE"
+    )
+
+    [[ -n "$message" ]] && argv+=(--message "$message")
+  fi
 
   {
     exec </dev/null

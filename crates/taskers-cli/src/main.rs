@@ -84,6 +84,14 @@ enum Command {
         #[command(subcommand)]
         command: WorkspaceCommand,
     },
+    AgentHook {
+        #[command(subcommand)]
+        command: AgentHookCommand,
+    },
+    Browser {
+        #[command(subcommand)]
+        command: BrowserCommand,
+    },
     Pane {
         #[command(subcommand)]
         command: PaneCommand,
@@ -100,10 +108,26 @@ enum QueryCommand {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    Agents {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    Notifications {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    Tree {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum WorkspaceCommand {
+    List {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     New {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -129,6 +153,132 @@ enum WorkspaceCommand {
         socket: Option<PathBuf>,
         #[arg(long)]
         workspace: WorkspaceId,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentHookCommand {
+    SessionStart {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    Active {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    Progress {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    Waiting {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    Notification {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    Stop {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BrowserCommand {
+    Open {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        url: Option<String>,
+    },
+    Navigate {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: SurfaceId,
+        #[arg(long)]
+        url: String,
     },
 }
 
@@ -357,15 +507,69 @@ async fn main() -> anyhow::Result<()> {
             serve(listener, controller, pending()).await?;
         }
         Command::Query {
-            query: QueryCommand::Status { socket },
-        } => {
-            let client = ControlClient::new(resolve_socket_path(socket));
-            let response = client
-                .send(ControlCommand::QueryStatus {
-                    query: ControlQuery::All,
-                })
-                .await?;
-            println!("{}", serde_json::to_string_pretty(&response)?);
+            query,
+        } => match query {
+            QueryCommand::Status { socket } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = client
+                    .send(ControlCommand::QueryStatus {
+                        query: ControlQuery::All,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            QueryCommand::Agents { socket } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let model = query_model(&client).await?;
+                let payload = model
+                    .workspace_summaries(model.active_window)?
+                    .into_iter()
+                    .flat_map(|workspace| {
+                        let workspace_id = workspace.workspace_id;
+                        let workspace_label = workspace.label.clone();
+                        workspace.agent_summaries.into_iter().map(move |agent| {
+                            serde_json::json!({
+                                "workspace_id": workspace_id,
+                                "workspace_label": workspace_label,
+                                "workspace_window_id": agent.workspace_window_id,
+                                "pane_id": agent.pane_id,
+                                "surface_id": agent.surface_id,
+                                "agent_kind": agent.agent_kind,
+                                "title": agent.title,
+                                "state": format!("{:?}", agent.state).to_lowercase(),
+                                "last_signal_at": agent.last_signal_at,
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            }
+            QueryCommand::Notifications { socket } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let model = query_model(&client).await?;
+                let payload = model
+                    .activity_items()
+                    .into_iter()
+                    .map(|item| {
+                        serde_json::json!({
+                            "workspace_id": item.workspace_id,
+                            "workspace_window_id": item.workspace_window_id,
+                            "pane_id": item.pane_id,
+                            "surface_id": item.surface_id,
+                            "kind": format!("{:?}", item.kind).to_lowercase(),
+                            "state": format!("{:?}", item.state).to_lowercase(),
+                            "message": item.message,
+                            "created_at": item.created_at,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            }
+            QueryCommand::Tree { socket } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let model = query_model(&client).await?;
+                println!("{}", serde_json::to_string_pretty(&model)?);
+            }
         }
         Command::Signal {
             socket,
@@ -476,6 +680,29 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Command::Workspace { command } => match command {
+            WorkspaceCommand::List { socket } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let model = query_model(&client).await?;
+                let active_workspace = model.active_workspace_id();
+                let payload = model
+                    .workspace_summaries(model.active_window)?
+                    .into_iter()
+                    .map(|workspace| {
+                        serde_json::json!({
+                            "workspace_id": workspace.workspace_id,
+                            "label": workspace.label,
+                            "active": active_workspace == Some(workspace.workspace_id),
+                            "unread_count": workspace.unread_count,
+                            "highest_attention": format!("{:?}", workspace.highest_attention).to_lowercase(),
+                            "display_attention": format!("{:?}", workspace.display_attention).to_lowercase(),
+                            "agent_count": workspace.agent_summaries.len(),
+                            "repo_hint": workspace.repo_hint,
+                            "latest_notification": workspace.latest_notification,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            }
             WorkspaceCommand::New { socket, label } => {
                 let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
@@ -512,6 +739,219 @@ async fn main() -> anyhow::Result<()> {
                 let response = client
                     .send(ControlCommand::CloseWorkspace {
                         workspace_id: workspace,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+        },
+        Command::AgentHook { command } => match command {
+            AgentHookCommand::SessionStart {
+                socket,
+                workspace,
+                pane,
+                surface,
+                agent,
+                title,
+                message,
+            } => {
+                emit_agent_hook(
+                    socket,
+                    workspace,
+                    pane,
+                    surface,
+                    agent,
+                    title,
+                    message,
+                    CliSignalKind::Started,
+                )
+                .await?;
+            }
+            AgentHookCommand::Active {
+                socket,
+                workspace,
+                pane,
+                surface,
+                agent,
+                title,
+                message,
+            }
+            | AgentHookCommand::Progress {
+                socket,
+                workspace,
+                pane,
+                surface,
+                agent,
+                title,
+                message,
+            } => {
+                emit_agent_hook(
+                    socket,
+                    workspace,
+                    pane,
+                    surface,
+                    agent,
+                    title,
+                    message,
+                    CliSignalKind::Progress,
+                )
+                .await?;
+            }
+            AgentHookCommand::Waiting {
+                socket,
+                workspace,
+                pane,
+                surface,
+                agent,
+                title,
+                message,
+            } => {
+                emit_agent_hook(
+                    socket,
+                    workspace,
+                    pane,
+                    surface,
+                    agent,
+                    title,
+                    message,
+                    CliSignalKind::WaitingInput,
+                )
+                .await?;
+            }
+            AgentHookCommand::Notification {
+                socket,
+                workspace,
+                pane,
+                surface,
+                agent,
+                title,
+                message,
+            } => {
+                emit_agent_hook(
+                    socket,
+                    workspace,
+                    pane,
+                    surface,
+                    agent,
+                    title,
+                    message,
+                    CliSignalKind::Notification,
+                )
+                .await?;
+            }
+            AgentHookCommand::Stop {
+                socket,
+                workspace,
+                pane,
+                surface,
+                agent,
+                title,
+                message,
+            } => {
+                emit_agent_hook(
+                    socket,
+                    workspace,
+                    pane,
+                    surface,
+                    agent,
+                    title,
+                    message,
+                    CliSignalKind::Completed,
+                )
+                .await?;
+            }
+        },
+        Command::Browser { command } => match command {
+            BrowserCommand::Open {
+                socket,
+                workspace,
+                pane,
+                url,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let model = query_model(&client).await?;
+                let workspace_id = workspace
+                    .or_else(env_workspace_id)
+                    .or_else(|| model.active_workspace_id())
+                    .context("missing workspace id; pass --workspace or run from inside Taskers")?;
+                let target_pane = pane
+                    .or_else(env_pane_id)
+                    .or_else(|| {
+                        model.workspaces
+                            .get(&workspace_id)
+                            .map(|workspace| workspace.active_pane)
+                    });
+                let response = send_control_command(
+                    &client,
+                    ControlCommand::SplitPane {
+                        workspace_id,
+                        pane_id: target_pane,
+                        axis: SplitAxis::Horizontal,
+                    },
+                )
+                .await?;
+                let pane_id = match response {
+                    ControlResponse::PaneSplit { pane_id } => pane_id,
+                    other => bail!("unexpected browser open response: {other:?}"),
+                };
+                let placeholder_surface_id =
+                    active_surface_for_pane(&query_model(&client).await?, workspace_id, pane_id)?;
+                let surface_id =
+                    create_surface(&client, workspace_id, pane_id, PaneKind::Browser, url.clone())
+                        .await?;
+                send_control_command(
+                    &client,
+                    ControlCommand::CloseSurface {
+                        workspace_id,
+                        pane_id,
+                        surface_id: placeholder_surface_id,
+                    },
+                )
+                .await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "browser_opened",
+                        "workspace_id": workspace_id,
+                        "pane_id": pane_id,
+                        "surface_id": surface_id,
+                        "url": url,
+                    }))?
+                );
+            }
+            BrowserCommand::Navigate {
+                socket,
+                workspace,
+                pane,
+                surface,
+                url,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                if let Some(pane_id) = pane {
+                    let workspace_id = workspace
+                        .or_else(env_workspace_id)
+                        .context("missing workspace id; pass --workspace or run from inside Taskers")?;
+                    let _ = send_control_command(
+                        &client,
+                        ControlCommand::FocusSurface {
+                            workspace_id,
+                            pane_id,
+                            surface_id: surface,
+                        },
+                    )
+                    .await;
+                }
+                let response = client
+                    .send(ControlCommand::UpdateSurfaceMetadata {
+                        surface_id: surface,
+                        patch: PaneMetadataPatch {
+                            title: None,
+                            cwd: None,
+                            url: Some(url),
+                            repo_name: None,
+                            git_branch: None,
+                            ports: None,
+                            agent_kind: None,
+                        },
                     })
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
@@ -888,6 +1328,63 @@ async fn create_surface(
     }
 
     Ok(surface_id)
+}
+
+async fn emit_agent_hook(
+    socket: Option<PathBuf>,
+    workspace: Option<WorkspaceId>,
+    pane: Option<PaneId>,
+    surface: Option<SurfaceId>,
+    agent: Option<String>,
+    title: Option<String>,
+    message: Option<String>,
+    kind: CliSignalKind,
+) -> anyhow::Result<()> {
+    let workspace_id = workspace
+        .or_else(env_workspace_id)
+        .context("missing workspace id; pass --workspace or run from inside Taskers")?;
+    let pane_id = pane
+        .or_else(env_pane_id)
+        .context("missing pane id; pass --pane or run from inside Taskers")?;
+    let surface_id = surface.or_else(env_surface_id);
+    let client = ControlClient::new(resolve_socket_path(socket));
+
+    let normalized_agent = agent
+        .or_else(|| title.as_deref().and_then(infer_agent_kind))
+        .unwrap_or_else(|| "shell".into());
+    let normalized_title = title.unwrap_or_else(|| normalized_agent.clone());
+    let metadata = Some(taskers_domain::SignalPaneMetadata {
+        title: Some(normalized_title.clone()),
+        cwd: None,
+        repo_name: None,
+        git_branch: None,
+        ports: Vec::new(),
+        agent_kind: Some(normalized_agent.clone()),
+        agent_active: Some(matches!(
+            kind,
+            CliSignalKind::Started
+                | CliSignalKind::Progress
+                | CliSignalKind::WaitingInput
+                | CliSignalKind::Notification
+        )),
+    });
+
+    let response = client
+        .send(ControlCommand::EmitSignal {
+            workspace_id,
+            pane_id,
+            surface_id,
+            event: SignalEvent {
+                source: format!("agent-hook:{normalized_agent}"),
+                kind: kind.into(),
+                message,
+                metadata,
+                timestamp: OffsetDateTime::now_utc(),
+            },
+        })
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
 }
 
 fn infer_agent_kind(value: &str) -> Option<String> {

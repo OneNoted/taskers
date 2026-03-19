@@ -122,6 +122,10 @@ impl AppState {
                 env.insert("TASKERS_PANE_ID".into(), pane.id.to_string());
                 env.insert("TASKERS_WORKSPACE_ID".into(), workspace_id.to_string());
                 env.insert("TASKERS_SURFACE_ID".into(), surface.id.to_string());
+                env.insert(
+                    "TASKERS_AGENT_SESSION_ID".into(),
+                    surface.session_id.to_string(),
+                );
                 env
             }
             PaneKind::Browser => BTreeMap::new(),
@@ -188,6 +192,7 @@ mod tests {
             Some(&pane.to_string())
         );
         assert!(descriptor.env.contains_key("TASKERS_SURFACE_ID"));
+        assert!(descriptor.env.contains_key("TASKERS_AGENT_SESSION_ID"));
     }
 
     #[test]
