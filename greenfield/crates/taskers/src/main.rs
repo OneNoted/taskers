@@ -6,24 +6,37 @@ use dioxus_desktop::{
         event::{Event, WindowEvent},
     },
 };
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use gtk::glib;
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{self, Write},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    thread,
+};
 use taskers_core::{
     BootstrapModel, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore, TerminalDefaults,
 };
+use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink};
 use taskers_paths::default_ghostty_runtime_dir;
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
 
 fn main() {
     scrub_inherited_terminal_env();
 
+    let diagnostics = DiagnosticsWriter::from_env();
     let (terminal_defaults, runtime_status) = bootstrap_runtime();
+    log_runtime_status(diagnostics.as_ref(), &runtime_status);
     let core = SharedCore::bootstrap(BootstrapModel {
         runtime_status,
         terminal_defaults,
     });
     let core_for_window = core.clone();
     let core_for_events = core.clone();
+    let diagnostics_for_window = diagnostics.clone();
+    let diagnostics_for_events = diagnostics.clone();
+    spawn_revision_sync_relay(core.clone(), diagnostics.clone());
 
     LaunchBuilder::desktop()
         .with_context(core.clone())
@@ -45,11 +58,44 @@ fn main() {
                             core.apply_host_event(event);
                         }
                     });
+                    let diagnostics_sink = diagnostics_for_window.as_ref().map(DiagnosticsWriter::sink);
 
-                    if let Err(error) = taskers_host::attach_window(window.clone(), event_sink) {
+                    if let Err(error) =
+                        taskers_host::attach_window(window.clone(), event_sink, diagnostics_sink)
+                    {
+                        log_diagnostic(
+                            diagnostics_for_window.as_ref(),
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Window,
+                                None,
+                                format!("host attach failed: {error}"),
+                            ),
+                        );
                         eprintln!("taskers host attach failed: {error}");
                     }
-                    if let Err(error) = taskers_host::sync_snapshot(&core_for_window.snapshot()) {
+
+                    let snapshot = core_for_window.snapshot();
+                    log_diagnostic(
+                        diagnostics_for_window.as_ref(),
+                        DiagnosticRecord::new(
+                            DiagnosticCategory::Window,
+                            Some(snapshot.revision),
+                            format!(
+                                "initial snapshot panes={} active={}",
+                                snapshot.portal.panes.len(),
+                                snapshot.active_pane
+                            ),
+                        ),
+                    );
+                    if let Err(error) = taskers_host::sync_snapshot(&snapshot) {
+                        log_diagnostic(
+                            diagnostics_for_window.as_ref(),
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Sync,
+                                Some(snapshot.revision),
+                                format!("initial sync failed: {error}"),
+                            ),
+                        );
                         eprintln!("taskers host initial sync failed: {error}");
                     }
                 })
@@ -61,10 +107,17 @@ fn main() {
                     {
                         core_for_events
                             .set_window_size(PixelSize::new(size.width as i32, size.height as i32));
-                        if let Err(error) = taskers_host::sync_snapshot(&core_for_events.snapshot())
-                        {
-                            eprintln!("taskers host resize sync failed: {error}");
-                        }
+                        log_diagnostic(
+                            diagnostics_for_events.as_ref(),
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Window,
+                                Some(core_for_events.revision()),
+                                format!(
+                                    "window resized width={} height={}",
+                                    size.width, size.height
+                                ),
+                            ),
+                        );
                     }
                 }),
         )
@@ -123,5 +176,119 @@ fn terminal_defaults_from(shell_launch: ShellLaunchSpec) -> TerminalDefaults {
         rows: 40,
         command_argv: argv,
         env,
+    }
+}
+
+fn spawn_revision_sync_relay(core: SharedCore, diagnostics: Option<DiagnosticsWriter>) {
+    let mut revisions = core.subscribe_revision_events();
+    thread::spawn(move || loop {
+        match revisions.blocking_recv() {
+            Ok(revision) => {
+                let snapshot = core.snapshot();
+                let diagnostics = diagnostics.clone();
+                glib::MainContext::default().invoke(move || {
+                    log_diagnostic(
+                        diagnostics.as_ref(),
+                        DiagnosticRecord::new(
+                            DiagnosticCategory::Sync,
+                            Some(revision),
+                            format!(
+                                "syncing snapshot panes={} active={}",
+                                snapshot.portal.panes.len(),
+                                snapshot.active_pane
+                            ),
+                        ),
+                    );
+                    if let Err(error) = taskers_host::sync_snapshot(&snapshot) {
+                        log_diagnostic(
+                            diagnostics.as_ref(),
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Sync,
+                                Some(revision),
+                                format!("snapshot sync failed: {error}"),
+                            ),
+                        );
+                        eprintln!("taskers host sync failed for revision {revision}: {error}");
+                    }
+                });
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                log_diagnostic(
+                    diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::Sync,
+                        None,
+                        format!("revision relay lagged; skipped {skipped} events"),
+                    ),
+                );
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    });
+}
+
+fn log_runtime_status(diagnostics: Option<&DiagnosticsWriter>, status: &RuntimeStatus) {
+    let summary = format!(
+        "runtime status ghostty={} shell={} terminal={}",
+        status.ghostty_runtime.label(),
+        status.shell_integration.label(),
+        status.terminal_host.label(),
+    );
+    log_diagnostic(
+        diagnostics,
+        DiagnosticRecord::new(DiagnosticCategory::Startup, None, summary),
+    );
+}
+
+fn log_diagnostic(diagnostics: Option<&DiagnosticsWriter>, record: DiagnosticRecord) {
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.write(record);
+    }
+}
+
+#[derive(Clone)]
+struct DiagnosticsWriter {
+    target: DiagnosticsTarget,
+}
+
+#[derive(Clone)]
+enum DiagnosticsTarget {
+    Stderr,
+    File(Arc<Mutex<File>>),
+}
+
+impl DiagnosticsWriter {
+    fn from_env() -> Option<Self> {
+        let value = std::env::var_os("TASKERS_GREENFIELD_DIAGNOSTIC_LOG")?;
+        if value == "stderr" {
+            return Some(Self {
+                target: DiagnosticsTarget::Stderr,
+            });
+        }
+
+        let path = PathBuf::from(value);
+        let file = File::create(path).ok()?;
+        Some(Self {
+            target: DiagnosticsTarget::File(Arc::new(Mutex::new(file))),
+        })
+    }
+
+    fn sink(&self) -> DiagnosticsSink {
+        let diagnostics = self.clone();
+        Arc::new(move |record| diagnostics.write(record))
+    }
+
+    fn write(&self, record: DiagnosticRecord) {
+        let line = format!("{}\n", record.format_line());
+        match &self.target {
+            DiagnosticsTarget::Stderr => {
+                let _ = io::stderr().lock().write_all(line.as_bytes());
+            }
+            DiagnosticsTarget::File(file) => {
+                if let Ok(mut file) = file.lock() {
+                    let _ = file.write_all(line.as_bytes());
+                }
+            }
+        }
     }
 }

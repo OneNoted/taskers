@@ -289,36 +289,17 @@ pub fn app() -> Element {
 
     let focus = {
         let core = core.clone();
-        Arc::new(move |pane_id: PaneId| {
-            core.focus_pane(pane_id);
-            if let Err(error) = taskers_host::sync_snapshot(&core.snapshot()) {
-                eprintln!("taskers host sync failed after focus: {error}");
-            }
-        })
+        Arc::new(move |pane_id: PaneId| core.focus_pane(pane_id))
     };
 
     let split_terminal = {
         let core = core.clone();
-        let mut revision = revision;
-        move |_| {
-            core.split_with_terminal();
-            if let Err(error) = taskers_host::sync_snapshot(&core.snapshot()) {
-                eprintln!("taskers host sync failed after terminal split: {error}");
-            }
-            revision.set(core.revision());
-        }
+        move |_| core.split_with_terminal()
     };
 
     let split_browser = {
         let core = core.clone();
-        let mut revision = revision;
-        move |_| {
-            core.split_with_browser();
-            if let Err(error) = taskers_host::sync_snapshot(&core.snapshot()) {
-                eprintln!("taskers host sync failed after browser split: {error}");
-            }
-            revision.set(core.revision());
-        }
+        move |_| core.split_with_browser()
     };
 
     rsx! {

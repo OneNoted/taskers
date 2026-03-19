@@ -3697,11 +3697,13 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "dioxus",
  "dioxus-desktop",
+ "gtk",
  "taskers-core",
  "taskers-host",
  "taskers-paths",
  "taskers-runtime",
  "taskers-shell",
+ "tokio",
 ]
 
 [[package]]
@@ -3757,7 +3759,6 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "dioxus",
  "taskers-core",
- "taskers-host",
 ]
 
 [[package]]

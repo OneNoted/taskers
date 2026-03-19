@@ -12,8 +12,10 @@ path = "src/main.rs"
 [dependencies]
 dioxus.workspace = true
 dioxus-desktop.workspace = true
+gtk.workspace = true
 taskers-core.workspace = true
 taskers-host.workspace = true
 taskers-paths.workspace = true
 taskers-runtime.workspace = true
 taskers-shell.workspace = true
+tokio.workspace = true

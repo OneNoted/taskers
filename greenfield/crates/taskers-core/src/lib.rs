@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use std::{collections::BTreeMap, fmt, sync::Arc};
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PaneId(pub u64);
@@ -741,15 +741,18 @@ fn split_frame(frame: Frame, axis: SplitAxis, ratio_millis: u16, gap: i32) -> (F
 pub struct SharedCore {
     inner: Arc<Mutex<TaskersCore>>,
     revisions: watch::Sender<u64>,
+    revision_events: broadcast::Sender<u64>,
 }
 
 impl SharedCore {
     pub fn bootstrap(bootstrap: BootstrapModel) -> Self {
         let core = TaskersCore::with_bootstrap(bootstrap);
         let (revisions, _) = watch::channel(core.revision());
+        let (revision_events, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(Mutex::new(core)),
             revisions,
+            revision_events,
         }
     }
 
@@ -763,6 +766,10 @@ impl SharedCore {
 
     pub fn subscribe_revisions(&self) -> watch::Receiver<u64> {
         self.revisions.subscribe()
+    }
+
+    pub fn subscribe_revision_events(&self) -> broadcast::Receiver<u64> {
+        self.revision_events.subscribe()
     }
 
     pub fn snapshot(&self) -> ShellSnapshot {
@@ -793,6 +800,7 @@ impl SharedCore {
         let mut core = self.inner.lock();
         if update(&mut core) {
             let _ = self.revisions.send(core.revision());
+            let _ = self.revision_events.send(core.revision());
         }
     }
 }
