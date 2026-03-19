@@ -267,6 +267,14 @@ pub enum HostEvent {
     SurfaceCwdChanged { surface_id: SurfaceId, cwd: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellAction {
+    SplitBrowser { pane_id: Option<PaneId> },
+    SplitTerminal { pane_id: Option<PaneId> },
+    FocusPane { pane_id: PaneId },
+    ClosePane { pane_id: PaneId, surface_id: SurfaceId },
+}
+
 #[derive(Debug, Clone)]
 struct SurfaceRecord {
     id: SurfaceId,
@@ -538,7 +546,11 @@ impl TaskersCore {
         }
     }
 
-    fn split_active(&mut self, kind: SurfaceKind, axis: SplitAxis) -> bool {
+    fn split_pane(&mut self, target: PaneId, kind: SurfaceKind, axis: SplitAxis) -> bool {
+        if !self.model.panes.contains_key(&target) {
+            return false;
+        }
+
         let pane = match kind {
             SurfaceKind::Terminal => self.make_surface(kind, self.next_terminal_title(), None, None),
             SurfaceKind::Browser => self.make_surface(
@@ -554,7 +566,7 @@ impl TaskersCore {
         if self
             .model
             .layout
-            .split_leaf(self.model.active_pane, axis, pane_id, 500)
+            .split_leaf(target, axis, pane_id, 500)
         {
             self.model.active_pane = pane_id;
             self.revision += 1;
@@ -621,6 +633,26 @@ impl TaskersCore {
                     }
                 })
             }
+        }
+    }
+
+    fn dispatch_shell_action(&mut self, action: ShellAction) -> bool {
+        match action {
+            ShellAction::SplitBrowser { pane_id } => self.split_pane(
+                pane_id.unwrap_or(self.model.active_pane),
+                SurfaceKind::Browser,
+                SplitAxis::Horizontal,
+            ),
+            ShellAction::SplitTerminal { pane_id } => self.split_pane(
+                pane_id.unwrap_or(self.model.active_pane),
+                SurfaceKind::Terminal,
+                SplitAxis::Vertical,
+            ),
+            ShellAction::FocusPane { pane_id } => self.focus_pane(pane_id),
+            ShellAction::ClosePane {
+                pane_id,
+                surface_id,
+            } => self.close_surface(pane_id, surface_id),
         }
     }
 
@@ -780,16 +812,20 @@ impl SharedCore {
         self.mutate(|core| core.set_window_size(size));
     }
 
+    pub fn dispatch_shell_action(&self, action: ShellAction) {
+        self.mutate(|core| core.dispatch_shell_action(action));
+    }
+
     pub fn split_with_browser(&self) {
-        self.mutate(|core| core.split_active(SurfaceKind::Browser, SplitAxis::Horizontal));
+        self.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
     }
 
     pub fn split_with_terminal(&self) {
-        self.mutate(|core| core.split_active(SurfaceKind::Terminal, SplitAxis::Vertical));
+        self.dispatch_shell_action(ShellAction::SplitTerminal { pane_id: None });
     }
 
     pub fn focus_pane(&self, pane_id: PaneId) {
-        self.mutate(|core| core.focus_pane(pane_id));
+        self.dispatch_shell_action(ShellAction::FocusPane { pane_id });
     }
 
     pub fn apply_host_event(&self, event: HostEvent) {
