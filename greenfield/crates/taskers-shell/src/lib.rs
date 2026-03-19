@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AttentionState, LayoutNodeSnapshot, PaneSnapshot, RuntimeCapability,
     RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
-    ShortcutBindingSnapshot, SplitAxis, SurfaceKind, SurfaceSnapshot, WorkspaceSummary,
+    ShortcutBindingSnapshot, SplitAxis, SurfaceKind, SurfaceSnapshot, WorkspaceDirection,
+    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowSnapshot,
 };
 
 fn app_css(snapshot: &ShellSnapshot) -> String {
@@ -73,6 +74,30 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     let toggle_overview = {
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::ToggleOverview)
+    };
+    let scroll_left = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::ScrollViewport { dx: -360, dy: 0 })
+    };
+    let scroll_right = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::ScrollViewport { dx: 360, dy: 0 })
+    };
+    let create_window_right = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            })
+        }
+    };
+    let create_window_down = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Down,
+            })
+        }
     };
 
     let main_class = match snapshot.section {
@@ -147,6 +172,10 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                                 onclick: toggle_overview,
                                 "Overview"
                             }
+                            button { class: "workspace-header-action", onclick: scroll_left, "←" }
+                            button { class: "workspace-header-action", onclick: scroll_right, "→" }
+                            button { class: "workspace-header-action", onclick: create_window_right, "+ column" }
+                            button { class: "workspace-header-action", onclick: create_window_down, "+ stack" }
                             button {
                                 class: "workspace-header-action",
                                 onclick: split_terminal,
@@ -169,7 +198,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 
                 if matches!(snapshot.section, ShellSection::Workspace) {
                     div { class: if snapshot.overview_mode { "workspace-canvas workspace-canvas-overview" } else { "workspace-canvas" },
-                        {render_layout(&snapshot.current_workspace.layout, core.clone(), &snapshot.runtime_status)}
+                        {render_workspace_strip(&snapshot.current_workspace, core.clone(), &snapshot.runtime_status)}
                     }
                 } else {
                     div { class: "settings-canvas",
@@ -293,6 +322,86 @@ fn render_layout(
             }
         }
         LayoutNodeSnapshot::Pane(pane) => render_pane(pane, core, runtime_status),
+    }
+}
+
+fn render_workspace_strip(
+    workspace: &WorkspaceViewSnapshot,
+    core: SharedCore,
+    runtime_status: &RuntimeStatus,
+) -> Element {
+    let translate_x = if workspace.overview_scale < 1.0 {
+        0
+    } else {
+        -workspace.viewport_x
+    };
+    let translate_y = if workspace.overview_scale < 1.0 {
+        0
+    } else {
+        -workspace.viewport_y
+    };
+    let canvas_style = format!(
+        "width:{}px;height:{}px;transform:translate({}px, {}px);",
+        workspace.canvas_width, workspace.canvas_height, translate_x, translate_y
+    );
+
+    rsx! {
+        div { class: "workspace-viewport",
+            div { class: "workspace-strip-canvas", style: "{canvas_style}",
+                for column in &workspace.columns {
+                    for window in &column.windows {
+                        {render_workspace_window(window, workspace, core.clone(), runtime_status)}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_workspace_window(
+    window: &WorkspaceWindowSnapshot,
+    workspace: &WorkspaceViewSnapshot,
+    core: SharedCore,
+    runtime_status: &RuntimeStatus,
+) -> Element {
+    let local_x = window.frame.x - workspace.viewport_origin_x;
+    let local_y = window.frame.y - workspace.viewport_origin_y;
+    let style = format!(
+        "left:{}px;top:{}px;width:{}px;height:{}px;",
+        local_x, local_y, window.frame.width, window.frame.height
+    );
+    let window_class = if window.active {
+        format!(
+            "workspace-window-shell workspace-window-shell-active workspace-window-shell-state-{}",
+            window.attention.slug()
+        )
+    } else {
+        format!(
+            "workspace-window-shell workspace-window-shell-state-{}",
+            window.attention.slug()
+        )
+    };
+    let window_id = window.id;
+    let focus_core = core.clone();
+    let focus_window = move |_| {
+        focus_core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+    };
+
+    rsx! {
+        section { class: "{window_class}", style: "{style}",
+            div { class: "workspace-window-toolbar",
+                button { class: "workspace-window-title", onclick: focus_window,
+                    span { class: "workspace-label", "{window.title}" }
+                    span { class: "workspace-meta", "{window.pane_count} panes · {window.surface_count} surfaces" }
+                }
+                div { class: "workspace-window-flags",
+                    span { class: format!("status-pill status-pill-inline status-pill-{}", window.attention.slug()), "{window.attention.label()}" }
+                }
+            }
+            div { class: "workspace-window-body",
+                {render_layout(&window.layout, core.clone(), runtime_status)}
+            }
+        }
     }
 }
 

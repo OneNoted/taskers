@@ -568,7 +568,100 @@ button {{
 .settings-canvas {{
   flex: 1;
   min-height: 0;
+}}
+
+.workspace-canvas {{
+  position: relative;
+  overflow: hidden;
+}}
+
+.settings-canvas {{
   padding: 16px;
+}}
+
+.workspace-viewport {{
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}}
+
+.workspace-strip-canvas {{
+  position: absolute;
+  inset: 0 auto auto 0;
+  transform-origin: top left;
+}}
+
+.workspace-window-shell {{
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  background: {elevated};
+  border: 1px solid {border_08};
+  overflow: hidden;
+  box-shadow: 0 18px 42px {overlay_16};
+}}
+
+.workspace-window-shell-active {{
+  border-color: {accent_24};
+  box-shadow: 0 18px 42px {overlay_16}, 0 0 0 1px {accent_24};
+}}
+
+.workspace-window-shell-state-busy {{
+  box-shadow: 0 18px 42px {overlay_16}, inset 0 0 0 1px {busy_10};
+}}
+
+.workspace-window-shell-state-completed {{
+  box-shadow: 0 18px 42px {overlay_16}, inset 0 0 0 1px {completed_10};
+}}
+
+.workspace-window-shell-state-waiting {{
+  box-shadow: 0 18px 42px {overlay_16}, inset 0 0 0 1px {waiting_10};
+}}
+
+.workspace-window-shell-state-error {{
+  box-shadow: 0 18px 42px {overlay_16}, inset 0 0 0 1px {error_10};
+}}
+
+.workspace-window-toolbar {{
+  min-height: 38px;
+  border-bottom: 1px solid {border_07};
+  background: {surface};
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}}
+
+.workspace-window-title {{
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+}}
+
+.workspace-window-title:hover {{
+  color: {text_bright};
+}}
+
+.workspace-window-flags {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}}
+
+.workspace-window-body {{
+  flex: 1;
+  min-height: 0;
+  padding: 10px;
+  background: {border_02};
 }}
 
 .split-container {{

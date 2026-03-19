@@ -9,14 +9,16 @@ use taskers_app_core::{AppState, default_session_path};
 use taskers_control::{ControlCommand, ControlResponse};
 use taskers_domain::{
     ActivityItem, AppModel, PaneKind, PaneMetadata, PaneMetadataPatch,
-    SplitAxis as DomainSplitAxis, SurfaceRecord, Workspace,
+    SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame,
+    Workspace, DEFAULT_WORKSPACE_WINDOW_GAP, MIN_WORKSPACE_WINDOW_HEIGHT,
+    MIN_WORKSPACE_WINDOW_WIDTH,
     WorkspaceSummary as DomainWorkspaceSummary,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
 use tokio::sync::watch;
 
-pub use taskers_domain::{PaneId, SurfaceId, WorkspaceId};
+pub use taskers_domain::{PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivityId {
@@ -46,6 +48,25 @@ impl SplitAxis {
         match axis {
             DomainSplitAxis::Horizontal => Self::Horizontal,
             DomainSplitAxis::Vertical => Self::Vertical,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl WorkspaceDirection {
+    fn to_domain(self) -> taskers_domain::Direction {
+        match self {
+            Self::Left => taskers_domain::Direction::Left,
+            Self::Right => taskers_domain::Direction::Right,
+            Self::Up => taskers_domain::Direction::Up,
+            Self::Down => taskers_domain::Direction::Down,
         }
     }
 }
@@ -388,7 +409,40 @@ pub struct WorkspaceViewSnapshot {
     pub attention: AttentionState,
     pub pane_count: usize,
     pub surface_count: usize,
+    pub active_window_id: WorkspaceWindowId,
+    pub viewport_origin_x: i32,
+    pub viewport_origin_y: i32,
     pub active_pane: PaneId,
+    pub viewport_x: i32,
+    pub viewport_y: i32,
+    pub overview_scale: f32,
+    pub canvas_width: i32,
+    pub canvas_height: i32,
+    pub canvas_offset_x: i32,
+    pub canvas_offset_y: i32,
+    pub columns: Vec<WorkspaceColumnSnapshot>,
+    pub layout: LayoutNodeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceColumnSnapshot {
+    pub id: WorkspaceColumnId,
+    pub active: bool,
+    pub width: i32,
+    pub windows: Vec<WorkspaceWindowSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceWindowSnapshot {
+    pub id: WorkspaceWindowId,
+    pub column_id: WorkspaceColumnId,
+    pub active: bool,
+    pub attention: AttentionState,
+    pub title: String,
+    pub pane_count: usize,
+    pub surface_count: usize,
+    pub active_pane: PaneId,
+    pub frame: Frame,
     pub layout: LayoutNodeSnapshot,
 }
 
@@ -467,6 +521,9 @@ pub enum ShellAction {
     ToggleOverview,
     FocusWorkspace { workspace_id: WorkspaceId },
     CreateWorkspace,
+    CreateWorkspaceWindow { direction: WorkspaceDirection },
+    FocusWorkspaceWindow { window_id: WorkspaceWindowId },
+    ScrollViewport { dx: i32, dy: i32 },
     SplitBrowser { pane_id: Option<PaneId> },
     SplitTerminal { pane_id: Option<PaneId> },
     AddBrowserSurface { pane_id: Option<PaneId> },
@@ -486,6 +543,29 @@ struct UiState {
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     window_size: PixelSize,
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceWindowPlacement {
+    window_id: WorkspaceWindowId,
+    column_id: WorkspaceColumnId,
+    frame: WindowFrame,
+}
+
+#[derive(Clone, Copy)]
+struct CanvasMetrics {
+    offset_x: i32,
+    offset_y: i32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceRenderContext {
+    overview_mode: bool,
+    overview_scale: f64,
+    viewport_width: i32,
+    viewport_height: i32,
 }
 
 #[derive(Clone)]
@@ -534,7 +614,34 @@ impl TaskersCore {
         let active_window = workspace
             .active_window_record()
             .expect("active workspace window should exist");
-        let content = self.content_frame();
+        let viewport = self.workspace_viewport_frame();
+        let render_context = workspace_render_context(
+            workspace,
+            self.ui.overview_mode,
+            viewport.width,
+            viewport.height,
+        );
+        let placements = workspace_display_window_placements(workspace, render_context);
+        let canvas_metrics = workspace_canvas_metrics(&placements);
+        let window_frames = placements
+            .iter()
+            .map(|placement| {
+                (
+                    placement.window_id,
+                    (
+                        placement.column_id,
+                        display_window_frame(
+                            placement.frame,
+                            canvas_metrics,
+                            viewport,
+                            workspace.viewport.x,
+                            workspace.viewport.y,
+                            render_context.overview_mode,
+                        ),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
 
         ShellSnapshot {
             revision: self.revision,
@@ -551,7 +658,18 @@ impl TaskersCore {
                     .values()
                     .map(|pane| pane.surfaces.len())
                     .sum(),
+                active_window_id: workspace.active_window,
+                viewport_origin_x: viewport.x,
+                viewport_origin_y: viewport.y,
                 active_pane: workspace.active_pane,
+                viewport_x: workspace.viewport.x,
+                viewport_y: workspace.viewport.y,
+                overview_scale: render_context.overview_scale as f32,
+                canvas_width: canvas_metrics.width,
+                canvas_height: canvas_metrics.height,
+                canvas_offset_x: canvas_metrics.offset_x,
+                canvas_offset_y: canvas_metrics.offset_y,
+                columns: self.workspace_columns_snapshot(workspace, &window_frames),
                 layout: self.snapshot_layout(workspace, &active_window.layout),
             },
             activity: self.activity_snapshot(&model),
@@ -562,9 +680,9 @@ impl TaskersCore {
                     self.ui.window_size.width,
                     self.ui.window_size.height,
                 ),
-                content,
+                content: viewport,
                 panes: if matches!(self.ui.section, ShellSection::Workspace) {
-                    self.collect_surface_plans(workspace_id, workspace, &active_window.layout, content)
+                    self.collect_workspace_surface_plans(workspace_id, workspace, &window_frames)
                 } else {
                     Vec::new()
                 },
@@ -575,12 +693,18 @@ impl TaskersCore {
         }
     }
 
-    fn content_frame(&self) -> Frame {
+    fn workspace_viewport_frame(&self) -> Frame {
         let metrics = self.metrics;
         let width = (self.ui.window_size.width - metrics.sidebar_width - metrics.activity_width)
             .max(640);
         let height = self.ui.window_size.height.max(320);
-        Frame::new(metrics.sidebar_width, 0, width, height)
+        let inset = metrics.workspace_padding;
+        Frame::new(
+            metrics.sidebar_width + inset,
+            metrics.toolbar_height + inset,
+            (width - inset * 2).max(320),
+            (height - metrics.toolbar_height - inset * 2).max(220),
+        )
     }
 
     fn settings_snapshot(&self) -> SettingsSnapshot {
@@ -648,6 +772,67 @@ impl TaskersCore {
             .collect()
     }
 
+    fn workspace_columns_snapshot(
+        &self,
+        workspace: &Workspace,
+        window_frames: &BTreeMap<WorkspaceWindowId, (WorkspaceColumnId, Frame)>,
+    ) -> Vec<WorkspaceColumnSnapshot> {
+        let active_column_id = workspace.active_column_id();
+        workspace
+            .columns
+            .values()
+            .map(|column| WorkspaceColumnSnapshot {
+                id: column.id,
+                active: active_column_id == Some(column.id),
+                width: column.width,
+                windows: column
+                    .window_order
+                    .iter()
+                    .filter_map(|window_id| {
+                        let window = workspace.windows.get(window_id)?;
+                        let (_, frame) = window_frames.get(window_id)?;
+                        Some(self.workspace_window_snapshot(
+                            workspace,
+                            column.id,
+                            window,
+                            *frame,
+                        ))
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn workspace_window_snapshot(
+        &self,
+        workspace: &Workspace,
+        column_id: WorkspaceColumnId,
+        window: &taskers_domain::WorkspaceWindowRecord,
+        frame: Frame,
+    ) -> WorkspaceWindowSnapshot {
+        let pane_ids = window.layout.leaves();
+        let pane_count = pane_ids.len();
+        let surface_count = pane_ids
+            .iter()
+            .filter_map(|pane_id| workspace.panes.get(pane_id))
+            .map(|pane| pane.surfaces.len())
+            .sum();
+        let title = window_primary_title(workspace, window);
+
+        WorkspaceWindowSnapshot {
+            id: window.id,
+            column_id,
+            active: workspace.active_window == window.id,
+            attention: workspace_window_attention(workspace, window),
+            title,
+            pane_count,
+            surface_count,
+            active_pane: window.active_pane,
+            frame,
+            layout: self.snapshot_layout(workspace, &window.layout),
+        }
+    }
+
     fn snapshot_layout(
         &self,
         workspace: &Workspace,
@@ -696,6 +881,28 @@ impl TaskersCore {
                 })
                 .collect(),
         }
+    }
+
+    fn collect_workspace_surface_plans(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace: &Workspace,
+        window_frames: &BTreeMap<WorkspaceWindowId, (WorkspaceColumnId, Frame)>,
+    ) -> Vec<PortalSurfacePlan> {
+        workspace
+            .windows
+            .values()
+            .filter_map(|window| {
+                let (_, frame) = window_frames.get(&window.id)?;
+                Some(self.collect_surface_plans(
+                    workspace_id,
+                    workspace,
+                    &window.layout,
+                    *frame,
+                ))
+            })
+            .flatten()
+            .collect()
     }
 
     fn collect_surface_plans(
@@ -811,6 +1018,11 @@ impl TaskersCore {
             }
             ShellAction::FocusWorkspace { workspace_id } => self.focus_workspace(workspace_id),
             ShellAction::CreateWorkspace => self.create_workspace(),
+            ShellAction::CreateWorkspaceWindow { direction } => {
+                self.create_workspace_window(direction)
+            }
+            ShellAction::FocusWorkspaceWindow { window_id } => self.focus_workspace_window(window_id),
+            ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
             ShellAction::SplitBrowser { pane_id } => self.split_with_kind(pane_id, PaneKind::Browser),
             ShellAction::SplitTerminal { pane_id } => self.split_with_kind(pane_id, PaneKind::Terminal),
             ShellAction::AddBrowserSurface { pane_id } => {
@@ -868,6 +1080,45 @@ impl TaskersCore {
     fn create_workspace(&mut self) -> bool {
         let label = next_workspace_label(&self.app_state.snapshot_model());
         self.dispatch_control(ControlCommand::CreateWorkspace { label })
+    }
+
+    fn create_workspace_window(&mut self, direction: WorkspaceDirection) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
+            workspace_id,
+            direction: direction.to_domain(),
+        })
+    }
+
+    fn focus_workspace_window(&mut self, window_id: WorkspaceWindowId) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::FocusWorkspaceWindow {
+            workspace_id,
+            workspace_window_id: window_id,
+        })
+    }
+
+    fn scroll_viewport_by(&mut self, dx: i32, dy: i32) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::SetWorkspaceViewport {
+            workspace_id,
+            viewport: taskers_domain::WorkspaceViewport {
+                x: workspace.viewport.x.saturating_add(dx),
+                y: workspace.viewport.y.saturating_add(dy),
+            },
+        })
     }
 
     fn split_with_kind(&mut self, pane_id: Option<PaneId>, kind: PaneKind) -> bool {
@@ -1209,6 +1460,282 @@ fn shortcut_bindings(preset: ShortcutPreset) -> Vec<ShortcutBindingSnapshot> {
         .collect()
 }
 
+fn display_window_frame(
+    frame: WindowFrame,
+    metrics: CanvasMetrics,
+    viewport: Frame,
+    viewport_x: i32,
+    viewport_y: i32,
+    overview_mode: bool,
+) -> Frame {
+    let translated_x = viewport.x + metrics.offset_x + frame.x;
+    let translated_y = viewport.y + metrics.offset_y + frame.y;
+    let shift_x = if overview_mode { 0 } else { viewport_x };
+    let shift_y = if overview_mode { 0 } else { viewport_y };
+    Frame::new(
+        translated_x - shift_x,
+        translated_y - shift_y,
+        frame.width,
+        frame.height,
+    )
+}
+
+fn workspace_render_context(
+    workspace: &Workspace,
+    overview_mode: bool,
+    viewport_width: i32,
+    viewport_height: i32,
+) -> WorkspaceRenderContext {
+    if !overview_mode {
+        return WorkspaceRenderContext {
+            overview_mode: false,
+            overview_scale: 1.0,
+            viewport_width,
+            viewport_height,
+        };
+    }
+
+    let base_frames = workspace_window_placements(workspace, viewport_width, viewport_height)
+        .into_iter()
+        .map(|placement| placement.frame)
+        .collect::<Vec<_>>();
+    let base_metrics = canvas_metrics_from_frames(&base_frames);
+    let content_width = (base_metrics.width - 4).max(1);
+    let content_height = (base_metrics.height - 4).max(1);
+    let overview_scale = (f64::from(viewport_width.max(1)) / f64::from(content_width))
+        .min(f64::from(viewport_height.max(1)) / f64::from(content_height))
+        .clamp(0.05, 1.0);
+
+    WorkspaceRenderContext {
+        overview_mode: true,
+        overview_scale,
+        viewport_width,
+        viewport_height,
+    }
+}
+
+fn workspace_display_window_placements(
+    workspace: &Workspace,
+    render_context: WorkspaceRenderContext,
+) -> Vec<WorkspaceWindowPlacement> {
+    workspace_window_placements(
+        workspace,
+        render_context.viewport_width,
+        render_context.viewport_height,
+    )
+    .into_iter()
+    .map(|mut placement| {
+        if render_context.overview_mode {
+            placement.frame = scale_window_frame(placement.frame, render_context.overview_scale);
+        }
+        placement
+    })
+    .collect()
+}
+
+fn workspace_window_placements(
+    workspace: &Workspace,
+    viewport_width: i32,
+    viewport_height: i32,
+) -> Vec<WorkspaceWindowPlacement> {
+    let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
+    if ordered_columns.is_empty() {
+        return Vec::new();
+    }
+
+    let horizontal_gap_total =
+        DEFAULT_WORKSPACE_WINDOW_GAP * ordered_columns.len().saturating_sub(1) as i32;
+    let available_width = (viewport_width - horizontal_gap_total).max(0);
+    let preferred_column_widths = ordered_columns
+        .iter()
+        .map(|column| column.width.max(1))
+        .collect::<Vec<_>>();
+    let column_widths = fit_track_extents(
+        &preferred_column_widths,
+        available_width,
+        MIN_WORKSPACE_WINDOW_WIDTH,
+    );
+
+    let mut placements = Vec::new();
+    let mut x = 0;
+    for (column_index, column) in ordered_columns.into_iter().enumerate() {
+        let column_width = column_widths
+            .get(column_index)
+            .copied()
+            .unwrap_or(MIN_WORKSPACE_WINDOW_WIDTH);
+        let vertical_gap_total =
+            DEFAULT_WORKSPACE_WINDOW_GAP * column.window_order.len().saturating_sub(1) as i32;
+        let available_height = (viewport_height - vertical_gap_total).max(0);
+        let preferred_window_heights = column
+            .window_order
+            .iter()
+            .filter_map(|window_id| workspace.windows.get(window_id).map(|window| window.height))
+            .collect::<Vec<_>>();
+        let window_heights = fit_track_extents(
+            &preferred_window_heights,
+            available_height,
+            MIN_WORKSPACE_WINDOW_HEIGHT,
+        );
+
+        let mut y = 0;
+        for (window_index, window_id) in column.window_order.iter().enumerate() {
+            if !workspace.windows.contains_key(window_id) {
+                continue;
+            }
+            let window_height = window_heights
+                .get(window_index)
+                .copied()
+                .unwrap_or(MIN_WORKSPACE_WINDOW_HEIGHT);
+            placements.push(WorkspaceWindowPlacement {
+                window_id: *window_id,
+                column_id: column.id,
+                frame: WindowFrame {
+                    x,
+                    y,
+                    width: column_width,
+                    height: window_height,
+                },
+            });
+            y += window_height + DEFAULT_WORKSPACE_WINDOW_GAP;
+        }
+
+        x += column_width + DEFAULT_WORKSPACE_WINDOW_GAP;
+    }
+
+    placements
+}
+
+fn workspace_canvas_metrics(placements: &[WorkspaceWindowPlacement]) -> CanvasMetrics {
+    let frames = placements.iter().map(|placement| placement.frame).collect::<Vec<_>>();
+    canvas_metrics_from_frames(&frames)
+}
+
+fn canvas_metrics_from_frames(frames: &[WindowFrame]) -> CanvasMetrics {
+    let min_x = frames.iter().map(|frame| frame.x).min().unwrap_or(0);
+    let min_y = frames.iter().map(|frame| frame.y).min().unwrap_or(0);
+    let offset_x = 2 - min_x;
+    let offset_y = 2 - min_y;
+    let width = frames
+        .iter()
+        .map(|frame| frame.right() + offset_x + 2)
+        .max()
+        .unwrap_or(4);
+    let height = frames
+        .iter()
+        .map(|frame| frame.bottom() + offset_y + 2)
+        .max()
+        .unwrap_or(4);
+
+    CanvasMetrics {
+        offset_x,
+        offset_y,
+        width,
+        height,
+    }
+}
+
+fn scale_window_frame(frame: WindowFrame, scale: f64) -> WindowFrame {
+    WindowFrame {
+        x: (f64::from(frame.x) * scale).round() as i32,
+        y: (f64::from(frame.y) * scale).round() as i32,
+        width: (f64::from(frame.width) * scale).round() as i32,
+        height: (f64::from(frame.height) * scale).round() as i32,
+    }
+}
+
+fn fit_track_extents(preferred_extents: &[i32], available_total: i32, min_extent: i32) -> Vec<i32> {
+    if preferred_extents.is_empty() {
+        return Vec::new();
+    }
+
+    let count = preferred_extents.len() as i32;
+    let min_total = min_extent.saturating_mul(count);
+    if available_total <= min_total {
+        return vec![min_extent; preferred_extents.len()];
+    }
+
+    let preferred_extents = preferred_extents
+        .iter()
+        .map(|extent| (*extent).max(1))
+        .collect::<Vec<_>>();
+    let mut result = vec![0; preferred_extents.len()];
+    let mut active = (0..preferred_extents.len()).collect::<Vec<_>>();
+    let mut remaining_total = available_total;
+
+    loop {
+        if active.is_empty() {
+            break;
+        }
+
+        let remaining_weight = active
+            .iter()
+            .map(|index| i64::from(preferred_extents[*index]))
+            .sum::<i64>()
+            .max(1);
+        let below_minimum = active
+            .iter()
+            .copied()
+            .filter(|index| {
+                (f64::from(remaining_total) * f64::from(preferred_extents[*index]))
+                    / (remaining_weight as f64)
+                    < f64::from(min_extent)
+            })
+            .collect::<Vec<_>>();
+
+        if below_minimum.is_empty() {
+            let distributed = distribute_weighted_total(
+                &active
+                    .iter()
+                    .map(|index| preferred_extents[*index])
+                    .collect::<Vec<_>>(),
+                remaining_total,
+            );
+            for (slot, index) in active.iter().enumerate() {
+                result[*index] = distributed[slot];
+            }
+            break;
+        }
+
+        for index in below_minimum {
+            result[index] = min_extent;
+            remaining_total -= min_extent;
+            active.retain(|candidate| *candidate != index);
+        }
+    }
+
+    result
+}
+
+fn distribute_weighted_total(weights: &[i32], total: i32) -> Vec<i32> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    let weight_sum = weights.iter().map(|weight| i64::from(*weight)).sum::<i64>().max(1);
+    let mut distributed = Vec::with_capacity(weights.len());
+    let mut allocated = 0;
+    let mut remainders = Vec::with_capacity(weights.len());
+
+    for (index, weight) in weights.iter().copied().enumerate() {
+        let scaled = i64::from(total) * i64::from(weight);
+        let base = (scaled / weight_sum) as i32;
+        distributed.push(base);
+        allocated += base;
+        remainders.push((index, scaled % weight_sum));
+    }
+
+    let mut remaining = total - allocated;
+    remainders.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    for (index, _) in remainders.into_iter().take(remaining.max(0) as usize) {
+        distributed[index] += 1;
+        remaining -= 1;
+        if remaining <= 0 {
+            break;
+        }
+    }
+
+    distributed
+}
+
 fn default_preview_app_state() -> AppState {
     let mut model = AppModel::new("Main");
     let workspace_id = model.active_workspace_id().expect("workspace");
@@ -1335,6 +1862,33 @@ fn workspace_attention(workspace: &Workspace) -> AttentionState {
         .max_by_key(|attention| attention.rank())
         .unwrap_or(taskers_domain::AttentionState::Normal)
         .into()
+}
+
+fn workspace_window_attention(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+) -> AttentionState {
+    window
+        .layout
+        .leaves()
+        .into_iter()
+        .filter_map(|pane_id| workspace.panes.get(&pane_id))
+        .map(|pane| pane.highest_attention())
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(taskers_domain::AttentionState::Normal)
+        .into()
+}
+
+fn window_primary_title(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+) -> String {
+    workspace
+        .panes
+        .get(&window.active_pane)
+        .and_then(|pane| pane.active_surface())
+        .map(display_surface_title)
+        .unwrap_or_else(|| "Workspace window".into())
 }
 
 fn display_surface_title(surface: &SurfaceRecord) -> String {
