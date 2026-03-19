@@ -1634,6 +1634,7 @@ dependencies = [
  "tar",
  "taskers-domain",
  "taskers-paths",
+ "taskers-runtime",
  "tempfile",
  "thiserror 2.0.18",
  "ureq",

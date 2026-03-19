@@ -18,7 +18,7 @@ use gtk::prelude::ObjectType;
 use libloading::Library;
 use thiserror::Error;
 
-use crate::backend::SurfaceDescriptor;
+use crate::backend::{GhosttyHostOptions, SurfaceDescriptor};
 use crate::runtime::{configure_runtime_environment, runtime_bridge_path};
 
 #[derive(Debug, Error)]
@@ -51,7 +51,8 @@ pub struct GhosttyHost;
 #[cfg(taskers_ghostty_bridge)]
 struct GhosttyBridgeLibrary {
     _library: Library,
-    host_new: unsafe extern "C" fn() -> *mut taskers_ghostty_host_t,
+    host_new:
+        unsafe extern "C" fn(*const taskers_ghostty_host_options_s) -> *mut taskers_ghostty_host_t,
     host_free: unsafe extern "C" fn(*mut taskers_ghostty_host_t),
     host_tick: unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> c_int,
     surface_new: unsafe extern "C" fn(
@@ -63,18 +64,62 @@ struct GhosttyBridgeLibrary {
 
 impl GhosttyHost {
     pub fn new() -> Result<Self, GhosttyError> {
+        Self::new_with_options(&GhosttyHostOptions::default())
+    }
+
+    pub fn new_with_options(options: &GhosttyHostOptions) -> Result<Self, GhosttyError> {
         configure_runtime_environment();
 
         #[cfg(taskers_ghostty_bridge)]
         unsafe {
             let bridge = load_bridge_library()?;
-            let raw = (bridge.host_new)();
+            let command_argv = options
+                .command_argv
+                .iter()
+                .map(|value| {
+                    CString::new(value.as_str())
+                        .map_err(|_| GhosttyError::InvalidString("command_argv"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let command_argv_ptrs = command_argv
+                .iter()
+                .map(|value| value.as_ptr())
+                .collect::<Vec<_>>();
+            let env_entries = options
+                .env
+                .iter()
+                .map(|(key, value)| {
+                    CString::new(format!("{key}={value}"))
+                        .map_err(|_| GhosttyError::InvalidString("env"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let env_entry_ptrs = env_entries
+                .iter()
+                .map(|value| value.as_ptr())
+                .collect::<Vec<_>>();
+            let host_options = taskers_ghostty_host_options_s {
+                command_argv: if command_argv_ptrs.is_empty() {
+                    std::ptr::null()
+                } else {
+                    command_argv_ptrs.as_ptr()
+                },
+                command_argc: command_argv_ptrs.len(),
+                env_entries: if env_entry_ptrs.is_empty() {
+                    std::ptr::null()
+                } else {
+                    env_entry_ptrs.as_ptr()
+                },
+                env_count: env_entry_ptrs.len(),
+            };
+
+            let raw = (bridge.host_new)(&host_options);
             let raw = NonNull::new(raw).ok_or(GhosttyError::HostInit)?;
             Ok(Self { bridge, raw })
         }
 
         #[cfg(not(taskers_ghostty_bridge))]
         {
+            let _ = options;
             Err(GhosttyError::Unavailable)
         }
     }
@@ -109,18 +154,6 @@ impl GhosttyHost {
                 .as_deref()
                 .map(|value| CString::new(value).map_err(|_| GhosttyError::InvalidString("title")))
                 .transpose()?;
-            let command_argv = descriptor
-                .command_argv
-                .iter()
-                .map(|value| {
-                    CString::new(value.as_str())
-                        .map_err(|_| GhosttyError::InvalidString("command_argv"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let command_argv_ptrs = command_argv
-                .iter()
-                .map(|value| value.as_ptr())
-                .collect::<Vec<_>>();
             let env_entries = descriptor
                 .env
                 .iter()
@@ -141,12 +174,6 @@ impl GhosttyHost {
                 title: title
                     .as_ref()
                     .map_or(std::ptr::null(), |value| value.as_ptr()),
-                command_argv: if command_argv_ptrs.is_empty() {
-                    std::ptr::null()
-                } else {
-                    command_argv_ptrs.as_ptr()
-                },
-                command_argc: command_argv_ptrs.len(),
                 env_entries: if env_entry_ptrs.is_empty() {
                     std::ptr::null()
                 } else {
@@ -210,7 +237,9 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
 
     unsafe {
         let host_new = *library
-            .get::<unsafe extern "C" fn() -> *mut taskers_ghostty_host_t>(
+            .get::<unsafe extern "C" fn(
+                *const taskers_ghostty_host_options_s,
+            ) -> *mut taskers_ghostty_host_t>(
                 b"taskers_ghostty_host_new\0",
             )
             .map_err(|error| GhosttyError::LibraryLoad {
@@ -270,11 +299,18 @@ struct taskers_ghostty_host_t {
 
 #[cfg(taskers_ghostty_bridge)]
 #[repr(C)]
+struct taskers_ghostty_host_options_s {
+    command_argv: *const *const c_char,
+    command_argc: usize,
+    env_entries: *const *const c_char,
+    env_count: usize,
+}
+
+#[cfg(taskers_ghostty_bridge)]
+#[repr(C)]
 struct taskers_ghostty_surface_options_s {
     working_directory: *const c_char,
     title: *const c_char,
-    command_argv: *const *const c_char,
-    command_argc: usize,
     env_entries: *const *const c_char,
     env_count: usize,
 }

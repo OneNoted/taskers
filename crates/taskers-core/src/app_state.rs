@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, ControlResponse, InMemoryController};
 use taskers_domain::{AppModel, PaneId, PaneKind, WorkspaceId};
-use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
+use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
 
 use crate::{pane_runtime::RuntimeManager, session_store};
@@ -62,6 +62,10 @@ impl AppState {
         &self.shell_launch
     }
 
+    pub fn ghostty_host_options(&self) -> GhosttyHostOptions {
+        GhosttyHostOptions::from_shell_launch(&self.shell_launch)
+    }
+
     pub fn snapshot_model(&self) -> AppModel {
         self.controller.snapshot().model
     }
@@ -112,15 +116,15 @@ impl AppState {
             .active_surface()
             .ok_or_else(|| anyhow!("pane {pane_id} has no active surface"))?;
 
-        let (command_argv, env) = match surface.kind {
+        let env = match surface.kind {
             PaneKind::Terminal => {
                 let mut env = self.shell_launch.env.clone();
                 env.insert("TASKERS_PANE_ID".into(), pane.id.to_string());
                 env.insert("TASKERS_WORKSPACE_ID".into(), workspace_id.to_string());
                 env.insert("TASKERS_SURFACE_ID".into(), surface.id.to_string());
-                (self.shell_launch.program_and_args(), env)
+                env
             }
-            PaneKind::Browser => (Vec::new(), BTreeMap::new()),
+            PaneKind::Browser => BTreeMap::new(),
         };
 
         Ok(SurfaceDescriptor {
@@ -130,7 +134,7 @@ impl AppState {
             cwd: surface.metadata.cwd.clone(),
             title: surface.metadata.title.clone(),
             url: surface.metadata.url.clone(),
-            command_argv,
+            command_argv: Vec::new(),
             env,
         })
     }
@@ -142,13 +146,13 @@ mod tests {
 
     use taskers_control::{ControlCommand, ControlQuery};
     use taskers_domain::{AppModel, PaneKind, PaneMetadataPatch};
-    use taskers_ghostty::BackendChoice;
+    use taskers_ghostty::{BackendChoice, GhosttyHostOptions};
     use taskers_runtime::ShellLaunchSpec;
 
     use super::AppState;
 
     #[test]
-    fn surface_descriptor_includes_shell_launch_and_surface_metadata() {
+    fn surface_descriptor_keeps_surface_metadata_but_omits_embedded_command_override() {
         let model = AppModel::new("Main");
         let workspace = model.active_workspace_id().expect("workspace");
         let pane = model.active_workspace().expect("workspace").active_pane;
@@ -174,7 +178,7 @@ mod tests {
 
         assert_eq!(descriptor.kind, PaneKind::Terminal);
         assert_eq!(descriptor.url, None);
-        assert_eq!(descriptor.command_argv, vec!["/bin/zsh", "-i"]);
+        assert!(descriptor.command_argv.is_empty());
         assert_eq!(
             descriptor.env.get("TASKERS_WORKSPACE_ID"),
             Some(&workspace.to_string())
@@ -184,6 +188,33 @@ mod tests {
             Some(&pane.to_string())
         );
         assert!(descriptor.env.contains_key("TASKERS_SURFACE_ID"));
+    }
+
+    #[test]
+    fn ghostty_host_options_follow_shell_launch() {
+        let model = AppModel::new("Main");
+
+        let mut shell_launch = ShellLaunchSpec::fallback();
+        shell_launch.program = PathBuf::from("/bin/zsh");
+        shell_launch.args = vec!["-i".into()];
+        shell_launch
+            .env
+            .insert("TASKERS_SOCKET".into(), "/tmp/taskers.sock".into());
+
+        let app_state = AppState::new(
+            model,
+            PathBuf::from("/tmp/taskers-session.json"),
+            BackendChoice::Mock,
+            shell_launch,
+        )
+        .expect("app state");
+
+        let options: GhosttyHostOptions = app_state.ghostty_host_options();
+        assert_eq!(options.command_argv, vec!["/bin/zsh", "-i"]);
+        assert_eq!(
+            options.env.get("TASKERS_SOCKET").map(String::as_str),
+            Some("/tmp/taskers.sock")
+        );
     }
 
     #[test]

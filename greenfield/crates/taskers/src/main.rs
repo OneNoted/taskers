@@ -19,7 +19,7 @@ use taskers_core::{
     BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
     SurfaceKind, TerminalDefaults,
 };
-use taskers_ghostty::{GhosttyHost, ensure_runtime_installed};
+use taskers_ghostty::{GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
@@ -208,7 +208,8 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> BootstrapContex
         ),
     };
 
-    let (ghostty_host, terminal_host, terminal_note) = match GhosttyHost::new() {
+    let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+    let (ghostty_host, terminal_host, terminal_note) = match GhosttyHost::new_with_options(&host_options) {
         Ok(host) => {
             let _ = host.tick();
             (Some(host), RuntimeCapability::Ready, None)

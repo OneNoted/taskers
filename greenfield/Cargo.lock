@@ -2432,6 +2432,7 @@ dependencies = [
  "tar",
  "taskers-domain",
  "taskers-paths",
+ "taskers-runtime",
  "thiserror 2.0.18",
  "ureq",
  "xz2",

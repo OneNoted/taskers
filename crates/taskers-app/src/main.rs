@@ -40,7 +40,7 @@ use taskers_domain::{
     WorkspaceViewport, WorkspaceWindowId,
 };
 use taskers_ghostty::{
-    BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, TerminalBackend,
+    BackendChoice, BackendProbe, DefaultBackend, GhosttyHost, GhosttyHostOptions, TerminalBackend,
     ensure_runtime_installed,
 };
 use taskers_runtime::{
@@ -2096,7 +2096,7 @@ fn main() -> gtk::glib::ExitCode {
         .env
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
     let (backend_choice, _backend_note, ghostty_host, backend_toast) =
-        initialize_terminal_backend(&probe);
+        initialize_terminal_backend(&probe, &shell_launch);
     let runtime_toast = merge_startup_toasts(
         merge_startup_toasts(
             merge_startup_toasts(ghostty_runtime_toast, shell_integration_toast),
@@ -2239,6 +2239,7 @@ fn build_ui(
 
 fn initialize_terminal_backend(
     probe: &BackendProbe,
+    shell_launch: &ShellLaunchSpec,
 ) -> (BackendChoice, String, Option<GhosttyHost>, Option<String>) {
     if probe.selected != BackendChoice::Ghostty {
         return (BackendChoice::Mock, probe.notes.clone(), None, None);
@@ -2253,7 +2254,8 @@ fn initialize_terminal_backend(
         return (BackendChoice::Mock, note, None, Some(toast));
     }
 
-    match GhosttyHost::new() {
+    let host_options = GhosttyHostOptions::from_shell_launch(shell_launch);
+    match GhosttyHost::new_with_options(&host_options) {
         Ok(host) => (
             BackendChoice::Ghostty,
             probe.notes.clone(),
