@@ -6,6 +6,10 @@ repository.workspace = true
 version.workspace = true
 
 [dependencies]
-indexmap.workspace = true
 parking_lot.workspace = true
+taskers-app-core.workspace = true
+taskers-control.workspace = true
+taskers-domain.workspace = true
+taskers-ghostty.workspace = true
+taskers-runtime.workspace = true
 tokio.workspace = true

@@ -2391,7 +2391,9 @@ dependencies = [
  "dioxus-liveview",
  "gtk4",
  "libadwaita",
- "taskers-core",
+ "taskers-core 0.1.0-alpha.1",
+ "taskers-core 0.3.0",
+ "taskers-domain",
  "taskers-ghostty",
  "taskers-host",
  "taskers-paths",
@@ -2402,12 +2404,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "taskers-control"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "taskers-domain",
+ "taskers-paths",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "taskers-core"
 version = "0.1.0-alpha.1"
 dependencies = [
- "indexmap",
  "parking_lot",
+ "taskers-control",
+ "taskers-core 0.3.0",
+ "taskers-domain",
+ "taskers-ghostty",
+ "taskers-runtime",
  "tokio",
+]
+
+[[package]]
+name = "taskers-core"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "taskers-control",
+ "taskers-domain",
+ "taskers-ghostty",
+ "taskers-paths",
+ "taskers-runtime",
 ]
 
 [[package]]
@@ -2444,7 +2478,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "gtk4",
- "taskers-core",
+ "taskers-core 0.1.0-alpha.1",
  "taskers-domain",
  "taskers-ghostty",
  "webkit6",
@@ -2471,7 +2505,7 @@ name = "taskers-shell"
 version = "0.1.0-alpha.1"
 dependencies = [
  "dioxus",
- "taskers-core",
+ "taskers-core 0.1.0-alpha.1",
 ]
 
 [[package]]

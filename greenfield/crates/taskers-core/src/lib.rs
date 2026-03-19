@@ -1,39 +1,53 @@
-use indexmap::IndexMap;
 use parking_lot::Mutex;
-use std::{collections::BTreeMap, fmt, sync::Arc};
-use tokio::sync::{broadcast, watch};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+};
+use taskers_app_core::{AppState, default_session_path};
+use taskers_control::{ControlCommand, ControlResponse};
+use taskers_domain::{
+    ActivityItem, AppModel, PaneKind, PaneMetadata, PaneMetadataPatch,
+    SplitAxis as DomainSplitAxis, SurfaceRecord, Workspace,
+    WorkspaceSummary as DomainWorkspaceSummary,
+};
+use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
+use taskers_runtime::ShellLaunchSpec;
+use tokio::sync::watch;
+
+pub use taskers_domain::{PaneId, SurfaceId, WorkspaceId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WorkspaceId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PaneId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SurfaceId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ActivityId(pub u64);
-
-macro_rules! impl_display_id {
-    ($name:ident, $prefix:literal) => {
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, concat!($prefix, "-{}"), self.0)
-            }
-        }
-    };
+pub struct ActivityId {
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
 }
 
-impl_display_id!(WorkspaceId, "workspace");
-impl_display_id!(PaneId, "pane");
-impl_display_id!(SurfaceId, "surface");
-impl_display_id!(ActivityId, "activity");
+impl fmt::Display for ActivityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "activity-{}-{}-{}",
+            self.workspace_id, self.pane_id, self.surface_id
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitAxis {
     Horizontal,
     Vertical,
+}
+
+impl SplitAxis {
+    fn from_domain(axis: DomainSplitAxis) -> Self {
+        match axis {
+            DomainSplitAxis::Horizontal => Self::Horizontal,
+            DomainSplitAxis::Vertical => Self::Vertical,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,9 +63,16 @@ impl SurfaceKind {
             Self::Browser => "Browser",
         }
     }
+
+    fn from_domain(kind: &PaneKind) -> Self {
+        match kind {
+            PaneKind::Terminal => Self::Terminal,
+            PaneKind::Browser => Self::Browser,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AttentionState {
     Normal,
     Busy,
@@ -82,19 +103,22 @@ impl AttentionState {
     }
 }
 
+impl From<taskers_domain::AttentionState> for AttentionState {
+    fn from(value: taskers_domain::AttentionState) -> Self {
+        match value {
+            taskers_domain::AttentionState::Normal => Self::Normal,
+            taskers_domain::AttentionState::Busy => Self::Busy,
+            taskers_domain::AttentionState::Completed => Self::Completed,
+            taskers_domain::AttentionState::WaitingInput => Self::WaitingInput,
+            taskers_domain::AttentionState::Error => Self::Error,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellSection {
     Workspace,
     Settings,
-}
-
-impl ShellSection {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Workspace => "Workspace",
-            Self::Settings => "Settings",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,18 +139,18 @@ impl ShortcutPreset {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Balanced => "Balanced Defaults",
-            Self::PowerUser => "Power User Defaults",
+            Self::Balanced => "Apply Balanced Defaults",
+            Self::PowerUser => "Apply Power User Defaults",
         }
     }
 
     pub fn detail(self) -> &'static str {
         match self {
             Self::Balanced => {
-                "Keep common focus, overview, browser, and split actions bound."
+                "Keep common focus, top-level window, split, overview, and close actions bound."
             }
             Self::PowerUser => {
-                "Restore dense direction and resize bindings for full keyboard-driven control."
+                "Restore the dense direction and resize bindings for full keyboard-driven control."
             }
         }
     }
@@ -184,29 +208,23 @@ impl Default for RuntimeStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalDefaults {
-    pub cols: u16,
-    pub rows: u16,
-    pub command_argv: Vec<String>,
-    pub env: BTreeMap<String, String>,
+#[derive(Clone)]
+pub struct BootstrapModel {
+    pub app_state: AppState,
+    pub runtime_status: RuntimeStatus,
+    pub selected_theme_id: String,
+    pub selected_shortcut_preset: ShortcutPreset,
 }
 
-impl Default for TerminalDefaults {
+impl Default for BootstrapModel {
     fn default() -> Self {
         Self {
-            cols: 120,
-            rows: 40,
-            command_argv: vec!["/bin/sh".into()],
-            env: BTreeMap::new(),
+            app_state: default_preview_app_state(),
+            runtime_status: RuntimeStatus::default(),
+            selected_theme_id: "dark".into(),
+            selected_shortcut_preset: ShortcutPreset::Balanced,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct BootstrapModel {
-    pub runtime_status: RuntimeStatus,
-    pub terminal_defaults: TerminalDefaults,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -462,276 +480,68 @@ pub enum ShellAction {
 }
 
 #[derive(Debug, Clone)]
-struct SurfaceRecord {
-    id: SurfaceId,
-    kind: SurfaceKind,
-    title: String,
-    url: Option<String>,
-    cwd: Option<String>,
-    attention: AttentionState,
-}
-
-#[derive(Debug, Clone)]
-struct PaneRecord {
-    id: PaneId,
-    active_surface: SurfaceId,
-    surfaces: IndexMap<SurfaceId, SurfaceRecord>,
-}
-
-#[derive(Debug, Clone)]
-enum LayoutNode {
-    Leaf(PaneId),
-    Split {
-        axis: SplitAxis,
-        ratio_millis: u16,
-        first: Box<LayoutNode>,
-        second: Box<LayoutNode>,
-    },
-}
-
-impl LayoutNode {
-    fn split_leaf(
-        &mut self,
-        target: PaneId,
-        axis: SplitAxis,
-        new_pane: PaneId,
-        ratio_millis: u16,
-    ) -> bool {
-        match self {
-            Self::Leaf(existing) if *existing == target => {
-                let old = *existing;
-                *self = Self::Split {
-                    axis,
-                    ratio_millis,
-                    first: Box::new(Self::Leaf(old)),
-                    second: Box::new(Self::Leaf(new_pane)),
-                };
-                true
-            }
-            Self::Split { first, second, .. } => {
-                first.split_leaf(target, axis, new_pane, ratio_millis)
-                    || second.split_leaf(target, axis, new_pane, ratio_millis)
-            }
-            Self::Leaf(_) => false,
-        }
-    }
-
-    fn remove_leaf(self, target: PaneId) -> Option<Self> {
-        match self {
-            Self::Leaf(existing) if existing == target => None,
-            Self::Leaf(existing) => Some(Self::Leaf(existing)),
-            Self::Split {
-                axis,
-                ratio_millis,
-                first,
-                second,
-            } => {
-                let first = first.remove_leaf(target);
-                let second = second.remove_leaf(target);
-                match (first, second) {
-                    (Some(first), Some(second)) => Some(Self::Split {
-                        axis,
-                        ratio_millis,
-                        first: Box::new(first),
-                        second: Box::new(second),
-                    }),
-                    (Some(first), None) => Some(first),
-                    (None, Some(second)) => Some(second),
-                    (None, None) => None,
-                }
-            }
-        }
-    }
-
-    fn first_leaf_id(&self) -> PaneId {
-        match self {
-            Self::Leaf(pane_id) => *pane_id,
-            Self::Split { first, .. } => first.first_leaf_id(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceRecord {
-    id: WorkspaceId,
-    title: String,
-    active_pane: PaneId,
-    panes: IndexMap<PaneId, PaneRecord>,
-    layout: LayoutNode,
-}
-
-#[derive(Debug, Clone)]
-struct ActivityRecord {
-    id: ActivityId,
-    title: String,
-    preview: String,
-    meta: String,
-    attention: AttentionState,
-    workspace_id: WorkspaceId,
-    pane_id: Option<PaneId>,
-    surface_id: Option<SurfaceId>,
-    unread: bool,
-}
-
-#[derive(Debug, Clone)]
-struct AppModel {
+struct UiState {
     section: ShellSection,
     overview_mode: bool,
-    active_workspace: WorkspaceId,
-    workspaces: IndexMap<WorkspaceId, WorkspaceRecord>,
-    activity: IndexMap<ActivityId, ActivityRecord>,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     window_size: PixelSize,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 struct TaskersCore {
-    next_id: u64,
+    app_state: AppState,
     revision: u64,
     metrics: LayoutMetrics,
-    model: AppModel,
     runtime_status: RuntimeStatus,
-    terminal_defaults: TerminalDefaults,
+    ui: UiState,
 }
 
 impl TaskersCore {
     fn with_bootstrap(bootstrap: BootstrapModel) -> Self {
-        let metrics = LayoutMetrics::default();
-        let mut core = Self {
-            next_id: 1,
-            revision: 1,
-            metrics,
-            model: AppModel {
+        let revision = bootstrap.app_state.revision().max(1);
+        Self {
+            app_state: bootstrap.app_state,
+            revision,
+            metrics: LayoutMetrics::default(),
+            runtime_status: bootstrap.runtime_status,
+            ui: UiState {
                 section: ShellSection::Workspace,
                 overview_mode: false,
-                active_workspace: WorkspaceId(0),
-                workspaces: IndexMap::new(),
-                activity: IndexMap::new(),
-                selected_theme_id: "dark".into(),
-                selected_shortcut_preset: ShortcutPreset::Balanced,
+                selected_theme_id: bootstrap.selected_theme_id,
+                selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 window_size: PixelSize::new(1440, 900),
             },
-            runtime_status: bootstrap.runtime_status,
-            terminal_defaults: bootstrap.terminal_defaults,
-        };
-
-        let main = core.seed_workspace(
-            "Main",
-            vec![
-                SeedSurface::terminal("Agent shell", None, AttentionState::Busy).with_secondary(
-                    SeedSurface::browser(
-                        "Docs",
-                        "https://taskers.app/docs",
-                        AttentionState::Completed,
-                    ),
-                ),
-                SeedPane::new(SeedSurface::browser(
-                    "Preview",
-                    "https://dioxuslabs.com/learn/0.7/",
-                    AttentionState::Normal,
-                )),
-            ],
-        );
-        let research = core.seed_workspace(
-            "Research",
-            vec![SeedPane::new(SeedSurface::browser(
-                "Taskers docs",
-                "https://taskers.invalid/docs",
-                AttentionState::WaitingInput,
-            ))],
-        );
-        let release = core.seed_workspace(
-            "Release",
-            vec![SeedPane::new(SeedSurface::terminal(
-                "Release checks",
-                Some("/home/notes/Projects/taskers"),
-                AttentionState::Error,
-            ))],
-        );
-
-        core.model.active_workspace = main;
-        core.seed_activity(
-            "Embedded terminal host",
-            match &core.runtime_status.terminal_host {
-                RuntimeCapability::Ready => "Embedded Ghostty passed the last startup probe.".into(),
-                RuntimeCapability::Fallback { message } => {
-                    format!("Shell is still live, but terminal startup fell back: {message}")
-                }
-                RuntimeCapability::Unavailable { message } => {
-                    format!("Embedded terminal host is unavailable: {message}")
-                }
-            },
-            "Linux host runtime",
-            match core.runtime_status.terminal_host {
-                RuntimeCapability::Ready => AttentionState::Completed,
-                RuntimeCapability::Fallback { .. } => AttentionState::WaitingInput,
-                RuntimeCapability::Unavailable { .. } => AttentionState::Error,
-            },
-            main,
-            None,
-            None,
-        );
-        core.seed_activity(
-            "Research workspace waiting",
-            "A browser review is staged in the Research workspace.",
-            "Workspace Research · browser",
-            AttentionState::WaitingInput,
-            research,
-            None,
-            None,
-        );
-        core.seed_activity(
-            "Release checks need attention",
-            "The release terminal recorded a failing verification run.",
-            "Workspace Release · terminal",
-            AttentionState::Error,
-            release,
-            None,
-            None,
-        );
-
-        core
+        }
     }
 
     fn revision(&self) -> u64 {
         self.revision
     }
 
-    fn current_workspace(&self) -> &WorkspaceRecord {
-        self.model
-            .workspaces
-            .get(&self.model.active_workspace)
-            .expect("active workspace should exist")
-    }
-
     fn snapshot(&self) -> ShellSnapshot {
-        let workspace = self.current_workspace();
+        let model = self.app_state.snapshot_model();
+        let workspace_id = model
+            .active_workspace_id()
+            .expect("active workspace should exist");
+        let workspace = model
+            .workspaces
+            .get(&workspace_id)
+            .expect("active workspace should exist");
+        let active_window = workspace
+            .active_window_record()
+            .expect("active workspace window should exist");
         let content = self.content_frame();
-        let portal = SurfacePortalPlan {
-            window: Frame::new(
-                0,
-                0,
-                self.model.window_size.width,
-                self.model.window_size.height,
-            ),
-            content,
-            panes: if matches!(self.model.section, ShellSection::Workspace) {
-                self.collect_surface_plans(workspace, &workspace.layout, content)
-            } else {
-                Vec::new()
-            },
-        };
 
         ShellSnapshot {
             revision: self.revision,
-            section: self.model.section,
-            overview_mode: self.model.overview_mode,
-            workspaces: self.workspace_summaries(),
+            section: self.ui.section,
+            overview_mode: self.ui.overview_mode,
+            workspaces: self.workspace_summaries(&model),
             current_workspace: WorkspaceViewSnapshot {
-                id: workspace.id,
-                title: workspace.title.clone(),
-                attention: self.workspace_attention(workspace.id),
+                id: workspace_id,
+                title: workspace.label.clone(),
+                attention: workspace_attention(workspace),
                 pane_count: workspace.panes.len(),
                 surface_count: workspace
                     .panes
@@ -739,977 +549,572 @@ impl TaskersCore {
                     .map(|pane| pane.surfaces.len())
                     .sum(),
                 active_pane: workspace.active_pane,
-                layout: self.snapshot_layout(workspace, &workspace.layout),
+                layout: self.snapshot_layout(workspace, &active_window.layout),
             },
-            activity: self.activity_snapshot(),
-            portal,
+            activity: self.activity_snapshot(&model),
+            portal: SurfacePortalPlan {
+                window: Frame::new(
+                    0,
+                    0,
+                    self.ui.window_size.width,
+                    self.ui.window_size.height,
+                ),
+                content,
+                panes: if matches!(self.ui.section, ShellSection::Workspace) {
+                    self.collect_surface_plans(workspace_id, workspace, &active_window.layout, content)
+                } else {
+                    Vec::new()
+                },
+            },
             metrics: self.metrics,
             runtime_status: self.runtime_status.clone(),
             settings: self.settings_snapshot(),
         }
     }
 
-    fn workspace_summaries(&self) -> Vec<WorkspaceSummary> {
-        self.model
-            .workspaces
-            .values()
-            .map(|workspace| WorkspaceSummary {
-                id: workspace.id,
-                title: workspace.title.clone(),
-                preview: self.workspace_preview(workspace),
-                active: workspace.id == self.model.active_workspace,
-                pane_count: workspace.panes.len(),
-                surface_count: workspace
-                    .panes
-                    .values()
-                    .map(|pane| pane.surfaces.len())
-                    .sum(),
-                unread_activity: self
-                    .model
-                    .activity
-                    .values()
-                    .filter(|item| item.workspace_id == workspace.id && item.unread)
-                    .count(),
-                attention: self.workspace_attention(workspace.id),
-            })
-            .collect()
-    }
-
-    fn workspace_preview(&self, workspace: &WorkspaceRecord) -> String {
-        let pane = workspace
-            .panes
-            .get(&workspace.active_pane)
-            .or_else(|| workspace.panes.values().next());
-        let Some(pane) = pane else {
-            return "No surfaces".into();
-        };
-        let surface = pane
-            .surfaces
-            .get(&pane.active_surface)
-            .or_else(|| pane.surfaces.values().next())
-            .expect("pane should have at least one surface");
-        match surface.kind {
-            SurfaceKind::Terminal => surface
-                .cwd
-                .clone()
-                .unwrap_or_else(|| "Embedded terminal".into()),
-            SurfaceKind::Browser => surface
-                .url
-                .clone()
-                .unwrap_or_else(|| "Native browser view".into()),
-        }
-    }
-
-    fn workspace_attention(&self, workspace_id: WorkspaceId) -> AttentionState {
-        let pane_attention = self
-            .model
-            .workspaces
-            .get(&workspace_id)
-            .map(|workspace| {
-                workspace
-                    .panes
-                    .values()
-                    .flat_map(|pane| pane.surfaces.values().map(|surface| surface.attention))
-                    .fold(AttentionState::Normal, strongest_attention)
-            })
-            .unwrap_or(AttentionState::Normal);
-
-        self.model
-            .activity
-            .values()
-            .filter(|item| item.workspace_id == workspace_id && item.unread)
-            .map(|item| item.attention)
-            .fold(pane_attention, strongest_attention)
-    }
-
-    fn activity_snapshot(&self) -> Vec<ActivityItemSnapshot> {
-        self.model
-            .activity
-            .values()
-            .rev()
-            .map(|item| ActivityItemSnapshot {
-                id: item.id,
-                title: item.title.clone(),
-                preview: item.preview.clone(),
-                meta: item.meta.clone(),
-                attention: item.attention,
-                workspace_id: item.workspace_id,
-                pane_id: item.pane_id,
-                surface_id: item.surface_id,
-                unread: item.unread,
-            })
-            .collect()
+    fn content_frame(&self) -> Frame {
+        let metrics = self.metrics;
+        let width = (self.ui.window_size.width - metrics.sidebar_width - metrics.activity_width)
+            .max(640);
+        let height = self.ui.window_size.height.max(320);
+        Frame::new(metrics.sidebar_width, 0, width, height)
     }
 
     fn settings_snapshot(&self) -> SettingsSnapshot {
         SettingsSnapshot {
-            selected_theme_id: self.model.selected_theme_id.clone(),
-            theme_options: builtin_theme_options(&self.model.selected_theme_id),
+            selected_theme_id: self.ui.selected_theme_id.clone(),
+            theme_options: builtin_theme_options(&self.ui.selected_theme_id),
             shortcut_presets: ShortcutPreset::ALL
                 .into_iter()
                 .map(|preset| ShortcutPresetSnapshot {
                     id: preset.id().into(),
                     label: preset.label().into(),
                     detail: preset.detail().into(),
-                    active: preset == self.model.selected_shortcut_preset,
+                    active: preset == self.ui.selected_shortcut_preset,
                 })
                 .collect(),
-            shortcuts: shortcut_bindings(self.model.selected_shortcut_preset),
+            shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
         }
+    }
+
+    fn workspace_summaries(&self, model: &AppModel) -> Vec<WorkspaceSummary> {
+        let active_window = model.active_window;
+        model
+            .workspace_summaries(active_window)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|summary| WorkspaceSummary {
+                id: summary.workspace_id,
+                title: summary.label.clone(),
+                preview: workspace_preview(&summary),
+                active: model.active_workspace_id() == Some(summary.workspace_id),
+                pane_count: model
+                    .workspaces
+                    .get(&summary.workspace_id)
+                    .map(|workspace| workspace.panes.len())
+                    .unwrap_or_default(),
+                surface_count: model
+                    .workspaces
+                    .get(&summary.workspace_id)
+                    .map(workspace_surface_count)
+                    .unwrap_or_default(),
+                unread_activity: summary.unread_count,
+                attention: summary.display_attention.into(),
+            })
+            .collect()
+    }
+
+    fn activity_snapshot(&self, model: &AppModel) -> Vec<ActivityItemSnapshot> {
+        model.activity_items()
+            .into_iter()
+            .map(|item| ActivityItemSnapshot {
+                id: ActivityId {
+                    workspace_id: item.workspace_id,
+                    pane_id: item.pane_id,
+                    surface_id: item.surface_id,
+                },
+                title: activity_title(model, &item),
+                preview: compact_preview(&item.message),
+                meta: activity_context_line(model, &item),
+                attention: item.state.into(),
+                workspace_id: item.workspace_id,
+                pane_id: Some(item.pane_id),
+                surface_id: Some(item.surface_id),
+                unread: true,
+            })
+            .collect()
     }
 
     fn snapshot_layout(
         &self,
-        workspace: &WorkspaceRecord,
-        node: &LayoutNode,
+        workspace: &Workspace,
+        node: &taskers_domain::LayoutNode,
     ) -> LayoutNodeSnapshot {
         match node {
-            LayoutNode::Leaf(pane_id) => {
-                let pane = workspace
-                    .panes
-                    .get(pane_id)
-                    .expect("layout pane should exist");
-                let surfaces = pane
-                    .surfaces
-                    .values()
-                    .map(|surface| SurfaceSnapshot {
-                        id: surface.id,
-                        kind: surface.kind,
-                        title: surface.title.clone(),
-                        url: surface.url.clone(),
-                        cwd: surface.cwd.clone(),
-                        attention: surface.attention,
-                    })
-                    .collect::<Vec<_>>();
-
-                LayoutNodeSnapshot::Pane(PaneSnapshot {
-                    id: pane.id,
-                    active: pane.id == workspace.active_pane,
-                    attention: pane_attention(pane),
-                    active_surface: pane.active_surface,
-                    surfaces,
-                })
-            }
-            LayoutNode::Split {
+            taskers_domain::LayoutNode::Leaf { pane_id } => LayoutNodeSnapshot::Pane(
+                self.pane_snapshot(
+                    workspace,
+                    workspace
+                        .panes
+                        .get(pane_id)
+                        .expect("layout leaf should reference a pane"),
+                ),
+            ),
+            taskers_domain::LayoutNode::Split {
                 axis,
-                ratio_millis,
+                ratio,
                 first,
                 second,
             } => LayoutNodeSnapshot::Split {
-                axis: *axis,
-                ratio: f32::from(*ratio_millis) / 1000.0,
+                axis: SplitAxis::from_domain(*axis),
+                ratio: f32::from(*ratio) / 1000.0,
                 first: Box::new(self.snapshot_layout(workspace, first)),
                 second: Box::new(self.snapshot_layout(workspace, second)),
             },
         }
     }
 
-    fn content_frame(&self) -> Frame {
-        let metrics = self.metrics;
-        let padding = metrics.workspace_padding;
-        let x = metrics.sidebar_width + padding;
-        let y = metrics.toolbar_height + padding;
-        let width = (self.model.window_size.width
-            - metrics.sidebar_width
-            - metrics.activity_width
-            - (padding * 2))
-            .max(360);
-        let height =
-            (self.model.window_size.height - metrics.toolbar_height - (padding * 2)).max(240);
-        Frame::new(x, y, width, height)
+    fn pane_snapshot(&self, workspace: &Workspace, pane: &taskers_domain::PaneRecord) -> PaneSnapshot {
+        PaneSnapshot {
+            id: pane.id,
+            active: workspace.active_pane == pane.id,
+            attention: pane.highest_attention().into(),
+            active_surface: pane.active_surface,
+            surfaces: pane
+                .surfaces
+                .values()
+                .map(|surface| SurfaceSnapshot {
+                    id: surface.id,
+                    kind: SurfaceKind::from_domain(&surface.kind),
+                    title: display_surface_title(surface),
+                    url: normalized_surface_url(surface),
+                    cwd: normalized_cwd(&surface.metadata),
+                    attention: surface.attention.into(),
+                })
+                .collect(),
+        }
     }
 
     fn collect_surface_plans(
         &self,
-        workspace: &WorkspaceRecord,
-        node: &LayoutNode,
+        workspace_id: WorkspaceId,
+        workspace: &Workspace,
+        node: &taskers_domain::LayoutNode,
         frame: Frame,
     ) -> Vec<PortalSurfacePlan> {
-        let mut panes = Vec::new();
-        self.collect_surface_plans_into(workspace, node, frame, &mut panes);
-        panes
-    }
-
-    fn collect_surface_plans_into(
-        &self,
-        workspace: &WorkspaceRecord,
-        node: &LayoutNode,
-        frame: Frame,
-        out: &mut Vec<PortalSurfacePlan>,
-    ) {
         match node {
-            LayoutNode::Leaf(pane_id) => {
-                if let Some(pane) = workspace.panes.get(pane_id) {
-                    if let Some(surface) = pane
-                        .surfaces
-                        .get(&pane.active_surface)
-                        .or_else(|| pane.surfaces.values().next())
-                    {
-                        out.push(PortalSurfacePlan {
-                            pane_id: pane.id,
-                            surface_id: surface.id,
-                            active: pane.id == workspace.active_pane,
-                            frame: frame
-                                .inset_top(self.metrics.pane_header_height + self.metrics.surface_tab_height),
-                            mount: self.mount_spec_for(workspace.id, pane.id, surface),
-                        });
-                    }
-                }
-            }
-            LayoutNode::Split {
+            taskers_domain::LayoutNode::Leaf { pane_id } => workspace
+                .panes
+                .get(pane_id)
+                .and_then(|pane| {
+                    let active_surface = pane.active_surface()?;
+                    Some(PortalSurfacePlan {
+                        pane_id: pane.id,
+                        surface_id: active_surface.id,
+                        active: workspace.active_pane == pane.id,
+                        frame: pane_body_frame(frame, self.metrics),
+                        mount: self.mount_spec_for_active_surface(workspace_id, pane, active_surface),
+                    })
+                })
+                .into_iter()
+                .collect(),
+            taskers_domain::LayoutNode::Split {
                 axis,
-                ratio_millis,
+                ratio,
                 first,
                 second,
             } => {
                 let (first_frame, second_frame) =
-                    split_frame(frame, *axis, *ratio_millis, self.metrics.split_gap);
-                self.collect_surface_plans_into(workspace, first, first_frame, out);
-                self.collect_surface_plans_into(workspace, second, second_frame, out);
+                    split_frame(frame, SplitAxis::from_domain(*axis), *ratio, self.metrics.split_gap);
+                let mut plans =
+                    self.collect_surface_plans(workspace_id, workspace, first, first_frame);
+                plans.extend(self.collect_surface_plans(
+                    workspace_id,
+                    workspace,
+                    second,
+                    second_frame,
+                ));
+                plans
             }
         }
     }
 
-    fn mount_spec_for(
+    fn mount_spec_for_active_surface(
         &self,
         workspace_id: WorkspaceId,
-        pane_id: PaneId,
-        surface: &SurfaceRecord,
+        pane: &taskers_domain::PaneRecord,
+        active_surface: &SurfaceRecord,
     ) -> SurfaceMountSpec {
-        match surface.kind {
-            SurfaceKind::Browser => SurfaceMountSpec::Browser(BrowserMountSpec {
-                url: surface
-                    .url
-                    .clone()
-                    .unwrap_or_else(|| "https://dioxuslabs.com/learn/0.7/".into()),
-            }),
-            SurfaceKind::Terminal => {
-                let mut env = self.terminal_defaults.env.clone();
-                env.insert("TASKERS_PANE_ID".into(), pane_id.to_string());
-                env.insert("TASKERS_SURFACE_ID".into(), surface.id.to_string());
-                env.insert("TASKERS_WORKSPACE_ID".into(), workspace_id.to_string());
-                SurfaceMountSpec::Terminal(TerminalMountSpec {
-                    title: surface.title.clone(),
-                    cwd: surface.cwd.clone(),
-                    cols: self.terminal_defaults.cols,
-                    rows: self.terminal_defaults.rows,
-                    command_argv: self.terminal_defaults.command_argv.clone(),
-                    env,
-                })
-            }
-        }
-    }
-
-    fn split_pane(&mut self, target: PaneId, kind: SurfaceKind, axis: SplitAxis) -> bool {
-        let workspace_id = self.model.active_workspace;
-        let new_pane = self.make_pane(
-            kind,
-            default_surface_title(kind),
-            default_surface_url(kind),
-            None,
-            initial_attention_for(kind),
-        );
-        let pane_id = new_pane.id;
-        let Some(workspace) = self.model.workspaces.get_mut(&workspace_id) else {
-            return false;
-        };
-        if !workspace.panes.contains_key(&target) {
-            return false;
-        }
-        workspace.panes.insert(pane_id, new_pane);
-        if workspace.layout.split_leaf(target, axis, pane_id, 500) {
-            workspace.active_pane = pane_id;
-            self.revision += 1;
-            true
-        } else {
-            let _ = workspace.panes.shift_remove(&pane_id);
-            false
-        }
-    }
-
-    fn add_surface_to_pane(&mut self, target: PaneId, kind: SurfaceKind) -> bool {
-        let workspace_id = self.model.active_workspace;
-        let surface = self.make_surface_record(
-            kind,
-            default_surface_title(kind),
-            default_surface_url(kind),
-            None,
-            initial_attention_for(kind),
-        );
-        let surface_id = surface.id;
-        let Some(workspace) = self.model.workspaces.get_mut(&workspace_id) else {
-            return false;
-        };
-        let Some(pane) = workspace.panes.get_mut(&target) else {
-            return false;
-        };
-        pane.surfaces.insert(surface_id, surface);
-        pane.active_surface = surface_id;
-        workspace.active_pane = target;
-        self.revision += 1;
-        true
-    }
-
-    fn focus_pane(&mut self, pane_id: PaneId) -> bool {
-        let workspace_id = self.model.active_workspace;
-        let active_surface_id = {
-            let Some(workspace) = self.model.workspaces.get_mut(&workspace_id) else {
-                return false;
-            };
-            if !workspace.panes.contains_key(&pane_id) {
-                return false;
-            }
-            workspace.active_pane = pane_id;
-            if let Some(pane) = workspace.panes.get_mut(&pane_id) {
-                if let Some(surface) = pane.surfaces.get_mut(&pane.active_surface) {
-                    surface.attention = AttentionState::Normal;
-                }
-                Some(pane.active_surface)
-            } else {
-                None
-            }
-        };
-        self.dismiss_surface_activity(workspace_id, Some(pane_id), active_surface_id);
-        self.revision += 1;
-        true
-    }
-
-    fn focus_surface(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
-        let workspace_id = self.model.active_workspace;
-        {
-            let Some(workspace) = self.model.workspaces.get_mut(&workspace_id) else {
-                return false;
-            };
-            let Some(pane) = workspace.panes.get_mut(&pane_id) else {
-                return false;
-            };
-            if !pane.surfaces.contains_key(&surface_id) {
-                return false;
-            }
-            pane.active_surface = surface_id;
-            workspace.active_pane = pane_id;
-            if let Some(surface) = pane.surfaces.get_mut(&surface_id) {
-                surface.attention = AttentionState::Normal;
-            }
-        }
-        self.dismiss_surface_activity(workspace_id, Some(pane_id), Some(surface_id));
-        self.revision += 1;
-        true
-    }
-
-    fn focus_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
-        if self.model.workspaces.contains_key(&workspace_id)
-            && self.model.active_workspace != workspace_id
-        {
-            self.model.active_workspace = workspace_id;
-            self.model.section = ShellSection::Workspace;
-            self.revision += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn create_workspace(&mut self) -> bool {
-        let title = format!("Workspace {}", self.model.workspaces.len() + 1);
-        let workspace_id = self.seed_workspace(
-            &title,
-            vec![SeedPane::new(SeedSurface::terminal(
-                "Agent shell",
-                None,
-                initial_attention_for(SurfaceKind::Terminal),
-            ))],
-        );
-        self.model.active_workspace = workspace_id;
-        self.model.section = ShellSection::Workspace;
-        self.revision += 1;
-        true
-    }
-
-    fn set_section(&mut self, section: ShellSection) -> bool {
-        if self.model.section != section {
-            self.model.section = section;
-            self.revision += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn toggle_overview(&mut self) -> bool {
-        self.model.overview_mode = !self.model.overview_mode;
-        self.revision += 1;
-        true
-    }
-
-    fn dismiss_activity(&mut self, activity_id: ActivityId) -> bool {
-        if self.model.activity.shift_remove(&activity_id).is_some() {
-            self.revision += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn select_theme(&mut self, theme_id: String) -> bool {
-        if builtin_theme_options("")
-            .iter()
-            .any(|option| option.id == theme_id)
-            && self.model.selected_theme_id != theme_id
-        {
-            self.model.selected_theme_id = theme_id;
-            self.revision += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn select_shortcut_preset(&mut self, preset_id: String) -> bool {
-        let Some(preset) = ShortcutPreset::parse(&preset_id) else {
-            return false;
-        };
-        if self.model.selected_shortcut_preset != preset {
-            self.model.selected_shortcut_preset = preset;
-            self.revision += 1;
-            true
-        } else {
-            false
-        }
+        let descriptor = self
+            .app_state
+            .surface_descriptor_for_pane(workspace_id, pane.id)
+            .unwrap_or_else(|_| fallback_surface_descriptor(active_surface));
+        mount_spec_from_descriptor(active_surface, descriptor)
     }
 
     fn set_window_size(&mut self, size: PixelSize) -> bool {
-        if self.model.window_size != size {
-            self.model.window_size = size;
-            self.revision += 1;
-            true
-        } else {
-            false
+        if self.ui.window_size == size {
+            return false;
         }
+        self.ui.window_size = size;
+        self.bump_local_revision();
+        true
     }
 
     fn apply_host_event(&mut self, event: HostEvent) -> bool {
         match event {
-            HostEvent::PaneFocused { pane_id } => self.focus_pane(pane_id),
-            HostEvent::SurfaceClosed {
-                pane_id,
+            HostEvent::PaneFocused { pane_id } => self.focus_pane_by_id(pane_id),
+            HostEvent::SurfaceClosed { pane_id, surface_id } => {
+                self.close_surface_by_id(pane_id, surface_id)
+            }
+            HostEvent::SurfaceTitleChanged { surface_id, title } => self.update_surface_metadata(
                 surface_id,
-            } => self.close_surface(pane_id, surface_id),
-            HostEvent::SurfaceTitleChanged { surface_id, title } => {
-                self.update_surface(surface_id, |surface| {
-                    if surface.title != title {
-                        surface.title = title.clone();
-                        surface.attention = AttentionState::Completed;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                self.push_surface_activity(
-                    surface_id,
-                    "Surface title updated",
-                    title,
-                    AttentionState::Completed,
-                )
-            }
-            HostEvent::SurfaceUrlChanged { surface_id, url } => {
-                self.update_surface(surface_id, |surface| {
-                    if surface.url.as_deref() != Some(url.as_str()) {
-                        surface.url = Some(url.clone());
-                        surface.attention = AttentionState::Busy;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                self.push_surface_activity(
-                    surface_id,
-                    "Browser navigated",
-                    url,
-                    AttentionState::Busy,
-                )
-            }
-            HostEvent::SurfaceCwdChanged { surface_id, cwd } => {
-                self.update_surface(surface_id, |surface| {
-                    if surface.cwd.as_deref() != Some(cwd.as_str()) {
-                        surface.cwd = Some(cwd.clone());
-                        surface.attention = AttentionState::Busy;
-                        true
-                    } else {
-                        false
-                    }
-                });
-                self.push_surface_activity(
-                    surface_id,
-                    "Terminal changed directory",
-                    cwd,
-                    AttentionState::Busy,
-                )
-            }
+                PaneMetadataPatch {
+                    title: Some(title),
+                    ..PaneMetadataPatch::default()
+                },
+            ),
+            HostEvent::SurfaceUrlChanged { surface_id, url } => self.update_surface_metadata(
+                surface_id,
+                PaneMetadataPatch {
+                    url: Some(url),
+                    ..PaneMetadataPatch::default()
+                },
+            ),
+            HostEvent::SurfaceCwdChanged { surface_id, cwd } => self.update_surface_metadata(
+                surface_id,
+                PaneMetadataPatch {
+                    cwd: Some(cwd),
+                    ..PaneMetadataPatch::default()
+                },
+            ),
         }
     }
 
     fn dispatch_shell_action(&mut self, action: ShellAction) -> bool {
         match action {
-            ShellAction::ShowSection { section } => self.set_section(section),
-            ShellAction::ToggleOverview => self.toggle_overview(),
+            ShellAction::ShowSection { section } => {
+                if self.ui.section == section {
+                    return false;
+                }
+                self.ui.section = section;
+                self.bump_local_revision();
+                true
+            }
+            ShellAction::ToggleOverview => {
+                self.ui.overview_mode = !self.ui.overview_mode;
+                self.bump_local_revision();
+                true
+            }
             ShellAction::FocusWorkspace { workspace_id } => self.focus_workspace(workspace_id),
             ShellAction::CreateWorkspace => self.create_workspace(),
-            ShellAction::SplitBrowser { pane_id } => self.split_pane(
-                pane_id.unwrap_or(self.current_workspace().active_pane),
-                SurfaceKind::Browser,
-                SplitAxis::Horizontal,
-            ),
-            ShellAction::SplitTerminal { pane_id } => self.split_pane(
-                pane_id.unwrap_or(self.current_workspace().active_pane),
-                SurfaceKind::Terminal,
-                SplitAxis::Vertical,
-            ),
-            ShellAction::AddBrowserSurface { pane_id } => self.add_surface_to_pane(
-                pane_id.unwrap_or(self.current_workspace().active_pane),
-                SurfaceKind::Browser,
-            ),
-            ShellAction::AddTerminalSurface { pane_id } => self.add_surface_to_pane(
-                pane_id.unwrap_or(self.current_workspace().active_pane),
-                SurfaceKind::Terminal,
-            ),
-            ShellAction::FocusPane { pane_id } => self.focus_pane(pane_id),
-            ShellAction::FocusSurface {
-                pane_id,
-                surface_id,
-            } => self.focus_surface(pane_id, surface_id),
-            ShellAction::CloseSurface {
-                pane_id,
-                surface_id,
-            } => self.close_surface(pane_id, surface_id),
+            ShellAction::SplitBrowser { pane_id } => self.split_with_kind(pane_id, PaneKind::Browser),
+            ShellAction::SplitTerminal { pane_id } => self.split_with_kind(pane_id, PaneKind::Terminal),
+            ShellAction::AddBrowserSurface { pane_id } => {
+                self.add_surface_to_pane(pane_id, PaneKind::Browser)
+            }
+            ShellAction::AddTerminalSurface { pane_id } => {
+                self.add_surface_to_pane(pane_id, PaneKind::Terminal)
+            }
+            ShellAction::FocusPane { pane_id } => self.focus_pane_by_id(pane_id),
+            ShellAction::FocusSurface { pane_id, surface_id } => {
+                self.focus_surface_by_id(pane_id, surface_id)
+            }
+            ShellAction::CloseSurface { pane_id, surface_id } => {
+                self.close_surface_by_id(pane_id, surface_id)
+            }
             ShellAction::DismissActivity { activity_id } => self.dismiss_activity(activity_id),
-            ShellAction::SelectTheme { theme_id } => self.select_theme(theme_id),
+            ShellAction::SelectTheme { theme_id } => {
+                if self.ui.selected_theme_id == theme_id {
+                    return false;
+                }
+                self.ui.selected_theme_id = theme_id;
+                self.bump_local_revision();
+                true
+            }
             ShellAction::SelectShortcutPreset { preset_id } => {
-                self.select_shortcut_preset(preset_id)
+                let Some(preset) = ShortcutPreset::parse(&preset_id) else {
+                    return false;
+                };
+                if self.ui.selected_shortcut_preset == preset {
+                    return false;
+                }
+                self.ui.selected_shortcut_preset = preset;
+                self.bump_local_revision();
+                true
             }
         }
     }
 
-    fn close_surface(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
-        let workspace_id = self.model.active_workspace;
-        let mut needs_replacement = false;
-        {
-            let Some(workspace) = self.model.workspaces.get_mut(&workspace_id) else {
-                return false;
-            };
-            let Some(pane) = workspace.panes.get(&pane_id) else {
-                return false;
-            };
-            if !pane.surfaces.contains_key(&surface_id) {
-                return false;
-            }
-
-            if pane.surfaces.len() > 1 {
-                let pane = workspace
-                    .panes
-                    .get_mut(&pane_id)
-                    .expect("pane should still exist");
-                pane.surfaces.shift_remove(&surface_id);
-                if pane.active_surface == surface_id {
-                    pane.active_surface = *pane
-                        .surfaces
-                        .keys()
-                        .next()
-                        .expect("pane should still have a surface");
-                }
-                workspace.active_pane = pane_id;
-            } else {
-                workspace.panes.shift_remove(&pane_id);
-                if let Some(layout) = workspace.layout.clone().remove_leaf(pane_id) {
-                    workspace.layout = layout;
-                } else {
-                    needs_replacement = true;
-                }
-                if !needs_replacement && !workspace.panes.contains_key(&workspace.active_pane) {
-                    workspace.active_pane = workspace.layout.first_leaf_id();
-                }
-            }
+    fn focus_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        let mut changed = false;
+        if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
+            changed |= self.dispatch_control(ControlCommand::SwitchWorkspace {
+                window_id: None,
+                workspace_id,
+            });
         }
-
-        if needs_replacement {
-            let replacement = self.make_pane(
-                SurfaceKind::Terminal,
-                "Agent shell".into(),
-                None,
-                None,
-                initial_attention_for(SurfaceKind::Terminal),
-            );
-            let replacement_id = replacement.id;
-            let workspace = self
-                .model
-                .workspaces
-                .get_mut(&workspace_id)
-                .expect("active workspace should exist");
-            workspace.panes.insert(replacement_id, replacement);
-            workspace.layout = LayoutNode::Leaf(replacement_id);
-            workspace.active_pane = replacement_id;
+        if self.ui.section != ShellSection::Workspace {
+            self.ui.section = ShellSection::Workspace;
+            self.bump_local_revision();
+            changed = true;
         }
-
-        self.dismiss_surface_activity(workspace_id, Some(pane_id), Some(surface_id));
-        self.revision += 1;
-        true
+        changed
     }
 
-    fn update_surface(
-        &mut self,
-        surface_id: SurfaceId,
-        mut update: impl FnMut(&mut SurfaceRecord) -> bool,
-    ) -> bool {
-        for workspace in self.model.workspaces.values_mut() {
-            for pane in workspace.panes.values_mut() {
-                if let Some(surface) = pane.surfaces.get_mut(&surface_id) {
-                    return update(surface);
-                }
-            }
-        }
-        false
+    fn create_workspace(&mut self) -> bool {
+        let label = next_workspace_label(&self.app_state.snapshot_model());
+        self.dispatch_control(ControlCommand::CreateWorkspace { label })
     }
 
-    fn push_surface_activity(
-        &mut self,
-        surface_id: SurfaceId,
-        title: impl Into<String>,
-        preview: impl Into<String>,
-        attention: AttentionState,
-    ) -> bool {
-        let Some((workspace_id, pane_id, meta)) = self.lookup_surface_context(surface_id) else {
+    fn split_with_kind(&mut self, pane_id: Option<PaneId>, kind: PaneKind) -> bool {
+        let Some((workspace_id, target_pane_id)) = self.resolve_target_pane(pane_id) else {
             return false;
         };
-        self.model.activity.insert(
-            ActivityId(self.next_id),
-            ActivityRecord {
-                id: ActivityId(self.next_id),
-                title: title.into(),
-                preview: preview.into(),
-                meta,
-                attention,
+
+        let response = match self.dispatch_control_with_response(ControlCommand::SplitPane {
+            workspace_id,
+            pane_id: Some(target_pane_id),
+            axis: DomainSplitAxis::Horizontal,
+        }) {
+            Some(response) => response,
+            None => return false,
+        };
+
+        let ControlResponse::PaneSplit { pane_id: new_pane_id } = response else {
+            return false;
+        };
+
+        if kind == PaneKind::Terminal {
+            return true;
+        }
+
+        let placeholder_surface = self
+            .app_state
+            .snapshot_model()
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&new_pane_id))
+            .map(|pane| pane.active_surface);
+
+        let created = self.dispatch_control(ControlCommand::CreateSurface {
+            workspace_id,
+            pane_id: new_pane_id,
+            kind,
+        });
+        if !created {
+            return false;
+        }
+
+        if let Some(placeholder_surface) = placeholder_surface {
+            let _ = self.dispatch_control(ControlCommand::CloseSurface {
                 workspace_id,
-                pane_id: Some(pane_id),
-                surface_id: Some(surface_id),
-                unread: true,
-            },
-        );
-        self.next_id += 1;
-        self.revision += 1;
+                pane_id: new_pane_id,
+                surface_id: placeholder_surface,
+            });
+        }
         true
     }
 
-    fn lookup_surface_context(&self, surface_id: SurfaceId) -> Option<(WorkspaceId, PaneId, String)> {
-        for workspace in self.model.workspaces.values() {
-            for pane in workspace.panes.values() {
-                if let Some(surface) = pane.surfaces.get(&surface_id) {
-                    let meta = format!(
-                        "{} · {}",
-                        workspace.title,
-                        match surface.kind {
-                            SurfaceKind::Terminal => surface
-                                .cwd
-                                .clone()
-                                .unwrap_or_else(|| surface.kind.label().into()),
-                            SurfaceKind::Browser => surface
-                                .url
-                                .clone()
-                                .unwrap_or_else(|| surface.kind.label().into()),
-                        }
-                    );
-                    return Some((workspace.id, pane.id, meta));
-                }
-            }
-        }
-        None
-    }
-
-    fn dismiss_surface_activity(
-        &mut self,
-        workspace_id: WorkspaceId,
-        pane_id: Option<PaneId>,
-        surface_id: Option<SurfaceId>,
-    ) {
-        let remove = self
-            .model
-            .activity
-            .iter()
-            .filter_map(|(id, item)| {
-                (item.workspace_id == workspace_id
-                    && item.pane_id == pane_id
-                    && item.surface_id == surface_id)
-                    .then_some(*id)
-            })
-            .collect::<Vec<_>>();
-        for id in remove {
-            self.model.activity.shift_remove(&id);
-        }
-    }
-
-    fn seed_workspace(&mut self, title: &str, panes: Vec<SeedPane>) -> WorkspaceId {
-        let workspace_id = WorkspaceId(self.next_id);
-        self.next_id += 1;
-        let mut pane_records = IndexMap::new();
-        let mut layout: Option<LayoutNode> = None;
-        let mut active_pane = None;
-
-        for (index, seed) in panes.into_iter().enumerate() {
-            let pane = self.make_seeded_pane(seed);
-            let pane_id = pane.id;
-            if index == 0 {
-                active_pane = Some(pane_id);
-                layout = Some(LayoutNode::Leaf(pane_id));
-            } else if let Some(layout_node) = layout.as_mut() {
-                let axis = if index % 2 == 0 {
-                    SplitAxis::Vertical
-                } else {
-                    SplitAxis::Horizontal
-                };
-                let _ = layout_node.split_leaf(active_pane.expect("first pane"), axis, pane_id, 500);
-            }
-            pane_records.insert(pane_id, pane);
-        }
-
-        let active_pane = active_pane.expect("workspace should contain at least one pane");
-        self.model.workspaces.insert(
+    fn add_surface_to_pane(&mut self, pane_id: Option<PaneId>, kind: PaneKind) -> bool {
+        let Some((workspace_id, target_pane_id)) = self.resolve_target_pane(pane_id) else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CreateSurface {
             workspace_id,
-            WorkspaceRecord {
-                id: workspace_id,
-                title: title.into(),
-                active_pane,
-                panes: pane_records,
-                layout: layout.expect("workspace should contain at least one pane"),
-            },
-        );
-        workspace_id
-    }
-
-    fn seed_activity(
-        &mut self,
-        title: impl Into<String>,
-        preview: impl Into<String>,
-        meta: impl Into<String>,
-        attention: AttentionState,
-        workspace_id: WorkspaceId,
-        pane_id: Option<PaneId>,
-        surface_id: Option<SurfaceId>,
-    ) {
-        let activity_id = ActivityId(self.next_id);
-        self.next_id += 1;
-        self.model.activity.insert(
-            activity_id,
-            ActivityRecord {
-                id: activity_id,
-                title: title.into(),
-                preview: preview.into(),
-                meta: meta.into(),
-                attention,
-                workspace_id,
-                pane_id,
-                surface_id,
-                unread: true,
-            },
-        );
-    }
-
-    fn make_seeded_pane(&mut self, seed: SeedPane) -> PaneRecord {
-        let pane_id = PaneId(self.next_id);
-        self.next_id += 1;
-        let mut surfaces = IndexMap::new();
-        let mut active_surface = None;
-        for (index, seed_surface) in seed.surfaces.into_iter().enumerate() {
-            let surface = self.make_surface_record(
-                seed_surface.kind,
-                seed_surface.title,
-                seed_surface.url,
-                seed_surface.cwd,
-                seed_surface.attention,
-            );
-            if index == 0 {
-                active_surface = Some(surface.id);
-            }
-            surfaces.insert(surface.id, surface);
-        }
-        PaneRecord {
-            id: pane_id,
-            active_surface: active_surface.expect("seed pane should contain a surface"),
-            surfaces,
-        }
-    }
-
-    fn make_pane(
-        &mut self,
-        kind: SurfaceKind,
-        title: String,
-        url: Option<String>,
-        cwd: Option<String>,
-        attention: AttentionState,
-    ) -> PaneRecord {
-        let pane_id = PaneId(self.next_id);
-        self.next_id += 1;
-        let surface = self.make_surface_record(kind, title, url, cwd, attention);
-        let active_surface = surface.id;
-        let mut surfaces = IndexMap::new();
-        surfaces.insert(surface.id, surface);
-        PaneRecord {
-            id: pane_id,
-            active_surface,
-            surfaces,
-        }
-    }
-
-    fn make_surface_record(
-        &mut self,
-        kind: SurfaceKind,
-        title: String,
-        url: Option<String>,
-        cwd: Option<String>,
-        attention: AttentionState,
-    ) -> SurfaceRecord {
-        let surface_id = SurfaceId(self.next_id);
-        self.next_id += 1;
-        SurfaceRecord {
-            id: surface_id,
+            pane_id: target_pane_id,
             kind,
-            title,
-            url,
-            cwd,
-            attention,
+        })
+    }
+
+    fn focus_pane_by_id(&mut self, pane_id: PaneId) -> bool {
+        let Some((workspace_id, _)) = self.resolve_workspace_pane(&self.app_state.snapshot_model(), pane_id) else {
+            return false;
+        };
+        if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
+            let _ = self.dispatch_control(ControlCommand::SwitchWorkspace {
+                window_id: None,
+                workspace_id,
+            });
+        }
+        self.dispatch_control(ControlCommand::FocusPane { workspace_id, pane_id })
+    }
+
+    fn focus_surface_by_id(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
+        let Some((workspace_id, _)) =
+            self.resolve_surface_location(&self.app_state.snapshot_model(), surface_id)
+        else {
+            return false;
+        };
+        if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
+            let _ = self.dispatch_control(ControlCommand::SwitchWorkspace {
+                window_id: None,
+                workspace_id,
+            });
+        }
+        self.dispatch_control(ControlCommand::FocusSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+        })
+    }
+
+    fn close_surface_by_id(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
+        let Some((workspace_id, _)) =
+            self.resolve_surface_location(&self.app_state.snapshot_model(), surface_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CloseSurface {
+            workspace_id,
+            pane_id,
+            surface_id,
+        })
+    }
+
+    fn dismiss_activity(&mut self, activity_id: ActivityId) -> bool {
+        self.dispatch_control(ControlCommand::MarkSurfaceCompleted {
+            workspace_id: activity_id.workspace_id,
+            pane_id: activity_id.pane_id,
+            surface_id: activity_id.surface_id,
+        })
+    }
+
+    fn update_surface_metadata(
+        &mut self,
+        surface_id: SurfaceId,
+        patch: PaneMetadataPatch,
+    ) -> bool {
+        self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch })
+    }
+
+    fn resolve_target_pane(&self, pane_id: Option<PaneId>) -> Option<(WorkspaceId, PaneId)> {
+        let model = self.app_state.snapshot_model();
+        if let Some(pane_id) = pane_id {
+            return self.resolve_workspace_pane(&model, pane_id);
+        }
+        let workspace_id = model.active_workspace_id()?;
+        let workspace = model.workspaces.get(&workspace_id)?;
+        Some((workspace_id, workspace.active_pane))
+    }
+
+    fn resolve_workspace_pane(
+        &self,
+        model: &AppModel,
+        pane_id: PaneId,
+    ) -> Option<(WorkspaceId, PaneId)> {
+        model.workspaces.iter().find_map(|(workspace_id, workspace)| {
+            workspace.panes.contains_key(&pane_id).then_some((*workspace_id, pane_id))
+        })
+    }
+
+    fn resolve_surface_location(
+        &self,
+        model: &AppModel,
+        surface_id: SurfaceId,
+    ) -> Option<(WorkspaceId, PaneId)> {
+        model.workspaces.iter().find_map(|(workspace_id, workspace)| {
+            workspace.panes.iter().find_map(|(pane_id, pane)| {
+                pane.surfaces
+                    .contains_key(&surface_id)
+                    .then_some((*workspace_id, *pane_id))
+            })
+        })
+    }
+
+    fn dispatch_control(&mut self, command: ControlCommand) -> bool {
+        self.dispatch_control_with_response(command).is_some()
+    }
+
+    fn dispatch_control_with_response(
+        &mut self,
+        command: ControlCommand,
+    ) -> Option<ControlResponse> {
+        match self.app_state.dispatch(command) {
+            Ok(response) => {
+                self.sync_revision_from_app();
+                Some(response)
+            }
+            Err(error) => {
+                eprintln!("greenfield control dispatch failed: {error}");
+                None
+            }
         }
     }
-}
 
-fn split_frame(frame: Frame, axis: SplitAxis, ratio_millis: u16, gap: i32) -> (Frame, Frame) {
-    let ratio = f32::from(ratio_millis.clamp(100, 900)) / 1000.0;
+    fn sync_revision_from_app(&mut self) {
+        self.revision = self.revision.max(self.app_state.revision());
+    }
 
-    match axis {
-        SplitAxis::Horizontal => {
-            let available = (frame.width - gap).max(2);
-            let first_width = ((available as f32) * ratio).round() as i32;
-            let second_width = (available - first_width).max(1);
-            let first_width = first_width.max(1);
-
-            (
-                Frame::new(frame.x, frame.y, first_width, frame.height),
-                Frame::new(
-                    frame.x + first_width + gap,
-                    frame.y,
-                    second_width,
-                    frame.height,
-                ),
-            )
-        }
-        SplitAxis::Vertical => {
-            let available = (frame.height - gap).max(2);
-            let first_height = ((available as f32) * ratio).round() as i32;
-            let second_height = (available - first_height).max(1);
-            let first_height = first_height.max(1);
-
-            (
-                Frame::new(frame.x, frame.y, frame.width, first_height),
-                Frame::new(
-                    frame.x,
-                    frame.y + first_height + gap,
-                    frame.width,
-                    second_height,
-                ),
-            )
-        }
+    fn bump_local_revision(&mut self) {
+        self.revision = self.revision.max(self.app_state.revision()) + 1;
     }
 }
 
-fn strongest_attention(lhs: AttentionState, rhs: AttentionState) -> AttentionState {
-    match (attention_rank(lhs), attention_rank(rhs)) {
-        (left, right) if left >= right => lhs,
-        _ => rhs,
+#[derive(Clone)]
+pub struct SharedCore {
+    inner: Arc<Mutex<TaskersCore>>,
+    revisions: watch::Sender<u64>,
+}
+
+impl PartialEq for SharedCore {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
-fn attention_rank(state: AttentionState) -> u8 {
-    match state {
-        AttentionState::Normal => 0,
-        AttentionState::Completed => 1,
-        AttentionState::Busy => 2,
-        AttentionState::WaitingInput => 3,
-        AttentionState::Error => 4,
-    }
-}
+impl Eq for SharedCore {}
 
-fn pane_attention(pane: &PaneRecord) -> AttentionState {
-    pane.surfaces
-        .values()
-        .map(|surface| surface.attention)
-        .fold(AttentionState::Normal, strongest_attention)
-}
-
-fn initial_attention_for(kind: SurfaceKind) -> AttentionState {
-    match kind {
-        SurfaceKind::Terminal => AttentionState::Busy,
-        SurfaceKind::Browser => AttentionState::Completed,
-    }
-}
-
-fn default_surface_title(kind: SurfaceKind) -> String {
-    match kind {
-        SurfaceKind::Terminal => "Agent shell".into(),
-        SurfaceKind::Browser => "Browser".into(),
-    }
-}
-
-fn default_surface_url(kind: SurfaceKind) -> Option<String> {
-    match kind {
-        SurfaceKind::Terminal => None,
-        SurfaceKind::Browser => Some("https://dioxuslabs.com/learn/0.7/".into()),
-    }
-}
-
-#[derive(Debug)]
-struct SeedSurface {
-    kind: SurfaceKind,
-    title: String,
-    url: Option<String>,
-    cwd: Option<String>,
-    attention: AttentionState,
-}
-
-impl SeedSurface {
-    fn terminal(title: &str, cwd: Option<&str>, attention: AttentionState) -> Self {
+impl SharedCore {
+    pub fn bootstrap(bootstrap: BootstrapModel) -> Self {
+        let core = TaskersCore::with_bootstrap(bootstrap);
+        let revision = core.revision();
+        let (revisions, _) = watch::channel(revision);
         Self {
-            kind: SurfaceKind::Terminal,
-            title: title.into(),
-            url: None,
-            cwd: cwd.map(str::to_string),
-            attention,
+            inner: Arc::new(Mutex::new(core)),
+            revisions,
         }
     }
 
-    fn browser(title: &str, url: &str, attention: AttentionState) -> Self {
-        Self {
-            kind: SurfaceKind::Browser,
-            title: title.into(),
-            url: Some(url.into()),
-            cwd: None,
-            attention,
+    pub fn subscribe_revisions(&self) -> watch::Receiver<u64> {
+        self.revisions.subscribe()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.inner.lock().revision()
+    }
+
+    pub fn snapshot(&self) -> ShellSnapshot {
+        self.inner.lock().snapshot()
+    }
+
+    pub fn set_window_size(&self, size: PixelSize) {
+        let mut inner = self.inner.lock();
+        if inner.set_window_size(size) {
+            let _ = self.revisions.send(inner.revision());
         }
     }
 
-    fn with_secondary(self, secondary: SeedSurface) -> SeedPane {
-        SeedPane {
-            surfaces: vec![self, secondary],
+    pub fn dispatch_shell_action(&self, action: ShellAction) {
+        let mut inner = self.inner.lock();
+        if inner.dispatch_shell_action(action) {
+            let _ = self.revisions.send(inner.revision());
         }
     }
-}
 
-#[derive(Debug)]
-struct SeedPane {
-    surfaces: Vec<SeedSurface>,
-}
-
-impl SeedPane {
-    fn new(surface: SeedSurface) -> Self {
-        Self {
-            surfaces: vec![surface],
+    pub fn apply_host_event(&self, event: HostEvent) {
+        let mut inner = self.inner.lock();
+        if inner.apply_host_event(event) {
+            let _ = self.revisions.send(inner.revision());
         }
+    }
+
+    pub fn split_with_browser(&self) {
+        self.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+    }
+
+    pub fn split_with_terminal(&self) {
+        self.dispatch_shell_action(ShellAction::SplitTerminal { pane_id: None });
     }
 }
 
@@ -1788,311 +1193,428 @@ fn shortcut_bindings(preset: ShortcutPreset) -> Vec<ShortcutBindingSnapshot> {
         .collect()
 }
 
-#[derive(Clone)]
-pub struct SharedCore {
-    inner: Arc<Mutex<TaskersCore>>,
-    revisions: watch::Sender<u64>,
-    revision_events: broadcast::Sender<u64>,
+fn default_preview_app_state() -> AppState {
+    let mut model = AppModel::new("Main");
+    let workspace_id = model.active_workspace_id().expect("workspace");
+    let pane_id = model.active_workspace().expect("workspace").active_pane;
+    let browser_pane_id = model
+        .split_pane(workspace_id, Some(pane_id), DomainSplitAxis::Horizontal)
+        .expect("split pane");
+    let placeholder_surface_id = model
+        .workspaces
+        .get(&workspace_id)
+        .and_then(|workspace| workspace.panes.get(&browser_pane_id))
+        .map(|pane| pane.active_surface);
+    let browser_surface_id = model
+        .create_surface(workspace_id, browser_pane_id, PaneKind::Browser)
+        .expect("browser surface");
+    let _ = model.update_pane_metadata(
+        pane_id,
+        PaneMetadataPatch {
+            title: Some("Agent shell".into()),
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|path| path.display().to_string()),
+            ..PaneMetadataPatch::default()
+        },
+    );
+    let _ = model.update_surface_metadata(
+        browser_surface_id,
+        PaneMetadataPatch {
+            title: Some("Dioxus Tutorial".into()),
+            url: Some("https://dioxuslabs.com/learn/0.7/tutorial/".into()),
+            ..PaneMetadataPatch::default()
+        },
+    );
+    if let Some(placeholder_surface_id) = placeholder_surface_id {
+        let _ = model.close_surface(workspace_id, browser_pane_id, placeholder_surface_id);
+    }
+
+    AppState::new(
+        model,
+        default_session_path_for_preview("greenfield-preview-bootstrap"),
+        BackendChoice::Mock,
+        ShellLaunchSpec::fallback(),
+    )
+    .expect("preview app state")
 }
 
-impl SharedCore {
-    pub fn bootstrap(bootstrap: BootstrapModel) -> Self {
-        let core = TaskersCore::with_bootstrap(bootstrap);
-        let (revisions, _) = watch::channel(core.revision());
-        let (revision_events, _) = broadcast::channel(256);
-        Self {
-            inner: Arc::new(Mutex::new(core)),
-            revisions,
-            revision_events,
+fn default_session_path_for_preview(label: &str) -> PathBuf {
+    let base = default_session_path();
+    let stem = base
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("taskers-session");
+    let file = format!("{stem}-{label}.json");
+    base.with_file_name(file)
+}
+
+fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, Frame) {
+    let ratio = i32::from(ratio.clamp(150, 850));
+    match axis {
+        SplitAxis::Horizontal => {
+            let usable_width = (frame.width - gap).max(2);
+            let first_width = ((usable_width * ratio) / 1000).max(1);
+            let second_width = (usable_width - first_width).max(1);
+            (
+                Frame::new(frame.x, frame.y, first_width, frame.height),
+                Frame::new(
+                    frame.x + first_width + gap,
+                    frame.y,
+                    second_width,
+                    frame.height,
+                ),
+            )
+        }
+        SplitAxis::Vertical => {
+            let usable_height = (frame.height - gap).max(2);
+            let first_height = ((usable_height * ratio) / 1000).max(1);
+            let second_height = (usable_height - first_height).max(1);
+            (
+                Frame::new(frame.x, frame.y, frame.width, first_height),
+                Frame::new(
+                    frame.x,
+                    frame.y + first_height + gap,
+                    frame.width,
+                    second_height,
+                ),
+            )
         }
     }
+}
 
-    pub fn demo() -> Self {
-        Self::bootstrap(BootstrapModel::default())
+fn pane_body_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
+    frame.inset_top(metrics.pane_header_height + metrics.surface_tab_height)
+}
+
+fn workspace_preview(summary: &DomainWorkspaceSummary) -> String {
+    if let Some(notification) = summary.latest_notification.as_deref() {
+        return compact_preview(notification);
+    }
+    if let Some(repo_hint) = summary.repo_hint.as_deref() {
+        return repo_hint.to_string();
+    }
+    if let Some(agent) = summary.agent_summaries.first() {
+        return agent
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("{} {}", agent.agent_kind, agent.state.label()));
+    }
+    "No recent activity.".into()
+}
+
+fn workspace_surface_count(workspace: &Workspace) -> usize {
+    workspace
+        .panes
+        .values()
+        .map(|pane| pane.surfaces.len())
+        .sum()
+}
+
+fn workspace_attention(workspace: &Workspace) -> AttentionState {
+    workspace
+        .panes
+        .values()
+        .map(|pane| pane.highest_attention())
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(taskers_domain::AttentionState::Normal)
+        .into()
+}
+
+fn display_surface_title(surface: &SurfaceRecord) -> String {
+    if let Some(title) = surface
+        .metadata
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        return title.to_string();
     }
 
-    pub fn revision(&self) -> u64 {
-        self.inner.lock().revision()
+    if matches!(surface.kind, PaneKind::Browser)
+        && let Some(url) = surface
+            .metadata
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+    {
+        return url.to_string();
     }
 
-    pub fn subscribe_revisions(&self) -> watch::Receiver<u64> {
-        self.revisions.subscribe()
+    match surface.kind {
+        PaneKind::Terminal => "Terminal".into(),
+        PaneKind::Browser => "Browser".into(),
     }
+}
 
-    pub fn subscribe_revision_events(&self) -> broadcast::Receiver<u64> {
-        self.revision_events.subscribe()
+fn normalized_surface_url(surface: &SurfaceRecord) -> Option<String> {
+    surface
+        .metadata
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+}
+
+fn normalized_cwd(metadata: &PaneMetadata) -> Option<String> {
+    metadata
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(str::to_string)
+}
+
+fn compact_preview(message: &str) -> String {
+    let trimmed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.len() <= 140 {
+        return trimmed;
     }
+    format!("{}…", &trimmed[..139])
+}
 
-    pub fn snapshot(&self) -> ShellSnapshot {
-        self.inner.lock().snapshot()
-    }
+fn activity_title(model: &AppModel, item: &ActivityItem) -> String {
+    model.workspaces
+        .get(&item.workspace_id)
+        .and_then(|workspace| workspace.panes.get(&item.pane_id))
+        .and_then(|pane| {
+            pane.surfaces
+                .get(&item.surface_id)
+                .or_else(|| pane.active_surface())
+        })
+        .map(display_surface_title)
+        .unwrap_or_else(|| "Terminal pane".into())
+}
 
-    pub fn set_window_size(&self, size: PixelSize) {
-        self.mutate(|core| core.set_window_size(size));
-    }
-
-    pub fn dispatch_shell_action(&self, action: ShellAction) {
-        self.mutate(|core| core.dispatch_shell_action(action));
-    }
-
-    pub fn split_with_browser(&self) {
-        self.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
-    }
-
-    pub fn split_with_terminal(&self) {
-        self.dispatch_shell_action(ShellAction::SplitTerminal { pane_id: None });
-    }
-
-    pub fn focus_pane(&self, pane_id: PaneId) {
-        self.dispatch_shell_action(ShellAction::FocusPane { pane_id });
-    }
-
-    pub fn apply_host_event(&self, event: HostEvent) {
-        self.mutate(|core| core.apply_host_event(event));
-    }
-
-    fn mutate(&self, update: impl FnOnce(&mut TaskersCore) -> bool) {
-        let mut core = self.inner.lock();
-        if update(&mut core) {
-            let _ = self.revisions.send(core.revision());
-            let _ = self.revision_events.send(core.revision());
+fn activity_context_line(model: &AppModel, item: &ActivityItem) -> String {
+    let workspace_label = model
+        .workspaces
+        .get(&item.workspace_id)
+        .map(|workspace| workspace.label.clone())
+        .unwrap_or_else(|| "Workspace".into());
+    let mut parts = vec![format!("Workspace {workspace_label}")];
+    if let Some(surface) = model
+        .workspaces
+        .get(&item.workspace_id)
+        .and_then(|workspace| workspace.panes.get(&item.pane_id))
+        .and_then(|pane| {
+            pane.surfaces
+                .get(&item.surface_id)
+                .or_else(|| pane.active_surface())
+        })
+    {
+        parts.push(match surface.kind {
+            PaneKind::Terminal => "terminal".into(),
+            PaneKind::Browser => "browser".into(),
+        });
+        if let Some(repo) = surface.metadata.repo_name.as_deref() {
+            parts.push(repo.to_string());
+        }
+        if let Some(branch) = surface.metadata.git_branch.as_deref() {
+            parts.push(branch.to_string());
         }
     }
+    parts.join(" · ")
 }
 
-impl PartialEq for SharedCore {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
+fn next_workspace_label(model: &AppModel) -> String {
+    format!("Workspace {}", model.workspaces.len() + 1)
+}
+
+fn fallback_surface_descriptor(surface: &SurfaceRecord) -> SurfaceDescriptor {
+    SurfaceDescriptor {
+        cols: 120,
+        rows: 40,
+        kind: surface.kind.clone(),
+        cwd: normalized_cwd(&surface.metadata),
+        title: surface
+            .metadata
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string),
+        url: normalized_surface_url(surface),
+        command_argv: Vec::new(),
+        env: BTreeMap::new(),
     }
 }
 
-impl Eq for SharedCore {}
+fn mount_spec_from_descriptor(
+    surface: &SurfaceRecord,
+    descriptor: SurfaceDescriptor,
+) -> SurfaceMountSpec {
+    match surface.kind {
+        PaneKind::Browser => SurfaceMountSpec::Browser(BrowserMountSpec {
+            url: descriptor
+                .url
+                .as_deref()
+                .map(resolved_browser_uri)
+                .unwrap_or_else(|| "about:blank".into()),
+        }),
+        PaneKind::Terminal => SurfaceMountSpec::Terminal(TerminalMountSpec {
+            title: descriptor
+                .title
+                .unwrap_or_else(|| display_surface_title(surface)),
+            cwd: descriptor.cwd,
+            cols: descriptor.cols,
+            rows: descriptor.rows,
+            command_argv: descriptor.command_argv,
+            env: descriptor.env,
+        }),
+    }
+}
+
+fn resolved_browser_uri(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "about:blank".into();
+    }
+    if trimmed.contains("://") {
+        return trimmed.to_string();
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return format!(
+            "https://duckduckgo.com/?q={}",
+            trimmed.split_whitespace().collect::<Vec<_>>().join("+")
+        );
+    }
+    if is_local_browser_target(trimmed) {
+        return format!("http://{trimmed}");
+    }
+    format!("https://{trimmed}")
+}
+
+fn is_local_browser_target(value: &str) -> bool {
+    value.starts_with("localhost")
+        || value.starts_with("127.0.0.1")
+        || value.starts_with("0.0.0.0")
+        || value.contains(":3000")
+        || value.contains(":5173")
+        || value.contains(":8000")
+        || value.contains(":8080")
+}
 
 #[cfg(test)]
 mod tests {
     use super::{
         BootstrapModel, BrowserMountSpec, HostEvent, RuntimeCapability, RuntimeStatus, SharedCore,
-        ShellAction, ShellSection, ShortcutPreset, SurfaceMountSpec, SurfaceKind,
-        TerminalDefaults, WorkspaceId,
+        ShellAction, ShellSection, SurfaceMountSpec, default_preview_app_state,
     };
-    use std::collections::BTreeMap;
 
     fn bootstrap() -> BootstrapModel {
-        let mut env = BTreeMap::new();
-        env.insert("TASKERS_SOCKET".into(), "/tmp/taskers.sock".into());
         BootstrapModel {
+            app_state: default_preview_app_state(),
             runtime_status: RuntimeStatus {
                 ghostty_runtime: RuntimeCapability::Ready,
                 shell_integration: RuntimeCapability::Ready,
                 terminal_host: RuntimeCapability::Fallback {
-                    message: "GTK4 Ghostty bridge probe failed on this machine.".into(),
+                    message: "Probe failed".into(),
                 },
             },
-            terminal_defaults: TerminalDefaults {
-                cols: 132,
-                rows: 48,
-                command_argv: vec!["/bin/zsh".into(), "-i".into()],
-                env,
-            },
+            selected_theme_id: "dark".into(),
+            selected_shortcut_preset: super::ShortcutPreset::Balanced,
         }
     }
 
     #[test]
-    fn terminal_mount_spec_inherits_shell_defaults() {
+    fn default_bootstrap_projects_browser_and_terminal_portal_plans() {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
-        let terminal = snapshot
+
+        let browser_count = snapshot
             .portal
             .panes
-            .into_iter()
-            .find(|pane| pane.mount.kind() == SurfaceKind::Terminal)
-            .expect("terminal surface plan");
+            .iter()
+            .filter(|plan| matches!(plan.mount, SurfaceMountSpec::Browser(_)))
+            .count();
+        let terminal_count = snapshot
+            .portal
+            .panes
+            .iter()
+            .filter(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
+            .count();
 
-        match terminal.mount {
-            SurfaceMountSpec::Terminal(spec) => {
-                assert_eq!(spec.command_argv, vec!["/bin/zsh", "-i"]);
-                assert_eq!(spec.cols, 132);
-                assert_eq!(spec.rows, 48);
-                assert_eq!(
-                    spec.env.get("TASKERS_SOCKET").map(String::as_str),
-                    Some("/tmp/taskers.sock")
-                );
-                assert_eq!(
-                    spec.env.get("TASKERS_PANE_ID").map(String::as_str),
-                    Some(terminal.pane_id.to_string().as_str())
-                );
-            }
-            SurfaceMountSpec::Browser(_) => panic!("expected terminal mount spec"),
-        }
+        assert_eq!(browser_count, 1);
+        assert_eq!(terminal_count, 1);
     }
 
     #[test]
-    fn browser_host_events_update_surface_metadata() {
+    fn split_browser_creates_real_browser_pane() {
         let core = SharedCore::bootstrap(bootstrap());
-        let browser = core
+        let before = core.snapshot().portal.panes.len();
+
+        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.portal.panes.len() > before);
+        assert!(snapshot.portal.panes.iter().any(|plan| {
+            matches!(
+                &plan.mount,
+                SurfaceMountSpec::Browser(BrowserMountSpec { url })
+                    if url.starts_with("http")
+            )
+        }));
+    }
+
+    #[test]
+    fn host_events_round_trip_surface_metadata_into_snapshot() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let browser_surface = core
             .snapshot()
             .portal
             .panes
             .into_iter()
-            .find(|pane| matches!(pane.mount, SurfaceMountSpec::Browser(_)))
-            .expect("browser pane");
+            .find(|plan| matches!(plan.mount, SurfaceMountSpec::Browser(_)))
+            .expect("browser surface");
 
         core.apply_host_event(HostEvent::SurfaceTitleChanged {
-            surface_id: browser.surface_id,
+            surface_id: browser_surface.surface_id,
             title: "Taskers Docs".into(),
         });
         core.apply_host_event(HostEvent::SurfaceUrlChanged {
-            surface_id: browser.surface_id,
-            url: "https://taskers.invalid/docs".into(),
+            surface_id: browser_surface.surface_id,
+            url: "https://example.com/docs".into(),
         });
 
         let snapshot = core.snapshot();
-        let pane = match snapshot.current_workspace.layout {
-            super::LayoutNodeSnapshot::Split { second, .. } => second,
-            _ => panic!("expected split layout"),
+        let pane = match &snapshot.current_workspace.layout {
+            super::LayoutNodeSnapshot::Split { first, second, .. } => [first.as_ref(), second.as_ref()]
+                .into_iter()
+                .find_map(|node| match node {
+                    super::LayoutNodeSnapshot::Pane(pane) => pane
+                        .surfaces
+                        .iter()
+                        .any(|surface| surface.id == browser_surface.surface_id)
+                        .then_some(pane),
+                    _ => None,
+                })
+                .expect("browser pane"),
+            super::LayoutNodeSnapshot::Pane(_) => panic!("expected split layout"),
         };
-        let pane = match *pane {
-            super::LayoutNodeSnapshot::Pane(pane) => pane,
-            _ => panic!("expected pane node"),
-        };
+
         let surface = pane
             .surfaces
-            .into_iter()
-            .find(|surface| surface.id == browser.surface_id)
+            .iter()
+            .find(|surface| surface.id == browser_surface.surface_id)
             .expect("browser surface");
         assert_eq!(surface.title, "Taskers Docs");
-        assert_eq!(
-            surface.url.as_deref(),
-            Some("https://taskers.invalid/docs")
-        );
+        assert_eq!(surface.url.as_deref(), Some("https://example.com/docs"));
     }
 
     #[test]
-    fn closing_a_split_surface_collapses_the_layout() {
+    fn local_shell_state_revisions_advance_without_app_mutation() {
         let core = SharedCore::bootstrap(bootstrap());
-        let browser = core
-            .snapshot()
-            .portal
-            .panes
-            .into_iter()
-            .find(|pane| matches!(pane.mount, SurfaceMountSpec::Browser(BrowserMountSpec { .. })))
-            .expect("browser pane");
+        let before = core.revision();
 
-        core.apply_host_event(HostEvent::SurfaceClosed {
-            pane_id: browser.pane_id,
-            surface_id: browser.surface_id,
-        });
-
-        let snapshot = core.snapshot();
-        assert!(matches!(
-            snapshot.current_workspace.layout,
-            super::LayoutNodeSnapshot::Pane(_)
-        ));
-        assert_eq!(snapshot.portal.panes.len(), 1);
-    }
-
-    #[test]
-    fn adding_a_surface_switches_the_active_tab_and_portal_mount() {
-        let core = SharedCore::bootstrap(bootstrap());
-        let pane_id = core.snapshot().current_workspace.active_pane;
-        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
-            pane_id: Some(pane_id),
-        });
-
-        let snapshot = core.snapshot();
-        let pane = match snapshot.current_workspace.layout {
-            super::LayoutNodeSnapshot::Split { first, .. } => first,
-            super::LayoutNodeSnapshot::Pane(pane) => Box::new(super::LayoutNodeSnapshot::Pane(pane)),
-        };
-        let pane = match *pane {
-            super::LayoutNodeSnapshot::Pane(pane) => pane,
-            _ => panic!("expected pane"),
-        };
-        assert!(pane.surfaces.len() >= 3);
-        let mounted = snapshot
-            .portal
-            .panes
-            .into_iter()
-            .find(|plan| plan.pane_id == pane_id)
-            .expect("mounted plan for active pane");
-        assert_eq!(mounted.surface_id, pane.active_surface);
-        assert_eq!(mounted.mount.kind(), SurfaceKind::Browser);
-    }
-
-    #[test]
-    fn switching_workspaces_updates_snapshot_and_portal() {
-        let core = SharedCore::bootstrap(bootstrap());
-        let workspace = core
-            .snapshot()
-            .workspaces
-            .into_iter()
-            .find(|workspace| workspace.title == "Research")
-            .expect("research workspace");
-
-        core.dispatch_shell_action(ShellAction::FocusWorkspace {
-            workspace_id: workspace.id,
-        });
-
-        let snapshot = core.snapshot();
-        assert_eq!(snapshot.current_workspace.id, workspace.id);
-        assert_eq!(snapshot.current_workspace.title, "Research");
-        assert_eq!(snapshot.portal.panes.len(), 1);
-    }
-
-    #[test]
-    fn settings_snapshot_tracks_selected_theme_and_shortcut_preset() {
-        let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::ShowSection {
             section: ShellSection::Settings,
         });
-        core.dispatch_shell_action(ShellAction::SelectTheme {
-            theme_id: "tokyo-night".into(),
-        });
-        core.dispatch_shell_action(ShellAction::SelectShortcutPreset {
-            preset_id: ShortcutPreset::PowerUser.id().into(),
-        });
 
-        let snapshot = core.snapshot();
-        assert_eq!(snapshot.section, ShellSection::Settings);
-        assert_eq!(snapshot.settings.selected_theme_id, "tokyo-night");
-        assert!(
-            snapshot
-                .settings
-                .shortcut_presets
-                .iter()
-                .any(|preset| preset.id == "power-user" && preset.active)
-        );
-    }
-
-    #[test]
-    fn runtime_status_round_trips_through_snapshot() {
-        let core = SharedCore::bootstrap(bootstrap());
-        let snapshot = core.snapshot();
-
-        assert!(matches!(
-            snapshot.runtime_status.ghostty_runtime,
-            RuntimeCapability::Ready
-        ));
-        assert!(matches!(
-            snapshot.runtime_status.shell_integration,
-            RuntimeCapability::Ready
-        ));
-        assert!(matches!(
-            snapshot.runtime_status.terminal_host,
-            RuntimeCapability::Fallback { .. }
-        ));
-    }
-
-    #[test]
-    fn create_workspace_adds_new_sidebar_entry() {
-        let core = SharedCore::bootstrap(bootstrap());
-        let before = core.snapshot().workspaces.len();
-        core.dispatch_shell_action(ShellAction::CreateWorkspace);
-        let snapshot = core.snapshot();
-        assert_eq!(snapshot.workspaces.len(), before + 1);
-        assert!(snapshot
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == WorkspaceId(0) || workspace.active));
+        assert!(core.revision() > before);
+        assert!(matches!(core.snapshot().section, ShellSection::Settings));
     }
 }

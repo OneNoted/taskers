@@ -5,7 +5,6 @@ use clap::{Parser, ValueEnum};
 use gtk::glib;
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeMap,
     fs::{File, OpenOptions, remove_file},
     io::{self, Write},
     net::TcpListener,
@@ -18,9 +17,11 @@ use std::{
 };
 use taskers_core::{
     BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
-    SurfaceKind, TerminalDefaults,
+    ShortcutPreset, SurfaceKind,
 };
-use taskers_ghostty::{GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
+use taskers_app_core::{AppState, load_or_bootstrap};
+use taskers_domain::AppModel;
+use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
@@ -70,7 +71,7 @@ struct BootstrapContext {
 struct RuntimeBootstrap {
     ghostty_runtime: RuntimeCapability,
     shell_integration: RuntimeCapability,
-    terminal_defaults: TerminalDefaults,
+    shell_launch: ShellLaunchSpec,
     host_options: GhosttyHostOptions,
     startup_notes: Vec<String>,
 }
@@ -112,7 +113,7 @@ fn build_ui_result(
     cli: Cli,
 ) -> Result<()> {
     let diagnostics = DiagnosticsWriter::from_cli(&cli);
-    let bootstrap = bootstrap_runtime(diagnostics.as_ref());
+    let bootstrap = bootstrap_runtime(diagnostics.as_ref())?;
     log_runtime_status(diagnostics.as_ref(), &bootstrap.core.snapshot().runtime_status);
 
     let shell_url = launch_liveview_server(bootstrap.core.clone())?;
@@ -209,19 +210,32 @@ fn build_ui_result(
     Ok(())
 }
 
-fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> BootstrapContext {
+fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
     let runtime = resolve_runtime_bootstrap();
     let mut startup_notes = runtime.startup_notes;
+    let session_path = greenfield_session_path();
+    let initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
+        format!(
+            "failed to load or bootstrap greenfield session at {}",
+            session_path.display()
+        )
+    })?;
 
-    let (ghostty_host, terminal_host, terminal_note) =
+    let (ghostty_host, backend_choice, terminal_host, terminal_note) =
         match probe_ghostty_backend_process(GhosttyProbeMode::Surface) {
             Ok(()) => match GhosttyHost::new_with_options(&runtime.host_options) {
                 Ok(host) => {
                     let _ = host.tick();
-                    (Some(host), RuntimeCapability::Ready, None)
+                    (
+                        Some(host),
+                        BackendChoice::GhosttyEmbedded,
+                        RuntimeCapability::Ready,
+                        None,
+                    )
                 }
                 Err(error) => (
                     None,
+                    BackendChoice::Mock,
                     RuntimeCapability::Fallback {
                         message: format!("Ghostty host unavailable: {error}"),
                     },
@@ -230,6 +244,7 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> BootstrapContex
             },
             Err(error) => (
                 None,
+                BackendChoice::Mock,
                 RuntimeCapability::Fallback {
                     message: format!("Ghostty surface self-probe failed: {error}"),
                 },
@@ -246,18 +261,27 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> BootstrapContex
         shell_integration: runtime.shell_integration,
         terminal_host,
     };
+    let app_state = AppState::new(
+        initial_model,
+        session_path,
+        backend_choice,
+        runtime.shell_launch,
+    )
+    .context("failed to initialize greenfield app state")?;
     let core = SharedCore::bootstrap(BootstrapModel {
+        app_state,
         runtime_status,
-        terminal_defaults: runtime.terminal_defaults,
+        selected_theme_id: "dark".into(),
+        selected_shortcut_preset: ShortcutPreset::Balanced,
     });
 
     log_runtime_status(diagnostics, &core.snapshot().runtime_status);
 
-    BootstrapContext {
+    Ok(BootstrapContext {
         core,
         ghostty_host,
         startup_notes,
-    }
+    })
 }
 
 fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
@@ -288,16 +312,29 @@ fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
         ),
     };
 
-    let terminal_defaults = terminal_defaults_from(shell_launch.clone());
     let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch);
 
     RuntimeBootstrap {
         ghostty_runtime,
         shell_integration,
-        terminal_defaults,
+        shell_launch,
         host_options,
         startup_notes,
     }
+}
+
+fn greenfield_session_path() -> PathBuf {
+    taskers_paths::TaskersPaths::detect()
+        .state_dir()
+        .join("greenfield-session.json")
+}
+
+fn greenfield_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "taskers-greenfield-probe-{}-{}.json",
+        mode.as_arg(),
+        std::process::id()
+    ))
 }
 
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
@@ -319,32 +356,16 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     };
 
     if matches!(mode, GhosttyProbeMode::Surface) {
-        return run_internal_surface_probe(host, runtime.terminal_defaults, mode);
+        return run_internal_surface_probe(host, runtime.shell_launch, mode);
     }
 
     spin_probe_main_context(Duration::from_millis(350));
     glib::ExitCode::SUCCESS
 }
 
-fn terminal_defaults_from(shell_launch: ShellLaunchSpec) -> TerminalDefaults {
-    let mut command_argv = Vec::with_capacity(shell_launch.args.len() + 1);
-    command_argv.push(shell_launch.program.display().to_string());
-    command_argv.extend(shell_launch.args);
-
-    let mut env = BTreeMap::new();
-    env.extend(shell_launch.env);
-
-    TerminalDefaults {
-        cols: 120,
-        rows: 40,
-        command_argv,
-        env,
-    }
-}
-
 fn run_internal_surface_probe(
     host: GhosttyHost,
-    terminal_defaults: TerminalDefaults,
+    shell_launch: ShellLaunchSpec,
     mode: GhosttyProbeMode,
 ) -> glib::ExitCode {
     let settings = WebKitSettings::builder()
@@ -361,13 +382,31 @@ fn run_internal_surface_probe(
         Some("http://127.0.0.1/"),
     );
 
+    let app_state = match AppState::new(
+        AppModel::new("Ghostty Probe"),
+        greenfield_probe_session_path(mode),
+        BackendChoice::GhosttyEmbedded,
+        shell_launch,
+    ) {
+        Ok(app_state) => app_state,
+        Err(error) => {
+            eprintln!(
+                "ghostty {} self-probe failed during app state bootstrap: {error}",
+                mode.as_arg()
+            );
+            return glib::ExitCode::FAILURE;
+        }
+    };
+
     let core = SharedCore::bootstrap(BootstrapModel {
+        app_state,
         runtime_status: RuntimeStatus {
             ghostty_runtime: RuntimeCapability::Ready,
             shell_integration: RuntimeCapability::Ready,
             terminal_host: RuntimeCapability::Ready,
         },
-        terminal_defaults,
+        selected_theme_id: "dark".into(),
+        selected_shortcut_preset: ShortcutPreset::Balanced,
     });
     core.set_window_size(PixelSize::new(1200, 800));
 
