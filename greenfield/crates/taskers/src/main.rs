@@ -149,6 +149,7 @@ fn build_ui_result(
         .focusable(true)
         .settings(&settings)
         .build();
+    shell_view.set_can_target(true);
     shell_view.load_uri(&shell_url);
 
     let core = bootstrap.core.clone();
@@ -184,6 +185,15 @@ fn build_ui_result(
         );
         eprintln!("{note}");
     }
+    log_diagnostic(
+        diagnostics.as_ref(),
+        DiagnosticRecord::new(
+            DiagnosticCategory::Startup,
+            Some(core.revision()),
+            format!("shared shell listening on {shell_url}"),
+        ),
+    );
+    eprintln!("shared shell listening on {shell_url}");
 
     let smoke_script = cli.smoke_script;
     let quit_after_ms = cli.quit_after_ms.unwrap_or(8_000);
@@ -414,6 +424,7 @@ fn run_internal_surface_probe(
         .focusable(true)
         .settings(&settings)
         .build();
+    shell_view.set_can_target(true);
     shell_view.load_html(
         "<!DOCTYPE html><html><body></body></html>",
         Some("http://127.0.0.1/"),

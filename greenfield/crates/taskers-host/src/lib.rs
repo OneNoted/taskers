@@ -113,6 +113,10 @@ impl TaskersHost {
         let surface_layer = Fixed::new();
         surface_layer.set_hexpand(true);
         surface_layer.set_vexpand(true);
+        // The surface layer spans the full window, but only mounted native pane
+        // bodies should intercept pointer events. Leaving the layer targetable
+        // blocks the shared shell webview underneath.
+        surface_layer.set_can_target(false);
         root.add_overlay(&surface_layer);
 
         emit_diagnostic(
@@ -345,6 +349,7 @@ impl BrowserSurface {
             .focusable(true)
             .settings(&settings)
             .build();
+        webview.set_can_target(true);
         webview.load_uri(&url);
         (event_sink)(HostEvent::SurfaceUrlChanged {
             surface_id: plan.surface_id,
@@ -546,6 +551,7 @@ impl TerminalSurface {
         widget.set_hexpand(true);
         widget.set_vexpand(true);
         widget.set_focusable(true);
+        widget.set_can_target(true);
         position_widget(fixed, &widget, plan.frame);
 
         connect_ghostty_widget(host, &widget, plan, event_sink, diagnostics.clone());
