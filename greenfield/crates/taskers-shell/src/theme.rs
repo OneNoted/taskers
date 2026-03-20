@@ -202,7 +202,9 @@ button {{
 
 .workspace-sidebar,
 .attention-panel {{
-  background: {surface};
+  background: {surface_85};
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -211,13 +213,13 @@ button {{
 .workspace-sidebar {{
   border-right: 1px solid {border_04};
   padding: 8px;
-  gap: 12px;
+  gap: 10px;
 }}
 
 .attention-panel {{
   border-left: 1px solid {border_04};
   padding: 10px 12px;
-  gap: 10px;
+  gap: 8px;
 }}
 
 .sidebar-brand {{
@@ -569,15 +571,37 @@ button {{
 }}
 
 .workspace-header {{
-  height: 56px;
-  min-height: 56px;
+  height: 48px;
+  min-height: 48px;
   border-bottom: 1px solid {border_07};
-  padding: 0 14px;
+  padding: 0 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   background: {base};
+}}
+
+.workspace-header-group {{
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: {border_04};
+  border-radius: 8px;
+  padding: 2px;
+}}
+
+.workspace-header-group .workspace-header-action {{
+  border: 0;
+  min-height: 26px;
+  padding: 0 8px;
+}}
+
+.workspace-header-divider {{
+  width: 1px;
+  height: 16px;
+  background: {border_10};
+  margin: 0 4px;
 }}
 
 .workspace-header-main,
@@ -784,6 +808,7 @@ button {{
 }}
 
 .pane-card {{
+  position: relative;
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -814,6 +839,29 @@ button {{
 
 .pane-card-state-error {{
   box-shadow: inset 0 0 0 1px {error_10};
+}}
+
+@keyframes focus-flash {{
+  0%   {{ opacity: 0; }}
+  25%  {{ opacity: 1; }}
+  50%  {{ opacity: 0; }}
+  75%  {{ opacity: 1; }}
+  100% {{ opacity: 0; }}
+}}
+
+.pane-flash-ring {{
+  position: absolute;
+  inset: 6px;
+  border-radius: 10px;
+  border: 3px solid {accent};
+  box-shadow: 0 0 12px {accent_20};
+  pointer-events: none;
+  opacity: 0;
+  z-index: 10;
+}}
+
+.pane-flash-ring-active {{
+  animation: focus-flash 0.9s ease-in-out;
 }}
 
 .pane-header {{
@@ -1355,6 +1403,7 @@ button {{
 "#,
         base = p.base.to_hex(),
         surface = p.surface.to_hex(),
+        surface_85 = rgba(p.surface, 0.85),
         elevated = p.elevated.to_hex(),
         overlay_03 = rgba(p.overlay, 0.03),
         overlay_05 = rgba(p.overlay, 0.05),

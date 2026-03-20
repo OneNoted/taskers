@@ -332,6 +332,7 @@ pub struct PaneSnapshot {
     pub attention: AttentionState,
     pub active_surface: SurfaceId,
     pub surfaces: Vec<SurfaceSnapshot>,
+    pub focus_flash_token: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1032,9 +1033,16 @@ impl TaskersCore {
     }
 
     fn pane_snapshot(&self, workspace: &Workspace, pane: &taskers_domain::PaneRecord) -> PaneSnapshot {
+        let is_active = workspace.active_pane == pane.id;
+        let has_unread = pane.highest_attention() != taskers_domain::AttentionState::Normal;
+        let flash_token = if is_active && has_unread {
+            self.revision
+        } else {
+            0
+        };
         PaneSnapshot {
             id: pane.id,
-            active: workspace.active_pane == pane.id,
+            active: is_active,
             attention: pane.highest_attention().into(),
             active_surface: pane.active_surface,
             surfaces: pane
@@ -1049,6 +1057,7 @@ impl TaskersCore {
                     attention: surface.attention.into(),
                 })
                 .collect(),
+            focus_flash_token: flash_token,
         }
     }
 

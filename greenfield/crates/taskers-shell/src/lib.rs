@@ -158,34 +158,35 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             onclick: show_workspace_header,
                             span { class: "workspace-header-label", "{snapshot.current_workspace.title}" }
                             span { class: "workspace-header-meta",
-                                "{snapshot.current_workspace.pane_count} panes · {snapshot.current_workspace.surface_count} surfaces · revision {snapshot.revision}"
+                                "{snapshot.current_workspace.pane_count} panes · {snapshot.current_workspace.surface_count} surfaces"
                             }
                         }
                     }
                     div { class: "workspace-header-actions",
                         if matches!(snapshot.section, ShellSection::Workspace) {
-                            button {
-                                class: if snapshot.overview_mode {
-                                    "workspace-header-action workspace-header-action-active"
-                                } else {
-                                    "workspace-header-action"
-                                },
-                                onclick: toggle_overview,
-                                "Overview"
+                            div { class: "workspace-header-group",
+                                button {
+                                    class: if snapshot.overview_mode {
+                                        "workspace-header-action workspace-header-action-active"
+                                    } else {
+                                        "workspace-header-action"
+                                    },
+                                    onclick: toggle_overview,
+                                    "◫"
+                                }
+                                button { class: "workspace-header-action", onclick: scroll_left, "◀" }
+                                button { class: "workspace-header-action", onclick: scroll_right, "▶" }
                             }
-                            button { class: "workspace-header-action", onclick: scroll_left, "←" }
-                            button { class: "workspace-header-action", onclick: scroll_right, "→" }
-                            button { class: "workspace-header-action", onclick: create_window_right, "+ column" }
-                            button { class: "workspace-header-action", onclick: create_window_down, "+ stack" }
-                            button {
-                                class: "workspace-header-action",
-                                onclick: split_terminal,
-                                "+ split"
-                            }
-                            button {
-                                class: "workspace-header-action workspace-header-action-primary",
-                                onclick: split_browser,
-                                "+ browser"
+                            div { class: "workspace-header-divider" }
+                            div { class: "workspace-header-group",
+                                button { class: "workspace-header-action", onclick: create_window_right, "+ col" }
+                                button { class: "workspace-header-action", onclick: create_window_down, "+ stack" }
+                                button { class: "workspace-header-action", onclick: split_terminal, "+ split" }
+                                button {
+                                    class: "workspace-header-action workspace-header-action-primary",
+                                    onclick: split_browser,
+                                    "+ browser"
+                                }
                             }
                         } else {
                             button {
@@ -589,6 +590,13 @@ fn render_pane(
         })
     };
 
+    let flash_key = pane.focus_flash_token;
+    let flash_class = if flash_key > 0 {
+        "pane-flash-ring pane-flash-ring-active"
+    } else {
+        "pane-flash-ring"
+    };
+
     rsx! {
         section { class: "{pane_class}", onclick: focus_pane,
             div { class: "pane-header",
@@ -623,6 +631,7 @@ fn render_pane(
             div { class: "pane-body",
                 {render_surface_backdrop(active_surface, runtime_status)}
             }
+            div { key: "{flash_key}", class: "{flash_class}" }
         }
     }
 }
