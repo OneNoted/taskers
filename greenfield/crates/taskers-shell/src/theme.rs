@@ -475,6 +475,72 @@ button {{
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }}
 
+.workspace-progress {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}}
+
+.workspace-progress-track {{
+  flex: 1;
+  height: 3px;
+  border-radius: 1.5px;
+  background: {border_08};
+}}
+
+.workspace-progress-fill {{
+  height: 100%;
+  border-radius: 1.5px;
+  background: var(--workspace-accent, {accent});
+  transition: width 0.3s ease;
+}}
+
+.workspace-progress-label {{
+  font-size: 10px;
+  color: {text_dim};
+  white-space: nowrap;
+}}
+
+.workspace-pr-row {{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+}}
+
+.workspace-pr-icon {{
+  font-size: 10px;
+}}
+
+.workspace-pr-status-Open {{
+  color: {completed};
+}}
+
+.workspace-pr-status-Draft {{
+  color: {waiting};
+}}
+
+.workspace-pr-status-Merged {{
+  color: {accent};
+}}
+
+.workspace-pr-status-Closed {{
+  color: {error};
+}}
+
+.workspace-pr-number {{
+  color: {text_muted};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+
+.workspace-pr-title {{
+  color: {text_dim};
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}}
+
 .workspace-label {{
   font-weight: 600;
   font-size: 12.5px;

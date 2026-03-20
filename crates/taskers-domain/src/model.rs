@@ -63,6 +63,30 @@ pub enum PaneKind {
     Browser,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressState {
+    /// Progress as permille (0–1000).
+    pub value: u16,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrStatus {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestState {
+    pub number: u32,
+    pub title: String,
+    pub status: PrStatus,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneMetadata {
     pub title: Option<String>,
@@ -77,6 +101,10 @@ pub struct PaneMetadata {
     #[serde(default)]
     pub agent_active: bool,
     pub last_signal_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub progress: Option<ProgressState>,
+    #[serde(default)]
+    pub pull_requests: Vec<PullRequestState>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

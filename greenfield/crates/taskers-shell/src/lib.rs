@@ -3,10 +3,10 @@ mod theme;
 use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot,
-    LayoutNodeSnapshot, PaneSnapshot, RuntimeCapability, RuntimeStatus, SettingsSnapshot,
-    SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutBindingSnapshot, SplitAxis,
-    SurfaceKind, SurfaceSnapshot, WorkspaceDirection, WorkspaceId, WorkspaceSummary,
-    WorkspaceViewSnapshot, WorkspaceWindowSnapshot,
+    LayoutNodeSnapshot, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeCapability,
+    RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
+    ShortcutBindingSnapshot, SplitAxis, SurfaceKind, SurfaceSnapshot, WorkspaceDirection,
+    WorkspaceId, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowSnapshot,
 };
 
 fn app_css(snapshot: &ShellSnapshot) -> String {
@@ -101,6 +101,10 @@ pub fn TaskersShell(core: SharedCore) -> Element {
         }
     };
 
+    let drag_source = use_signal(|| None::<WorkspaceId>);
+    let drag_target = use_signal(|| None::<WorkspaceId>);
+    let workspace_ids: Vec<WorkspaceId> = snapshot.workspaces.iter().map(|ws| ws.id).collect();
+
     let main_class = match snapshot.section {
         ShellSection::Workspace => {
             if snapshot.overview_mode {
@@ -137,9 +141,16 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                     div { class: "sidebar-heading", "Workspaces" }
                     button { class: "workspace-add", onclick: create_workspace, "+" }
                 }
-                WorkspaceList {
-                    workspaces: snapshot.workspaces.clone(),
-                    core: core.clone(),
+                div { class: "workspace-list",
+                    for workspace in &snapshot.workspaces {
+                        {render_workspace_item(
+                            workspace,
+                            core.clone(),
+                            drag_source,
+                            drag_target,
+                            &workspace_ids,
+                        )}
+                    }
                 }
                 div { class: "runtime-card",
                     div { class: "sidebar-heading", "Runtime status" }
@@ -252,28 +263,6 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-#[component]
-fn WorkspaceList(workspaces: Vec<WorkspaceSummary>, core: SharedCore) -> Element {
-    let drag_source = use_signal(|| None::<WorkspaceId>);
-    let drag_target = use_signal(|| None::<WorkspaceId>);
-
-    let workspace_ids: Vec<WorkspaceId> = workspaces.iter().map(|ws| ws.id).collect();
-
-    rsx! {
-        div { class: "workspace-list",
-            for workspace in &workspaces {
-                {render_workspace_item(
-                    workspace,
-                    core.clone(),
-                    drag_source,
-                    drag_target,
-                    &workspace_ids,
-                )}
             }
         }
     }
@@ -433,7 +422,42 @@ fn render_workspace_item(
                     if let Some(ports) = &ports_row {
                         div { class: "workspace-ports-row", "{ports}" }
                     }
+                    {render_workspace_progress(&workspace.progress)}
+                    {render_workspace_pull_requests(&workspace.pull_requests)}
                 }
+            }
+        }
+    }
+}
+
+fn render_workspace_progress(progress: &Option<ProgressSnapshot>) -> Element {
+    let Some(progress) = progress else {
+        return rsx! {};
+    };
+    let pct = (progress.fraction * 100.0).clamp(0.0, 100.0);
+    let fill_style = format!("width: {pct:.1}%;");
+    rsx! {
+        div { class: "workspace-progress",
+            div { class: "workspace-progress-track",
+                div { class: "workspace-progress-fill", style: "{fill_style}" }
+            }
+            if let Some(label) = &progress.label {
+                span { class: "workspace-progress-label", "{label}" }
+            }
+        }
+    }
+}
+
+fn render_workspace_pull_requests(pull_requests: &[PullRequestSnapshot]) -> Element {
+    if pull_requests.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        for pr in pull_requests {
+            div { class: "workspace-pr-row",
+                span { class: "workspace-pr-icon workspace-pr-status-{pr.status}", "{pr.status_icon}" }
+                span { class: "workspace-pr-number", "#{pr.number}" }
+                span { class: "workspace-pr-title", "{pr.title}" }
             }
         }
     }

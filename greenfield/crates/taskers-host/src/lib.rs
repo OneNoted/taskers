@@ -865,7 +865,7 @@ pub fn browser_plans(portal: &SurfacePortalPlan) -> Vec<PortalSurfacePlan> {
         .panes
         .iter()
         .filter(|plan| matches!(plan.mount, SurfaceMountSpec::Browser(_)))
-        .cloned()
+        .filter_map(|plan| clip_to_content(plan, &portal.content))
         .collect()
 }
 
@@ -874,8 +874,36 @@ pub fn terminal_plans(portal: &SurfacePortalPlan) -> Vec<PortalSurfacePlan> {
         .panes
         .iter()
         .filter(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
-        .cloned()
+        .filter_map(|plan| clip_to_content(plan, &portal.content))
         .collect()
+}
+
+fn clip_to_content(
+    plan: &PortalSurfacePlan,
+    content: &taskers_core::Frame,
+) -> Option<PortalSurfacePlan> {
+    let f = &plan.frame;
+    let cx = content.x;
+    let cy = content.y;
+    let cr = content.x + content.width;
+    let cb = content.y + content.height;
+
+    let clipped_x = f.x.max(cx);
+    let clipped_y = f.y.max(cy);
+    let clipped_r = (f.x + f.width).min(cr);
+    let clipped_b = (f.y + f.height).min(cb);
+
+    let clipped_w = clipped_r - clipped_x;
+    let clipped_h = clipped_b - clipped_y;
+
+    if clipped_w <= 0 || clipped_h <= 0 {
+        return None;
+    }
+
+    Some(PortalSurfacePlan {
+        frame: taskers_core::Frame::new(clipped_x, clipped_y, clipped_w, clipped_h),
+        ..plan.clone()
+    })
 }
 
 fn emit_diagnostic(sink: Option<&DiagnosticsSink>, record: DiagnosticRecord) {

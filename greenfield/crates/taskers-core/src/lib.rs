@@ -306,7 +306,7 @@ impl Default for LayoutMetrics {
         Self {
             sidebar_width: 248,
             activity_width: 312,
-            toolbar_height: 56,
+            toolbar_height: 48,
             workspace_padding: 16,
             split_gap: 12,
             pane_header_height: 38,
@@ -392,7 +392,7 @@ pub struct SurfacePortalPlan {
     pub panes: Vec<PortalSurfacePlan>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceSummary {
     pub id: WorkspaceId,
     pub title: String,
@@ -409,6 +409,23 @@ pub struct WorkspaceSummary {
     pub working_directory: Option<String>,
     pub listening_ports: Vec<u16>,
     pub custom_color: Option<String>,
+    pub progress: Option<ProgressSnapshot>,
+    pub pull_requests: Vec<PullRequestSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProgressSnapshot {
+    pub fraction: f32,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestSnapshot {
+    pub number: u32,
+    pub title: String,
+    pub status: String,
+    pub status_icon: &'static str,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -882,6 +899,37 @@ impl TaskersCore {
                     listening_ports,
                     custom_color: workspace
                         .and_then(|ws| ws.custom_color.clone()),
+                    progress: workspace
+                        .into_iter()
+                        .flat_map(|ws| ws.panes.values())
+                        .flat_map(|pane| pane.surfaces.values())
+                        .find_map(|surface| {
+                            surface.metadata.progress.as_ref().map(|p| ProgressSnapshot {
+                                fraction: f32::from(p.value.min(1000)) / 1000.0,
+                                label: p.label.clone(),
+                            })
+                        }),
+                    pull_requests: workspace
+                        .into_iter()
+                        .flat_map(|ws| ws.panes.values())
+                        .flat_map(|pane| pane.surfaces.values())
+                        .flat_map(|surface| surface.metadata.pull_requests.iter())
+                        .map(|pr| {
+                            let (status, status_icon) = match pr.status {
+                                taskers_domain::PrStatus::Open => ("Open", "●"),
+                                taskers_domain::PrStatus::Draft => ("Draft", "◐"),
+                                taskers_domain::PrStatus::Merged => ("Merged", "✓"),
+                                taskers_domain::PrStatus::Closed => ("Closed", "✕"),
+                            };
+                            PullRequestSnapshot {
+                                number: pr.number,
+                                title: pr.title.clone(),
+                                status: status.into(),
+                                status_icon,
+                                url: pr.url.clone(),
+                            }
+                        })
+                        .collect(),
                 }
             })
             .collect()
