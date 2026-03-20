@@ -156,6 +156,12 @@ fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOpti
     cloned.@"shell-integration" = .none;
     cloned.@"shell-integration-features" = .{};
     cloned.@"linux-cgroup" = .never;
+    // Embedded Taskers panes already supply their own chrome and spacing.
+    // Ghostty's default window padding makes the terminal grid float inside
+    // the pane body and visibly misalign with the shell layout.
+    cloned.@"window-padding-x" = .{ .top_left = 0, .bottom_right = 0 };
+    cloned.@"window-padding-y" = .{ .top_left = 0, .bottom_right = 0 };
+    cloned.@"window-padding-balance" = false;
     for (ptr.env_entries) |entry| {
         try cloned.env.parseCLI(alloc, entry);
     }
