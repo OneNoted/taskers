@@ -2,7 +2,7 @@ use adw::prelude::*;
 use anyhow::{Context, Result};
 use axum::{Router, extract::ws::WebSocketUpgrade, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
-use gtk::glib;
+use gtk::{EventControllerKey, gdk, glib};
 use std::{
     cell::{Cell, RefCell},
     fs::{File, OpenOptions, remove_file},
@@ -16,12 +16,12 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use taskers_core::{
-    BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
-    ShortcutPreset, SurfaceKind,
-};
 use taskers_app_core::{AppState, load_or_bootstrap};
 use taskers_control::{bind_socket, default_socket_path, serve_with_handler};
+use taskers_core::{
+    BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
+    ShellSection, ShortcutAction, ShortcutPreset, SurfaceKind,
+};
 use taskers_domain::AppModel;
 use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
@@ -137,7 +137,10 @@ fn build_ui_result(
     cli: Cli,
 ) -> Result<()> {
     let diagnostics = DiagnosticsWriter::from_cli(&cli);
-    log_runtime_status(diagnostics.as_ref(), &bootstrap.core.snapshot().runtime_status);
+    log_runtime_status(
+        diagnostics.as_ref(),
+        &bootstrap.core.snapshot().runtime_status,
+    );
 
     let shell_url = launch_liveview_server(bootstrap.core.clone())?;
     let settings = WebKitSettings::builder()
@@ -177,6 +180,7 @@ fn build_ui_result(
     });
     let host_widget = host.borrow().widget();
     window.set_content(Some(&host_widget));
+    connect_navigation_shortcuts(&window, &shell_view, &core);
 
     for note in bootstrap.startup_notes {
         log_diagnostic(
@@ -241,6 +245,106 @@ fn build_ui_result(
     }
 
     Ok(())
+}
+
+fn normalize_shortcut_modifiers(state: gdk::ModifierType) -> gdk::ModifierType {
+    state
+        & (gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::SHIFT_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::META_MASK
+            | gdk::ModifierType::SUPER_MASK
+            | gdk::ModifierType::HYPER_MASK)
+}
+
+fn is_modifier_key(key: gdk::Key) -> bool {
+    matches!(
+        key,
+        gdk::Key::Control_L
+            | gdk::Key::Control_R
+            | gdk::Key::Shift_L
+            | gdk::Key::Shift_R
+            | gdk::Key::Alt_L
+            | gdk::Key::Alt_R
+            | gdk::Key::Meta_L
+            | gdk::Key::Meta_R
+            | gdk::Key::Super_L
+            | gdk::Key::Super_R
+            | gdk::Key::Hyper_L
+            | gdk::Key::Hyper_R
+    )
+}
+
+fn shortcut_matches(
+    preset: ShortcutPreset,
+    action: ShortcutAction,
+    key: gdk::Key,
+    state: gdk::ModifierType,
+) -> bool {
+    action
+        .accelerators(preset)
+        .iter()
+        .filter_map(|accelerator| gtk::accelerator_parse(*accelerator))
+        .any(|(expected_key, expected_modifiers)| {
+            key == expected_key && normalize_shortcut_modifiers(state) == expected_modifiers
+        })
+}
+
+fn focus_active_browser_address(shell_view: &WebView) {
+    shell_view.evaluate_javascript(
+        "(() => {
+            const address = document.querySelector('.browser-address');
+            if (!(address instanceof HTMLInputElement)) return false;
+            address.focus();
+            address.select();
+            return true;
+        })();",
+        None,
+        None,
+        None::<&gtk::gio::Cancellable>,
+        |_| {},
+    );
+}
+
+fn connect_navigation_shortcuts(
+    window: &adw::ApplicationWindow,
+    shell_view: &WebView,
+    core: &SharedCore,
+) {
+    let controller = EventControllerKey::new();
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let shortcuts_core = core.clone();
+    let shortcuts_shell = shell_view.clone();
+    controller.connect_key_pressed(move |_, key, _, state| {
+        if is_modifier_key(key) {
+            return glib::Propagation::Proceed;
+        }
+
+        let preset = shortcuts_core.selected_shortcut_preset();
+
+        if shortcut_matches(preset, ShortcutAction::FocusBrowserAddress, key, state) {
+            let snapshot = shortcuts_core.snapshot();
+            if snapshot.section == ShellSection::Workspace && snapshot.browser_chrome.is_some() {
+                focus_active_browser_address(&shortcuts_shell);
+                return glib::Propagation::Stop;
+            }
+            return glib::Propagation::Proceed;
+        }
+
+        for action in ShortcutAction::ALL {
+            if action == ShortcutAction::FocusBrowserAddress {
+                continue;
+            }
+            if shortcut_matches(preset, action, key, state)
+                && shortcuts_core.dispatch_shortcut_action(action)
+            {
+                return glib::Propagation::Stop;
+            }
+        }
+
+        glib::Propagation::Proceed
+    });
+    window.add_controller(controller);
 }
 
 fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
@@ -309,7 +413,7 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         app_state,
         runtime_status,
         selected_theme_id: "dark".into(),
-        selected_shortcut_preset: ShortcutPreset::Balanced,
+        selected_shortcut_preset: ShortcutPreset::PowerUser,
     });
 
     log_runtime_status(diagnostics, &core.snapshot().runtime_status);
@@ -387,7 +491,10 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
             host
         }
         Err(error) => {
-            eprintln!("ghostty {} self-probe failed during host init: {error}", mode.as_arg());
+            eprintln!(
+                "ghostty {} self-probe failed during host init: {error}",
+                mode.as_arg()
+            );
             return glib::ExitCode::FAILURE;
         }
     };
@@ -454,7 +561,7 @@ fn run_internal_surface_probe(
             terminal_host: RuntimeCapability::Ready,
         },
         selected_theme_id: "dark".into(),
-        selected_shortcut_preset: ShortcutPreset::Balanced,
+        selected_shortcut_preset: ShortcutPreset::PowerUser,
     });
     core.set_window_size(PixelSize::new(1200, 800));
 
@@ -547,7 +654,10 @@ fn probe_ghostty_backend_process(mode: GhosttyProbeMode) -> Result<()> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                anyhow::bail!("Ghostty self-probe timed out; probe log: {}", log_path.display());
+                anyhow::bail!(
+                    "Ghostty self-probe timed out; probe log: {}",
+                    log_path.display()
+                );
             }
             Err(error) => {
                 anyhow::bail!(
@@ -681,8 +791,7 @@ fn spawn_control_server(app_state: AppState, socket_path: PathBuf) -> String {
                             .dispatch(command)
                             .map_err(|error| error.to_string())
                     };
-                    if let Err(error) =
-                        serve_with_handler(listener, handler, pending::<()>()).await
+                    if let Err(error) = serve_with_handler(listener, handler, pending::<()>()).await
                     {
                         eprintln!("control server error: {error}");
                     }
@@ -705,7 +814,9 @@ fn launch_liveview_server(core: SharedCore) -> Result<String> {
     listener
         .set_nonblocking(true)
         .context("failed to set loopback listener nonblocking")?;
-    let addr = listener.local_addr().context("failed to read loopback addr")?;
+    let addr = listener
+        .local_addr()
+        .context("failed to read loopback addr")?;
     let url = format!("http://{addr}/");
 
     thread::spawn(move || {

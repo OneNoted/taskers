@@ -8,9 +8,9 @@ use std::{
 use taskers_app_core::{AppState, default_session_path};
 use taskers_control::{ControlCommand, ControlResponse};
 use taskers_domain::{
-    ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, MIN_WORKSPACE_WINDOW_HEIGHT,
-    MIN_WORKSPACE_WINDOW_WIDTH, PaneKind, PaneMetadata, PaneMetadataPatch,
-    SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
+    ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, Direction, KEYBOARD_RESIZE_STEP,
+    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind, PaneMetadata,
+    PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
     WorkspaceSummary as DomainWorkspaceSummary,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
@@ -181,6 +181,275 @@ impl ShortcutPreset {
             "balanced" => Some(Self::Balanced),
             "power-user" => Some(Self::PowerUser),
             _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShortcutAction {
+    ToggleOverview,
+    CloseTerminal,
+    OpenBrowserSplit,
+    FocusBrowserAddress,
+    ReloadBrowserPage,
+    ToggleBrowserDevtools,
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    NewWindowLeft,
+    NewWindowRight,
+    NewWindowUp,
+    NewWindowDown,
+    MoveWindowLeft,
+    MoveWindowRight,
+    MoveWindowUp,
+    MoveWindowDown,
+    ResizeWindowLeft,
+    ResizeWindowRight,
+    ResizeWindowUp,
+    ResizeWindowDown,
+    ResizeSplitLeft,
+    ResizeSplitRight,
+    ResizeSplitUp,
+    ResizeSplitDown,
+    SplitRight,
+    SplitDown,
+}
+
+impl ShortcutAction {
+    pub const ALL: [Self; 28] = [
+        Self::ToggleOverview,
+        Self::CloseTerminal,
+        Self::OpenBrowserSplit,
+        Self::FocusBrowserAddress,
+        Self::ReloadBrowserPage,
+        Self::ToggleBrowserDevtools,
+        Self::FocusLeft,
+        Self::FocusRight,
+        Self::FocusUp,
+        Self::FocusDown,
+        Self::NewWindowLeft,
+        Self::NewWindowRight,
+        Self::NewWindowUp,
+        Self::NewWindowDown,
+        Self::MoveWindowLeft,
+        Self::MoveWindowRight,
+        Self::MoveWindowUp,
+        Self::MoveWindowDown,
+        Self::ResizeWindowLeft,
+        Self::ResizeWindowRight,
+        Self::ResizeWindowUp,
+        Self::ResizeWindowDown,
+        Self::ResizeSplitLeft,
+        Self::ResizeSplitRight,
+        Self::ResizeSplitUp,
+        Self::ResizeSplitDown,
+        Self::SplitRight,
+        Self::SplitDown,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::ToggleOverview => "toggle_overview",
+            Self::CloseTerminal => "close_terminal",
+            Self::OpenBrowserSplit => "open_browser_split",
+            Self::FocusBrowserAddress => "focus_browser_address",
+            Self::ReloadBrowserPage => "reload_browser_page",
+            Self::ToggleBrowserDevtools => "toggle_browser_devtools",
+            Self::FocusLeft => "focus_left",
+            Self::FocusRight => "focus_right",
+            Self::FocusUp => "focus_up",
+            Self::FocusDown => "focus_down",
+            Self::NewWindowLeft => "new_window_left",
+            Self::NewWindowRight => "new_window_right",
+            Self::NewWindowUp => "new_window_up",
+            Self::NewWindowDown => "new_window_down",
+            Self::MoveWindowLeft => "move_window_left",
+            Self::MoveWindowRight => "move_window_right",
+            Self::MoveWindowUp => "move_window_up",
+            Self::MoveWindowDown => "move_window_down",
+            Self::ResizeWindowLeft => "resize_window_left",
+            Self::ResizeWindowRight => "resize_window_right",
+            Self::ResizeWindowUp => "resize_window_up",
+            Self::ResizeWindowDown => "resize_window_down",
+            Self::ResizeSplitLeft => "resize_split_left",
+            Self::ResizeSplitRight => "resize_split_right",
+            Self::ResizeSplitUp => "resize_split_up",
+            Self::ResizeSplitDown => "resize_split_down",
+            Self::SplitRight => "split_right",
+            Self::SplitDown => "split_down",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ToggleOverview => "Toggle overview",
+            Self::CloseTerminal => "Close terminal",
+            Self::OpenBrowserSplit => "Open browser in split",
+            Self::FocusBrowserAddress => "Focus browser address bar",
+            Self::ReloadBrowserPage => "Reload browser page",
+            Self::ToggleBrowserDevtools => "Toggle browser devtools",
+            Self::FocusLeft => "Focus left",
+            Self::FocusRight => "Focus right",
+            Self::FocusUp => "Focus up",
+            Self::FocusDown => "Focus down",
+            Self::NewWindowLeft => "New window left",
+            Self::NewWindowRight => "New window right",
+            Self::NewWindowUp => "New window up",
+            Self::NewWindowDown => "New window down",
+            Self::MoveWindowLeft => "Move window left",
+            Self::MoveWindowRight => "Move window right",
+            Self::MoveWindowUp => "Move window up",
+            Self::MoveWindowDown => "Move window down",
+            Self::ResizeWindowLeft => "Make window narrower",
+            Self::ResizeWindowRight => "Make window wider",
+            Self::ResizeWindowUp => "Make window shorter",
+            Self::ResizeWindowDown => "Make window taller",
+            Self::ResizeSplitLeft => "Make split narrower",
+            Self::ResizeSplitRight => "Make split wider",
+            Self::ResizeSplitUp => "Make split shorter",
+            Self::ResizeSplitDown => "Make split taller",
+            Self::SplitRight => "Split right",
+            Self::SplitDown => "Split down",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::ToggleOverview => "Zoom the current workspace out to fit the full column strip.",
+            Self::CloseTerminal => "Close the active pane.",
+            Self::OpenBrowserSplit => {
+                "Split the active pane to the right and open a browser surface."
+            }
+            Self::FocusBrowserAddress => "Focus the address bar for the active browser surface.",
+            Self::ReloadBrowserPage => "Reload the active browser surface.",
+            Self::ToggleBrowserDevtools => "Show or hide devtools for the active browser surface.",
+            Self::FocusLeft => {
+                "Move focus to the nearest pane on the left before falling back to another window."
+            }
+            Self::FocusRight => {
+                "Move focus to the nearest pane on the right before falling back to another window."
+            }
+            Self::FocusUp => {
+                "Move focus to the nearest pane above before falling back to another window."
+            }
+            Self::FocusDown => {
+                "Move focus to the nearest pane below before falling back to another window."
+            }
+            Self::NewWindowLeft => "Create a top-level window in a new column on the left.",
+            Self::NewWindowRight => "Create a top-level window in a new column on the right.",
+            Self::NewWindowUp => "Create a stacked top-level window above the active window.",
+            Self::NewWindowDown => "Create a stacked top-level window below the active window.",
+            Self::MoveWindowLeft => "Move the active top-level window into the column on the left.",
+            Self::MoveWindowRight => {
+                "Move the active top-level window into the column on the right."
+            }
+            Self::MoveWindowUp => "Move the active top-level window above the current stack.",
+            Self::MoveWindowDown => "Move the active top-level window below the current stack.",
+            Self::ResizeWindowLeft => "Reduce the active column width.",
+            Self::ResizeWindowRight => "Increase the active column width.",
+            Self::ResizeWindowUp => "Reduce the active top-level window height.",
+            Self::ResizeWindowDown => "Increase the active top-level window height.",
+            Self::ResizeSplitLeft => "Reduce the active split width.",
+            Self::ResizeSplitRight => "Increase the active split width.",
+            Self::ResizeSplitUp => "Reduce the active split height.",
+            Self::ResizeSplitDown => "Increase the active split height.",
+            Self::SplitRight => "Split the active pane to the right inside the current window.",
+            Self::SplitDown => "Split the active pane downward inside the current window.",
+        }
+    }
+
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::ToggleOverview | Self::CloseTerminal => "General",
+            Self::OpenBrowserSplit
+            | Self::FocusBrowserAddress
+            | Self::ReloadBrowserPage
+            | Self::ToggleBrowserDevtools => "Browser",
+            Self::FocusLeft | Self::FocusRight | Self::FocusUp | Self::FocusDown => "Focus",
+            Self::NewWindowLeft
+            | Self::NewWindowRight
+            | Self::NewWindowUp
+            | Self::NewWindowDown
+            | Self::MoveWindowLeft
+            | Self::MoveWindowRight
+            | Self::MoveWindowUp
+            | Self::MoveWindowDown => "Top-level windows",
+            Self::SplitRight | Self::SplitDown => "Pane splits",
+            Self::ResizeWindowLeft
+            | Self::ResizeWindowRight
+            | Self::ResizeWindowUp
+            | Self::ResizeWindowDown
+            | Self::ResizeSplitLeft
+            | Self::ResizeSplitRight
+            | Self::ResizeSplitUp
+            | Self::ResizeSplitDown => "Advanced resize",
+        }
+    }
+
+    pub fn accelerators(self, preset: ShortcutPreset) -> &'static [&'static str] {
+        match preset {
+            ShortcutPreset::Balanced => match self {
+                Self::ToggleOverview => &["<Control><Alt>o"],
+                Self::CloseTerminal => &["<Control><Alt>x"],
+                Self::OpenBrowserSplit => &["<Control><Alt><Shift>l"],
+                Self::FocusBrowserAddress => &["<Control>l"],
+                Self::ReloadBrowserPage => &["<Control>r"],
+                Self::ToggleBrowserDevtools => &["<Control><Shift>i"],
+                Self::FocusLeft => &["<Control><Alt>h", "<Control><Alt>Left"],
+                Self::FocusRight => &["<Control><Alt>l", "<Control><Alt>Right"],
+                Self::FocusUp => &["<Control><Alt>k", "<Control><Alt>Up"],
+                Self::FocusDown => &["<Control><Alt>j", "<Control><Alt>Down"],
+                Self::NewWindowLeft => &[],
+                Self::NewWindowRight => &["<Control><Alt>t"],
+                Self::NewWindowUp => &[],
+                Self::NewWindowDown => &["<Control><Alt>g"],
+                Self::MoveWindowLeft => &[],
+                Self::MoveWindowRight => &[],
+                Self::MoveWindowUp => &[],
+                Self::MoveWindowDown => &[],
+                Self::ResizeWindowLeft => &[],
+                Self::ResizeWindowRight => &[],
+                Self::ResizeWindowUp => &[],
+                Self::ResizeWindowDown => &[],
+                Self::ResizeSplitLeft => &[],
+                Self::ResizeSplitRight => &[],
+                Self::ResizeSplitUp => &[],
+                Self::ResizeSplitDown => &[],
+                Self::SplitRight => &["<Control><Alt><Shift>t"],
+                Self::SplitDown => &["<Control><Alt><Shift>g"],
+            },
+            ShortcutPreset::PowerUser => match self {
+                Self::ToggleOverview => &["<Control><Alt>o"],
+                Self::CloseTerminal => &["<Control><Alt>x"],
+                Self::OpenBrowserSplit => &["<Control><Alt><Shift>l"],
+                Self::FocusBrowserAddress => &["<Control>l"],
+                Self::ReloadBrowserPage => &["<Control>r"],
+                Self::ToggleBrowserDevtools => &["<Control><Shift>i"],
+                Self::FocusLeft => &["<Control><Alt>h", "<Control><Alt>Left"],
+                Self::FocusRight => &["<Control><Alt>l", "<Control><Alt>Right"],
+                Self::FocusUp => &["<Control><Alt>k", "<Control><Alt>Up"],
+                Self::FocusDown => &["<Control><Alt>j", "<Control><Alt>Down"],
+                Self::NewWindowLeft => &[],
+                Self::NewWindowRight => &["<Control><Alt>t"],
+                Self::NewWindowUp => &[],
+                Self::NewWindowDown => &["<Control><Alt>g"],
+                Self::MoveWindowLeft => &["<Control><Alt><Shift>h", "<Control><Alt><Shift>Left"],
+                Self::MoveWindowRight => &["<Control><Alt><Shift>l", "<Control><Alt><Shift>Right"],
+                Self::MoveWindowUp => &["<Control><Alt><Shift>k", "<Control><Alt><Shift>Up"],
+                Self::MoveWindowDown => &["<Control><Alt><Shift>j", "<Control><Alt><Shift>Down"],
+                Self::ResizeWindowLeft => &["<Control><Alt>Home"],
+                Self::ResizeWindowRight => &["<Control><Alt>End"],
+                Self::ResizeWindowUp => &["<Control><Alt>Page_Up"],
+                Self::ResizeWindowDown => &["<Control><Alt>Page_Down"],
+                Self::ResizeSplitLeft => &["<Control><Alt><Shift>Home"],
+                Self::ResizeSplitRight => &["<Control><Alt><Shift>End"],
+                Self::ResizeSplitUp => &["<Control><Alt><Shift>Page_Up"],
+                Self::ResizeSplitDown => &["<Control><Alt><Shift>Page_Down"],
+                Self::SplitRight => &["<Control><Alt><Shift>t"],
+                Self::SplitDown => &["<Control><Alt><Shift>g"],
+            },
         }
     }
 }
@@ -1413,10 +1682,10 @@ impl TaskersCore {
             }
             ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
             ShellAction::SplitBrowser { pane_id } => {
-                self.split_with_kind(pane_id, PaneKind::Browser)
+                self.split_with_kind_axis(pane_id, PaneKind::Browser, DomainSplitAxis::Horizontal)
             }
             ShellAction::SplitTerminal { pane_id } => {
-                self.split_with_kind(pane_id, PaneKind::Terminal)
+                self.split_with_kind_axis(pane_id, PaneKind::Terminal, DomainSplitAxis::Horizontal)
             }
             ShellAction::AddBrowserSurface { pane_id } => {
                 self.add_surface_to_pane(pane_id, PaneKind::Browser)
@@ -1473,6 +1742,166 @@ impl TaskersCore {
                 self.bump_local_revision();
                 true
             }
+        }
+    }
+
+    fn dispatch_shortcut_action(&mut self, action: ShortcutAction) -> bool {
+        match action {
+            ShortcutAction::ToggleOverview => {
+                self.dispatch_shell_action(ShellAction::ToggleOverview)
+            }
+            ShortcutAction::CloseTerminal => self.run_workspace_shortcut(|core, workspace_id| {
+                let pane_id = core
+                    .app_state
+                    .snapshot_model()
+                    .workspaces
+                    .get(&workspace_id)
+                    .map(|workspace| workspace.active_pane)?;
+                Some(core.dispatch_control(ControlCommand::ClosePane {
+                    workspace_id,
+                    pane_id,
+                }))
+            }),
+            ShortcutAction::OpenBrowserSplit => self.run_workspace_shortcut(|core, _| {
+                Some(core.split_with_kind_axis(
+                    None,
+                    PaneKind::Browser,
+                    DomainSplitAxis::Horizontal,
+                ))
+            }),
+            ShortcutAction::FocusBrowserAddress => false,
+            ShortcutAction::ReloadBrowserPage => {
+                self.with_active_browser_surface(|core, surface_id| {
+                    core.queue_host_command(HostCommand::BrowserReload { surface_id })
+                })
+            }
+            ShortcutAction::ToggleBrowserDevtools => {
+                self.with_active_browser_surface(|core, surface_id| {
+                    core.queue_host_command(HostCommand::BrowserToggleDevtools { surface_id })
+                })
+            }
+            ShortcutAction::FocusLeft => self.run_workspace_shortcut(|core, workspace_id| {
+                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                    workspace_id,
+                    direction: Direction::Left,
+                }))
+            }),
+            ShortcutAction::FocusRight => self.run_workspace_shortcut(|core, workspace_id| {
+                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                    workspace_id,
+                    direction: Direction::Right,
+                }))
+            }),
+            ShortcutAction::FocusUp => self.run_workspace_shortcut(|core, workspace_id| {
+                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                    workspace_id,
+                    direction: Direction::Up,
+                }))
+            }),
+            ShortcutAction::FocusDown => self.run_workspace_shortcut(|core, workspace_id| {
+                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                    workspace_id,
+                    direction: Direction::Down,
+                }))
+            }),
+            ShortcutAction::NewWindowLeft => self.run_workspace_shortcut(|core, _| {
+                Some(core.create_workspace_window(WorkspaceDirection::Left))
+            }),
+            ShortcutAction::NewWindowRight => self.run_workspace_shortcut(|core, _| {
+                Some(core.create_workspace_window(WorkspaceDirection::Right))
+            }),
+            ShortcutAction::NewWindowUp => self.run_workspace_shortcut(|core, _| {
+                Some(core.create_workspace_window(WorkspaceDirection::Up))
+            }),
+            ShortcutAction::NewWindowDown => self.run_workspace_shortcut(|core, _| {
+                Some(core.create_workspace_window(WorkspaceDirection::Down))
+            }),
+            ShortcutAction::MoveWindowLeft
+            | ShortcutAction::MoveWindowRight
+            | ShortcutAction::MoveWindowUp
+            | ShortcutAction::MoveWindowDown => false,
+            ShortcutAction::ResizeWindowLeft => {
+                self.run_workspace_shortcut(|core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
+                        workspace_id,
+                        direction: Direction::Left,
+                        amount: KEYBOARD_RESIZE_STEP,
+                    }))
+                })
+            }
+            ShortcutAction::ResizeWindowRight => {
+                self.run_workspace_shortcut(|core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
+                        workspace_id,
+                        direction: Direction::Right,
+                        amount: KEYBOARD_RESIZE_STEP,
+                    }))
+                })
+            }
+            ShortcutAction::ResizeWindowUp => self.run_workspace_shortcut(|core, workspace_id| {
+                Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
+                    workspace_id,
+                    direction: Direction::Up,
+                    amount: KEYBOARD_RESIZE_STEP,
+                }))
+            }),
+            ShortcutAction::ResizeWindowDown => {
+                self.run_workspace_shortcut(|core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
+                        workspace_id,
+                        direction: Direction::Down,
+                        amount: KEYBOARD_RESIZE_STEP,
+                    }))
+                })
+            }
+            ShortcutAction::ResizeSplitLeft => self.run_workspace_shortcut(|core, workspace_id| {
+                Some(
+                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                        workspace_id,
+                        direction: Direction::Left,
+                        amount: KEYBOARD_RESIZE_STEP,
+                    }),
+                )
+            }),
+            ShortcutAction::ResizeSplitRight => {
+                self.run_workspace_shortcut(|core, workspace_id| {
+                    Some(
+                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                            workspace_id,
+                            direction: Direction::Right,
+                            amount: KEYBOARD_RESIZE_STEP,
+                        }),
+                    )
+                })
+            }
+            ShortcutAction::ResizeSplitUp => self.run_workspace_shortcut(|core, workspace_id| {
+                Some(
+                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                        workspace_id,
+                        direction: Direction::Up,
+                        amount: KEYBOARD_RESIZE_STEP,
+                    }),
+                )
+            }),
+            ShortcutAction::ResizeSplitDown => self.run_workspace_shortcut(|core, workspace_id| {
+                Some(
+                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                        workspace_id,
+                        direction: Direction::Down,
+                        amount: KEYBOARD_RESIZE_STEP,
+                    }),
+                )
+            }),
+            ShortcutAction::SplitRight => self.run_workspace_shortcut(|core, _| {
+                Some(core.split_with_kind_axis(
+                    None,
+                    PaneKind::Terminal,
+                    DomainSplitAxis::Horizontal,
+                ))
+            }),
+            ShortcutAction::SplitDown => self.run_workspace_shortcut(|core, _| {
+                Some(core.split_with_kind_axis(None, PaneKind::Terminal, DomainSplitAxis::Vertical))
+            }),
         }
     }
 
@@ -1536,7 +1965,12 @@ impl TaskersCore {
         })
     }
 
-    fn split_with_kind(&mut self, pane_id: Option<PaneId>, kind: PaneKind) -> bool {
+    fn split_with_kind_axis(
+        &mut self,
+        pane_id: Option<PaneId>,
+        kind: PaneKind,
+        axis: DomainSplitAxis,
+    ) -> bool {
         let Some((workspace_id, target_pane_id)) = self.resolve_target_pane(pane_id) else {
             return false;
         };
@@ -1544,7 +1978,7 @@ impl TaskersCore {
         let response = match self.dispatch_control_with_response(ControlCommand::SplitPane {
             workspace_id,
             pane_id: Some(target_pane_id),
-            axis: DomainSplitAxis::Horizontal,
+            axis,
         }) {
             Some(response) => response,
             None => return false,
@@ -1713,6 +2147,99 @@ impl TaskersCore {
         self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch })
     }
 
+    fn run_workspace_shortcut(
+        &mut self,
+        handler: impl FnOnce(&mut Self, WorkspaceId) -> Option<bool>,
+    ) -> bool {
+        let Some(workspace_id) = self.prepare_workspace_interaction() else {
+            return false;
+        };
+        let Some(mut changed) = handler(self, workspace_id) else {
+            return false;
+        };
+        changed |= self.ensure_active_window_visible();
+        changed
+    }
+
+    fn prepare_workspace_interaction(&mut self) -> Option<WorkspaceId> {
+        let mut changed = false;
+        if self.ui.section != ShellSection::Workspace {
+            self.ui.section = ShellSection::Workspace;
+            changed = true;
+        }
+        if self.ui.overview_mode {
+            self.ui.overview_mode = false;
+            changed = true;
+        }
+        if changed {
+            self.bump_local_revision();
+        }
+        self.app_state.snapshot_model().active_workspace_id()
+    }
+
+    fn ensure_active_window_visible(&mut self) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let viewport_frame = self.workspace_viewport_frame();
+        let Some(active_frame) =
+            workspace_window_placements(workspace, viewport_frame.width, viewport_frame.height)
+                .into_iter()
+                .find(|placement| placement.window_id == workspace.active_window)
+                .map(|placement| placement.frame)
+        else {
+            return false;
+        };
+
+        let mut next_viewport = workspace.viewport.clone();
+        let visible_right = next_viewport.x + viewport_frame.width;
+        let visible_bottom = next_viewport.y + viewport_frame.height;
+        if active_frame.x < next_viewport.x {
+            next_viewport.x = active_frame.x;
+        } else if active_frame.right() > visible_right {
+            next_viewport.x = active_frame.right() - viewport_frame.width;
+        }
+        if active_frame.y < next_viewport.y {
+            next_viewport.y = active_frame.y;
+        } else if active_frame.bottom() > visible_bottom {
+            next_viewport.y = active_frame.bottom() - viewport_frame.height;
+        }
+        if next_viewport == workspace.viewport {
+            return false;
+        }
+        self.dispatch_control(ControlCommand::SetWorkspaceViewport {
+            workspace_id,
+            viewport: next_viewport,
+        })
+    }
+
+    fn with_active_browser_surface(
+        &mut self,
+        handler: impl FnOnce(&mut Self, SurfaceId) -> bool,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let Some(pane) = workspace.panes.get(&workspace.active_pane) else {
+            return false;
+        };
+        let Some(surface) = pane.active_surface() else {
+            return false;
+        };
+        if surface.kind != PaneKind::Browser {
+            return false;
+        }
+        handler(self, surface.id)
+    }
+
     fn resolve_target_pane(&self, pane_id: Option<PaneId>) -> Option<(WorkspaceId, PaneId)> {
         let model = self.app_state.snapshot_model();
         if let Some(pane_id) = pane_id {
@@ -1835,6 +2362,10 @@ impl SharedCore {
         self.inner.lock().snapshot()
     }
 
+    pub fn selected_shortcut_preset(&self) -> ShortcutPreset {
+        self.inner.lock().ui.selected_shortcut_preset
+    }
+
     pub fn set_window_size(&self, size: PixelSize) {
         let mut inner = self.inner.lock();
         if inner.set_window_size(size) {
@@ -1847,6 +2378,15 @@ impl SharedCore {
         if inner.dispatch_shell_action(action) {
             let _ = self.revisions.send(inner.revision());
         }
+    }
+
+    pub fn dispatch_shortcut_action(&self, action: ShortcutAction) -> bool {
+        let mut inner = self.inner.lock();
+        let changed = inner.dispatch_shortcut_action(action);
+        if changed {
+            let _ = self.revisions.send(inner.revision());
+        }
+        changed
     }
 
     pub fn apply_host_event(&self, event: HostEvent) {
@@ -1895,226 +2435,19 @@ fn builtin_theme_options(selected_theme_id: &str) -> Vec<ThemeOptionSnapshot> {
         .collect()
 }
 
-#[derive(Clone, Copy)]
-struct ShortcutBindingSpec {
-    id: &'static str,
-    label: &'static str,
-    detail: &'static str,
-    category: &'static str,
-    balanced: &'static [&'static str],
-    power_user: &'static [&'static str],
-}
-
-const SHORTCUT_BINDINGS: &[ShortcutBindingSpec] = &[
-    ShortcutBindingSpec {
-        id: "toggle_overview",
-        label: "Toggle overview",
-        detail: "Zoom the current workspace out to fit the full column strip.",
-        category: "General",
-        balanced: &["<Control><Alt>o"],
-        power_user: &["<Control><Alt>o"],
-    },
-    ShortcutBindingSpec {
-        id: "close_terminal",
-        label: "Close terminal",
-        detail: "Close the active pane or active top-level window.",
-        category: "General",
-        balanced: &["<Control><Alt>x"],
-        power_user: &["<Control><Alt>x"],
-    },
-    ShortcutBindingSpec {
-        id: "open_browser_split",
-        label: "Open browser in split",
-        detail: "Split the active pane to the right and open a browser surface.",
-        category: "Browser",
-        balanced: &["<Control><Alt><Shift>l"],
-        power_user: &["<Control><Alt><Shift>l"],
-    },
-    ShortcutBindingSpec {
-        id: "focus_browser_address",
-        label: "Focus browser address bar",
-        detail: "Focus the address bar for the active browser surface.",
-        category: "Browser",
-        balanced: &["<Control>l"],
-        power_user: &["<Control>l"],
-    },
-    ShortcutBindingSpec {
-        id: "reload_browser_page",
-        label: "Reload browser page",
-        detail: "Reload the active browser surface.",
-        category: "Browser",
-        balanced: &["<Control>r"],
-        power_user: &["<Control>r"],
-    },
-    ShortcutBindingSpec {
-        id: "toggle_browser_devtools",
-        label: "Toggle browser devtools",
-        detail: "Show or hide devtools for the active browser surface.",
-        category: "Browser",
-        balanced: &["<Control><Shift>i"],
-        power_user: &["<Control><Shift>i"],
-    },
-    ShortcutBindingSpec {
-        id: "focus_left",
-        label: "Focus left",
-        detail: "Move focus to the column on the left, then fall back to pane focus.",
-        category: "Focus",
-        balanced: &["<Control><Alt>h", "<Control><Alt>Left"],
-        power_user: &["<Control><Alt>h", "<Control><Alt>Left"],
-    },
-    ShortcutBindingSpec {
-        id: "focus_right",
-        label: "Focus right",
-        detail: "Move focus to the column on the right, then fall back to pane focus.",
-        category: "Focus",
-        balanced: &["<Control><Alt>l", "<Control><Alt>Right"],
-        power_user: &["<Control><Alt>l", "<Control><Alt>Right"],
-    },
-    ShortcutBindingSpec {
-        id: "focus_up",
-        label: "Focus up",
-        detail: "Move focus to the stacked window above, then fall back to pane focus.",
-        category: "Focus",
-        balanced: &["<Control><Alt>k", "<Control><Alt>Up"],
-        power_user: &["<Control><Alt>k", "<Control><Alt>Up"],
-    },
-    ShortcutBindingSpec {
-        id: "focus_down",
-        label: "Focus down",
-        detail: "Move focus to the stacked window below, then fall back to pane focus.",
-        category: "Focus",
-        balanced: &["<Control><Alt>j", "<Control><Alt>Down"],
-        power_user: &["<Control><Alt>j", "<Control><Alt>Down"],
-    },
-    ShortcutBindingSpec {
-        id: "new_window_left",
-        label: "New window left",
-        detail: "Create a top-level window in a new column on the left.",
-        category: "Top-level windows",
-        balanced: &[],
-        power_user: &["<Control><Alt><Shift>h", "<Control><Alt><Shift>Left"],
-    },
-    ShortcutBindingSpec {
-        id: "new_window_right",
-        label: "New window right",
-        detail: "Create a top-level window in a new column on the right.",
-        category: "Top-level windows",
-        balanced: &["<Control><Alt>t"],
-        power_user: &["<Control><Alt>t"],
-    },
-    ShortcutBindingSpec {
-        id: "new_window_up",
-        label: "New window up",
-        detail: "Create a stacked top-level window above the active window.",
-        category: "Top-level windows",
-        balanced: &[],
-        power_user: &["<Control><Alt><Shift>k", "<Control><Alt><Shift>Up"],
-    },
-    ShortcutBindingSpec {
-        id: "new_window_down",
-        label: "New window down",
-        detail: "Create a stacked top-level window below the active window.",
-        category: "Top-level windows",
-        balanced: &["<Control><Alt>g"],
-        power_user: &["<Control><Alt>g"],
-    },
-    ShortcutBindingSpec {
-        id: "resize_window_left",
-        label: "Make window narrower",
-        detail: "Reduce the active column width.",
-        category: "Advanced resize",
-        balanced: &[],
-        power_user: &["<Control><Alt>Home"],
-    },
-    ShortcutBindingSpec {
-        id: "resize_window_right",
-        label: "Make window wider",
-        detail: "Increase the active column width.",
-        category: "Advanced resize",
-        balanced: &[],
-        power_user: &["<Control><Alt>End"],
-    },
-    ShortcutBindingSpec {
-        id: "resize_window_up",
-        label: "Make window shorter",
-        detail: "Reduce the active top-level window height.",
-        category: "Advanced resize",
-        balanced: &[],
-        power_user: &["<Control><Alt>Page_Up"],
-    },
-    ShortcutBindingSpec {
-        id: "resize_window_down",
-        label: "Make window taller",
-        detail: "Increase the active top-level window height.",
-        category: "Advanced resize",
-        balanced: &[],
-        power_user: &["<Control><Alt>Page_Down"],
-    },
-    ShortcutBindingSpec {
-        id: "resize_split_left",
-        label: "Make split narrower",
-        detail: "Reduce the active split width.",
-        category: "Advanced resize",
-        balanced: &[],
-        power_user: &["<Control><Alt><Shift>Home"],
-    },
-    ShortcutBindingSpec {
-        id: "resize_split_right",
-        label: "Make split wider",
-        detail: "Increase the active split width.",
-        category: "Advanced resize",
-        balanced: &[],
-        power_user: &["<Control><Alt><Shift>End"],
-    },
-    ShortcutBindingSpec {
-        id: "resize_split_up",
-        label: "Make split shorter",
-        detail: "Reduce the active split height.",
-        category: "Advanced resize",
-        balanced: &[],
-        power_user: &["<Control><Alt><Shift>Page_Up"],
-    },
-    ShortcutBindingSpec {
-        id: "resize_split_down",
-        label: "Make split taller",
-        detail: "Increase the active split height.",
-        category: "Advanced resize",
-        balanced: &[],
-        power_user: &["<Control><Alt><Shift>Page_Down"],
-    },
-    ShortcutBindingSpec {
-        id: "split_right",
-        label: "Split right",
-        detail: "Split the active pane to the right inside the current window.",
-        category: "Pane splits",
-        balanced: &["<Control><Alt><Shift>t"],
-        power_user: &["<Control><Alt><Shift>t"],
-    },
-    ShortcutBindingSpec {
-        id: "split_down",
-        label: "Split down",
-        detail: "Split the active pane downward inside the current window.",
-        category: "Pane splits",
-        balanced: &["<Control><Alt><Shift>g"],
-        power_user: &["<Control><Alt><Shift>g"],
-    },
-];
-
 fn shortcut_bindings(preset: ShortcutPreset) -> Vec<ShortcutBindingSnapshot> {
-    SHORTCUT_BINDINGS
-        .iter()
-        .map(|binding| ShortcutBindingSnapshot {
-            id: binding.id.into(),
-            label: binding.label.into(),
-            detail: binding.detail.into(),
-            category: binding.category.into(),
-            accelerators: match preset {
-                ShortcutPreset::Balanced => binding.balanced,
-                ShortcutPreset::PowerUser => binding.power_user,
-            }
-            .iter()
-            .map(|value| (*value).into())
-            .collect(),
+    ShortcutAction::ALL
+        .into_iter()
+        .map(|action| ShortcutBindingSnapshot {
+            id: action.id().into(),
+            label: action.label().into(),
+            detail: action.detail().into(),
+            category: action.category().into(),
+            accelerators: action
+                .accelerators(preset)
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
         })
         .collect()
 }
