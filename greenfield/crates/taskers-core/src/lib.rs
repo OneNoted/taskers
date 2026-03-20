@@ -467,6 +467,9 @@ pub struct BrowserChromeSnapshot {
     pub surface_id: SurfaceId,
     pub title: String,
     pub url: String,
+    pub can_go_back: bool,
+    pub can_go_forward: bool,
+    pub devtools_open: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,6 +575,12 @@ pub enum HostEvent {
     SurfaceTitleChanged { surface_id: SurfaceId, title: String },
     SurfaceUrlChanged { surface_id: SurfaceId, url: String },
     SurfaceCwdChanged { surface_id: SurfaceId, cwd: String },
+    BrowserNavigationStateChanged {
+        surface_id: SurfaceId,
+        can_go_back: bool,
+        can_go_forward: bool,
+        devtools_open: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,6 +626,13 @@ struct UiState {
     window_size: PixelSize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct BrowserNavigationState {
+    can_go_back: bool,
+    can_go_forward: bool,
+    devtools_open: bool,
+}
+
 #[derive(Clone, Copy)]
 struct WorkspaceWindowPlacement {
     window_id: WorkspaceWindowId,
@@ -649,6 +665,7 @@ struct TaskersCore {
     runtime_status: RuntimeStatus,
     ui: UiState,
     host_commands: VecDeque<HostCommand>,
+    browser_navigation: BTreeMap<SurfaceId, BrowserNavigationState>,
 }
 
 impl TaskersCore {
@@ -669,6 +686,7 @@ impl TaskersCore {
                 window_size: PixelSize::new(1440, 900),
             },
             host_commands: VecDeque::new(),
+            browser_navigation: BTreeMap::new(),
         }
     }
 
@@ -1017,6 +1035,21 @@ impl TaskersCore {
             surface_id: surface.id,
             title: display_surface_title(surface),
             url: normalized_surface_url(surface).unwrap_or_else(|| "about:blank".into()),
+            can_go_back: self
+                .browser_navigation
+                .get(&surface.id)
+                .map(|state| state.can_go_back)
+                .unwrap_or(false),
+            can_go_forward: self
+                .browser_navigation
+                .get(&surface.id)
+                .map(|state| state.can_go_forward)
+                .unwrap_or(false),
+            devtools_open: self
+                .browser_navigation
+                .get(&surface.id)
+                .map(|state| state.devtools_open)
+                .unwrap_or(false),
         })
     }
 
@@ -1112,6 +1145,7 @@ impl TaskersCore {
         match event {
             HostEvent::PaneFocused { pane_id } => self.focus_pane_by_id(pane_id),
             HostEvent::SurfaceClosed { pane_id, surface_id } => {
+                self.browser_navigation.remove(&surface_id);
                 self.close_surface_by_id(pane_id, surface_id)
             }
             HostEvent::SurfaceTitleChanged { surface_id, title } => self.update_surface_metadata(
@@ -1135,6 +1169,24 @@ impl TaskersCore {
                     ..PaneMetadataPatch::default()
                 },
             ),
+            HostEvent::BrowserNavigationStateChanged {
+                surface_id,
+                can_go_back,
+                can_go_forward,
+                devtools_open,
+            } => {
+                let next = BrowserNavigationState {
+                    can_go_back,
+                    can_go_forward,
+                    devtools_open,
+                };
+                if self.browser_navigation.get(&surface_id) == Some(&next) {
+                    return false;
+                }
+                self.browser_navigation.insert(surface_id, next);
+                self.bump_local_revision();
+                true
+            }
         }
     }
 
@@ -2409,6 +2461,33 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn browser_navigation_host_events_update_browser_chrome_snapshot() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+
+        let snapshot = core.snapshot();
+        let browser = snapshot.browser_chrome.expect("active browser chrome");
+        assert!(!browser.can_go_back);
+        assert!(!browser.can_go_forward);
+        assert!(!browser.devtools_open);
+
+        core.apply_host_event(HostEvent::BrowserNavigationStateChanged {
+            surface_id: browser.surface_id,
+            can_go_back: true,
+            can_go_forward: true,
+            devtools_open: true,
+        });
+
+        let browser = core
+            .snapshot()
+            .browser_chrome
+            .expect("active browser chrome after host event");
+        assert!(browser.can_go_back);
+        assert!(browser.can_go_forward);
+        assert!(browser.devtools_open);
     }
 
     #[test]

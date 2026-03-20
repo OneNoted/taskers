@@ -2,10 +2,11 @@ mod theme;
 
 use dioxus::prelude::*;
 use taskers_core::{
-    ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, LayoutNodeSnapshot, PaneSnapshot,
-    RuntimeCapability, RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection,
-    ShellSnapshot, ShortcutBindingSnapshot, SplitAxis, SurfaceKind, SurfaceSnapshot,
-    WorkspaceDirection, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowSnapshot,
+    ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot,
+    LayoutNodeSnapshot, PaneSnapshot, RuntimeCapability, RuntimeStatus, SettingsSnapshot,
+    SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutBindingSnapshot, SplitAxis,
+    SurfaceKind, SurfaceSnapshot, WorkspaceDirection, WorkspaceSummary, WorkspaceViewSnapshot,
+    WorkspaceWindowSnapshot,
 };
 
 fn app_css(snapshot: &ShellSnapshot) -> String {
@@ -198,7 +199,12 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 
                 if matches!(snapshot.section, ShellSection::Workspace) {
                     div { class: if snapshot.overview_mode { "workspace-canvas workspace-canvas-overview" } else { "workspace-canvas" },
-                        {render_workspace_strip(&snapshot.current_workspace, core.clone(), &snapshot.runtime_status)}
+                        {render_workspace_strip(
+                            &snapshot.current_workspace,
+                            snapshot.browser_chrome.as_ref(),
+                            core.clone(),
+                            &snapshot.runtime_status,
+                        )}
                     }
                 } else {
                     div { class: "settings-canvas",
@@ -313,6 +319,7 @@ fn render_runtime_capability(label: &'static str, capability: &RuntimeCapability
 
 fn render_layout(
     node: &LayoutNodeSnapshot,
+    browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
 ) -> Element {
@@ -335,20 +342,21 @@ fn render_layout(
             rsx! {
                 div { class: "split-container", style: "flex-direction: {direction};",
                     div { class: "split-child", style: "{first_style}",
-                        {render_layout(first, core.clone(), runtime_status)}
+                        {render_layout(first, browser_chrome, core.clone(), runtime_status)}
                     }
                     div { class: "split-child", style: "{second_style}",
-                        {render_layout(second, core.clone(), runtime_status)}
+                        {render_layout(second, browser_chrome, core.clone(), runtime_status)}
                     }
                 }
             }
         }
-        LayoutNodeSnapshot::Pane(pane) => render_pane(pane, core, runtime_status),
+        LayoutNodeSnapshot::Pane(pane) => render_pane(pane, browser_chrome, core, runtime_status),
     }
 }
 
 fn render_workspace_strip(
     workspace: &WorkspaceViewSnapshot,
+    browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
 ) -> Element {
@@ -389,7 +397,13 @@ fn render_workspace_strip(
             div { class: "workspace-strip-canvas", style: "{canvas_style}",
                 for column in &workspace.columns {
                     for window in &column.windows {
-                        {render_workspace_window(window, workspace, core.clone(), runtime_status)}
+                        {render_workspace_window(
+                            window,
+                            workspace,
+                            browser_chrome,
+                            core.clone(),
+                            runtime_status,
+                        )}
                     }
                 }
             }
@@ -400,6 +414,7 @@ fn render_workspace_strip(
 fn render_workspace_window(
     window: &WorkspaceWindowSnapshot,
     workspace: &WorkspaceViewSnapshot,
+    browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
 ) -> Element {
@@ -438,13 +453,18 @@ fn render_workspace_window(
                 }
             }
             div { class: "workspace-window-body",
-                {render_layout(&window.layout, core.clone(), runtime_status)}
+                {render_layout(&window.layout, browser_chrome, core.clone(), runtime_status)}
             }
         }
     }
 }
 
-fn render_pane(pane: &PaneSnapshot, core: SharedCore, runtime_status: &RuntimeStatus) -> Element {
+fn render_pane(
+    pane: &PaneSnapshot,
+    browser_chrome: Option<&BrowserChromeSnapshot>,
+    core: SharedCore,
+    runtime_status: &RuntimeStatus,
+) -> Element {
     let pane_class = if pane.active {
         format!("pane-card pane-card-active pane-card-state-{}", pane.attention.slug())
     } else {
@@ -468,6 +488,19 @@ fn render_pane(pane: &PaneSnapshot, core: SharedCore, runtime_status: &RuntimeSt
     let status_class = format!("status-dot status-dot-{}", active_surface.attention.slug());
     let pane_id = pane.id;
     let active_surface_id = active_surface.id;
+    let active_browser_chrome = browser_chrome
+        .filter(|chrome| chrome.surface_id == active_surface.id)
+        .cloned();
+    let toolbar_key = active_browser_chrome
+        .as_ref()
+        .map(|chrome| format!("{}-{}", active_surface.id, chrome.url))
+        .or_else(|| {
+            active_surface
+                .url
+                .as_ref()
+                .map(|url| format!("{}-{}", active_surface.id, url))
+        })
+        .unwrap_or_else(|| active_surface.id.to_string());
 
     let focus_pane = {
         let core = core.clone();
@@ -530,8 +563,9 @@ fn render_pane(pane: &PaneSnapshot, core: SharedCore, runtime_status: &RuntimeSt
             }
             if matches!(active_surface.kind, SurfaceKind::Browser) {
                 BrowserToolbar {
-                    key: "{active_surface.id}",
+                    key: "{toolbar_key}",
                     surface: active_surface.clone(),
+                    chrome: active_browser_chrome,
                     core: core.clone(),
                 }
             }
@@ -570,10 +604,35 @@ fn render_surface_tab(
 }
 
 #[component]
-fn BrowserToolbar(surface: SurfaceSnapshot, core: SharedCore) -> Element {
-    let initial_url = surface.url.clone().unwrap_or_else(|| "about:blank".into());
+fn BrowserToolbar(
+    surface: SurfaceSnapshot,
+    chrome: Option<BrowserChromeSnapshot>,
+    core: SharedCore,
+) -> Element {
+    let initial_url = chrome
+        .as_ref()
+        .map(|chrome| chrome.url.clone())
+        .or_else(|| surface.url.clone())
+        .unwrap_or_else(|| "about:blank".into());
     let mut address = use_signal(|| initial_url.clone());
     let surface_id = surface.id;
+    let can_go_back = chrome
+        .as_ref()
+        .map(|chrome| chrome.can_go_back)
+        .unwrap_or(false);
+    let can_go_forward = chrome
+        .as_ref()
+        .map(|chrome| chrome.can_go_forward)
+        .unwrap_or(false);
+    let devtools_open = chrome
+        .as_ref()
+        .map(|chrome| chrome.devtools_open)
+        .unwrap_or(false);
+    let devtools_label = if devtools_open {
+        "Hide tools"
+    } else {
+        "Devtools"
+    };
 
     let navigate = {
         let core = core.clone();
@@ -608,8 +667,20 @@ fn BrowserToolbar(surface: SurfaceSnapshot, core: SharedCore) -> Element {
 
     rsx! {
         form { class: "browser-toolbar", onsubmit: navigate,
-            button { r#type: "button", class: "browser-toolbar-button", onclick: go_back, "←" }
-            button { r#type: "button", class: "browser-toolbar-button", onclick: go_forward, "→" }
+            button {
+                r#type: "button",
+                class: "browser-toolbar-button",
+                disabled: !can_go_back,
+                onclick: go_back,
+                "←"
+            }
+            button {
+                r#type: "button",
+                class: "browser-toolbar-button",
+                disabled: !can_go_forward,
+                onclick: go_forward,
+                "→"
+            }
             button { r#type: "button", class: "browser-toolbar-button", onclick: reload, "↻" }
             input {
                 class: "browser-address",
@@ -622,7 +693,7 @@ fn BrowserToolbar(surface: SurfaceSnapshot, core: SharedCore) -> Element {
                 r#type: "button",
                 class: "browser-toolbar-button",
                 onclick: toggle_devtools,
-                "Devtools"
+                "{devtools_label}"
             }
         }
     }

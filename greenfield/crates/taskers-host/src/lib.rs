@@ -4,6 +4,7 @@ use gtk::{
     prelude::*,
 };
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     rc::Rc,
     sync::Arc,
@@ -324,9 +325,12 @@ impl TaskersHost {
 }
 
 struct BrowserSurface {
+    surface_id: SurfaceId,
     webview: WebView,
     url: String,
-    devtools_open: bool,
+    devtools_open: Rc<Cell<bool>>,
+    event_sink: HostEventSink,
+    diagnostics: Option<DiagnosticsSink>,
 }
 
 impl BrowserSurface {
@@ -356,6 +360,7 @@ impl BrowserSurface {
             url: url.clone(),
         });
         position_widget(fixed, webview.upcast_ref(), plan.frame);
+        let devtools_open = Rc::new(Cell::new(false));
 
         let pane_id = plan.pane_id;
         let surface_id = plan.surface_id;
@@ -419,8 +424,26 @@ impl BrowserSurface {
         });
 
         let surface_id = plan.surface_id;
+        let navigation_sink = event_sink.clone();
+        let navigation_diagnostics = diagnostics.clone();
+        let navigation_devtools = devtools_open.clone();
+        webview.connect_load_changed(move |web_view, _| {
+            emit_browser_navigation_state(
+                web_view,
+                surface_id,
+                navigation_devtools.get(),
+                &navigation_sink,
+                navigation_diagnostics.as_ref(),
+            );
+        });
+
+        let url_surface_id = plan.surface_id;
         let url_sink = event_sink;
+        let uri_sink = url_sink.clone();
         let url_diagnostics = diagnostics.clone();
+        let navigation_sink = url_sink.clone();
+        let navigation_diagnostics = diagnostics.clone();
+        let navigation_devtools = devtools_open.clone();
         webview.connect_uri_notify(move |web_view| {
             if let Some(url) = web_view.uri() {
                 emit_diagnostic(
@@ -430,14 +453,39 @@ impl BrowserSurface {
                         None,
                         format!("browser url observed: {url}"),
                     )
-                    .with_surface(surface_id),
+                    .with_surface(url_surface_id),
                 );
-                (url_sink)(HostEvent::SurfaceUrlChanged {
-                    surface_id,
+                (uri_sink)(HostEvent::SurfaceUrlChanged {
+                    surface_id: url_surface_id,
                     url: url.to_string(),
                 });
             }
+            emit_browser_navigation_state(
+                web_view,
+                url_surface_id,
+                navigation_devtools.get(),
+                &navigation_sink,
+                navigation_diagnostics.as_ref(),
+            );
         });
+
+        if let Some(inspector) = webview.inspector() {
+            let navigation_webview = webview.clone();
+            let navigation_sink = url_sink.clone();
+            let navigation_diagnostics = diagnostics.clone();
+            let navigation_devtools = devtools_open.clone();
+            let inspector_surface_id = plan.surface_id;
+            inspector.connect_closed(move |_| {
+                navigation_devtools.set(false);
+                emit_browser_navigation_state(
+                    &navigation_webview,
+                    inspector_surface_id,
+                    false,
+                    &navigation_sink,
+                    navigation_diagnostics.as_ref(),
+                );
+            });
+        }
 
         if plan.active {
             webview.grab_focus();
@@ -454,10 +502,21 @@ impl BrowserSurface {
             .with_surface(plan.surface_id),
         );
 
+        emit_browser_navigation_state(
+            &webview,
+            plan.surface_id,
+            devtools_open.get(),
+            &url_sink,
+            diagnostics.as_ref(),
+        );
+
         Ok(Self {
+            surface_id: plan.surface_id,
             webview,
             url,
-            devtools_open: false,
+            devtools_open,
+            event_sink: url_sink,
+            diagnostics,
         })
     }
 
@@ -498,6 +557,7 @@ impl BrowserSurface {
             self.webview.go_back();
         }
         self.webview.grab_focus();
+        self.emit_navigation_state();
     }
 
     fn go_forward(&mut self) {
@@ -505,28 +565,40 @@ impl BrowserSurface {
             self.webview.go_forward();
         }
         self.webview.grab_focus();
+        self.emit_navigation_state();
     }
 
     fn reload(&mut self) {
         self.webview.reload();
         self.webview.grab_focus();
+        self.emit_navigation_state();
     }
 
     fn toggle_devtools(&mut self) {
         let Some(inspector) = self.webview.inspector() else {
             return;
         };
-        if self.devtools_open {
+        if self.devtools_open.get() {
             inspector.close();
-            self.devtools_open = false;
         } else {
             if inspector.can_attach() {
                 inspector.attach();
             }
             inspector.show();
-            self.devtools_open = true;
+            self.devtools_open.set(true);
         }
         self.webview.grab_focus();
+        self.emit_navigation_state();
+    }
+
+    fn emit_navigation_state(&self) {
+        emit_browser_navigation_state(
+            &self.webview,
+            self.surface_id,
+            self.devtools_open.get(),
+            &self.event_sink,
+            self.diagnostics.as_ref(),
+        );
     }
 }
 
@@ -711,6 +783,35 @@ fn connect_ghostty_widget(
                 surface_id,
             });
         }
+    });
+}
+
+fn emit_browser_navigation_state(
+    webview: &WebView,
+    surface_id: SurfaceId,
+    devtools_open: bool,
+    event_sink: &HostEventSink,
+    diagnostics: Option<&DiagnosticsSink>,
+) {
+    emit_diagnostic(
+        diagnostics,
+        DiagnosticRecord::new(
+            DiagnosticCategory::BrowserMetadata,
+            None,
+            format!(
+                "browser navigation state updated back={} forward={} devtools={}",
+                webview.can_go_back(),
+                webview.can_go_forward(),
+                devtools_open
+            ),
+        )
+        .with_surface(surface_id),
+    );
+    (event_sink)(HostEvent::BrowserNavigationStateChanged {
+        surface_id,
+        can_go_back: webview.can_go_back(),
+        can_go_forward: webview.can_go_forward(),
+        devtools_open,
     });
 }
 
