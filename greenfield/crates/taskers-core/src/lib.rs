@@ -18,7 +18,10 @@ use taskers_runtime::ShellLaunchSpec;
 use time::OffsetDateTime;
 use tokio::sync::watch;
 
-pub use taskers_domain::{PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId};
+pub use taskers_domain::{
+    PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
+    WorkspaceWindowMoveTarget,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivityId {
@@ -940,6 +943,10 @@ pub enum ShellAction {
     FocusWorkspaceWindow {
         window_id: WorkspaceWindowId,
     },
+    MoveWorkspaceWindow {
+        window_id: WorkspaceWindowId,
+        target: WorkspaceWindowMoveTarget,
+    },
     ScrollViewport {
         dx: i32,
         dy: i32,
@@ -1680,6 +1687,9 @@ impl TaskersCore {
             ShellAction::FocusWorkspaceWindow { window_id } => {
                 self.focus_workspace_window(window_id)
             }
+            ShellAction::MoveWorkspaceWindow { window_id, target } => {
+                self.move_workspace_window_by_id(window_id, target)
+            }
             ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
             ShellAction::SplitBrowser { pane_id } => {
                 self.split_with_kind_axis(pane_id, PaneKind::Browser, DomainSplitAxis::Horizontal)
@@ -1819,7 +1829,16 @@ impl TaskersCore {
             ShortcutAction::MoveWindowLeft
             | ShortcutAction::MoveWindowRight
             | ShortcutAction::MoveWindowUp
-            | ShortcutAction::MoveWindowDown => false,
+            | ShortcutAction::MoveWindowDown => self.run_workspace_shortcut(|core, _| {
+                let direction = match action {
+                    ShortcutAction::MoveWindowLeft => Direction::Left,
+                    ShortcutAction::MoveWindowRight => Direction::Right,
+                    ShortcutAction::MoveWindowUp => Direction::Up,
+                    ShortcutAction::MoveWindowDown => Direction::Down,
+                    _ => unreachable!("move action already matched"),
+                };
+                Some(core.move_active_workspace_window(direction))
+            }),
             ShortcutAction::ResizeWindowLeft => {
                 self.run_workspace_shortcut(|core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
@@ -1945,6 +1964,22 @@ impl TaskersCore {
         self.dispatch_control(ControlCommand::FocusWorkspaceWindow {
             workspace_id,
             workspace_window_id: window_id,
+        })
+    }
+
+    fn move_workspace_window_by_id(
+        &mut self,
+        window_id: WorkspaceWindowId,
+        target: WorkspaceWindowMoveTarget,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::MoveWorkspaceWindow {
+            workspace_id,
+            workspace_window_id: window_id,
+            target,
         })
     }
 
@@ -2145,6 +2180,99 @@ impl TaskersCore {
 
     fn update_surface_metadata(&mut self, surface_id: SurfaceId, patch: PaneMetadataPatch) -> bool {
         self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch })
+    }
+
+    fn move_active_workspace_window(&mut self, direction: Direction) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let active_window_id = workspace.active_window;
+        let Some((active_column_id, active_column_index, active_window_index)) = workspace
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(column_index, (column_id, column))| {
+                column
+                    .window_order
+                    .iter()
+                    .position(|candidate| *candidate == active_window_id)
+                    .map(|window_index| (*column_id, column_index, window_index))
+            })
+        else {
+            return false;
+        };
+
+        let target = match direction {
+            Direction::Left => {
+                if let Some((column_id, _)) = active_column_index
+                    .checked_sub(1)
+                    .and_then(|index| workspace.columns.get_index(index))
+                {
+                    WorkspaceWindowMoveTarget::ColumnBefore {
+                        column_id: *column_id,
+                    }
+                } else if workspace
+                    .columns
+                    .get(&active_column_id)
+                    .is_some_and(|column| column.window_order.len() > 1)
+                {
+                    WorkspaceWindowMoveTarget::ColumnBefore {
+                        column_id: active_column_id,
+                    }
+                } else {
+                    return false;
+                }
+            }
+            Direction::Right => {
+                if let Some((column_id, _)) = workspace.columns.get_index(active_column_index + 1) {
+                    WorkspaceWindowMoveTarget::ColumnAfter {
+                        column_id: *column_id,
+                    }
+                } else if workspace
+                    .columns
+                    .get(&active_column_id)
+                    .is_some_and(|column| column.window_order.len() > 1)
+                {
+                    WorkspaceWindowMoveTarget::ColumnAfter {
+                        column_id: active_column_id,
+                    }
+                } else {
+                    return false;
+                }
+            }
+            Direction::Up => {
+                let Some(window_id) = workspace
+                    .columns
+                    .get(&active_column_id)
+                    .and_then(|column| {
+                        active_window_index
+                            .checked_sub(1)
+                            .and_then(|index| column.window_order.get(index))
+                    })
+                    .copied()
+                else {
+                    return false;
+                };
+                WorkspaceWindowMoveTarget::StackAbove { window_id }
+            }
+            Direction::Down => {
+                let Some(window_id) = workspace
+                    .columns
+                    .get(&active_column_id)
+                    .and_then(|column| column.window_order.get(active_window_index + 1))
+                    .copied()
+                else {
+                    return false;
+                };
+                WorkspaceWindowMoveTarget::StackBelow { window_id }
+            }
+        };
+
+        self.move_workspace_window_by_id(active_window_id, target)
     }
 
     fn run_workspace_shortcut(

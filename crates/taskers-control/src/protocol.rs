@@ -4,7 +4,7 @@ use uuid::Uuid;
 use taskers_domain::{
     AppModel, Direction, PaneId, PaneKind, PaneMetadataPatch, PersistedSession, SignalEvent,
     SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceViewport,
-    WorkspaceWindowId,
+    WorkspaceWindowId, WorkspaceWindowMoveTarget,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +33,11 @@ pub enum ControlCommand {
     FocusWorkspaceWindow {
         workspace_id: WorkspaceId,
         workspace_window_id: WorkspaceWindowId,
+    },
+    MoveWorkspaceWindow {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        target: WorkspaceWindowMoveTarget,
     },
     FocusPane {
         workspace_id: WorkspaceId,

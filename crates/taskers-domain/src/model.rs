@@ -333,6 +333,15 @@ pub struct WorkspaceViewport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceWindowMoveTarget {
+    ColumnBefore { column_id: WorkspaceColumnId },
+    ColumnAfter { column_id: WorkspaceColumnId },
+    StackAbove { window_id: WorkspaceWindowId },
+    StackBelow { window_id: WorkspaceWindowId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowFrame {
     pub x: i32,
     pub y: i32,
@@ -1318,11 +1327,6 @@ impl AppModel {
             .ok_or(DomainError::MissingWorkspace(workspace_id))?;
         let active_window_id = workspace.active_window;
 
-        if let Some(next_window_id) = workspace.top_level_neighbor(active_window_id, direction) {
-            workspace.focus_window(next_window_id);
-            return Ok(());
-        }
-
         let next_pane = workspace
             .windows
             .get(&active_window_id)
@@ -1332,8 +1336,127 @@ impl AppModel {
                 window.active_pane = next_pane;
             }
             workspace.sync_active_from_window(active_window_id);
+            return Ok(());
         }
 
+        if let Some(next_window_id) = workspace.top_level_neighbor(active_window_id, direction) {
+            workspace.focus_window(next_window_id);
+        }
+
+        Ok(())
+    }
+
+    pub fn move_workspace_window(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        target: WorkspaceWindowMoveTarget,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        if !workspace.windows.contains_key(&workspace_window_id) {
+            return Err(DomainError::MissingWorkspaceWindow(workspace_window_id));
+        }
+
+        let (source_column_id, _source_column_index, source_window_index) = workspace
+            .position_for_window(workspace_window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        let source_window_count = workspace
+            .columns
+            .get(&source_column_id)
+            .map(|column| column.window_order.len())
+            .unwrap_or_default();
+
+        match target {
+            WorkspaceWindowMoveTarget::ColumnBefore { column_id }
+            | WorkspaceWindowMoveTarget::ColumnAfter { column_id } => {
+                let place_after = matches!(target, WorkspaceWindowMoveTarget::ColumnAfter { .. });
+                if !workspace.columns.contains_key(&column_id) {
+                    return Err(DomainError::MissingWorkspaceColumn(column_id));
+                }
+                if source_window_count <= 1 {
+                    if source_column_id == column_id {
+                        workspace.sync_active_from_window(workspace_window_id);
+                        return Ok(());
+                    }
+                    let source_column = workspace
+                        .columns
+                        .shift_remove(&source_column_id)
+                        .ok_or(DomainError::MissingWorkspaceColumn(source_column_id))?;
+                    let mut insert_index = workspace
+                        .columns
+                        .get_index_of(&column_id)
+                        .ok_or(DomainError::MissingWorkspaceColumn(column_id))?;
+                    if place_after {
+                        insert_index += 1;
+                    }
+                    workspace.insert_column_at(insert_index, source_column);
+                } else {
+                    remove_window_from_column(workspace, source_column_id, source_window_index)?;
+                    let target_width = workspace
+                        .columns
+                        .get(&column_id)
+                        .map(|column| column.width)
+                        .ok_or(DomainError::MissingWorkspaceColumn(column_id))?;
+                    let (retained_width, new_width) =
+                        split_top_level_extent(target_width, MIN_WORKSPACE_WINDOW_WIDTH);
+                    let target_column = workspace
+                        .columns
+                        .get_mut(&column_id)
+                        .ok_or(DomainError::MissingWorkspaceColumn(column_id))?;
+                    target_column.width = retained_width;
+
+                    let mut new_column = WorkspaceColumnRecord::new(workspace_window_id);
+                    new_column.width = new_width;
+                    let insert_index = workspace
+                        .columns
+                        .get_index_of(&column_id)
+                        .ok_or(DomainError::MissingWorkspaceColumn(column_id))?;
+                    workspace.insert_column_at(
+                        if place_after {
+                            insert_index + 1
+                        } else {
+                            insert_index
+                        },
+                        new_column,
+                    );
+                }
+            }
+            WorkspaceWindowMoveTarget::StackAbove { window_id }
+            | WorkspaceWindowMoveTarget::StackBelow { window_id } => {
+                let place_below = matches!(target, WorkspaceWindowMoveTarget::StackBelow { .. });
+                if workspace_window_id == window_id {
+                    workspace.sync_active_from_window(workspace_window_id);
+                    return Ok(());
+                }
+                let (target_column_id, _, _) = workspace
+                    .position_for_window(window_id)
+                    .ok_or(DomainError::MissingWorkspaceWindow(window_id))?;
+
+                remove_window_from_column(workspace, source_column_id, source_window_index)?;
+                let (_, _, target_window_index) = workspace
+                    .position_for_window(window_id)
+                    .ok_or(DomainError::MissingWorkspaceWindow(window_id))?;
+                let insert_index = if place_below {
+                    target_window_index + 1
+                } else {
+                    target_window_index
+                };
+                let target_column = workspace
+                    .columns
+                    .get_mut(&target_column_id)
+                    .ok_or(DomainError::MissingWorkspaceColumn(target_column_id))?;
+                target_column
+                    .window_order
+                    .insert(insert_index, workspace_window_id);
+                target_column.active_window = workspace_window_id;
+            }
+        }
+
+        workspace.normalize();
+        workspace.sync_active_from_window(workspace_window_id);
         Ok(())
     }
 
@@ -2166,6 +2289,36 @@ fn workspace_agent_state(
     }
 }
 
+fn remove_window_from_column(
+    workspace: &mut Workspace,
+    column_id: WorkspaceColumnId,
+    window_index: usize,
+) -> Result<(), DomainError> {
+    let remove_column = {
+        let column = workspace
+            .columns
+            .get_mut(&column_id)
+            .ok_or(DomainError::MissingWorkspaceColumn(column_id))?;
+        if window_index >= column.window_order.len() {
+            return Err(DomainError::MissingWorkspaceColumn(column_id));
+        }
+        column.window_order.remove(window_index);
+        if column.window_order.is_empty() {
+            true
+        } else {
+            if !column.window_order.contains(&column.active_window) {
+                let replacement_index = window_index.min(column.window_order.len() - 1);
+                column.active_window = column.window_order[replacement_index];
+            }
+            false
+        }
+    };
+    if remove_column {
+        workspace.columns.shift_remove(&column_id);
+    }
+    Ok(())
+}
+
 fn close_layout_pane(window: &mut WorkspaceWindowRecord, pane_id: PaneId) -> Option<PaneId> {
     let fallback = [
         Direction::Right,
@@ -2346,29 +2499,22 @@ mod tests {
     }
 
     #[test]
-    fn directional_focus_prefers_top_level_windows_and_restores_inner_focus() {
+    fn directional_focus_prefers_inner_split_before_neighboring_window() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
         let first_pane = model
             .active_workspace()
             .and_then(|workspace| workspace.panes.first().map(|(pane_id, _)| *pane_id))
             .expect("pane");
+        let split_right_pane = model
+            .split_pane(workspace_id, Some(first_pane), SplitAxis::Horizontal)
+            .expect("split");
         let right_window_pane = model
             .create_workspace_window(workspace_id, Direction::Right)
             .expect("window");
-        let lower_window_pane = model
-            .create_workspace_window(workspace_id, Direction::Down)
-            .expect("window");
-        let lower_right_pane = model
-            .split_pane(workspace_id, Some(lower_window_pane), SplitAxis::Vertical)
-            .expect("split");
-
-        model
-            .focus_pane(workspace_id, lower_window_pane)
-            .expect("focus lower window");
         model
             .focus_pane(workspace_id, first_pane)
-            .expect("focus left window");
+            .expect("focus first pane");
         model
             .focus_pane_direction(workspace_id, Direction::Right)
             .expect("move right");
@@ -2379,15 +2525,12 @@ mod tests {
                 .get(&workspace_id)
                 .expect("workspace")
                 .active_pane,
-            lower_window_pane
+            split_right_pane
         );
 
         model
-            .focus_pane(workspace_id, lower_right_pane)
-            .expect("focus lower pane");
-        model
-            .focus_pane_direction(workspace_id, Direction::Up)
-            .expect("move up");
+            .focus_pane_direction(workspace_id, Direction::Right)
+            .expect("move right again");
         assert_eq!(
             model
                 .workspaces
@@ -2398,14 +2541,8 @@ mod tests {
         );
 
         model
-            .focus_pane_direction(workspace_id, Direction::Down)
-            .expect("move down again");
-        model
             .focus_pane_direction(workspace_id, Direction::Left)
             .expect("move left");
-        model
-            .focus_pane_direction(workspace_id, Direction::Right)
-            .expect("move right again");
 
         assert_eq!(
             model
@@ -2413,7 +2550,7 @@ mod tests {
                 .get(&workspace_id)
                 .expect("workspace")
                 .active_pane,
-            lower_right_pane
+            split_right_pane
         );
     }
 
@@ -2442,6 +2579,133 @@ mod tests {
             .find(|column| column.window_order.contains(&workspace.active_window))
             .expect("right column");
         assert_eq!(right_column.window_order.len(), 1);
+    }
+
+    #[test]
+    fn moving_single_window_column_reorders_columns_and_preserves_width() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_window_id = model.active_workspace().expect("workspace").active_window;
+        let right_window_pane = model
+            .create_workspace_window(workspace_id, Direction::Right)
+            .expect("window");
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let right_window_id = workspace
+            .window_for_pane(right_window_pane)
+            .expect("right window id");
+        let left_column_id = workspace
+            .column_for_window(first_window_id)
+            .expect("left column");
+        let right_column_id = workspace
+            .column_for_window(right_window_id)
+            .expect("right column");
+        let _ = workspace;
+
+        model
+            .set_workspace_column_width(
+                workspace_id,
+                right_column_id,
+                DEFAULT_WORKSPACE_WINDOW_WIDTH + 240,
+            )
+            .expect("set width");
+        model
+            .move_workspace_window(
+                workspace_id,
+                right_window_id,
+                WorkspaceWindowMoveTarget::ColumnBefore {
+                    column_id: left_column_id,
+                },
+            )
+            .expect("move window");
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
+        assert_eq!(ordered_columns.len(), 2);
+        assert_eq!(ordered_columns[0].window_order, vec![right_window_id]);
+        assert_eq!(
+            ordered_columns[0].width,
+            DEFAULT_WORKSPACE_WINDOW_WIDTH + 240
+        );
+        assert_eq!(ordered_columns[1].window_order, vec![first_window_id]);
+        assert_eq!(workspace.active_window, right_window_id);
+    }
+
+    #[test]
+    fn moving_stacked_window_sideways_creates_a_new_column() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_window_id = model.active_workspace().expect("workspace").active_window;
+        let lower_window_pane = model
+            .create_workspace_window(workspace_id, Direction::Down)
+            .expect("window");
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let lower_window_id = workspace
+            .window_for_pane(lower_window_pane)
+            .expect("lower window id");
+        let source_column_id = workspace
+            .column_for_window(first_window_id)
+            .expect("source column");
+        let _ = workspace;
+
+        model
+            .set_workspace_column_width(
+                workspace_id,
+                source_column_id,
+                DEFAULT_WORKSPACE_WINDOW_WIDTH + 400,
+            )
+            .expect("set width");
+        model
+            .move_workspace_window(
+                workspace_id,
+                lower_window_id,
+                WorkspaceWindowMoveTarget::ColumnAfter {
+                    column_id: source_column_id,
+                },
+            )
+            .expect("move window");
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
+        assert_eq!(ordered_columns.len(), 2);
+        assert_eq!(ordered_columns[0].window_order, vec![first_window_id]);
+        assert_eq!(ordered_columns[0].width, 840);
+        assert_eq!(ordered_columns[1].window_order, vec![lower_window_id]);
+        assert_eq!(ordered_columns[1].width, 840);
+        assert_eq!(workspace.active_window, lower_window_id);
+    }
+
+    #[test]
+    fn moving_window_into_stack_removes_empty_source_column() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_window_id = model.active_workspace().expect("workspace").active_window;
+        let right_window_pane = model
+            .create_workspace_window(workspace_id, Direction::Right)
+            .expect("window");
+        let right_window_id = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.window_for_pane(right_window_pane))
+            .expect("right window id");
+
+        model
+            .move_workspace_window(
+                workspace_id,
+                right_window_id,
+                WorkspaceWindowMoveTarget::StackBelow {
+                    window_id: first_window_id,
+                },
+            )
+            .expect("stack window");
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let only_column = workspace.columns.values().next().expect("single column");
+        assert_eq!(workspace.columns.len(), 1);
+        assert_eq!(
+            only_column.window_order,
+            vec![first_window_id, right_window_id]
+        );
+        assert_eq!(workspace.active_window, right_window_id);
     }
 
     #[test]

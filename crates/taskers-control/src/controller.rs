@@ -114,6 +114,19 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::MoveWorkspaceWindow {
+                workspace_id,
+                workspace_window_id,
+                target,
+            } => {
+                model.move_workspace_window(workspace_id, workspace_window_id, target)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window moved".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::FocusPane {
                 workspace_id,
                 pane_id,

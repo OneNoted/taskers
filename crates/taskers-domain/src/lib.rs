@@ -16,6 +16,6 @@ pub use model::{
     PaneRecord, PersistedSession, PrStatus, ProgressState, PullRequestState,
     SESSION_SCHEMA_VERSION, SurfaceRecord, WindowFrame, WindowRecord, Workspace,
     WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord, WorkspaceSummary,
-    WorkspaceViewport, WorkspaceWindowRecord,
+    WorkspaceViewport, WorkspaceWindowMoveTarget, WorkspaceWindowRecord,
 };
 pub use signal::{SignalEvent, SignalKind, SignalPaneMetadata};
