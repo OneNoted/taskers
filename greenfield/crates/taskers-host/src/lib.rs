@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use gtk::{
-    EventControllerFocus, EventControllerScroll, EventControllerScrollFlags, Fixed, GestureClick,
-    Overlay, Widget, glib, prelude::*,
+    Align, Box as GtkBox, EventControllerFocus, EventControllerScroll, EventControllerScrollFlags,
+    Fixed, GestureClick, Orientation, Overlay, Widget, glib, prelude::*,
 };
 use std::{
     cell::Cell,
@@ -255,7 +255,7 @@ impl TaskersHost {
 
         for surface_id in stale {
             if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
-                detach_from_fixed(&self.surface_layer, surface.webview.upcast_ref());
+                surface.shell.detach(&self.surface_layer);
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -315,7 +315,7 @@ impl TaskersHost {
 
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
-                detach_from_fixed(&self.surface_layer, &surface.widget);
+                surface.shell.detach(&self.surface_layer);
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -363,6 +363,7 @@ impl TaskersHost {
 }
 
 struct BrowserSurface {
+    shell: NativeSurfaceShell,
     surface_id: SurfaceId,
     webview: WebView,
     url: String,
@@ -394,13 +395,17 @@ impl BrowserSurface {
             .focusable(true)
             .settings(&settings)
             .build();
+        webview.add_css_class("native-surface-widget");
+        webview.add_css_class("native-surface-browser-widget");
         webview.set_can_target(interactive);
         webview.load_uri(&url);
         (event_sink)(HostEvent::SurfaceUrlChanged {
             surface_id: plan.surface_id,
             url: url.clone(),
         });
-        position_widget(fixed, webview.upcast_ref(), plan.frame);
+        let shell = NativeSurfaceShell::new("native-surface-browser");
+        shell.mount_child(webview.upcast_ref());
+        shell.position(fixed, plan.frame);
         let devtools_open = Rc::new(Cell::new(false));
 
         let pane_id = plan.pane_id;
@@ -532,6 +537,7 @@ impl BrowserSurface {
         );
 
         Ok(Self {
+            shell,
             surface_id: plan.surface_id,
             webview,
             url,
@@ -551,7 +557,7 @@ impl BrowserSurface {
         interactive: bool,
         diagnostics: Option<&DiagnosticsSink>,
     ) -> Result<()> {
-        position_widget(fixed, self.webview.upcast_ref(), plan.frame);
+        self.shell.position(fixed, plan.frame);
         self.webview.set_can_target(interactive);
 
         let BrowserMountSpec { url } = browser_spec(plan)?;
@@ -639,6 +645,7 @@ impl BrowserSurface {
 }
 
 struct TerminalSurface {
+    shell: NativeSurfaceShell,
     widget: Widget,
     active: bool,
     interactive: bool,
@@ -661,9 +668,16 @@ impl TerminalSurface {
             .map_err(|error| anyhow!(error.to_string()))?;
         widget.set_hexpand(true);
         widget.set_vexpand(true);
+        widget.set_halign(Align::Fill);
+        widget.set_valign(Align::Fill);
         widget.set_focusable(true);
+        widget.add_css_class("native-surface-widget");
+        widget.add_css_class("native-surface-terminal-widget");
+        widget.add_css_class("terminal-output");
         widget.set_can_target(interactive);
-        position_widget(fixed, &widget, plan.frame);
+        let shell = NativeSurfaceShell::new("native-surface-terminal");
+        shell.mount_child(&widget);
+        shell.position(fixed, plan.frame);
 
         connect_ghostty_widget(host, &widget, plan, event_sink, diagnostics.clone());
 
@@ -683,6 +697,7 @@ impl TerminalSurface {
         );
 
         Ok(Self {
+            shell,
             widget,
             active: plan.active,
             interactive,
@@ -700,7 +715,7 @@ impl TerminalSurface {
         diagnostics: Option<&DiagnosticsSink>,
     ) {
         self.widget.set_can_target(interactive);
-        position_widget(fixed, &self.widget, frame);
+        self.shell.position(fixed, frame);
         if active && interactive && (!self.active || !self.interactive) {
             let _ = host.focus_surface(&self.widget);
         }
@@ -715,6 +730,43 @@ impl TerminalSurface {
                 "terminal surface updated",
             ),
         );
+    }
+}
+
+struct NativeSurfaceShell {
+    root: GtkBox,
+}
+
+impl NativeSurfaceShell {
+    fn new(kind_class: &'static str) -> Self {
+        let root = GtkBox::new(Orientation::Vertical, 0);
+        root.set_hexpand(true);
+        root.set_vexpand(true);
+        root.set_halign(Align::Fill);
+        root.set_valign(Align::Fill);
+        root.set_focusable(false);
+        root.set_can_target(false);
+        root.add_css_class("native-surface-host");
+        root.add_css_class(kind_class);
+        Self { root }
+    }
+
+    fn mount_child(&self, child: &Widget) {
+        child.set_hexpand(true);
+        child.set_vexpand(true);
+        child.set_halign(Align::Fill);
+        child.set_valign(Align::Fill);
+        if child.parent().is_none() {
+            self.root.append(child);
+        }
+    }
+
+    fn position(&self, fixed: &Fixed, frame: taskers_core::Frame) {
+        position_widget(fixed, self.root.upcast_ref(), frame);
+    }
+
+    fn detach(&self, fixed: &Fixed) {
+        detach_from_fixed(fixed, self.root.upcast_ref());
     }
 }
 
