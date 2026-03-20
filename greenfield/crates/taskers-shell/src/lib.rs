@@ -214,36 +214,41 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             }
 
             aside { class: "attention-panel",
-                div { class: "sidebar-heading", "Agents" }
-                div { class: "attention-summary",
-                    div { class: "workspace-label", "{snapshot.agents.len()} live agents" }
-                    div { class: "workspace-meta", "{snapshot.activity.len()} unread · {snapshot.done_activity.len()} done" }
+                div { class: "notification-header",
+                    div { class: "sidebar-heading", "Notifications" }
+                    div { class: "notification-counts",
+                        if !snapshot.agents.is_empty() {
+                            span { class: "notification-count-pill notification-count-agents",
+                                "{snapshot.agents.len()} agents"
+                            }
+                        }
+                        if snapshot.activity.len() > 0 {
+                            span { class: "notification-count-pill notification-count-unread",
+                                "{snapshot.activity.len()} unread"
+                            }
+                        }
+                    }
                 }
-                if snapshot.agents.is_empty() {
-                    div { class: "empty-state", "No live agents." }
-                } else {
-                    div { class: "sidebar-heading", "Live sessions" }
-                    div { class: "activity-list",
+                if !snapshot.agents.is_empty() {
+                    div { class: "agent-session-list",
                         for agent in &snapshot.agents {
                             {render_agent_item(agent, core.clone(), &snapshot.current_workspace)}
                         }
                     }
                 }
-                div { class: "sidebar-heading", "Inbox" }
-                if snapshot.activity.is_empty() {
-                    div { class: "empty-state", "No unread items." }
-                } else {
-                    div { class: "activity-list",
-                        for item in &snapshot.activity {
-                            {render_activity_item(item, core.clone(), &snapshot.current_workspace)}
+                div { class: "notification-timeline",
+                    if snapshot.activity.is_empty() && snapshot.done_activity.is_empty() {
+                        div { class: "notification-empty",
+                            div { class: "notification-empty-icon", "◎" }
+                            div { class: "notification-empty-title", "No notifications" }
+                            div { class: "notification-empty-subtitle", "Activity from agents and surfaces appears here." }
                         }
-                    }
-                }
-                if !snapshot.done_activity.is_empty() {
-                    div { class: "sidebar-heading", "Done" }
-                    div { class: "activity-list",
-                        for item in snapshot.done_activity.iter().take(6) {
-                            {render_activity_item(item, core.clone(), &snapshot.current_workspace)}
+                    } else {
+                        for item in &snapshot.activity {
+                            {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
+                        }
+                        for item in snapshot.done_activity.iter().take(8) {
+                            {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
                         }
                     }
                 }
@@ -823,16 +828,24 @@ fn render_agent_item(
     }
 }
 
-fn render_activity_item(
+
+fn render_notification_row(
     item: &ActivityItemSnapshot,
     core: SharedCore,
     current_workspace: &taskers_core::WorkspaceViewSnapshot,
 ) -> Element {
-    let row_class = format!("activity-item activity-item-state-{}", item.attention.slug());
+    let dot_class = if item.unread {
+        "notification-dot notification-dot-unread"
+    } else {
+        "notification-dot notification-dot-read"
+    };
     let activity_id = item.id;
     let dismiss = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::DismissActivity { activity_id })
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::DismissActivity { activity_id });
+        }
     };
     let focus_target = {
         let core = core.clone();
@@ -854,21 +867,30 @@ fn render_activity_item(
     };
 
     rsx! {
-        div { class: "activity-item-shell",
-            button { class: "activity-item-button", onclick: focus_target,
-                div { class: "{row_class}",
-                    div { class: "activity-header",
-                        div { class: "workspace-label", "{item.title}" }
-                        div { class: "activity-time", "{item.attention.label()}" }
+        button { class: "notification-row-button", onclick: focus_target,
+            div { class: "notification-row",
+                div { class: "{dot_class}" }
+                div { class: "notification-row-content",
+                    div { class: "notification-row-header",
+                        div { class: "notification-title", "{item.title}" }
+                        div { class: "notification-timestamp", "{item.timestamp}" }
                     }
-                    div { class: "activity-meta", "{item.meta}" }
-                    div { class: "activity-preview", "{item.preview}" }
+                    if let Some(body) = &item.body {
+                        div { class: "notification-body", "{body}" }
+                    }
+                    div { class: "notification-row-footer",
+                        if let Some(source) = &item.source_workspace_title {
+                            div { class: "notification-source", "{source}" }
+                        }
+                        if item.unread {
+                            button {
+                                class: "notification-clear",
+                                onclick: dismiss,
+                                "×"
+                            }
+                        }
+                    }
                 }
-            }
-            if item.unread {
-                button { class: "activity-action", onclick: dismiss, "Done" }
-            } else {
-                div { class: "activity-action activity-action-passive", "Seen" }
             }
         }
     }

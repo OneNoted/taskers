@@ -303,7 +303,7 @@ button {{
 .workspace-add:hover {{
   background: {waiting_10};
   color: {waiting_text};
-  border-color: {waiting_25};
+  border-color: {waiting_18};
 }}
 
 .workspace-tab {{
@@ -1066,57 +1066,208 @@ button {{
   font-size: 12px;
 }}
 
-.activity-item-shell {{
-  align-items: stretch;
+.activity-item {{
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }}
 
 .activity-item-button {{
-  flex: 1;
+  width: 100%;
   border: 0;
   padding: 0;
   background: transparent;
   text-align: left;
 }}
 
-.activity-item {{
-  border-left: 2px solid transparent;
-  border-radius: 8px;
-  padding: 10px;
+.activity-item-button:hover .activity-item {{
+  background: {border_04};
+}}
+
+.notification-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}}
+
+.notification-counts {{
+  display: flex;
+  gap: 6px;
+}}
+
+.notification-count-pill {{
+  font-size: 10px;
+  font-weight: 600;
+  color: {text_dim};
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: {border_06};
+}}
+
+.notification-count-unread {{
+  background: {accent_14};
+  color: {text_bright};
+}}
+
+.agent-session-list {{
   display: flex;
   flex-direction: column;
   gap: 4px;
 }}
 
-.activity-item-button:hover .activity-item {{
-  background: {border_04};
+.notification-timeline {{
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }}
 
-.activity-item-state-busy {{
-  border-left-color: {busy_55};
+.notification-row-button {{
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
 }}
 
-.activity-item-state-completed {{
-  border-left-color: {completed_55};
+.notification-row {{
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 8px;
+  background: {border_03};
+  transition: background 0.14s ease-in-out;
 }}
 
-.activity-item-state-waiting {{
-  border-left-color: {waiting_70};
+.notification-row-button:hover .notification-row {{
+  background: {border_06};
 }}
 
-.activity-item-state-error {{
-  border-left-color: {error_65};
+.notification-dot {{
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  margin-top: 4px;
 }}
 
-.activity-action {{
-  align-self: center;
+.notification-dot-unread {{
+  background: {accent};
+}}
+
+.notification-dot-read {{
+  background: transparent;
+  border: 1px solid {accent_20};
+}}
+
+.notification-row-content {{
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}}
+
+.notification-row-header {{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}}
+
+.notification-title {{
+  font-weight: 600;
+  font-size: 12.5px;
+  color: {text_bright};
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+
+.notification-body {{
+  color: {text_subtle};
+  font-size: 11px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}}
+
+.notification-timestamp {{
+  flex: 0 0 auto;
+  font-size: 10px;
   color: {text_dim};
-  padding: 0 10px;
+  white-space: nowrap;
 }}
 
-.activity-action:hover {{
-  background: {waiting_10};
-  color: {waiting_text};
-  border-color: {waiting_25};
+.notification-row-footer {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}}
+
+.notification-source {{
+  font-size: 10px;
+  color: {text_dim};
+}}
+
+.notification-clear {{
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: {text_dim};
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
+}}
+
+.notification-clear:hover {{
+  background: {error_16};
+  color: {error};
+}}
+
+.notification-empty {{
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 16px;
+}}
+
+.notification-empty-icon {{
+  font-size: 28px;
+  color: {text_dim};
+  opacity: 0.5;
+}}
+
+.notification-empty-title {{
+  font-weight: 600;
+  font-size: 13px;
+  color: {text_muted};
+}}
+
+.notification-empty-subtitle {{
+  font-size: 11px;
+  color: {text_dim};
+  text-align: center;
+  line-height: 1.4;
 }}
 
 .settings-grid {{
@@ -1232,28 +1383,31 @@ button {{
         busy_10 = rgba(p.busy, 0.10),
         busy_12 = rgba(p.busy, 0.12),
         busy_16 = rgba(p.busy, 0.16),
-        busy_55 = rgba(p.busy, 0.55),
+
+
         busy_text = p.busy_text.to_hex(),
         completed = p.completed.to_hex(),
         completed_10 = rgba(p.completed, 0.10),
         completed_12 = rgba(p.completed, 0.12),
         completed_16 = rgba(p.completed, 0.16),
-        completed_55 = rgba(p.completed, 0.55),
+
+
         completed_text = p.completed_text.to_hex(),
         waiting = p.waiting.to_hex(),
         waiting_10 = rgba(p.waiting, 0.10),
         waiting_12 = rgba(p.waiting, 0.12),
         waiting_14 = rgba(p.waiting, 0.14),
         waiting_18 = rgba(p.waiting, 0.18),
-        waiting_25 = rgba(p.waiting, 0.25),
-        waiting_70 = rgba(p.waiting, 0.70),
+
+
         waiting_text = p.waiting_text.to_hex(),
         error = p.error.to_hex(),
         error_10 = rgba(p.error, 0.10),
         error_12 = rgba(p.error, 0.12),
         error_16 = rgba(p.error, 0.16),
         error_18 = rgba(p.error, 0.18),
-        error_65 = rgba(p.error, 0.65),
+
+
         error_text = p.error_text.to_hex(),
         action_window_22 = rgba(p.action_window, 0.22),
         action_split_22 = rgba(p.action_split, 0.22),
