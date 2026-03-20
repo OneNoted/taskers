@@ -26,6 +26,11 @@ pub enum ControlCommand {
         pane_id: Option<PaneId>,
         axis: SplitAxis,
     },
+    SplitPaneDirection {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        direction: Direction,
+    },
     CreateWorkspaceWindow {
         workspace_id: WorkspaceId,
         direction: Direction,
@@ -114,6 +119,13 @@ pub enum ControlCommand {
         target_pane_id: PaneId,
         to_index: usize,
     },
+    MoveSurfaceToSplit {
+        workspace_id: WorkspaceId,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        direction: Direction,
+    },
     SetWorkspaceViewport {
         workspace_id: WorkspaceId,
         viewport: WorkspaceViewport,
@@ -159,6 +171,9 @@ pub enum ControlResponse {
         workspace_id: WorkspaceId,
     },
     PaneSplit {
+        pane_id: PaneId,
+    },
+    SurfaceMovedToSplit {
         pane_id: PaneId,
     },
     SurfaceCreated {

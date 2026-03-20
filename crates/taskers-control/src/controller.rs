@@ -90,6 +90,20 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::SplitPaneDirection {
+                workspace_id,
+                pane_id,
+                direction,
+            } => {
+                let new_pane_id =
+                    model.split_pane_direction(workspace_id, Some(pane_id), direction)?;
+                (
+                    ControlResponse::PaneSplit {
+                        pane_id: new_pane_id,
+                    },
+                    true,
+                )
+            }
             ControlCommand::CreateWorkspaceWindow {
                 workspace_id,
                 direction,
@@ -313,6 +327,27 @@ impl InMemoryController {
                 (
                     ControlResponse::Ack {
                         message: "surface transferred".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MoveSurfaceToSplit {
+                workspace_id,
+                source_pane_id,
+                surface_id,
+                target_pane_id,
+                direction,
+            } => {
+                let new_pane_id = model.move_surface_to_split(
+                    workspace_id,
+                    source_pane_id,
+                    surface_id,
+                    target_pane_id,
+                    direction,
+                )?;
+                (
+                    ControlResponse::SurfaceMovedToSplit {
+                        pane_id: new_pane_id,
                     },
                     true,
                 )

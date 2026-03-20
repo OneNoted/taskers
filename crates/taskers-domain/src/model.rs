@@ -13,7 +13,7 @@ use crate::{
 pub const SESSION_SCHEMA_VERSION: u32 = 4;
 pub const DEFAULT_WORKSPACE_WINDOW_WIDTH: i32 = 1280;
 pub const DEFAULT_WORKSPACE_WINDOW_HEIGHT: i32 = 860;
-pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 2;
+pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 16;
 pub const MIN_WORKSPACE_WINDOW_WIDTH: i32 = 720;
 pub const MIN_WORKSPACE_WINDOW_HEIGHT: i32 = 420;
 pub const KEYBOARD_RESIZE_STEP: i32 = 80;
@@ -54,6 +54,8 @@ pub enum DomainError {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    #[error("{0}")]
+    InvalidOperation(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +153,10 @@ pub struct PaneRecord {
 impl PaneRecord {
     pub fn new(kind: PaneKind) -> Self {
         let surface = SurfaceRecord::new(kind);
+        Self::from_surface(surface)
+    }
+
+    fn from_surface(surface: SurfaceRecord) -> Self {
         let active_surface = surface.id;
         let mut surfaces = IndexMap::new();
         surfaces.insert(active_surface, surface);
@@ -1198,6 +1204,19 @@ impl AppModel {
         target_pane: Option<PaneId>,
         axis: SplitAxis,
     ) -> Result<PaneId, DomainError> {
+        let direction = match axis {
+            SplitAxis::Horizontal => Direction::Right,
+            SplitAxis::Vertical => Direction::Down,
+        };
+        self.split_pane_direction(workspace_id, target_pane, direction)
+    }
+
+    pub fn split_pane_direction(
+        &mut self,
+        workspace_id: WorkspaceId,
+        target_pane: Option<PaneId>,
+        direction: Direction,
+    ) -> Result<PaneId, DomainError> {
         let workspace = self
             .workspaces
             .get_mut(&workspace_id)
@@ -1219,7 +1238,9 @@ impl AppModel {
         workspace.panes.insert(new_pane_id, new_pane);
 
         if let Some(window) = workspace.windows.get_mut(&window_id) {
-            window.layout.split_leaf(target, axis, new_pane_id, 500);
+            window
+                .layout
+                .split_leaf_with_direction(target, direction, new_pane_id, 500);
             window.active_pane = new_pane_id;
         }
         workspace.sync_active_from_window(window_id);
@@ -1999,6 +2020,120 @@ impl AppModel {
         Ok(())
     }
 
+    pub fn move_surface_to_split(
+        &mut self,
+        workspace_id: WorkspaceId,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        direction: Direction,
+    ) -> Result<PaneId, DomainError> {
+        {
+            let workspace = self
+                .workspaces
+                .get(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let source_pane = workspace
+                .panes
+                .get(&source_pane_id)
+                .ok_or(DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id: source_pane_id,
+                })?;
+            if !workspace.panes.contains_key(&target_pane_id) {
+                return Err(DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id: target_pane_id,
+                });
+            }
+            if !source_pane.surfaces.contains_key(&surface_id) {
+                return Err(DomainError::SurfaceNotInPane {
+                    workspace_id,
+                    pane_id: source_pane_id,
+                    surface_id,
+                });
+            }
+            if source_pane_id == target_pane_id && source_pane.surfaces.len() <= 1 {
+                return Err(DomainError::InvalidOperation(
+                    "cannot split a pane from its only surface",
+                ));
+            }
+        }
+
+        let target_window_id = self
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.window_for_pane(target_pane_id))
+            .ok_or(DomainError::MissingPane(target_pane_id))?;
+
+        let moved_surface = {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let source_pane = workspace.panes.get_mut(&source_pane_id).ok_or(
+                DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id: source_pane_id,
+                },
+            )?;
+            source_pane
+                .surfaces
+                .shift_remove(&surface_id)
+                .ok_or(DomainError::SurfaceNotInPane {
+                    workspace_id,
+                    pane_id: source_pane_id,
+                    surface_id,
+                })?
+        };
+        let new_pane = PaneRecord::from_surface(moved_surface);
+        let new_pane_id = new_pane.id;
+
+        let should_close_source_pane = self
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .is_some_and(|pane| pane.surfaces.is_empty());
+
+        {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            workspace.panes.insert(new_pane_id, new_pane);
+
+            let target_window = workspace
+                .windows
+                .get_mut(&target_window_id)
+                .ok_or(DomainError::MissingPane(target_pane_id))?;
+            target_window.layout.split_leaf_with_direction(
+                target_pane_id,
+                direction,
+                new_pane_id,
+                500,
+            );
+            target_window.active_pane = new_pane_id;
+            for notification in &mut workspace.notifications {
+                if notification.surface_id == surface_id {
+                    notification.pane_id = new_pane_id;
+                }
+            }
+            workspace.sync_active_from_window(target_window_id);
+            let _ = workspace.focus_surface(new_pane_id, surface_id);
+        }
+
+        if should_close_source_pane {
+            self.close_pane(workspace_id, source_pane_id)?;
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let _ = workspace.focus_surface(new_pane_id, surface_id);
+        }
+
+        Ok(new_pane_id)
+    }
+
     pub fn close_pane(
         &mut self,
         workspace_id: WorkspaceId,
@@ -2499,6 +2634,32 @@ mod tests {
     }
 
     #[test]
+    fn split_pane_direction_places_new_pane_on_requested_side() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_pane = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.first().map(|(pane_id, _)| *pane_id))
+            .expect("pane");
+
+        let left_pane = model
+            .split_pane_direction(workspace_id, Some(first_pane), Direction::Left)
+            .expect("split left");
+        let upper_pane = model
+            .split_pane_direction(workspace_id, Some(first_pane), Direction::Up)
+            .expect("split up");
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let active_window = workspace.active_window_record().expect("window");
+
+        assert_eq!(workspace.active_pane, upper_pane);
+        assert_eq!(
+            active_window.layout.leaves(),
+            vec![left_pane, upper_pane, first_pane]
+        );
+    }
+
+    #[test]
     fn directional_focus_prefers_inner_split_before_neighboring_window() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
@@ -2854,6 +3015,111 @@ mod tests {
         assert_eq!(target_order, vec![second_surface_id, target_placeholder_id]);
         assert_eq!(target_pane.active_surface, second_surface_id);
         assert_eq!(workspace.active_pane, target_pane_id);
+    }
+
+    #[test]
+    fn moving_surface_to_split_from_same_pane_creates_neighbor_pane() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let first_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("first surface");
+        let moved_surface_id = model
+            .create_surface(workspace_id, source_pane_id, PaneKind::Browser)
+            .expect("second surface");
+
+        let new_pane_id = model
+            .move_surface_to_split(
+                workspace_id,
+                source_pane_id,
+                moved_surface_id,
+                source_pane_id,
+                Direction::Right,
+            )
+            .expect("move to split");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let window = workspace.active_window_record().expect("window");
+        let source_pane = workspace.panes.get(&source_pane_id).expect("source pane");
+        let target_pane = workspace.panes.get(&new_pane_id).expect("new pane");
+
+        assert_eq!(window.layout.leaves(), vec![source_pane_id, new_pane_id]);
+        assert_eq!(source_pane.surface_ids().collect::<Vec<_>>(), vec![first_surface_id]);
+        assert_eq!(target_pane.surface_ids().collect::<Vec<_>>(), vec![moved_surface_id]);
+        assert_eq!(workspace.active_pane, new_pane_id);
+        assert_eq!(target_pane.active_surface, moved_surface_id);
+    }
+
+    #[test]
+    fn moving_surface_to_split_across_windows_closes_empty_source_window() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let target_pane_id = model
+            .create_workspace_window(workspace_id, Direction::Right)
+            .expect("window");
+        let target_window_id = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.window_for_pane(target_pane_id))
+            .expect("target window");
+        let moved_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        let new_pane_id = model
+            .move_surface_to_split(
+                workspace_id,
+                source_pane_id,
+                moved_surface_id,
+                target_pane_id,
+                Direction::Left,
+            )
+            .expect("move to split");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let target_window = workspace.windows.get(&target_window_id).expect("window");
+
+        assert_eq!(workspace.windows.len(), 1);
+        assert!(!workspace.panes.contains_key(&source_pane_id));
+        assert_eq!(workspace.active_window, target_window_id);
+        assert_eq!(workspace.active_pane, new_pane_id);
+        assert_eq!(target_window.layout.leaves(), vec![new_pane_id, target_pane_id]);
+        assert_eq!(
+            workspace
+                .panes
+                .get(&new_pane_id)
+                .expect("new pane")
+                .surface_ids()
+                .collect::<Vec<_>>(),
+            vec![moved_surface_id]
+        );
+    }
+
+    #[test]
+    fn moving_only_surface_to_split_from_same_pane_is_rejected() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        let error = model
+            .move_surface_to_split(workspace_id, pane_id, surface_id, pane_id, Direction::Right)
+            .expect_err("reject self split of only surface");
+
+        assert!(matches!(
+            error,
+            DomainError::InvalidOperation("cannot split a pane from its only surface")
+        ));
     }
 
     #[test]
