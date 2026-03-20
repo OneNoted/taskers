@@ -188,6 +188,11 @@ impl TaskersHost {
 
     pub fn handle_command(&mut self, command: HostCommand) -> Result<()> {
         match command {
+            HostCommand::BrowserNavigate { surface_id, url } => {
+                self.with_browser_surface(surface_id, "browser navigate", |surface| {
+                    surface.navigate(&url)
+                })
+            }
             HostCommand::BrowserBack { surface_id } => {
                 self.with_browser_surface(surface_id, "browser back", |surface| surface.go_back())
             }
@@ -361,6 +366,8 @@ struct BrowserSurface {
     surface_id: SurfaceId,
     webview: WebView,
     url: String,
+    active: bool,
+    interactive: bool,
     devtools_open: Rc<Cell<bool>>,
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
@@ -395,26 +402,6 @@ impl BrowserSurface {
         });
         position_widget(fixed, webview.upcast_ref(), plan.frame);
         let devtools_open = Rc::new(Cell::new(false));
-
-        let pane_id = plan.pane_id;
-        let surface_id = plan.surface_id;
-        let focus_sink = event_sink.clone();
-        let focus_diagnostics = diagnostics.clone();
-        let click = GestureClick::new();
-        click.connect_pressed(move |_, _, _, _| {
-            emit_diagnostic(
-                focus_diagnostics.as_ref(),
-                DiagnosticRecord::new(
-                    DiagnosticCategory::HostEvent,
-                    None,
-                    "browser click focus event received",
-                )
-                .with_pane(pane_id)
-                .with_surface(surface_id),
-            );
-            (focus_sink)(HostEvent::PaneFocused { pane_id });
-        });
-        webview.add_controller(click);
 
         let pane_id = plan.pane_id;
         let surface_id = plan.surface_id;
@@ -548,6 +535,8 @@ impl BrowserSurface {
             surface_id: plan.surface_id,
             webview,
             url,
+            active: plan.active,
+            interactive,
             devtools_open,
             event_sink: url_sink,
             diagnostics,
@@ -570,9 +559,11 @@ impl BrowserSurface {
             self.webview.load_uri(url);
             self.url = url.clone();
         }
-        if plan.active && interactive {
+        if plan.active && interactive && (!self.active || !self.interactive) {
             self.webview.grab_focus();
         }
+        self.active = plan.active;
+        self.interactive = interactive;
 
         emit_diagnostic(
             diagnostics,
@@ -586,6 +577,15 @@ impl BrowserSurface {
         );
 
         Ok(())
+    }
+
+    fn navigate(&mut self, url: &str) {
+        if self.url != url {
+            self.webview.load_uri(url);
+            self.url = url.to_string();
+        }
+        self.webview.grab_focus();
+        self.emit_navigation_state();
     }
 
     fn go_back(&mut self) {
@@ -640,6 +640,8 @@ impl BrowserSurface {
 
 struct TerminalSurface {
     widget: Widget,
+    active: bool,
+    interactive: bool,
 }
 
 impl TerminalSurface {
@@ -680,7 +682,11 @@ impl TerminalSurface {
             .with_surface(plan.surface_id),
         );
 
-        Ok(Self { widget })
+        Ok(Self {
+            widget,
+            active: plan.active,
+            interactive,
+        })
     }
 
     fn sync(
@@ -695,9 +701,11 @@ impl TerminalSurface {
     ) {
         self.widget.set_can_target(interactive);
         position_widget(fixed, &self.widget, frame);
-        if active && interactive {
+        if active && interactive && (!self.active || !self.interactive) {
             let _ = host.focus_surface(&self.widget);
         }
+        self.active = active;
+        self.interactive = interactive;
 
         emit_diagnostic(
             diagnostics,

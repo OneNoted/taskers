@@ -323,6 +323,11 @@ button {{
   border-top: 2px solid var(--workspace-accent, {accent});
 }}
 
+.workspace-button-surface-drop .workspace-tab {{
+  background: {accent_12};
+  border-color: {accent_24};
+}}
+
 .workspace-tab {{
   position: relative;
   padding: 8px 10px 8px 14px;

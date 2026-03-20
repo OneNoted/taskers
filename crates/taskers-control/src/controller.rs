@@ -352,6 +352,25 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::MoveSurfaceToWorkspace {
+                source_workspace_id,
+                source_pane_id,
+                surface_id,
+                target_workspace_id,
+            } => {
+                let new_pane_id = model.move_surface_to_workspace(
+                    source_workspace_id,
+                    source_pane_id,
+                    surface_id,
+                    target_workspace_id,
+                )?;
+                (
+                    ControlResponse::SurfaceMovedToWorkspace {
+                        pane_id: new_pane_id,
+                    },
+                    true,
+                )
+            }
             ControlCommand::SetWorkspaceViewport {
                 workspace_id,
                 viewport,

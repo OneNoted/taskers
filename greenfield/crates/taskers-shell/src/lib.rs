@@ -189,6 +189,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     let drag_target = use_signal(|| None::<WorkspaceId>);
     let surface_drag_source = use_signal(|| None::<DraggedSurface>);
     let surface_drop_target = use_signal(|| None::<SurfaceDropTarget>);
+    let surface_workspace_target = use_signal(|| None::<WorkspaceId>);
     let window_drag_source = use_signal(|| None::<DraggedWindow>);
     let window_drop_target = use_signal(|| None::<WorkspaceWindowMoveTarget>);
     let workspace_ids: Vec<WorkspaceId> = snapshot.workspaces.iter().map(|ws| ws.id).collect();
@@ -234,6 +235,8 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             core.clone(),
                             drag_source,
                             drag_target,
+                            surface_drag_source,
+                            surface_workspace_target,
                             &workspace_ids,
                         )}
                     }
@@ -324,6 +327,8 @@ fn render_workspace_item(
     core: SharedCore,
     mut drag_source: Signal<Option<WorkspaceId>>,
     mut drag_target: Signal<Option<WorkspaceId>>,
+    mut surface_drag_source: Signal<Option<DraggedSurface>>,
+    mut surface_workspace_target: Signal<Option<WorkspaceId>>,
     all_ids: &[WorkspaceId],
 ) -> Element {
     let tab_class = if workspace.active {
@@ -393,8 +398,11 @@ fn render_workspace_item(
         .map(|color| format!("--workspace-accent: {color};"))
         .unwrap_or_default();
 
-    let is_drag_target = *drag_target.read() == Some(workspace_id);
-    let outer_class = if is_drag_target {
+    let is_workspace_drag_target = *drag_target.read() == Some(workspace_id);
+    let is_surface_drag_target = *surface_workspace_target.read() == Some(workspace_id);
+    let outer_class = if is_surface_drag_target {
+        "workspace-button workspace-button-surface-drop"
+    } else if is_workspace_drag_target {
         "workspace-button workspace-button-drag-over"
     } else {
         "workspace-button"
@@ -406,11 +414,20 @@ fn render_workspace_item(
     };
     let on_dragover = move |event: Event<DragData>| {
         event.prevent_default();
-        drag_target.set(Some(workspace_id));
+        if surface_drag_source.read().is_some() {
+            surface_workspace_target.set(Some(workspace_id));
+            drag_target.set(None);
+        } else {
+            drag_target.set(Some(workspace_id));
+            surface_workspace_target.set(None);
+        }
     };
     let on_dragleave = move |_: Event<DragData>| {
         if *drag_target.read() == Some(workspace_id) {
             drag_target.set(None);
+        }
+        if *surface_workspace_target.read() == Some(workspace_id) {
+            surface_workspace_target.set(None);
         }
     };
     let on_drop = {
@@ -418,9 +435,21 @@ fn render_workspace_item(
         let all_ids = all_ids.clone();
         move |event: Event<DragData>| {
             event.prevent_default();
+            let dragged_surface = *surface_drag_source.read();
             let source = *drag_source.read();
             drag_source.set(None);
             drag_target.set(None);
+            surface_workspace_target.set(None);
+            if let Some(dragged_surface) = dragged_surface {
+                surface_drag_source.set(None);
+                core.dispatch_shell_action(ShellAction::MoveSurfaceToWorkspace {
+                    source_pane_id: dragged_surface.pane_id,
+                    surface_id: dragged_surface.surface_id,
+                    target_workspace_id: workspace_id,
+                });
+                core.dispatch_shell_action(ShellAction::EndDrag);
+                return;
+            }
             if let Some(source_id) = source {
                 if source_id != workspace_id {
                     let mut new_order = all_ids.clone();
@@ -584,14 +613,16 @@ fn render_workspace_strip(
             if overview_scale < 1.0 {
                 return;
             }
-            event.prevent_default();
             let delta = event.delta().strip_units();
-            let dx = delta.x.round() as i32;
-            let dy = delta.y.round() as i32;
-            if dx == 0 && dy == 0 {
+            if delta.x.abs() < 1.0 || delta.x.abs() < delta.y.abs() {
                 return;
             }
-            core.dispatch_shell_action(ShellAction::ScrollViewport { dx, dy });
+            let dx = delta.x.round() as i32;
+            if dx == 0 {
+                return;
+            }
+            event.prevent_default();
+            core.dispatch_shell_action(ShellAction::ScrollViewport { dx, dy: 0 });
         }
     };
     let canvas_style = format!(

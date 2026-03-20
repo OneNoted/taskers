@@ -926,6 +926,7 @@ pub enum HostEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
+    BrowserNavigate { surface_id: SurfaceId, url: String },
     BrowserBack { surface_id: SurfaceId },
     BrowserForward { surface_id: SurfaceId },
     BrowserReload { surface_id: SurfaceId },
@@ -991,6 +992,11 @@ pub enum ShellAction {
         surface_id: SurfaceId,
         target_pane_id: PaneId,
         direction: Direction,
+    },
+    MoveSurfaceToWorkspace {
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_workspace_id: WorkspaceId,
     },
     BeginWindowDrag,
     BeginSurfaceDrag,
@@ -1118,6 +1124,12 @@ impl TaskersCore {
             .active_window_record()
             .expect("active workspace window should exist");
         let viewport = self.workspace_viewport_frame();
+        let clamped_viewport = clamped_workspace_viewport(
+            workspace,
+            viewport.width,
+            viewport.height,
+            workspace.viewport.clone(),
+        );
         let render_context = workspace_render_context(
             workspace,
             self.ui.overview_mode,
@@ -1137,8 +1149,8 @@ impl TaskersCore {
                             placement.frame,
                             canvas_metrics,
                             viewport,
-                            workspace.viewport.x,
-                            workspace.viewport.y,
+                            clamped_viewport.x,
+                            clamped_viewport.y,
                             render_context.overview_mode,
                         ),
                     ),
@@ -1166,8 +1178,8 @@ impl TaskersCore {
                 viewport_origin_x: viewport.x,
                 viewport_origin_y: viewport.y,
                 active_pane: workspace.active_pane,
-                viewport_x: workspace.viewport.x,
-                viewport_y: workspace.viewport.y,
+                viewport_x: clamped_viewport.x,
+                viewport_y: clamped_viewport.y,
                 overview_scale: render_context.overview_scale as f32,
                 canvas_width: canvas_metrics.width,
                 canvas_height: canvas_metrics.height,
@@ -1747,6 +1759,15 @@ impl TaskersCore {
                 target_pane_id,
                 direction,
             ),
+            ShellAction::MoveSurfaceToWorkspace {
+                source_pane_id,
+                surface_id,
+                target_workspace_id,
+            } => self.move_surface_to_workspace_by_id(
+                source_pane_id,
+                surface_id,
+                target_workspace_id,
+            ),
             ShellAction::BeginWindowDrag => self.set_drag_mode(ShellDragMode::Window),
             ShellAction::BeginSurfaceDrag => self.set_drag_mode(ShellDragMode::Surface),
             ShellAction::EndDrag => self.set_drag_mode(ShellDragMode::None),
@@ -2028,12 +2049,28 @@ impl TaskersCore {
         let Some(workspace) = model.workspaces.get(&workspace_id) else {
             return false;
         };
+        let viewport_frame = self.workspace_viewport_frame();
+        let current_viewport = clamped_workspace_viewport(
+            workspace,
+            viewport_frame.width,
+            viewport_frame.height,
+            workspace.viewport.clone(),
+        );
+        let next_viewport = clamped_workspace_viewport(
+            workspace,
+            viewport_frame.width,
+            viewport_frame.height,
+            taskers_domain::WorkspaceViewport {
+                x: current_viewport.x.saturating_add(dx),
+                y: current_viewport.y.saturating_add(dy),
+            },
+        );
+        if next_viewport == workspace.viewport {
+            return false;
+        }
         self.dispatch_control(ControlCommand::SetWorkspaceViewport {
             workspace_id,
-            viewport: taskers_domain::WorkspaceViewport {
-                x: workspace.viewport.x.saturating_add(dx),
-                y: workspace.viewport.y.saturating_add(dy),
-            },
+            viewport: next_viewport,
         })
     }
 
@@ -2229,15 +2266,52 @@ impl TaskersCore {
         false
     }
 
+    fn move_surface_to_workspace_by_id(
+        &mut self,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_workspace_id: WorkspaceId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some((source_workspace_id, located_source_pane_id)) =
+            self.resolve_surface_location(&model, surface_id)
+        else {
+            return false;
+        };
+        if located_source_pane_id != source_pane_id || source_workspace_id == target_workspace_id {
+            return false;
+        }
+        let Some(response) =
+            self.dispatch_control_with_response(ControlCommand::MoveSurfaceToWorkspace {
+                source_workspace_id,
+                source_pane_id,
+                surface_id,
+                target_workspace_id,
+            })
+        else {
+            return false;
+        };
+        let changed = matches!(response, ControlResponse::SurfaceMovedToWorkspace { .. });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
+    }
+
     fn navigate_browser_surface(&mut self, surface_id: SurfaceId, raw_url: &str) -> bool {
         let normalized = resolved_browser_uri(raw_url);
-        self.dispatch_control(ControlCommand::UpdateSurfaceMetadata {
+        let mut changed = self.dispatch_control(ControlCommand::UpdateSurfaceMetadata {
             surface_id,
             patch: PaneMetadataPatch {
-                url: Some(normalized),
+                url: Some(normalized.clone()),
                 ..PaneMetadataPatch::default()
             },
-        })
+        });
+        changed |= self.queue_host_command(HostCommand::BrowserNavigate {
+            surface_id,
+            url: normalized,
+        });
+        changed
     }
 
     fn queue_host_command(&mut self, command: HostCommand) -> bool {
@@ -2402,6 +2476,12 @@ impl TaskersCore {
             return false;
         };
         let viewport_frame = self.workspace_viewport_frame();
+        let current_viewport = clamped_workspace_viewport(
+            workspace,
+            viewport_frame.width,
+            viewport_frame.height,
+            workspace.viewport.clone(),
+        );
         let Some(active_frame) =
             workspace_window_placements(workspace, viewport_frame.width, viewport_frame.height)
                 .into_iter()
@@ -2411,7 +2491,7 @@ impl TaskersCore {
             return false;
         };
 
-        let mut next_viewport = workspace.viewport.clone();
+        let mut next_viewport = current_viewport;
         let visible_right = next_viewport.x + viewport_frame.width;
         let visible_bottom = next_viewport.y + viewport_frame.height;
         if active_frame.x < next_viewport.x {
@@ -2424,6 +2504,12 @@ impl TaskersCore {
         } else if active_frame.bottom() > visible_bottom {
             next_viewport.y = active_frame.bottom() - viewport_frame.height;
         }
+        let next_viewport = clamped_workspace_viewport(
+            workspace,
+            viewport_frame.width,
+            viewport_frame.height,
+            next_viewport,
+        );
         if next_viewport == workspace.viewport {
             return false;
         }
@@ -2819,6 +2905,23 @@ fn workspace_canvas_metrics(placements: &[WorkspaceWindowPlacement]) -> CanvasMe
         .map(|placement| placement.frame)
         .collect::<Vec<_>>();
     canvas_metrics_from_frames(&frames)
+}
+
+fn clamped_workspace_viewport(
+    workspace: &Workspace,
+    viewport_width: i32,
+    viewport_height: i32,
+    viewport: taskers_domain::WorkspaceViewport,
+) -> taskers_domain::WorkspaceViewport {
+    let placements = workspace_window_placements(workspace, viewport_width, viewport_height);
+    let canvas = workspace_canvas_metrics(&placements);
+    let max_x = (canvas.width - viewport_width).max(0);
+    let max_y = (canvas.height - viewport_height).max(0);
+
+    taskers_domain::WorkspaceViewport {
+        x: viewport.x.clamp(0, max_x),
+        y: viewport.y.clamp(0, max_y),
+    }
 }
 
 fn canvas_metrics_from_frames(frames: &[WindowFrame]) -> CanvasMetrics {
@@ -3346,16 +3449,33 @@ fn resolved_browser_uri(raw: &str) -> String {
     if trimmed.contains("://") {
         return trimmed.to_string();
     }
+    if is_local_browser_target(trimmed) {
+        return format!("http://{trimmed}");
+    }
+    if has_explicit_uri_scheme(trimmed) {
+        return trimmed.to_string();
+    }
     if !looks_like_browser_location(trimmed) {
         return format!(
             "https://duckduckgo.com/?q={}",
             trimmed.split_whitespace().collect::<Vec<_>>().join("+")
         );
     }
-    if is_local_browser_target(trimmed) {
-        return format!("http://{trimmed}");
-    }
     format!("https://{trimmed}")
+}
+
+fn has_explicit_uri_scheme(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+        && scheme
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
 }
 
 fn looks_like_browser_location(value: &str) -> bool {
@@ -3386,7 +3506,7 @@ mod tests {
     use super::{
         BootstrapModel, BrowserMountSpec, Direction, HostCommand, HostEvent, LayoutMetrics,
         RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
-        SurfaceMountSpec, default_preview_app_state, resolved_browser_uri,
+        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state, resolved_browser_uri,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -3545,6 +3665,10 @@ mod tests {
         let browser = snapshot.browser_chrome.expect("active browser chrome");
         assert!(!browser.url.trim().is_empty());
 
+        core.dispatch_shell_action(ShellAction::NavigateBrowser {
+            surface_id: browser.surface_id,
+            url: "about:blank".into(),
+        });
         core.dispatch_shell_action(ShellAction::BrowserReload {
             surface_id: browser.surface_id,
         });
@@ -3555,6 +3679,10 @@ mod tests {
         assert_eq!(
             core.drain_host_commands(),
             vec![
+                HostCommand::BrowserNavigate {
+                    surface_id: browser.surface_id,
+                    url: "about:blank".into()
+                },
                 HostCommand::BrowserReload {
                     surface_id: browser.surface_id
                 },
@@ -3660,11 +3788,17 @@ mod tests {
     #[test]
     fn horizontal_scroll_host_events_pan_workspace_outside_overview() {
         let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
         let before = core.snapshot().current_workspace.viewport_x;
 
         core.apply_host_event(HostEvent::ViewportScrolled { dx: 180, dy: 0 });
         let after = core.snapshot().current_workspace.viewport_x;
-        assert_eq!(after, before + 180);
+        assert!(after > before);
 
         core.dispatch_shell_action(ShellAction::ToggleOverview);
         core.apply_host_event(HostEvent::ViewportScrolled { dx: 180, dy: 0 });
@@ -3676,6 +3810,11 @@ mod tests {
     #[test]
     fn browser_address_bar_normalizes_search_queries() {
         assert_eq!(resolved_browser_uri(""), "about:blank");
+        assert_eq!(resolved_browser_uri("about:blank"), "about:blank");
+        assert_eq!(
+            resolved_browser_uri("file:///tmp/index.html"),
+            "file:///tmp/index.html"
+        );
         assert_eq!(
             resolved_browser_uri("rust"),
             "https://duckduckgo.com/?q=rust"
@@ -3689,6 +3828,22 @@ mod tests {
             resolved_browser_uri("localhost:3000"),
             "http://localhost:3000"
         );
+    }
+
+    #[test]
+    fn scroll_viewport_is_clamped_to_canvas_bounds() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::ScrollViewport {
+            dx: 50_000,
+            dy: 50_000,
+        });
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.current_workspace.viewport_x >= 0);
+        assert!(snapshot.current_workspace.viewport_x <= snapshot.current_workspace.canvas_width);
+        assert!(snapshot.current_workspace.viewport_y >= 0);
+        assert!(snapshot.current_workspace.viewport_y <= snapshot.current_workspace.canvas_height);
     }
 
     #[test]
@@ -3787,5 +3942,55 @@ mod tests {
             Some(moved_surface_id)
         );
         assert_eq!(snapshot.current_workspace.active_pane, new_pane_id);
+    }
+
+    #[test]
+    fn move_surface_to_workspace_shell_action_switches_workspace_and_keeps_surface() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.active)
+            .map(|workspace| workspace.id)
+            .expect("target workspace");
+
+        core.dispatch_shell_action(ShellAction::MoveSurfaceToWorkspace {
+            source_pane_id,
+            surface_id: moved_surface_id,
+            target_workspace_id,
+        });
+
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.current_workspace.id, target_workspace_id);
+
+        let mut pane_ids = Vec::new();
+        collect_pane_ids(&snapshot.current_workspace.layout, &mut pane_ids);
+        let moved_pane_id = pane_ids
+            .into_iter()
+            .find(|pane_id| {
+                find_pane(&snapshot.current_workspace.layout, *pane_id)
+                    .is_some_and(|pane| pane.active_surface == moved_surface_id)
+            })
+            .expect("moved pane");
+        let moved_pane =
+            find_pane(&snapshot.current_workspace.layout, moved_pane_id).expect("moved pane");
+
+        assert_eq!(
+            moved_pane.surfaces.first().map(|surface| surface.id),
+            Some(moved_surface_id)
+        );
+        assert_eq!(snapshot.current_workspace.active_pane, moved_pane_id);
     }
 }

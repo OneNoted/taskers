@@ -126,6 +126,12 @@ pub enum ControlCommand {
         target_pane_id: PaneId,
         direction: Direction,
     },
+    MoveSurfaceToWorkspace {
+        source_workspace_id: WorkspaceId,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_workspace_id: WorkspaceId,
+    },
     SetWorkspaceViewport {
         workspace_id: WorkspaceId,
         viewport: WorkspaceViewport,
@@ -174,6 +180,9 @@ pub enum ControlResponse {
         pane_id: PaneId,
     },
     SurfaceMovedToSplit {
+        pane_id: PaneId,
+    },
+    SurfaceMovedToWorkspace {
         pane_id: PaneId,
     },
     SurfaceCreated {
