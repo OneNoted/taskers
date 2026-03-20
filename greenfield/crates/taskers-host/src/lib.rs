@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow, bail};
 use gtk::{
-    Align, Box as GtkBox, EventControllerFocus, EventControllerScroll, EventControllerScrollFlags,
-    Fixed, GestureClick, Orientation, Overlay, Widget, glib, prelude::*,
+    Align, Box as GtkBox, CssProvider, EventControllerFocus, EventControllerScroll,
+    EventControllerScrollFlags, Fixed, GestureClick, Orientation, Overflow, Overlay,
+    STYLE_PROVIDER_PRIORITY_APPLICATION, Widget, glib, prelude::*,
 };
 use std::{
     cell::Cell,
@@ -110,6 +111,7 @@ impl TaskersHost {
         root.set_hexpand(true);
         root.set_vexpand(true);
         root.set_child(Some(shell_widget));
+        install_native_surface_css();
 
         let surface_layer = Fixed::new();
         surface_layer.set_hexpand(true);
@@ -744,6 +746,7 @@ impl NativeSurfaceShell {
         root.set_vexpand(true);
         root.set_halign(Align::Fill);
         root.set_valign(Align::Fill);
+        root.set_overflow(Overflow::Hidden);
         root.set_focusable(false);
         root.set_can_target(false);
         root.add_css_class("native-surface-host");
@@ -768,6 +771,42 @@ impl NativeSurfaceShell {
     fn detach(&self, fixed: &Fixed) {
         detach_from_fixed(fixed, self.root.upcast_ref());
     }
+}
+
+fn install_native_surface_css() {
+    let provider = CssProvider::new();
+    provider.load_from_data(native_surface_css());
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+fn native_surface_css() -> &'static str {
+    r#"
+.native-surface-host,
+.native-surface-widget,
+.terminal-output {
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.native-surface-terminal,
+.native-surface-terminal-widget,
+.terminal-output {
+  background: #0f1117;
+}
+
+.native-surface-browser,
+.native-surface-browser-widget {
+  background: transparent;
+}
+"#
 }
 
 fn connect_ghostty_widget(
