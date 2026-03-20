@@ -308,6 +308,14 @@ button {{
   border-color: {waiting_18};
 }}
 
+.workspace-button[draggable] {{
+  cursor: grab;
+}}
+
+.workspace-button-drag-over .workspace-tab {{
+  border-top: 2px solid var(--workspace-accent, {accent});
+}}
+
 .workspace-tab {{
   position: relative;
   padding: 8px 10px 8px 14px;

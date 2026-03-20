@@ -443,6 +443,8 @@ pub struct Workspace {
     #[serde(default)]
     pub viewport: WorkspaceViewport,
     pub notifications: Vec<NotificationItem>,
+    #[serde(default)]
+    pub custom_color: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for Workspace {
@@ -478,6 +480,7 @@ impl Workspace {
             active_pane,
             viewport: WorkspaceViewport::default(),
             notifications: Vec::new(),
+            custom_color: None,
         }
     }
 
@@ -1031,6 +1034,25 @@ impl AppModel {
             .get_mut(&workspace_id)
             .ok_or(DomainError::MissingWorkspace(workspace_id))?;
         workspace.label = label.into();
+        Ok(())
+    }
+
+    pub fn reorder_workspaces(
+        &mut self,
+        window_id: WindowId,
+        new_order: Vec<WorkspaceId>,
+    ) -> Result<(), DomainError> {
+        let window = self
+            .windows
+            .get_mut(&window_id)
+            .ok_or(DomainError::MissingWindow(window_id))?;
+        let existing: std::collections::HashSet<_> =
+            window.workspace_order.iter().copied().collect();
+        let proposed: std::collections::HashSet<_> = new_order.iter().copied().collect();
+        if existing != proposed {
+            return Ok(());
+        }
+        window.workspace_order = new_order;
         Ok(())
     }
 
@@ -1939,6 +1961,8 @@ struct CurrentWorkspaceSerde {
     viewport: WorkspaceViewport,
     #[serde(default)]
     notifications: Vec<NotificationItem>,
+    #[serde(default)]
+    custom_color: Option<String>,
 }
 
 impl CurrentWorkspaceSerde {
@@ -1953,6 +1977,7 @@ impl CurrentWorkspaceSerde {
             active_pane: self.active_pane,
             viewport: self.viewport,
             notifications: self.notifications,
+            custom_color: self.custom_color,
         };
         workspace.normalize();
         workspace

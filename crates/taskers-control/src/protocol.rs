@@ -113,6 +113,10 @@ pub enum ControlCommand {
     CloseWorkspace {
         workspace_id: WorkspaceId,
     },
+    ReorderWorkspaces {
+        window_id: WindowId,
+        workspace_ids: Vec<WorkspaceId>,
+    },
     EmitSignal {
         workspace_id: WorkspaceId,
         pane_id: PaneId,

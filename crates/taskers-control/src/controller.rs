@@ -316,6 +316,18 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::ReorderWorkspaces {
+                window_id,
+                workspace_ids,
+            } => {
+                model.reorder_workspaces(window_id, workspace_ids)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspaces reordered".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::EmitSignal {
                 workspace_id,
                 pane_id,

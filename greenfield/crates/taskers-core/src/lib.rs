@@ -408,6 +408,7 @@ pub struct WorkspaceSummary {
     pub git_branch: Option<String>,
     pub working_directory: Option<String>,
     pub listening_ports: Vec<u16>,
+    pub custom_color: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -606,6 +607,7 @@ pub enum ShellAction {
     ToggleOverview,
     FocusWorkspace { workspace_id: WorkspaceId },
     CloseWorkspace { workspace_id: WorkspaceId },
+    ReorderWorkspaces { workspace_ids: Vec<WorkspaceId> },
     CreateWorkspace,
     CreateWorkspaceWindow { direction: WorkspaceDirection },
     FocusWorkspaceWindow { window_id: WorkspaceWindowId },
@@ -878,6 +880,8 @@ impl TaskersCore {
                     git_branch,
                     working_directory,
                     listening_ports,
+                    custom_color: workspace
+                        .and_then(|ws| ws.custom_color.clone()),
                 }
             })
             .collect()
@@ -1246,6 +1250,13 @@ impl TaskersCore {
             ShellAction::FocusWorkspace { workspace_id } => self.focus_workspace(workspace_id),
             ShellAction::CloseWorkspace { workspace_id } => {
                 self.dispatch_control(ControlCommand::CloseWorkspace { workspace_id })
+            }
+            ShellAction::ReorderWorkspaces { workspace_ids } => {
+                let window_id = self.app_state.snapshot_model().active_window;
+                self.dispatch_control(ControlCommand::ReorderWorkspaces {
+                    window_id,
+                    workspace_ids,
+                })
             }
             ShellAction::CreateWorkspace => self.create_workspace(),
             ShellAction::CreateWorkspaceWindow { direction } => {
@@ -2040,6 +2051,10 @@ fn default_preview_app_state() -> AppState {
     );
     if let Some(placeholder_surface_id) = placeholder_surface_id {
         let _ = model.close_surface(workspace_id, browser_pane_id, placeholder_surface_id);
+    }
+
+    if let Some(workspace) = model.workspaces.get_mut(&workspace_id) {
+        workspace.custom_color = Some("#bb9af7".into());
     }
 
     AppState::new(

@@ -5,8 +5,8 @@ use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot,
     LayoutNodeSnapshot, PaneSnapshot, RuntimeCapability, RuntimeStatus, SettingsSnapshot,
     SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutBindingSnapshot, SplitAxis,
-    SurfaceKind, SurfaceSnapshot, WorkspaceDirection, WorkspaceSummary, WorkspaceViewSnapshot,
-    WorkspaceWindowSnapshot,
+    SurfaceKind, SurfaceSnapshot, WorkspaceDirection, WorkspaceId, WorkspaceSummary,
+    WorkspaceViewSnapshot, WorkspaceWindowSnapshot,
 };
 
 fn app_css(snapshot: &ShellSnapshot) -> String {
@@ -137,10 +137,9 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                     div { class: "sidebar-heading", "Workspaces" }
                     button { class: "workspace-add", onclick: create_workspace, "+" }
                 }
-                div { class: "workspace-list",
-                    for workspace in &snapshot.workspaces {
-                        {render_workspace_item(workspace, core.clone())}
-                    }
+                WorkspaceList {
+                    workspaces: snapshot.workspaces.clone(),
+                    core: core.clone(),
                 }
                 div { class: "runtime-card",
                     div { class: "sidebar-heading", "Runtime status" }
@@ -258,7 +257,35 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     }
 }
 
-fn render_workspace_item(workspace: &WorkspaceSummary, core: SharedCore) -> Element {
+#[component]
+fn WorkspaceList(workspaces: Vec<WorkspaceSummary>, core: SharedCore) -> Element {
+    let drag_source = use_signal(|| None::<WorkspaceId>);
+    let drag_target = use_signal(|| None::<WorkspaceId>);
+
+    let workspace_ids: Vec<WorkspaceId> = workspaces.iter().map(|ws| ws.id).collect();
+
+    rsx! {
+        div { class: "workspace-list",
+            for workspace in &workspaces {
+                {render_workspace_item(
+                    workspace,
+                    core.clone(),
+                    drag_source,
+                    drag_target,
+                    &workspace_ids,
+                )}
+            }
+        }
+    }
+}
+
+fn render_workspace_item(
+    workspace: &WorkspaceSummary,
+    core: SharedCore,
+    mut drag_source: Signal<Option<WorkspaceId>>,
+    mut drag_target: Signal<Option<WorkspaceId>>,
+    all_ids: &[WorkspaceId],
+) -> Element {
     let tab_class = if workspace.active {
         format!(
             "workspace-tab workspace-tab-active workspace-tab-state-{}",
@@ -290,9 +317,12 @@ fn render_workspace_item(workspace: &WorkspaceSummary, core: SharedCore) -> Elem
             core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
         }
     };
-    let close_workspace = move |event: Event<MouseData>| {
-        event.stop_propagation();
-        core.dispatch_shell_action(ShellAction::CloseWorkspace { workspace_id });
+    let close_workspace = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CloseWorkspace { workspace_id });
+        }
     };
 
     let branch_row = match (&workspace.git_branch, &workspace.working_directory) {
@@ -314,9 +344,69 @@ fn render_workspace_item(workspace: &WorkspaceSummary, core: SharedCore) -> Elem
         )
     };
 
+    let tab_style = workspace
+        .custom_color
+        .as_ref()
+        .map(|color| format!("--workspace-accent: {color};"))
+        .unwrap_or_default();
+
+    let is_drag_target = *drag_target.read() == Some(workspace_id);
+    let outer_class = if is_drag_target {
+        "workspace-button workspace-button-drag-over"
+    } else {
+        "workspace-button"
+    };
+
+    let all_ids = all_ids.to_vec();
+    let on_dragstart = move |_: Event<DragData>| {
+        drag_source.set(Some(workspace_id));
+    };
+    let on_dragover = move |event: Event<DragData>| {
+        event.prevent_default();
+        drag_target.set(Some(workspace_id));
+    };
+    let on_dragleave = move |_: Event<DragData>| {
+        if *drag_target.read() == Some(workspace_id) {
+            drag_target.set(None);
+        }
+    };
+    let on_drop = {
+        let core = core.clone();
+        let all_ids = all_ids.clone();
+        move |event: Event<DragData>| {
+            event.prevent_default();
+            let source = *drag_source.read();
+            drag_source.set(None);
+            drag_target.set(None);
+            if let Some(source_id) = source {
+                if source_id != workspace_id {
+                    let mut new_order = all_ids.clone();
+                    if let Some(src_pos) = new_order.iter().position(|id| *id == source_id) {
+                        new_order.remove(src_pos);
+                        let dst_pos = new_order
+                            .iter()
+                            .position(|id| *id == workspace_id)
+                            .unwrap_or(new_order.len());
+                        new_order.insert(dst_pos, source_id);
+                        core.dispatch_shell_action(ShellAction::ReorderWorkspaces {
+                            workspace_ids: new_order,
+                        });
+                    }
+                }
+            }
+        }
+    };
+
     rsx! {
-        button { class: "workspace-button", onclick: focus_workspace,
-            div { class: "{tab_class}",
+        button {
+            class: "{outer_class}",
+            draggable: "true",
+            onclick: focus_workspace,
+            ondragstart: on_dragstart,
+            ondragover: on_dragover,
+            ondragleave: on_dragleave,
+            ondrop: on_drop,
+            div { class: "{tab_class}", style: "{tab_style}",
                 if workspace.active {
                     div { class: "workspace-tab-rail" }
                 }
