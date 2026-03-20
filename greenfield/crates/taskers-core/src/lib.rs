@@ -19,8 +19,7 @@ use time::OffsetDateTime;
 use tokio::sync::watch;
 
 pub use taskers_domain::{
-    PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
-    WorkspaceWindowMoveTarget,
+    PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowMoveTarget,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -581,6 +580,7 @@ pub struct LayoutMetrics {
     pub window_body_padding: i32,
     pub split_gap: i32,
     pub pane_header_height: i32,
+    pub browser_toolbar_height: i32,
     pub surface_tab_height: i32,
 }
 
@@ -589,12 +589,13 @@ impl Default for LayoutMetrics {
         Self {
             sidebar_width: 248,
             activity_width: 312,
-            toolbar_height: 48,
+            toolbar_height: 42,
             workspace_padding: 16,
-            window_toolbar_height: 34,
+            window_toolbar_height: 28,
             window_body_padding: 0,
             split_gap: 12,
-            pane_header_height: 34,
+            pane_header_height: 28,
+            browser_toolbar_height: 34,
             surface_tab_height: 0,
         }
     }
@@ -2960,7 +2961,7 @@ fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, F
 fn pane_body_frame(frame: Frame, metrics: LayoutMetrics, kind: &PaneKind) -> Frame {
     let browser_toolbar_height = match kind {
         PaneKind::Terminal => 0,
-        PaneKind::Browser => 38,
+        PaneKind::Browser => metrics.browser_toolbar_height,
     };
     frame
         .inset_top(metrics.pane_header_height + metrics.surface_tab_height + browser_toolbar_height)

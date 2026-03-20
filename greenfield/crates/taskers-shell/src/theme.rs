@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use taskers_core::LayoutMetrics;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -170,6 +171,14 @@ fn rgba(color: Color, alpha: f32) -> String {
 }
 
 pub fn generate_css(p: &ThemePalette) -> String {
+    let metrics = LayoutMetrics::default();
+    let sidebar_width = metrics.sidebar_width;
+    let activity_width = metrics.activity_width;
+    let workspace_toolbar_height = metrics.toolbar_height;
+    let window_toolbar_height = metrics.window_toolbar_height;
+    let pane_header_height = metrics.pane_header_height;
+    let browser_toolbar_height = metrics.browser_toolbar_height;
+    let split_gap = metrics.split_gap;
     let mut css = String::with_capacity(18_000);
     let _ = write!(
         css,
@@ -196,7 +205,7 @@ button {{
   height: 100vh;
   background: {base};
   display: grid;
-  grid-template-columns: 248px minmax(0, 1fr) 312px;
+  grid-template-columns: {sidebar_width}px minmax(0, 1fr) {activity_width}px;
   overflow: hidden;
 }}
 
@@ -635,13 +644,13 @@ button {{
 }}
 
 .workspace-header {{
-  height: 48px;
-  min-height: 48px;
+  height: {workspace_toolbar_height}px;
+  min-height: {workspace_toolbar_height}px;
   border-bottom: 1px solid {border_07};
   padding: 0 12px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 10px;
   background: {base};
 }}
@@ -682,25 +691,26 @@ button {{
 
 .workspace-header-main,
 .shortcut-row {{
-  justify-content: space-between;
+  justify-content: flex-start;
 }}
 
 .workspace-header-title-btn {{
   background: transparent;
   border: 0;
   color: inherit;
-  padding: 6px 8px;
+  padding: 4px 0;
   text-align: left;
 }}
 
 .workspace-header-title-btn:hover {{
-  background: {border_06};
+  color: {text_bright};
 }}
 
 .workspace-header-label {{
   display: block;
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
   color: {text_bright};
 }}
 
@@ -799,7 +809,7 @@ button {{
   display: flex;
   flex-direction: column;
   background: {elevated};
-  border: 1px solid {border_08};
+  border: 1px solid {border_07};
   overflow: hidden;
 }}
 
@@ -807,53 +817,27 @@ button {{
   border-color: {accent_24};
 }}
 
-.workspace-window-shell-state-busy {{
-  border-color: {busy_12};
-}}
-
-.workspace-window-shell-state-completed {{
-  border-color: {completed_12};
-}}
-
-.workspace-window-shell-state-waiting {{
-  border-color: {waiting_14};
-}}
-
-.workspace-window-shell-state-error {{
-  border-color: {error_12};
-}}
-
 .workspace-window-toolbar {{
-  min-height: 34px;
+  height: {window_toolbar_height}px;
+  min-height: {window_toolbar_height}px;
   border-bottom: 1px solid {border_07};
   background: {surface};
   padding: 0 8px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: flex-start;
+  gap: 6px;
+  cursor: grab;
+  user-select: none;
 }}
 
 .workspace-window-title {{
-  background: transparent;
-  border: 0;
   color: inherit;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  text-align: left;
+  min-width: 0;
 }}
 
-.workspace-window-title:hover {{
-  color: {text_bright};
-}}
-
-.workspace-window-flags {{
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.workspace-window-toolbar:active {{
+  cursor: grabbing;
 }}
 
 .workspace-window-body {{
@@ -869,7 +853,7 @@ button {{
   min-width: 0;
   min-height: 0;
   display: flex;
-  gap: 12px;
+  gap: {split_gap}px;
 }}
 
 .split-child {{
@@ -898,22 +882,6 @@ button {{
   border-color: {accent_24};
 }}
 
-.pane-card-state-busy {{
-  box-shadow: inset 0 0 0 1px {busy_10};
-}}
-
-.pane-card-state-completed {{
-  box-shadow: inset 0 0 0 1px {completed_10};
-}}
-
-.pane-card-state-waiting {{
-  box-shadow: inset 0 0 0 1px {waiting_12};
-}}
-
-.pane-card-state-error {{
-  box-shadow: inset 0 0 0 1px {error_10};
-}}
-
 @keyframes focus-flash {{
   0%   {{ opacity: 0; }}
   25%  {{ opacity: 1; }}
@@ -936,13 +904,14 @@ button {{
 }}
 
 .pane-header {{
-  min-height: 34px;
+  height: {pane_header_height}px;
+  min-height: {pane_header_height}px;
   border-bottom: 1px solid {border_07};
-  padding: 0 6px 0 8px;
+  padding: 0 4px 0 6px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px;
   background: {surface};
 }}
 
@@ -957,7 +926,7 @@ button {{
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.14s ease-in-out;
@@ -971,10 +940,10 @@ button {{
 .surface-tabs {{
   flex: 1;
   min-width: 0;
-  min-height: 34px;
+  min-height: {pane_header_height}px;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
   padding: 0;
   overflow-x: auto;
   background: transparent;
@@ -983,13 +952,13 @@ button {{
 .surface-tab {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
   max-width: 320px;
-  height: 26px;
+  height: 22px;
   border: 1px solid transparent;
   background: transparent;
-  padding: 0 8px;
+  padding: 0 6px;
   color: {text_muted};
   white-space: nowrap;
 }}
@@ -1014,22 +983,6 @@ button {{
   color: {text_bright};
 }}
 
-.surface-tab-state-busy {{
-  box-shadow: inset 0 0 0 1px {busy_10};
-}}
-
-.surface-tab-state-completed {{
-  box-shadow: inset 0 0 0 1px {completed_10};
-}}
-
-.surface-tab-state-waiting {{
-  box-shadow: inset 0 0 0 1px {waiting_10};
-}}
-
-.surface-tab-state-error {{
-  box-shadow: inset 0 0 0 1px {error_10};
-}}
-
 .surface-tab-title {{
   min-width: 0;
   overflow: hidden;
@@ -1051,13 +1004,13 @@ button {{
 }}
 
 .pane-utility {{
-  min-width: 24px;
-  height: 22px;
+  min-width: 22px;
+  height: 20px;
   border: 0;
-  padding: 0 6px;
+  padding: 0 5px;
   background: transparent;
   color: {text_dim};
-  font-size: 11px;
+  font-size: 10px;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   line-height: 1;
 }}
@@ -1067,16 +1020,58 @@ button {{
   color: {text_bright};
 }}
 
-.pane-utility-tab {{
+.pane-utility-split {{
   color: {text_subtle};
 }}
 
-.pane-utility-split {{
-  color: {completed};
+.workspace-window-drop-zone {{
+  position: absolute;
+  z-index: 12;
+  opacity: 0;
+  pointer-events: none;
+  background: transparent;
+  transition: opacity 0.12s ease-in-out, background 0.12s ease-in-out;
 }}
 
-.pane-utility-window {{
-  color: {action_window};
+.workspace-window-drop-zone-visible {{
+  opacity: 0.45;
+  pointer-events: auto;
+}}
+
+.workspace-window-drop-zone-active {{
+  opacity: 1;
+  pointer-events: auto;
+  background: {accent_24};
+}}
+
+.workspace-window-drop-zone-left,
+.workspace-window-drop-zone-right {{
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+}}
+
+.workspace-window-drop-zone-left {{
+  left: 0;
+}}
+
+.workspace-window-drop-zone-right {{
+  right: 0;
+}}
+
+.workspace-window-drop-zone-top,
+.workspace-window-drop-zone-bottom {{
+  left: 12px;
+  right: 12px;
+  height: 6px;
+}}
+
+.workspace-window-drop-zone-top {{
+  top: 0;
+}}
+
+.workspace-window-drop-zone-bottom {{
+  bottom: 0;
 }}
 
 .pane-utility-close {{
@@ -1089,7 +1084,8 @@ button {{
 }}
 
 .browser-toolbar {{
-  min-height: 34px;
+  height: {browser_toolbar_height}px;
+  min-height: {browser_toolbar_height}px;
   border-bottom: 1px solid {border_06};
   display: flex;
   align-items: center;
@@ -1587,18 +1583,15 @@ button {{
         accent_22 = rgba(p.accent, 0.22),
         accent_24 = rgba(p.accent, 0.24),
         busy = p.busy.to_hex(),
-        busy_10 = rgba(p.busy, 0.10),
         busy_12 = rgba(p.busy, 0.12),
         busy_16 = rgba(p.busy, 0.16),
         busy_text = p.busy_text.to_hex(),
         completed = p.completed.to_hex(),
-        completed_10 = rgba(p.completed, 0.10),
         completed_12 = rgba(p.completed, 0.12),
         completed_16 = rgba(p.completed, 0.16),
         completed_text = p.completed_text.to_hex(),
         waiting = p.waiting.to_hex(),
         waiting_10 = rgba(p.waiting, 0.10),
-        waiting_12 = rgba(p.waiting, 0.12),
         waiting_14 = rgba(p.waiting, 0.14),
         waiting_18 = rgba(p.waiting, 0.18),
         waiting_text = p.waiting_text.to_hex(),
@@ -1607,7 +1600,6 @@ button {{
         error_12 = rgba(p.error, 0.12),
         error_16 = rgba(p.error, 0.16),
         error_text = p.error_text.to_hex(),
-        action_window = p.action_window.to_hex(),
     );
     css
 }

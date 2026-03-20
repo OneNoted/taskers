@@ -4,16 +4,20 @@ use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot,
     LayoutNodeSnapshot, PaneId, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeStatus,
-    SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
-    ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind, SurfaceSnapshot,
-    WorkspaceDirection, WorkspaceId, WorkspaceSummary, WorkspaceViewSnapshot,
-    WorkspaceWindowSnapshot,
+    SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutAction,
+    ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId,
+    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DraggedSurface {
     pane_id: PaneId,
     surface_id: SurfaceId,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DraggedWindow {
+    window_id: taskers_core::WorkspaceWindowId,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,23 +97,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             })
         }
     };
-    let show_workspace_header = {
-        let core = core.clone();
-        move |_| {
-            core.dispatch_shell_action(ShellAction::ShowSection {
-                section: ShellSection::Workspace,
-            })
-        }
-    };
     let show_settings_nav = {
-        let core = core.clone();
-        move |_| {
-            core.dispatch_shell_action(ShellAction::ShowSection {
-                section: ShellSection::Settings,
-            })
-        }
-    };
-    let show_settings_header = {
         let core = core.clone();
         move |_| {
             core.dispatch_shell_action(ShellAction::ShowSection {
@@ -121,47 +109,19 @@ pub fn TaskersShell(core: SharedCore) -> Element {
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::CreateWorkspace)
     };
-    let split_terminal = {
+    let show_active_section_header = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::SplitTerminal { pane_id: None })
-    };
-    let split_browser = {
-        let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None })
-    };
-    let toggle_overview = {
-        let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::ToggleOverview)
-    };
-    let scroll_left = {
-        let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::ScrollViewport { dx: -360, dy: 0 })
-    };
-    let scroll_right = {
-        let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::ScrollViewport { dx: 360, dy: 0 })
-    };
-    let create_window_right = {
-        let core = core.clone();
+        let section = snapshot.section;
         move |_| {
-            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
-                direction: WorkspaceDirection::Right,
-            })
+            core.dispatch_shell_action(ShellAction::ShowSection { section });
         }
     };
-    let create_window_down = {
-        let core = core.clone();
-        move |_| {
-            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
-                direction: WorkspaceDirection::Down,
-            })
-        }
-    };
-
     let drag_source = use_signal(|| None::<WorkspaceId>);
     let drag_target = use_signal(|| None::<WorkspaceId>);
     let surface_drag_source = use_signal(|| None::<DraggedSurface>);
     let surface_drop_target = use_signal(|| None::<SurfaceDropTarget>);
+    let window_drag_source = use_signal(|| None::<DraggedWindow>);
+    let window_drop_target = use_signal(|| None::<WorkspaceWindowMoveTarget>);
     let workspace_ids: Vec<WorkspaceId> = snapshot.workspaces.iter().map(|ws| ws.id).collect();
 
     let main_class = match snapshot.section {
@@ -216,46 +176,13 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                     div { class: "workspace-header-main",
                         button {
                             class: "workspace-header-title-btn",
-                            onclick: show_workspace_header,
-                            span { class: "workspace-header-label", "{snapshot.current_workspace.title}" }
-                            span { class: "workspace-header-meta",
-                                "{snapshot.current_workspace.pane_count} panes · {snapshot.current_workspace.surface_count} surfaces"
-                            }
-                        }
-                    }
-                    div { class: "workspace-header-actions",
-                        if matches!(snapshot.section, ShellSection::Workspace) {
-                            div { class: "workspace-header-group",
-                                button {
-                                    class: if snapshot.overview_mode {
-                                        "workspace-header-action workspace-header-action-active"
-                                    } else {
-                                        "workspace-header-action"
-                                    },
-                                    onclick: toggle_overview,
-                                    "◫"
+                            onclick: show_active_section_header,
+                            span { class: "workspace-header-label",
+                                if matches!(snapshot.section, ShellSection::Workspace) {
+                                    "{snapshot.current_workspace.title}"
+                                } else {
+                                    "Settings"
                                 }
-                                if !snapshot.overview_mode {
-                                    button { class: "workspace-header-action", onclick: scroll_left, "◀" }
-                                    button { class: "workspace-header-action", onclick: scroll_right, "▶" }
-                                }
-                            }
-                            div { class: "workspace-header-divider" }
-                            div { class: "workspace-header-group",
-                                button { class: "workspace-header-action", onclick: create_window_right, "+ col" }
-                                button { class: "workspace-header-action", onclick: create_window_down, "+ stack" }
-                                button { class: "workspace-header-action", onclick: split_terminal, "+ split" }
-                                button {
-                                    class: "workspace-header-action workspace-header-action-primary",
-                                    onclick: split_browser,
-                                    "+ browser"
-                                }
-                            }
-                        } else {
-                            button {
-                                class: "workspace-header-action workspace-header-action-active",
-                                onclick: show_settings_header,
-                                "Preferences"
                             }
                         }
                     }
@@ -270,6 +197,8 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             &snapshot.runtime_status,
                             surface_drag_source,
                             surface_drop_target,
+                            window_drag_source,
+                            window_drop_target,
                         )}
                     }
                 } else {
@@ -571,6 +500,8 @@ fn render_workspace_strip(
     runtime_status: &RuntimeStatus,
     surface_drag_source: Signal<Option<DraggedSurface>>,
     surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    window_drag_source: Signal<Option<DraggedWindow>>,
+    window_drop_target: Signal<Option<WorkspaceWindowMoveTarget>>,
 ) -> Element {
     let viewport_class = if workspace.overview_scale < 1.0 {
         "workspace-viewport workspace-viewport-overview"
@@ -612,6 +543,8 @@ fn render_workspace_strip(
                             runtime_status,
                             surface_drag_source,
                             surface_drop_target,
+                            window_drag_source,
+                            window_drop_target,
                         )}
                     }
                 }
@@ -626,8 +559,10 @@ fn render_workspace_window(
     browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
-    surface_drag_source: Signal<Option<DraggedSurface>>,
-    surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    mut surface_drag_source: Signal<Option<DraggedSurface>>,
+    mut surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    mut window_drag_source: Signal<Option<DraggedWindow>>,
+    window_drop_target: Signal<Option<WorkspaceWindowMoveTarget>>,
 ) -> Element {
     let local_x = window.frame.x - workspace.viewport_origin_x;
     let local_y = window.frame.y - workspace.viewport_origin_y;
@@ -636,28 +571,81 @@ fn render_workspace_window(
         local_x, local_y, window.frame.width, window.frame.height
     );
     let window_class = if window.active {
-        format!(
-            "workspace-window-shell workspace-window-shell-active workspace-window-shell-state-{}",
-            window.attention.slug()
-        )
+        "workspace-window-shell workspace-window-shell-active"
     } else {
-        format!(
-            "workspace-window-shell workspace-window-shell-state-{}",
-            window.attention.slug()
-        )
+        "workspace-window-shell"
     };
     let window_id = window.id;
     let focus_core = core.clone();
     let focus_window = move |_| {
         focus_core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
     };
+    let start_window_drag = move |_: Event<DragData>| {
+        surface_drag_source.set(None);
+        surface_drop_target.set(None);
+        window_drag_source.set(Some(DraggedWindow { window_id }));
+    };
+    let clear_window_drag = {
+        let mut window_drag_source = window_drag_source;
+        let mut window_drop_target = window_drop_target;
+        let mut surface_drop_target = surface_drop_target;
+        move |_: Event<DragData>| {
+            window_drag_source.set(None);
+            window_drop_target.set(None);
+            surface_drop_target.set(None);
+        }
+    };
+    let drag_active = window_drag_source.read().is_some();
+    let left_target = WorkspaceWindowMoveTarget::ColumnBefore {
+        column_id: window.column_id,
+    };
+    let right_target = WorkspaceWindowMoveTarget::ColumnAfter {
+        column_id: window.column_id,
+    };
+    let top_target = WorkspaceWindowMoveTarget::StackAbove { window_id };
+    let bottom_target = WorkspaceWindowMoveTarget::StackBelow { window_id };
 
     rsx! {
         section { class: "{window_class}", style: "{style}",
+            {render_window_drop_zone(
+                "workspace-window-drop-zone workspace-window-drop-zone-left",
+                left_target,
+                drag_active,
+                window_drag_source,
+                window_drop_target,
+                core.clone(),
+            )}
+            {render_window_drop_zone(
+                "workspace-window-drop-zone workspace-window-drop-zone-right",
+                right_target,
+                drag_active,
+                window_drag_source,
+                window_drop_target,
+                core.clone(),
+            )}
+            {render_window_drop_zone(
+                "workspace-window-drop-zone workspace-window-drop-zone-top",
+                top_target,
+                drag_active,
+                window_drag_source,
+                window_drop_target,
+                core.clone(),
+            )}
+            {render_window_drop_zone(
+                "workspace-window-drop-zone workspace-window-drop-zone-bottom",
+                bottom_target,
+                drag_active,
+                window_drag_source,
+                window_drop_target,
+                core.clone(),
+            )}
             div { class: "workspace-window-toolbar",
-                button { class: "workspace-window-title", onclick: focus_window,
+                draggable: "true",
+                onclick: focus_window,
+                ondragstart: start_window_drag,
+                ondragend: clear_window_drag,
+                div { class: "workspace-window-title",
                     span { class: "workspace-label", "{window.title}" }
-                    span { class: "workspace-meta", "{window.pane_count} panes · {window.surface_count} surfaces" }
                 }
             }
             div { class: "workspace-window-body",
@@ -670,6 +658,60 @@ fn render_workspace_window(
                     surface_drop_target,
                 )}
             }
+        }
+    }
+}
+
+fn render_window_drop_zone(
+    base_class: &'static str,
+    target: WorkspaceWindowMoveTarget,
+    visible: bool,
+    mut window_drag_source: Signal<Option<DraggedWindow>>,
+    mut window_drop_target: Signal<Option<WorkspaceWindowMoveTarget>>,
+    core: SharedCore,
+) -> Element {
+    let class = if *window_drop_target.read() == Some(target) {
+        format!("{base_class} workspace-window-drop-zone-active")
+    } else if visible {
+        format!("{base_class} workspace-window-drop-zone-visible")
+    } else {
+        base_class.to_string()
+    };
+    let set_drop_target = move |event: Event<DragData>| {
+        if window_drag_source.read().is_none() {
+            return;
+        }
+        event.prevent_default();
+        window_drop_target.set(Some(target));
+    };
+    let clear_drop_target = move |_: Event<DragData>| {
+        if *window_drop_target.read() == Some(target) {
+            window_drop_target.set(None);
+        }
+    };
+    let drop_window = move |event: Event<DragData>| {
+        if window_drag_source.read().is_none() {
+            return;
+        }
+        event.prevent_default();
+        let dragged = *window_drag_source.read();
+        window_drag_source.set(None);
+        window_drop_target.set(None);
+        let Some(dragged) = dragged else {
+            return;
+        };
+        core.dispatch_shell_action(ShellAction::MoveWorkspaceWindow {
+            window_id: dragged.window_id,
+            target,
+        });
+    };
+
+    rsx! {
+        div {
+            class: "{class}",
+            ondragover: set_drop_target,
+            ondragleave: clear_drop_target,
+            ondrop: drop_window,
         }
     }
 }
@@ -691,8 +733,7 @@ fn render_pane(
     );
     let pane_class = if pane.active {
         format!(
-            "pane-card pane-card-active pane-card-state-{}{}",
-            pane.attention.slug(),
+            "pane-card pane-card-active{}",
             if pane_is_drop_target {
                 " pane-card-drop-target"
             } else {
@@ -701,8 +742,7 @@ fn render_pane(
         )
     } else {
         format!(
-            "pane-card pane-card-state-{}{}",
-            pane.attention.slug(),
+            "pane-card{}",
             if pane_is_drop_target {
                 " pane-card-drop-target"
             } else {
@@ -759,20 +799,19 @@ fn render_pane(
             })
         }
     };
-    let split_browser = {
-        let core = core.clone();
-        move |_| {
-            core.dispatch_shell_action(ShellAction::SplitBrowser {
-                pane_id: Some(pane_id),
-            })
-        }
-    };
     let split_terminal = {
         let core = core.clone();
         move |_| {
             core.dispatch_shell_action(ShellAction::SplitTerminal {
                 pane_id: Some(pane_id),
             })
+        }
+    };
+    let split_down = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
+            core.dispatch_shortcut_action(ShortcutAction::SplitDown);
         }
     };
     let close_surface = {
@@ -797,6 +836,9 @@ fn render_pane(
         "Close current surface"
     };
     let set_pane_drop_target = move |event: Event<DragData>| {
+        if surface_drag_source.read().is_none() {
+            return;
+        }
         event.prevent_default();
         surface_drop_target.set(Some(SurfaceDropTarget::PaneEnd { pane_id }));
     };
@@ -852,8 +894,8 @@ fn render_pane(
                 div { class: "pane-action-cluster",
                     button { class: "pane-utility pane-utility-tab", title: "New terminal tab", onclick: add_terminal_surface, "+t" }
                     button { class: "pane-utility pane-utility-tab", title: "New browser tab", onclick: add_browser_surface, "+w" }
-                    button { class: "pane-utility pane-utility-split", title: "Split terminal right", onclick: split_terminal, "|t" }
-                    button { class: "pane-utility pane-utility-window", title: "Split browser right", onclick: split_browser, "|w" }
+                    button { class: "pane-utility pane-utility-split", title: "Split right", onclick: split_terminal, "|r" }
+                    button { class: "pane-utility pane-utility-split", title: "Split down", onclick: split_down, "|d" }
                     button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface, "x" }
                 }
             }
@@ -896,8 +938,7 @@ fn render_surface_tab(
     );
     let tab_class = if surface.id == active_surface_id {
         format!(
-            "surface-tab surface-tab-active surface-tab-state-{}{}",
-            surface.attention.slug(),
+            "surface-tab surface-tab-active{}",
             if is_drop_target {
                 " surface-tab-drop-target"
             } else {
@@ -906,8 +947,7 @@ fn render_surface_tab(
         )
     } else {
         format!(
-            "surface-tab surface-tab-state-{}{}",
-            surface.attention.slug(),
+            "surface-tab{}",
             if is_drop_target {
                 " surface-tab-drop-target"
             } else {
@@ -933,6 +973,9 @@ fn render_surface_tab(
         surface_drop_target.set(None);
     };
     let set_surface_drop_target = move |event: Event<DragData>| {
+        if surface_drag_source.read().is_none() {
+            return;
+        }
         event.prevent_default();
         surface_drop_target.set(Some(SurfaceDropTarget::BeforeSurface {
             pane_id,
