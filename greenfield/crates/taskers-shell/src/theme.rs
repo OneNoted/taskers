@@ -175,8 +175,10 @@ pub fn generate_css(p: &ThemePalette) -> String {
     let sidebar_width = metrics.sidebar_width;
     let activity_width = metrics.activity_width;
     let workspace_toolbar_height = metrics.toolbar_height;
+    let window_border_width = metrics.window_border_width;
     let window_toolbar_height = metrics.window_toolbar_height;
     let window_body_padding = metrics.window_body_padding;
+    let pane_border_width = metrics.pane_border_width;
     let pane_header_height = metrics.pane_header_height;
     let surface_tab_height = metrics.surface_tab_height;
     let browser_toolbar_height = metrics.browser_toolbar_height;
@@ -816,7 +818,7 @@ button {{
   display: flex;
   flex-direction: column;
   background: {surface};
-  border: 2px solid {border_07};
+  border: {window_border_width}px solid {border_07};
   overflow: hidden;
 }}
 
@@ -879,7 +881,7 @@ button {{
   display: flex;
   flex-direction: column;
   background: {elevated};
-  border: 1px solid {border_10};
+  border: {pane_border_width}px solid {border_10};
   overflow: hidden;
 }}
 

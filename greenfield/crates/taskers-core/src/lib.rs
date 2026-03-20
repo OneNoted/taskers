@@ -577,9 +577,11 @@ pub struct LayoutMetrics {
     pub activity_width: i32,
     pub toolbar_height: i32,
     pub workspace_padding: i32,
+    pub window_border_width: i32,
     pub window_toolbar_height: i32,
     pub window_body_padding: i32,
     pub split_gap: i32,
+    pub pane_border_width: i32,
     pub pane_header_height: i32,
     pub browser_toolbar_height: i32,
     pub surface_tab_height: i32,
@@ -592,9 +594,11 @@ impl Default for LayoutMetrics {
             activity_width: 312,
             toolbar_height: 42,
             workspace_padding: 16,
+            window_border_width: 2,
             window_toolbar_height: 28,
             window_body_padding: 10,
             split_gap: 8,
+            pane_border_width: 1,
             pane_header_height: 26,
             browser_toolbar_height: 34,
             surface_tab_height: 28,
@@ -3154,11 +3158,13 @@ fn pane_body_frame(frame: Frame, metrics: LayoutMetrics, kind: &PaneKind) -> Fra
         PaneKind::Browser => metrics.browser_toolbar_height,
     };
     frame
+        .inset(metrics.pane_border_width)
         .inset_top(metrics.pane_header_height + metrics.surface_tab_height + browser_toolbar_height)
 }
 
 fn workspace_window_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
     frame
+        .inset(metrics.window_border_width)
         .inset_top(metrics.window_toolbar_height)
         .inset(metrics.window_body_padding)
 }
@@ -3506,7 +3512,8 @@ mod tests {
     use super::{
         BootstrapModel, BrowserMountSpec, Direction, HostCommand, HostEvent, LayoutMetrics,
         RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
-        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state, resolved_browser_uri,
+        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state, pane_body_frame,
+        resolved_browser_uri, split_frame, workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -3532,6 +3539,28 @@ mod tests {
             super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
             super::LayoutNodeSnapshot::Split { first, second, .. } => {
                 find_pane(first, pane_id).or_else(|| find_pane(second, pane_id))
+            }
+        }
+    }
+
+    fn find_pane_frame(
+        node: &super::LayoutNodeSnapshot,
+        pane_id: taskers_domain::PaneId,
+        frame: super::Frame,
+        gap: i32,
+    ) -> Option<super::Frame> {
+        match node {
+            super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(frame),
+            super::LayoutNodeSnapshot::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let ratio = (ratio.clamp(0.15, 0.85) * 1000.0).round() as u16;
+                let (first_frame, second_frame) = split_frame(frame, *axis, ratio, gap);
+                find_pane_frame(first, pane_id, first_frame, gap)
+                    .or_else(|| find_pane_frame(second, pane_id, second_frame, gap))
             }
         }
     }
@@ -3588,6 +3617,43 @@ mod tests {
                 .iter()
                 .all(|plan| plan.frame.y >= min_content_y),
             "expected native surfaces to stay below window chrome"
+        );
+    }
+
+    #[test]
+    fn active_portal_surface_frame_matches_layout_insets() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let workspace = &snapshot.current_workspace;
+        let metrics = LayoutMetrics::default();
+        let active_window = workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == workspace.active_window_id)
+            .expect("active window");
+        let active_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == workspace.active_pane)
+            .expect("active portal plan");
+        let pane_frame = find_pane_frame(
+            &active_window.layout,
+            workspace.active_pane,
+            workspace_window_content_frame(active_window.frame, metrics),
+            metrics.split_gap,
+        )
+        .expect("active pane frame");
+        let pane_kind = match &active_plan.mount {
+            SurfaceMountSpec::Browser(_) => taskers_domain::PaneKind::Browser,
+            SurfaceMountSpec::Terminal(_) => taskers_domain::PaneKind::Terminal,
+        };
+
+        assert_eq!(
+            active_plan.frame,
+            pane_body_frame(pane_frame, metrics, &pane_kind),
+            "expected native surface frame to match shell pane-body insets"
         );
     }
 
