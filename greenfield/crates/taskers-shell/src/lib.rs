@@ -3,8 +3,8 @@ mod theme;
 use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot,
-    LayoutNodeSnapshot, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeCapability,
-    RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
+    LayoutNodeSnapshot, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeStatus,
+    SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
     ShortcutBindingSnapshot, SplitAxis, SurfaceKind, SurfaceSnapshot, WorkspaceDirection,
     WorkspaceId, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowSnapshot,
 };
@@ -131,9 +131,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
         div { class: "app-shell",
             aside { class: "workspace-sidebar",
                 div { class: "sidebar-brand",
-                    div { class: "sidebar-heading", "Taskers" }
                     h1 { "Taskers" }
-                    div { class: "workspace-preview", "Shared Dioxus shell over native browser and terminal hosts." }
                 }
                 div { class: "sidebar-nav",
                     button {
@@ -161,12 +159,6 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             &workspace_ids,
                         )}
                     }
-                }
-                div { class: "runtime-card",
-                    div { class: "sidebar-heading", "Runtime status" }
-                    {render_runtime_capability("Ghostty runtime", &snapshot.runtime_status.ghostty_runtime)}
-                    {render_runtime_capability("Shell integration", &snapshot.runtime_status.shell_integration)}
-                    {render_runtime_capability("Terminal host", &snapshot.runtime_status.terminal_host)}
                 }
             }
 
@@ -262,9 +254,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                 div { class: "notification-timeline",
                     if snapshot.activity.is_empty() && snapshot.done_activity.is_empty() {
                         div { class: "notification-empty",
-                            div { class: "notification-empty-icon", "◎" }
                             div { class: "notification-empty-title", "No notifications" }
-                            div { class: "notification-empty-subtitle", "Activity from agents and surfaces appears here." }
                         }
                     } else {
                         for item in &snapshot.activity {
@@ -470,29 +460,8 @@ fn render_workspace_pull_requests(pull_requests: &[PullRequestSnapshot]) -> Elem
     rsx! {
         for pr in pull_requests {
             div { class: "workspace-pr-row",
-                span { class: "workspace-pr-icon workspace-pr-status-{pr.status}", "{pr.status_icon}" }
                 span { class: "workspace-pr-number", "#{pr.number}" }
                 span { class: "workspace-pr-title", "{pr.title}" }
-            }
-        }
-    }
-}
-
-fn render_runtime_capability(label: &'static str, capability: &RuntimeCapability) -> Element {
-    let class = match capability {
-        RuntimeCapability::Ready => "status-pill status-pill-ready",
-        RuntimeCapability::Fallback { .. } => "status-pill status-pill-fallback",
-        RuntimeCapability::Unavailable { .. } => "status-pill status-pill-unavailable",
-    };
-
-    rsx! {
-        div { class: "runtime-row",
-            div { class: "runtime-status-row",
-                span { class: "workspace-preview", "{label}" }
-                span { class: "{class}", "{capability.label()}" }
-            }
-            if let Some(message) = capability.message() {
-                div { class: "status-copy", "{message}" }
             }
         }
     }
@@ -624,9 +593,6 @@ fn render_workspace_window(
                     span { class: "workspace-label", "{window.title}" }
                     span { class: "workspace-meta", "{window.pane_count} panes · {window.surface_count} surfaces" }
                 }
-                div { class: "workspace-window-flags",
-                    span { class: format!("status-pill status-pill-inline status-pill-{}", window.attention.slug()), "{window.attention.label()}" }
-                }
             }
             div { class: "workspace-window-body",
                 {render_layout(&window.layout, browser_chrome, core.clone(), runtime_status)}
@@ -658,17 +624,6 @@ fn render_pane(
                 .first()
                 .expect("pane snapshot should contain surfaces")
         });
-    let subtitle = match active_surface.kind {
-        SurfaceKind::Terminal => active_surface
-            .cwd
-            .clone()
-            .unwrap_or_else(|| "Embedded terminal".into()),
-        SurfaceKind::Browser => active_surface
-            .url
-            .clone()
-            .unwrap_or_else(|| "Native browser surface".into()),
-    };
-    let status_class = format!("status-dot status-dot-{}", active_surface.attention.slug());
     let pane_id = pane.id;
     let active_surface_id = active_surface.id;
     let active_browser_chrome = browser_chrome
@@ -737,28 +692,26 @@ fn render_pane(
     } else {
         "pane-flash-ring"
     };
+    let close_label = if pane.surfaces.len() > 1 {
+        "Close current tab"
+    } else {
+        "Close current surface"
+    };
 
     rsx! {
         section { class: "{pane_class}", onclick: focus_pane,
             div { class: "pane-header",
-                div { class: "pane-header-main",
-                    span { class: "{status_class}", "●" }
-                    div { class: "pane-title-stack",
-                        div { class: "pane-title", "{active_surface.title}" }
-                        div { class: "pane-meta", "{subtitle}" }
+                div { class: "surface-tabs",
+                    for surface in &pane.surfaces {
+                        {render_surface_tab(pane.id, pane.active_surface, surface, core.clone())}
                     }
                 }
                 div { class: "pane-action-cluster",
-                    button { class: "pane-action pane-action-tab", onclick: add_browser_surface, "+ tab" }
-                    button { class: "pane-action pane-action-tab", onclick: add_terminal_surface, "+ term" }
-                    button { class: "pane-action pane-window-action", onclick: split_browser, "+ web" }
-                    button { class: "pane-action pane-split-action", onclick: split_terminal, "+ split" }
-                    button { class: "pane-action pane-close-action", onclick: close_surface, "×" }
-                }
-            }
-            div { class: "surface-tabs",
-                for surface in &pane.surfaces {
-                    {render_surface_tab(pane.id, pane.active_surface, surface, core.clone())}
+                    button { class: "pane-utility pane-utility-tab", title: "New terminal tab", onclick: add_terminal_surface, "+t" }
+                    button { class: "pane-utility pane-utility-tab", title: "New browser tab", onclick: add_browser_surface, "+w" }
+                    button { class: "pane-utility pane-utility-split", title: "Split terminal right", onclick: split_terminal, "|t" }
+                    button { class: "pane-utility pane-utility-window", title: "Split browser right", onclick: split_browser, "|w" }
+                    button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface, "x" }
                 }
             }
             if matches!(active_surface.kind, SurfaceKind::Browser) {
@@ -783,6 +736,10 @@ fn render_surface_tab(
     surface: &SurfaceSnapshot,
     core: SharedCore,
 ) -> Element {
+    let kind_label = match surface.kind {
+        SurfaceKind::Terminal => "term",
+        SurfaceKind::Browser => "web",
+    };
     let tab_class = if surface.id == active_surface_id {
         format!(
             "surface-tab surface-tab-active surface-tab-state-{}",
@@ -801,8 +758,8 @@ fn render_surface_tab(
 
     rsx! {
         button { class: "{tab_class}", onclick: focus_surface,
-            span { class: "surface-tab-label", "{surface.kind.label()}" }
-            span { class: "pane-meta", "{surface.title}" }
+            span { class: "surface-tab-label", "{kind_label}" }
+            span { class: "surface-tab-title", "{surface.title}" }
         }
     }
 }
@@ -903,43 +860,32 @@ fn BrowserToolbar(
 }
 
 fn render_surface_backdrop(surface: &SurfaceSnapshot, runtime_status: &RuntimeStatus) -> Element {
-    let badge_class = format!(
-        "status-pill status-pill-inline status-pill-{}",
-        surface.attention.slug()
-    );
     match surface.kind {
         SurfaceKind::Browser => {
             let url = surface.url.clone().unwrap_or_else(|| "about:blank".into());
             rsx! {
                 div { class: "surface-backdrop",
                     div { class: "surface-backdrop-copy",
-                        div { class: "surface-backdrop-eyebrow", "Browser surface" }
+                        div { class: "surface-backdrop-eyebrow", "browser" }
                         div { class: "surface-backdrop-title", "{surface.title}" }
-                        div { class: "surface-backdrop-note",
-                            "The platform host mounts a native browser view here while the shared shell keeps tabs, workspace chrome, settings, and activity state consistent."
-                        }
                     }
                     div { class: "surface-meta",
-                        span { class: "{badge_class}", "{surface.attention.label()}" }
                         span { class: "surface-chip", "URL: {url}" }
                     }
                 }
             }
         }
         SurfaceKind::Terminal => {
-            let host_message = runtime_status
-                .terminal_host
-                .message()
-                .unwrap_or("Embedded terminal hosting is ready.");
             rsx! {
                 div { class: "surface-backdrop",
                     div { class: "surface-backdrop-copy",
-                        div { class: "surface-backdrop-eyebrow", "Terminal surface" }
+                        div { class: "surface-backdrop-eyebrow", "terminal" }
                         div { class: "surface-backdrop-title", "{surface.title}" }
-                        div { class: "surface-backdrop-note", "{host_message}" }
+                        if let Some(message) = runtime_status.terminal_host.message() {
+                            div { class: "surface-backdrop-note", "{message}" }
+                        }
                     }
                     div { class: "surface-meta",
-                        span { class: "{badge_class}", "{surface.attention.label()}" }
                         if let Some(cwd) = &surface.cwd {
                             span { class: "surface-chip", "cwd: {cwd}" }
                         }

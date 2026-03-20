@@ -203,8 +203,6 @@ button {{
 .workspace-sidebar,
 .attention-panel {{
   background: {surface_85};
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -272,7 +270,6 @@ button {{
 }}
 
 .sidebar-nav-button {{
-  border-radius: 7px;
   padding: 8px 10px;
   color: {text_subtle};
 }}
@@ -295,7 +292,6 @@ button {{
   background: transparent;
   color: {text_dim};
   border: 1px solid {border_10};
-  border-radius: 999px;
   min-width: 24px;
   min-height: 24px;
   padding: 0;
@@ -319,7 +315,6 @@ button {{
 .workspace-tab {{
   position: relative;
   padding: 8px 10px 8px 14px;
-  border-radius: 6px;
   border: 1px solid transparent;
   display: flex;
   align-items: stretch;
@@ -359,10 +354,9 @@ button {{
 .workspace-tab-rail {{
   position: absolute;
   left: 0;
-  top: 5px;
-  bottom: 5px;
-  width: 3px;
-  border-radius: 1.5px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
   background: var(--workspace-accent, {accent});
 }}
 
@@ -402,7 +396,6 @@ button {{
   width: 16px;
   height: 16px;
   border: 0;
-  border-radius: 4px;
   background: transparent;
   color: {text_dim};
   font-size: 13px;
@@ -428,7 +421,6 @@ button {{
   flex: 0 0 auto;
   width: 16px;
   height: 16px;
-  border-radius: 999px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -484,13 +476,11 @@ button {{
 .workspace-progress-track {{
   flex: 1;
   height: 3px;
-  border-radius: 1.5px;
   background: {border_08};
 }}
 
 .workspace-progress-fill {{
   height: 100%;
-  border-radius: 1.5px;
   background: var(--workspace-accent, {accent});
   transition: width 0.3s ease;
 }}
@@ -564,7 +554,6 @@ button {{
 .settings-card {{
   background: transparent;
   border: 1px solid {border_06};
-  border-radius: 9px;
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -588,7 +577,6 @@ button {{
 .status-pill {{
   display: inline-flex;
   align-items: center;
-  border-radius: 999px;
   padding: 4px 8px;
   font-size: 10px;
   font-weight: 700;
@@ -663,7 +651,6 @@ button {{
   align-items: center;
   gap: 2px;
   background: {border_04};
-  border-radius: 8px;
   padding: 2px;
 }}
 
@@ -701,7 +688,6 @@ button {{
 .workspace-header-title-btn {{
   background: transparent;
   border: 0;
-  border-radius: 7px;
   color: inherit;
   padding: 6px 8px;
   text-align: left;
@@ -729,7 +715,6 @@ button {{
 .activity-action,
 .shortcut-pill {{
   border: 1px solid {border_10};
-  border-radius: 999px;
   background: transparent;
 }}
 
@@ -813,39 +798,36 @@ button {{
   position: absolute;
   display: flex;
   flex-direction: column;
-  border-radius: 10px;
   background: {elevated};
   border: 1px solid {border_08};
   overflow: hidden;
-  box-shadow: 0 18px 42px {overlay_16};
 }}
 
 .workspace-window-shell-active {{
   border-color: {accent_24};
-  box-shadow: 0 18px 42px {overlay_16}, 0 0 0 1px {accent_24};
 }}
 
 .workspace-window-shell-state-busy {{
-  box-shadow: 0 18px 42px {overlay_16}, inset 0 0 0 1px {busy_10};
+  border-color: {busy_12};
 }}
 
 .workspace-window-shell-state-completed {{
-  box-shadow: 0 18px 42px {overlay_16}, inset 0 0 0 1px {completed_10};
+  border-color: {completed_12};
 }}
 
 .workspace-window-shell-state-waiting {{
-  box-shadow: 0 18px 42px {overlay_16}, inset 0 0 0 1px {waiting_10};
+  border-color: {waiting_14};
 }}
 
 .workspace-window-shell-state-error {{
-  box-shadow: 0 18px 42px {overlay_16}, inset 0 0 0 1px {error_10};
+  border-color: {error_12};
 }}
 
 .workspace-window-toolbar {{
-  min-height: 38px;
+  min-height: 34px;
   border-bottom: 1px solid {border_07};
   background: {surface};
-  padding: 0 10px;
+  padding: 0 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -877,7 +859,7 @@ button {{
 .workspace-window-body {{
   flex: 1;
   min-height: 0;
-  padding: 10px;
+  padding: 0;
   background: {border_02};
 }}
 
@@ -905,7 +887,6 @@ button {{
   flex-direction: column;
   background: {elevated};
   border: 1px solid {border_07};
-  border-radius: 8px;
   overflow: hidden;
 }}
 
@@ -939,10 +920,8 @@ button {{
 
 .pane-flash-ring {{
   position: absolute;
-  inset: 6px;
-  border-radius: 10px;
-  border: 3px solid {accent};
-  box-shadow: 0 0 12px {accent_20};
+  inset: 0;
+  border: 1px solid {accent};
   pointer-events: none;
   opacity: 0;
   z-index: 10;
@@ -953,29 +932,14 @@ button {{
 }}
 
 .pane-header {{
-  min-height: 38px;
+  min-height: 34px;
   border-bottom: 1px solid {border_07};
-  padding: 0 10px;
+  padding: 0 6px 0 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-}}
-
-.pane-title-stack {{
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}}
-
-.pane-title {{
-  color: {text_bright};
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  gap: 6px;
+  background: {surface};
 }}
 
 .pane-meta,
@@ -986,57 +950,42 @@ button {{
 }}
 
 .pane-action-cluster {{
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.14s ease-in-out;
 }}
 
-.pane-card:hover .pane-action-cluster,
 .pane-card-active .pane-action-cluster {{
   opacity: 1;
   pointer-events: auto;
 }}
 
-.pane-action-tab {{
-  border-color: {accent_20};
-}}
-
-.pane-window-action {{
-  border-color: {action_window_22};
-}}
-
-.pane-split-action {{
-  border-color: {action_split_22};
-}}
-
-.pane-close-action {{
-  border-color: {error_18};
-}}
-
-.pane-close-action:hover {{
-  background: {error_10};
-  color: {error};
-}}
-
 .surface-tabs {{
+  flex: 1;
+  min-width: 0;
   min-height: 34px;
-  border-bottom: 1px solid {border_06};
   display: flex;
-  align-items: stretch;
-  gap: 6px;
-  padding: 6px 8px;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
   overflow-x: auto;
-  background: {border_03};
+  background: transparent;
 }}
 
 .surface-tab {{
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  max-width: 320px;
+  height: 26px;
   border: 1px solid transparent;
-  border-radius: 999px;
   background: transparent;
-  padding: 5px 9px;
+  padding: 0 8px;
   color: {text_muted};
   white-space: nowrap;
 }}
@@ -1047,8 +996,8 @@ button {{
 }}
 
 .surface-tab-active {{
-  background: {accent_14};
-  border-color: {accent_24};
+  background: {overlay_16};
+  border-color: {accent_20};
   color: {text_bright};
 }}
 
@@ -1068,20 +1017,77 @@ button {{
   box-shadow: inset 0 0 0 1px {error_10};
 }}
 
+.surface-tab-title {{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: {text_subtle};
+  font-size: 12px;
+}}
+
+.surface-tab-active .surface-tab-title {{
+  color: {text_bright};
+}}
+
+.surface-tab-label {{
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+  color: {text_dim};
+}}
+
+.pane-utility {{
+  min-width: 24px;
+  height: 22px;
+  border: 0;
+  padding: 0 6px;
+  background: transparent;
+  color: {text_dim};
+  font-size: 11px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  line-height: 1;
+}}
+
+.pane-utility:hover {{
+  background: {border_06};
+  color: {text_bright};
+}}
+
+.pane-utility-tab {{
+  color: {text_subtle};
+}}
+
+.pane-utility-split {{
+  color: {completed};
+}}
+
+.pane-utility-window {{
+  color: {action_window};
+}}
+
+.pane-utility-close {{
+  color: {error_text};
+}}
+
+.pane-utility-close:hover {{
+  background: {error_10};
+  color: {error};
+}}
+
 .browser-toolbar {{
-  min-height: 42px;
+  min-height: 34px;
   border-bottom: 1px solid {border_06};
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: {overlay_05};
+  gap: 6px;
+  padding: 4px 6px;
+  background: {surface};
 }}
 
 .browser-toolbar-button {{
-  min-width: 34px;
-  height: 28px;
-  border-radius: 8px;
+  min-width: 30px;
+  height: 26px;
   border: 1px solid {border_10};
   background: {overlay_05};
   color: {text_subtle};
@@ -1102,8 +1108,7 @@ button {{
 .browser-address {{
   flex: 1;
   min-width: 0;
-  height: 28px;
-  border-radius: 8px;
+  height: 26px;
   border: 1px solid {border_10};
   padding: 0 10px;
   background: {overlay_05};
@@ -1120,7 +1125,7 @@ button {{
 .pane-body {{
   flex: 1;
   min-height: 0;
-  padding: 18px;
+  padding: 0;
   background: {border_02};
 }}
 
@@ -1131,17 +1136,14 @@ button {{
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 14px;
-  border: 1px dashed {border_12};
-  border-radius: 8px;
-  padding: 18px;
-  background:
-    linear-gradient(180deg, {overlay_16} 0%, {overlay_05} 100%),
-    {overlay_03};
+  gap: 12px;
+  border: 1px dashed {border_10};
+  padding: 12px;
+  background: {overlay_03};
 }}
 
 .workspace-main-overview .workspace-window-shell {{
-  box-shadow: 0 18px 42px {overlay_16};
+  box-shadow: none;
 }}
 
 .workspace-main-overview .workspace-window-toolbar {{
@@ -1157,7 +1159,6 @@ button {{
 
 .workspace-main-overview .workspace-window-flags,
 .workspace-main-overview .pane-action-cluster,
-.workspace-main-overview .surface-tabs,
 .workspace-main-overview .browser-toolbar,
 .workspace-main-overview .surface-backdrop-note,
 .workspace-main-overview .surface-chip {{
@@ -1173,11 +1174,14 @@ button {{
   padding: 0 8px;
 }}
 
-.workspace-main-overview .pane-title {{
-  font-size: 11px;
+.workspace-main-overview .surface-tab {{
+  height: 22px;
+  max-width: 180px;
+  padding: 0 6px;
 }}
 
-.workspace-main-overview .pane-meta {{
+.workspace-main-overview .surface-tab-title,
+.workspace-main-overview .surface-tab-label {{
   font-size: 10px;
 }}
 
@@ -1262,14 +1266,12 @@ button {{
 
 .empty-state {{
   border: 1px dashed {border_10};
-  border-radius: 8px;
   padding: 12px;
   color: {text_dim};
   font-size: 12px;
 }}
 
 .activity-item {{
-  border-radius: 8px;
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
@@ -1305,7 +1307,6 @@ button {{
   font-weight: 600;
   color: {text_dim};
   padding: 2px 6px;
-  border-radius: 999px;
   background: {border_06};
 }}
 
@@ -1342,7 +1343,6 @@ button {{
   align-items: flex-start;
   gap: 10px;
   padding: 10px;
-  border-radius: 8px;
   background: {border_03};
   transition: background 0.14s ease-in-out;
 }}
@@ -1355,7 +1355,6 @@ button {{
   flex: 0 0 auto;
   width: 8px;
   height: 8px;
-  border-radius: 999px;
   margin-top: 4px;
 }}
 
@@ -1426,7 +1425,6 @@ button {{
   width: 16px;
   height: 16px;
   border: 0;
-  border-radius: 4px;
   background: transparent;
   color: {text_dim};
   font-size: 13px;
@@ -1451,12 +1449,6 @@ button {{
   justify-content: center;
   gap: 8px;
   padding: 32px 16px;
-}}
-
-.notification-empty-icon {{
-  font-size: 28px;
-  color: {text_dim};
-  opacity: 0.5;
 }}
 
 .notification-empty-title {{
@@ -1492,7 +1484,6 @@ button {{
 .theme-card,
 .preset-card {{
   border: 1px solid {border_08};
-  border-radius: 8px;
   padding: 10px;
 }}
 
@@ -1602,10 +1593,8 @@ button {{
         error_10 = rgba(p.error, 0.10),
         error_12 = rgba(p.error, 0.12),
         error_16 = rgba(p.error, 0.16),
-        error_18 = rgba(p.error, 0.18),
         error_text = p.error_text.to_hex(),
-        action_window_22 = rgba(p.action_window, 0.22),
-        action_split_22 = rgba(p.action_split, 0.22),
+        action_window = p.action_window.to_hex(),
     );
     css
 }

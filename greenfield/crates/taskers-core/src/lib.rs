@@ -287,6 +287,16 @@ impl Frame {
             height: (self.height - clamped).max(1),
         }
     }
+
+    pub fn inset(self, amount: i32) -> Self {
+        let clamped = amount.clamp(0, self.width.min(self.height).saturating_sub(1) / 2);
+        Self {
+            x: self.x + clamped,
+            y: self.y + clamped,
+            width: (self.width - clamped * 2).max(1),
+            height: (self.height - clamped * 2).max(1),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +305,8 @@ pub struct LayoutMetrics {
     pub activity_width: i32,
     pub toolbar_height: i32,
     pub workspace_padding: i32,
+    pub window_toolbar_height: i32,
+    pub window_body_padding: i32,
     pub split_gap: i32,
     pub pane_header_height: i32,
     pub surface_tab_height: i32,
@@ -307,9 +319,11 @@ impl Default for LayoutMetrics {
             activity_width: 312,
             toolbar_height: 48,
             workspace_padding: 16,
+            window_toolbar_height: 34,
+            window_body_padding: 0,
             split_gap: 12,
-            pane_header_height: 38,
-            surface_tab_height: 34,
+            pane_header_height: 34,
+            surface_tab_height: 0,
         }
     }
 }
@@ -1217,7 +1231,12 @@ impl TaskersCore {
             .values()
             .filter_map(|window| {
                 let (_, frame) = window_frames.get(&window.id)?;
-                Some(self.collect_surface_plans(workspace_id, workspace, &window.layout, *frame))
+                Some(self.collect_surface_plans(
+                    workspace_id,
+                    workspace,
+                    &window.layout,
+                    workspace_window_content_frame(*frame, self.metrics),
+                ))
             })
             .flatten()
             .collect()
@@ -2434,10 +2453,16 @@ fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, F
 fn pane_body_frame(frame: Frame, metrics: LayoutMetrics, kind: &PaneKind) -> Frame {
     let browser_toolbar_height = match kind {
         PaneKind::Terminal => 0,
-        PaneKind::Browser => 42,
+        PaneKind::Browser => 38,
     };
     frame
         .inset_top(metrics.pane_header_height + metrics.surface_tab_height + browser_toolbar_height)
+}
+
+fn workspace_window_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
+    frame
+        .inset_top(metrics.window_toolbar_height)
+        .inset(metrics.window_body_padding)
 }
 
 fn workspace_preview(summary: &DomainWorkspaceSummary) -> String {
@@ -2753,8 +2778,9 @@ mod tests {
     use taskers_control::ControlCommand;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, HostCommand, HostEvent, RuntimeCapability, RuntimeStatus,
-        SharedCore, ShellAction, ShellSection, SurfaceMountSpec, default_preview_app_state,
+        BootstrapModel, BrowserMountSpec, HostCommand, HostEvent, LayoutMetrics, RuntimeCapability,
+        RuntimeStatus, SharedCore, ShellAction, ShellSection, SurfaceMountSpec,
+        default_preview_app_state,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -2792,6 +2818,24 @@ mod tests {
 
         assert_eq!(browser_count, 1);
         assert_eq!(terminal_count, 1);
+    }
+
+    #[test]
+    fn portal_surface_frames_start_below_window_toolbar() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let metrics = LayoutMetrics::default();
+        let min_content_y =
+            snapshot.portal.content.y + metrics.window_toolbar_height + metrics.pane_header_height;
+
+        assert!(
+            snapshot
+                .portal
+                .panes
+                .iter()
+                .all(|plan| plan.frame.y >= min_content_y),
+            "expected native surfaces to stay below window chrome"
+        );
     }
 
     #[test]
