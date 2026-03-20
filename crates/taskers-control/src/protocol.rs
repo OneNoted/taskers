@@ -102,6 +102,13 @@ pub enum ControlCommand {
         surface_id: SurfaceId,
         to_index: usize,
     },
+    TransferSurface {
+        workspace_id: WorkspaceId,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        to_index: usize,
+    },
     SetWorkspaceViewport {
         workspace_id: WorkspaceId,
         viewport: WorkspaceViewport,

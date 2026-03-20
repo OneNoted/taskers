@@ -894,6 +894,10 @@ button {{
   border-color: {accent_20};
 }}
 
+.pane-card-drop-target {{
+  border-color: {accent_24};
+}}
+
 .pane-card-state-busy {{
   box-shadow: inset 0 0 0 1px {busy_10};
 }}
@@ -993,6 +997,15 @@ button {{
 .surface-tab:hover {{
   background: {border_06};
   border-color: {border_10};
+}}
+
+.surface-tab[draggable] {{
+  cursor: grab;
+}}
+
+.surface-tab-drop-target {{
+  border-color: {accent_24};
+  background: {accent_12};
 }}
 
 .surface-tab-active {{

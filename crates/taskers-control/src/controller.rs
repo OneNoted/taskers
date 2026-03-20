@@ -283,6 +283,27 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::TransferSurface {
+                workspace_id,
+                source_pane_id,
+                surface_id,
+                target_pane_id,
+                to_index,
+            } => {
+                model.transfer_surface(
+                    workspace_id,
+                    source_pane_id,
+                    surface_id,
+                    target_pane_id,
+                    to_index,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface transferred".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::SetWorkspaceViewport {
                 workspace_id,
                 viewport,

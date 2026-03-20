@@ -1578,15 +1578,12 @@ impl AppModel {
                 surface_id,
             })?;
 
-        let notification_title = event
-            .metadata
-            .as_ref()
-            .and_then(|metadata| {
-                metadata
-                    .agent_title
-                    .clone()
-                    .or_else(|| metadata.title.clone())
-            });
+        let notification_title = event.metadata.as_ref().and_then(|metadata| {
+            metadata
+                .agent_title
+                .clone()
+                .or_else(|| metadata.title.clone())
+        });
         let metadata_reported_inactive = event
             .metadata
             .as_ref()
@@ -1769,6 +1766,113 @@ impl AppModel {
                 surface_id,
             });
         }
+        Ok(())
+    }
+
+    pub fn transfer_surface(
+        &mut self,
+        workspace_id: WorkspaceId,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        to_index: usize,
+    ) -> Result<(), DomainError> {
+        if source_pane_id == target_pane_id {
+            return self.move_surface(workspace_id, source_pane_id, surface_id, to_index);
+        }
+
+        {
+            let workspace = self
+                .workspaces
+                .get(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            if !workspace.panes.contains_key(&source_pane_id) {
+                return Err(DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id: source_pane_id,
+                });
+            }
+            if !workspace.panes.contains_key(&target_pane_id) {
+                return Err(DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id: target_pane_id,
+                });
+            }
+            if !workspace
+                .panes
+                .get(&source_pane_id)
+                .is_some_and(|pane| pane.surfaces.contains_key(&surface_id))
+            {
+                return Err(DomainError::SurfaceNotInPane {
+                    workspace_id,
+                    pane_id: source_pane_id,
+                    surface_id,
+                });
+            }
+        }
+
+        let moved_surface = {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let source_pane = workspace.panes.get_mut(&source_pane_id).ok_or(
+                DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id: source_pane_id,
+                },
+            )?;
+            source_pane
+                .surfaces
+                .shift_remove(&surface_id)
+                .ok_or(DomainError::SurfaceNotInPane {
+                    workspace_id,
+                    pane_id: source_pane_id,
+                    surface_id,
+                })?
+        };
+
+        let should_close_source_pane = self
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .is_some_and(|pane| pane.surfaces.is_empty());
+
+        {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let target_pane = workspace.panes.get_mut(&target_pane_id).ok_or(
+                DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id: target_pane_id,
+                },
+            )?;
+            target_pane.insert_surface(moved_surface);
+            if target_pane.surfaces.len() > 1 {
+                let last_index = target_pane.surfaces.len() - 1;
+                let target_index = to_index.min(last_index);
+                let _ = target_pane.move_surface(surface_id, target_index);
+            }
+            target_pane.active_surface = surface_id;
+            for notification in &mut workspace.notifications {
+                if notification.surface_id == surface_id {
+                    notification.pane_id = target_pane_id;
+                }
+            }
+            let _ = workspace.focus_surface(target_pane_id, surface_id);
+        }
+
+        if should_close_source_pane {
+            self.close_pane(workspace_id, source_pane_id)?;
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let _ = workspace.focus_surface(target_pane_id, surface_id);
+        }
+
         Ok(())
     }
 
@@ -2137,15 +2241,10 @@ mod tests {
         assert_eq!(right_column.width, MIN_WORKSPACE_WINDOW_WIDTH);
         assert_eq!(right_column.window_order.len(), 2);
         assert_ne!(workspace.active_window, first_window_id);
-        assert!(
-            workspace
-                .columns
-                .values()
-                .any(|column| {
-                    column.window_order == vec![first_window_id]
-                        && column.width == MIN_WORKSPACE_WINDOW_WIDTH
-                })
-        );
+        assert!(workspace.columns.values().any(|column| {
+            column.window_order == vec![first_window_id]
+                && column.width == MIN_WORKSPACE_WINDOW_WIDTH
+        }));
         let upper_window_id = right_column.window_order[0];
         assert_eq!(
             workspace
@@ -2193,7 +2292,10 @@ mod tests {
             .values()
             .map(|column| column.width)
             .collect::<Vec<_>>();
-        assert_eq!(widths, vec![MIN_WORKSPACE_WINDOW_WIDTH, MIN_WORKSPACE_WINDOW_WIDTH]);
+        assert_eq!(
+            widths,
+            vec![MIN_WORKSPACE_WINDOW_WIDTH, MIN_WORKSPACE_WINDOW_WIDTH]
+        );
     }
 
     #[test]
@@ -2218,7 +2320,10 @@ mod tests {
             .values()
             .map(|window| window.height)
             .collect::<Vec<_>>();
-        assert_eq!(heights, vec![MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_HEIGHT]);
+        assert_eq!(
+            heights,
+            vec![MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_HEIGHT]
+        );
     }
 
     #[test]
@@ -2436,6 +2541,91 @@ mod tests {
 
         assert_eq!(order, vec![first_surface_id, second_surface_id]);
         assert_eq!(pane.active_surface, second_surface_id);
+    }
+
+    #[test]
+    fn transferring_surface_to_another_pane_focuses_target_pane() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let target_pane_id = model
+            .split_pane(workspace_id, Some(source_pane_id), SplitAxis::Horizontal)
+            .expect("split");
+        let target_placeholder_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&target_pane_id))
+            .and_then(|pane| pane.surface_ids().next())
+            .expect("placeholder");
+
+        let first_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .and_then(|pane| pane.surface_ids().next())
+            .expect("first surface");
+        let second_surface_id = model
+            .create_surface(workspace_id, source_pane_id, PaneKind::Browser)
+            .expect("second surface");
+
+        model
+            .transfer_surface(
+                workspace_id,
+                source_pane_id,
+                second_surface_id,
+                target_pane_id,
+                0,
+            )
+            .expect("transfer");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let source_order = workspace
+            .panes
+            .get(&source_pane_id)
+            .expect("source pane")
+            .surface_ids()
+            .collect::<Vec<_>>();
+        let target_pane = workspace.panes.get(&target_pane_id).expect("target pane");
+        let target_order = target_pane.surface_ids().collect::<Vec<_>>();
+
+        assert_eq!(source_order, vec![first_surface_id]);
+        assert_eq!(target_order, vec![second_surface_id, target_placeholder_id]);
+        assert_eq!(target_pane.active_surface, second_surface_id);
+        assert_eq!(workspace.active_pane, target_pane_id);
+    }
+
+    #[test]
+    fn transferring_last_surface_closes_the_source_pane() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let target_pane_id = model
+            .split_pane(workspace_id, Some(source_pane_id), SplitAxis::Horizontal)
+            .expect("split");
+        let moved_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .and_then(|pane| pane.surface_ids().next())
+            .expect("surface");
+
+        model
+            .transfer_surface(
+                workspace_id,
+                source_pane_id,
+                moved_surface_id,
+                target_pane_id,
+                usize::MAX,
+            )
+            .expect("transfer");
+
+        let workspace = model.active_workspace().expect("workspace");
+        assert!(!workspace.panes.contains_key(&source_pane_id));
+        let target_order = workspace
+            .panes
+            .get(&target_pane_id)
+            .expect("target pane")
+            .surface_ids()
+            .collect::<Vec<_>>();
+        assert!(target_order.contains(&moved_surface_id));
+        assert_eq!(workspace.active_pane, target_pane_id);
     }
 
     #[test]

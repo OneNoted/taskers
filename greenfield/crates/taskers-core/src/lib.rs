@@ -694,6 +694,11 @@ pub enum ShellAction {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    MoveSurface {
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        target_index: usize,
+    },
     NavigateBrowser {
         surface_id: SurfaceId,
         url: String,
@@ -1424,6 +1429,11 @@ impl TaskersCore {
                 pane_id,
                 surface_id,
             } => self.focus_surface_by_id(pane_id, surface_id),
+            ShellAction::MoveSurface {
+                surface_id,
+                target_pane_id,
+                target_index,
+            } => self.move_surface_by_id(surface_id, target_pane_id, target_index),
             ShellAction::NavigateBrowser { surface_id, url } => {
                 self.navigate_browser_surface(surface_id, &url)
             }
@@ -1636,6 +1646,42 @@ impl TaskersCore {
             workspace_id,
             pane_id,
             surface_id,
+        })
+    }
+
+    fn move_surface_by_id(
+        &mut self,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        target_index: usize,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some((workspace_id, source_pane_id)) =
+            self.resolve_surface_location(&model, surface_id)
+        else {
+            return false;
+        };
+        let Some((target_workspace_id, _)) = self.resolve_workspace_pane(&model, target_pane_id)
+        else {
+            return false;
+        };
+        if workspace_id != target_workspace_id {
+            return false;
+        }
+        if source_pane_id == target_pane_id {
+            return self.dispatch_control(ControlCommand::MoveSurface {
+                workspace_id,
+                pane_id: source_pane_id,
+                surface_id,
+                to_index: target_index,
+            });
+        }
+        self.dispatch_control(ControlCommand::TransferSurface {
+            workspace_id,
+            source_pane_id,
+            surface_id,
+            target_pane_id,
+            to_index: target_index,
         })
     }
 
@@ -2751,7 +2797,7 @@ fn resolved_browser_uri(raw: &str) -> String {
     if trimmed.contains("://") {
         return trimmed.to_string();
     }
-    if trimmed.chars().any(char::is_whitespace) {
+    if !looks_like_browser_location(trimmed) {
         return format!(
             "https://duckduckgo.com/?q={}",
             trimmed.split_whitespace().collect::<Vec<_>>().join("+")
@@ -2763,9 +2809,20 @@ fn resolved_browser_uri(raw: &str) -> String {
     format!("https://{trimmed}")
 }
 
+fn looks_like_browser_location(value: &str) -> bool {
+    if is_local_browser_target(value) || value.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+
+    let head = value.split(['/', '?', '#']).next().unwrap_or(value);
+    head.contains('.')
+}
+
 fn is_local_browser_target(value: &str) -> bool {
     value.starts_with("localhost")
         || value.starts_with("127.0.0.1")
+        || value.starts_with("192.168.")
+        || value.starts_with("10.")
         || value.starts_with("0.0.0.0")
         || value.contains(":3000")
         || value.contains(":5173")
@@ -2780,7 +2837,7 @@ mod tests {
     use super::{
         BootstrapModel, BrowserMountSpec, HostCommand, HostEvent, LayoutMetrics, RuntimeCapability,
         RuntimeStatus, SharedCore, ShellAction, ShellSection, SurfaceMountSpec,
-        default_preview_app_state,
+        default_preview_app_state, resolved_browser_uri,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -3024,5 +3081,97 @@ mod tests {
 
         let overview_snapshot = core.snapshot();
         assert_eq!(overview_snapshot.current_workspace.viewport_x, after);
+    }
+
+    #[test]
+    fn browser_address_bar_normalizes_search_queries() {
+        assert_eq!(resolved_browser_uri(""), "about:blank");
+        assert_eq!(
+            resolved_browser_uri("rust"),
+            "https://duckduckgo.com/?q=rust"
+        );
+        assert_eq!(
+            resolved_browser_uri("cmux tabs"),
+            "https://duckduckgo.com/?q=cmux+tabs"
+        );
+        assert_eq!(resolved_browser_uri("example.com"), "https://example.com");
+        assert_eq!(
+            resolved_browser_uri("localhost:3000"),
+            "http://localhost:3000"
+        );
+    }
+
+    #[test]
+    fn move_surface_shell_action_transfers_surface_between_panes() {
+        fn find_pane<'a>(
+            node: &'a super::LayoutNodeSnapshot,
+            pane_id: taskers_domain::PaneId,
+        ) -> Option<&'a super::PaneSnapshot> {
+            match node {
+                super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
+                super::LayoutNodeSnapshot::Split { first, second, .. } => {
+                    find_pane(first, pane_id).or_else(|| find_pane(second, pane_id))
+                }
+            }
+        }
+
+        fn collect_pane_ids(
+            node: &super::LayoutNodeSnapshot,
+            pane_ids: &mut Vec<taskers_domain::PaneId>,
+        ) {
+            match node {
+                super::LayoutNodeSnapshot::Pane(pane) => pane_ids.push(pane.id),
+                super::LayoutNodeSnapshot::Split { first, second, .. } => {
+                    collect_pane_ids(first, pane_ids);
+                    collect_pane_ids(second, pane_ids);
+                }
+            }
+        }
+
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::SplitTerminal {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let mut pane_ids = Vec::new();
+        collect_pane_ids(&snapshot.current_workspace.layout, &mut pane_ids);
+        let target_pane_id = pane_ids
+            .into_iter()
+            .find(|pane_id| *pane_id != source_pane_id)
+            .expect("target pane");
+
+        core.dispatch_shell_action(ShellAction::MoveSurface {
+            surface_id: moved_surface_id,
+            target_pane_id,
+            target_index: 0,
+        });
+
+        let snapshot = core.snapshot();
+        let source_pane =
+            find_pane(&snapshot.current_workspace.layout, source_pane_id).expect("source pane");
+        let target_pane =
+            find_pane(&snapshot.current_workspace.layout, target_pane_id).expect("target pane");
+
+        assert!(
+            !source_pane
+                .surfaces
+                .iter()
+                .any(|surface| surface.id == moved_surface_id)
+        );
+        assert_eq!(
+            target_pane.surfaces.first().map(|surface| surface.id),
+            Some(moved_surface_id)
+        );
+        assert_eq!(snapshot.current_workspace.active_pane, target_pane_id);
     }
 }
