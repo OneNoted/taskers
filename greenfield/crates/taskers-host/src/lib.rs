@@ -397,15 +397,16 @@ impl BrowserSurface {
             .focusable(true)
             .settings(&settings)
             .build();
+        let (shell_class, widget_class) = native_surface_classes(PaneKind::Browser);
         webview.add_css_class("native-surface-widget");
-        webview.add_css_class("native-surface-browser-widget");
+        webview.add_css_class(widget_class);
         webview.set_can_target(interactive);
         webview.load_uri(&url);
         (event_sink)(HostEvent::SurfaceUrlChanged {
             surface_id: plan.surface_id,
             url: url.clone(),
         });
-        let shell = NativeSurfaceShell::new("native-surface-browser");
+        let shell = NativeSurfaceShell::new(shell_class);
         shell.mount_child(webview.upcast_ref());
         shell.position(fixed, plan.frame);
         let devtools_open = Rc::new(Cell::new(false));
@@ -673,11 +674,12 @@ impl TerminalSurface {
         widget.set_halign(Align::Fill);
         widget.set_valign(Align::Fill);
         widget.set_focusable(true);
+        let (shell_class, widget_class) = native_surface_classes(PaneKind::Terminal);
         widget.add_css_class("native-surface-widget");
-        widget.add_css_class("native-surface-terminal-widget");
+        widget.add_css_class(widget_class);
         widget.add_css_class("terminal-output");
         widget.set_can_target(interactive);
-        let shell = NativeSurfaceShell::new("native-surface-terminal");
+        let shell = NativeSurfaceShell::new(shell_class);
         shell.mount_child(&widget);
         shell.position(fixed, plan.frame);
 
@@ -782,6 +784,13 @@ fn install_native_surface_css() {
             &provider,
             STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+    }
+}
+
+fn native_surface_classes(kind: PaneKind) -> (&'static str, &'static str) {
+    match kind {
+        PaneKind::Terminal => ("native-surface-terminal", "native-surface-terminal-widget"),
+        PaneKind::Browser => ("native-surface-browser", "native-surface-browser-widget"),
     }
 }
 
@@ -1069,8 +1078,12 @@ fn current_timestamp_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_plans, native_surfaces_interactive, terminal_plans, workspace_pan_delta};
+    use super::{
+        browser_plans, native_surface_classes, native_surface_css, native_surfaces_interactive,
+        terminal_plans, workspace_pan_delta,
+    };
     use taskers_core::{BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec};
+    use taskers_domain::PaneKind;
 
     #[test]
     fn partitions_portal_plans_by_surface_kind() {
@@ -1099,5 +1112,26 @@ mod tests {
         assert!(native_surfaces_interactive(ShellDragMode::None));
         assert!(!native_surfaces_interactive(ShellDragMode::Window));
         assert!(!native_surfaces_interactive(ShellDragMode::Surface));
+    }
+
+    #[test]
+    fn native_surface_classes_distinguish_terminal_and_browser_hosts() {
+        assert_eq!(
+            native_surface_classes(PaneKind::Terminal),
+            ("native-surface-terminal", "native-surface-terminal-widget")
+        );
+        assert_eq!(
+            native_surface_classes(PaneKind::Browser),
+            ("native-surface-browser", "native-surface-browser-widget")
+        );
+    }
+
+    #[test]
+    fn native_surface_css_restores_terminal_background_contract() {
+        let css = native_surface_css();
+        assert!(css.contains(".native-surface-terminal"));
+        assert!(css.contains(".native-surface-terminal-widget"));
+        assert!(css.contains(".terminal-output"));
+        assert!(css.contains("background: #0f1117;"));
     }
 }
