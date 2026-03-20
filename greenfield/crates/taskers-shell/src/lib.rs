@@ -253,44 +253,90 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 }
 
 fn render_workspace_item(workspace: &WorkspaceSummary, core: SharedCore) -> Element {
-    let attention_class = format!("workspace-item-state-{}", workspace.attention.slug());
-    let item_class = if workspace.active {
-        format!("workspace-item workspace-item-active {attention_class}")
-    } else {
-        format!("workspace-item {attention_class}")
-    };
-    let badge_class = if workspace.attention == AttentionState::Normal {
-        "workspace-status-badge".to_string()
-    } else {
+    let tab_class = if workspace.active {
         format!(
-            "workspace-status-badge workspace-status-badge-state-{}",
+            "workspace-tab workspace-tab-active workspace-tab-state-{}",
             workspace.attention.slug()
         )
+    } else {
+        format!("workspace-tab workspace-tab-state-{}", workspace.attention.slug())
     };
+    let has_badge = workspace.unread_activity > 0 || workspace.waiting_agent_count > 0;
     let badge_text = if workspace.unread_activity > 0 {
         workspace.unread_activity.to_string()
-    } else if workspace.waiting_agent_count > 0 {
-        workspace.waiting_agent_count.to_string()
     } else {
-        workspace.attention.label().to_string()
+        workspace.waiting_agent_count.to_string()
+    };
+    let badge_state_class = if workspace.attention == AttentionState::Normal {
+        "workspace-unread-badge"
+    } else {
+        match workspace.attention {
+            AttentionState::Error => "workspace-unread-badge workspace-unread-badge-error",
+            AttentionState::WaitingInput => "workspace-unread-badge workspace-unread-badge-waiting",
+            AttentionState::Completed => "workspace-unread-badge workspace-unread-badge-completed",
+            _ => "workspace-unread-badge",
+        }
     };
     let workspace_id = workspace.id;
-    let focus_workspace = move |_| {
-        core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
+    let focus_workspace = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
+        }
+    };
+    let close_workspace = move |event: Event<MouseData>| {
+        event.stop_propagation();
+        core.dispatch_shell_action(ShellAction::CloseWorkspace { workspace_id });
+    };
+
+    let branch_row = match (&workspace.git_branch, &workspace.working_directory) {
+        (Some(branch), Some(dir)) => Some(format!("{branch} · {dir}")),
+        (Some(branch), None) => Some(branch.clone()),
+        (None, Some(dir)) => Some(dir.clone()),
+        (None, None) => None,
+    };
+    let ports_row = if workspace.listening_ports.is_empty() {
+        None
+    } else {
+        Some(
+            workspace
+                .listening_ports
+                .iter()
+                .map(|port| format!(":{port}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
     };
 
     rsx! {
         button { class: "workspace-button", onclick: focus_workspace,
-            div { class: "{item_class}",
-                div {
-                    div { class: "workspace-label", "{workspace.title}" }
-                    div { class: "workspace-preview", "{workspace.preview}" }
-                    div { class: "workspace-meta",
-                        "{workspace.pane_count} panes · {workspace.surface_count} surfaces · {workspace.agent_count} agents"
-                    }
+            div { class: "{tab_class}",
+                if workspace.active {
+                    div { class: "workspace-tab-rail" }
                 }
-                div { class: "{badge_class}",
-                    "{badge_text}"
+                div { class: "workspace-tab-content",
+                    div { class: "workspace-tab-header",
+                        div { class: "workspace-tab-title", "{workspace.title}" }
+                        div { class: "workspace-tab-trailing",
+                            if has_badge {
+                                span { class: "{badge_state_class}", "{badge_text}" }
+                            }
+                            button {
+                                class: "workspace-tab-close",
+                                onclick: close_workspace,
+                                "×"
+                            }
+                        }
+                    }
+                    if let Some(notification) = &workspace.notification_text {
+                        div { class: "workspace-notification", "{notification}" }
+                    }
+                    if let Some(branch) = &branch_row {
+                        div { class: "workspace-branch-row", "{branch}" }
+                    }
+                    if let Some(ports) = &ports_row {
+                        div { class: "workspace-ports-row", "{ports}" }
+                    }
                 }
             }
         }

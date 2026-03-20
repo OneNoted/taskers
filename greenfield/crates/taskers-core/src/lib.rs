@@ -604,6 +604,7 @@ pub enum ShellAction {
     ShowSection { section: ShellSection },
     ToggleOverview,
     FocusWorkspace { workspace_id: WorkspaceId },
+    CloseWorkspace { workspace_id: WorkspaceId },
     CreateWorkspace,
     CreateWorkspaceWindow { direction: WorkspaceDirection },
     FocusWorkspaceWindow { window_id: WorkspaceWindowId },
@@ -1234,6 +1235,9 @@ impl TaskersCore {
                 true
             }
             ShellAction::FocusWorkspace { workspace_id } => self.focus_workspace(workspace_id),
+            ShellAction::CloseWorkspace { workspace_id } => {
+                self.dispatch_control(ControlCommand::CloseWorkspace { workspace_id })
+            }
             ShellAction::CreateWorkspace => self.create_workspace(),
             ShellAction::CreateWorkspaceWindow { direction } => {
                 self.create_workspace_window(direction)

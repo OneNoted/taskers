@@ -243,11 +243,19 @@ button {{
 }}
 
 .sidebar-nav,
-.workspace-list,
 .activity-list {{
   display: flex;
   flex-direction: column;
   gap: 6px;
+}}
+
+.workspace-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }}
 
 .sidebar-nav-button,
@@ -298,46 +306,168 @@ button {{
   border-color: {waiting_25};
 }}
 
-.workspace-item {{
-  padding: 8px 10px;
-  border-radius: 8px;
+.workspace-tab {{
+  position: relative;
+  padding: 8px 10px 8px 14px;
+  border-radius: 6px;
   border: 1px solid transparent;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  transition: background 140ms ease, border-color 140ms ease;
+  align-items: stretch;
+  gap: 0;
+  transition: background 0.14s ease-in-out, border-color 0.14s ease-in-out;
 }}
 
-.workspace-button:hover .workspace-item {{
+.workspace-button:hover .workspace-tab {{
   background: {border_04};
-  border-color: {border_10};
+  border-color: {border_08};
 }}
 
-.workspace-item-active {{
-  background: {border_06};
-  border-color: {border_12};
+.workspace-tab-active {{
+  background: {accent_08};
 }}
 
-.workspace-item-state-busy {{
-  border-color: {busy_18};
+.workspace-button:hover .workspace-tab-active {{
+  background: {accent_12};
 }}
 
-.workspace-item-state-completed {{
-  border-color: {completed_18};
+.workspace-tab-state-busy {{
+  border-color: {busy_12};
 }}
 
-.workspace-item-state-waiting {{
-  border-color: {waiting_20};
+.workspace-tab-state-completed {{
+  border-color: {completed_12};
 }}
 
-.workspace-item-state-error {{
-  border-color: {error_18};
+.workspace-tab-state-waiting {{
+  border-color: {waiting_14};
+}}
+
+.workspace-tab-state-error {{
+  border-color: {error_12};
+}}
+
+.workspace-tab-rail {{
+  position: absolute;
+  left: 0;
+  top: 5px;
+  bottom: 5px;
+  width: 3px;
+  border-radius: 1.5px;
+  background: var(--workspace-accent, {accent});
+}}
+
+.workspace-tab-content {{
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}}
+
+.workspace-tab-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}}
+
+.workspace-tab-title {{
+  font-weight: 600;
+  font-size: 12.5px;
+  color: {text_bright};
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}}
+
+.workspace-tab-trailing {{
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}}
+
+.workspace-tab-close {{
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: {text_dim};
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+  transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
+}}
+
+.workspace-button:hover .workspace-tab-close {{
+  visibility: visible;
+}}
+
+.workspace-tab-close:hover {{
+  background: {error_16};
+  color: {error};
+}}
+
+.workspace-unread-badge {{
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  background: var(--workspace-accent, {accent});
+  color: {base};
+}}
+
+.workspace-unread-badge-error {{
+  background: {error};
+}}
+
+.workspace-unread-badge-waiting {{
+  background: {waiting};
+}}
+
+.workspace-unread-badge-completed {{
+  background: {completed};
+}}
+
+.workspace-notification {{
+  color: {text_subtle};
+  font-size: 10px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}}
+
+.workspace-branch-row {{
+  color: {text_muted};
+  font-size: 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.workspace-ports-row {{
+  color: {text_dim};
+  font-size: 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }}
 
 .workspace-label {{
   font-weight: 600;
-  font-size: 13px;
+  font-size: 12.5px;
   color: {text_bright};
 }}
 
@@ -352,38 +482,6 @@ button {{
 .activity-time {{
   color: {text_dim};
   font-size: 11px;
-}}
-
-.workspace-status-badge {{
-  flex: 0 0 auto;
-  border-radius: 999px;
-  padding: 3px 7px;
-  min-width: 22px;
-  text-align: center;
-  font-size: 10px;
-  font-weight: 700;
-  background: {accent_14};
-  color: {busy_text};
-}}
-
-.workspace-status-badge-state-busy {{
-  background: {busy_16};
-  color: {busy_text};
-}}
-
-.workspace-status-badge-state-completed {{
-  background: {completed_16};
-  color: {completed_text};
-}}
-
-.workspace-status-badge-state-waiting {{
-  background: {waiting_18};
-  color: {waiting_text};
-}}
-
-.workspace-status-badge-state-error {{
-  background: {error_16};
-  color: {error_text};
 }}
 
 .runtime-card,
@@ -1123,6 +1221,8 @@ button {{
         border_08 = rgba(p.border, 0.08),
         border_10 = rgba(p.border, 0.10),
         border_12 = rgba(p.border, 0.12),
+        accent = p.accent.to_hex(),
+        accent_08 = rgba(p.accent, 0.08),
         accent_12 = rgba(p.accent, 0.12),
         accent_14 = rgba(p.accent, 0.14),
         accent_20 = rgba(p.accent, 0.20),
@@ -1130,26 +1230,27 @@ button {{
         accent_24 = rgba(p.accent, 0.24),
         busy = p.busy.to_hex(),
         busy_10 = rgba(p.busy, 0.10),
+        busy_12 = rgba(p.busy, 0.12),
         busy_16 = rgba(p.busy, 0.16),
-        busy_18 = rgba(p.busy, 0.18),
         busy_55 = rgba(p.busy, 0.55),
         busy_text = p.busy_text.to_hex(),
         completed = p.completed.to_hex(),
         completed_10 = rgba(p.completed, 0.10),
+        completed_12 = rgba(p.completed, 0.12),
         completed_16 = rgba(p.completed, 0.16),
-        completed_18 = rgba(p.completed, 0.18),
         completed_55 = rgba(p.completed, 0.55),
         completed_text = p.completed_text.to_hex(),
         waiting = p.waiting.to_hex(),
         waiting_10 = rgba(p.waiting, 0.10),
         waiting_12 = rgba(p.waiting, 0.12),
+        waiting_14 = rgba(p.waiting, 0.14),
         waiting_18 = rgba(p.waiting, 0.18),
-        waiting_20 = rgba(p.waiting, 0.20),
         waiting_25 = rgba(p.waiting, 0.25),
         waiting_70 = rgba(p.waiting, 0.70),
         waiting_text = p.waiting_text.to_hex(),
         error = p.error.to_hex(),
         error_10 = rgba(p.error, 0.10),
+        error_12 = rgba(p.error, 0.12),
         error_16 = rgba(p.error, 0.16),
         error_18 = rgba(p.error, 0.18),
         error_65 = rgba(p.error, 0.65),
