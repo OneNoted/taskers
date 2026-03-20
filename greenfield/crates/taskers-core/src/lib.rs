@@ -900,6 +900,7 @@ impl TaskersCore {
                         surface_id: notification.surface_id,
                         kind: notification.kind.clone(),
                         state: notification.state,
+                        title: notification.title.clone(),
                         message: notification.message.clone(),
                         created_at: notification.created_at,
                     })
@@ -2181,6 +2182,15 @@ fn compact_preview(message: &str) -> String {
 }
 
 fn activity_title(model: &AppModel, item: &ActivityItem) -> String {
+    if let Some(title) = item
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        return title.to_string();
+    }
+
     model.workspaces
         .get(&item.workspace_id)
         .and_then(|workspace| workspace.panes.get(&item.pane_id))

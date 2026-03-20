@@ -120,6 +120,7 @@ fn parse_frame(frame: &str) -> Option<ParsedSignal> {
     {
         Some(SignalPaneMetadata {
             title,
+            agent_title: None,
             cwd,
             repo_name,
             git_branch,

@@ -558,6 +558,7 @@ async fn main() -> anyhow::Result<()> {
                             "surface_id": item.surface_id,
                             "kind": format!("{:?}", item.kind).to_lowercase(),
                             "state": format!("{:?}", item.state).to_lowercase(),
+                            "title": item.title,
                             "message": item.message,
                             "created_at": item.created_at,
                         })
@@ -603,6 +604,7 @@ async fn main() -> anyhow::Result<()> {
             {
                 Some(taskers_domain::SignalPaneMetadata {
                     title,
+                    agent_title: None,
                     cwd,
                     repo_name: repo,
                     git_branch: branch,
@@ -655,7 +657,8 @@ async fn main() -> anyhow::Result<()> {
             let message = normalized_body.unwrap_or_else(|| normalized_title.to_string());
             let inferred_agent = agent.or_else(|| infer_agent_kind(normalized_title));
             let metadata = Some(taskers_domain::SignalPaneMetadata {
-                title: Some(normalized_title.to_string()),
+                title: None,
+                agent_title: Some(normalized_title.to_string()),
                 cwd: None,
                 repo_name: None,
                 git_branch: None,
@@ -1354,7 +1357,8 @@ async fn emit_agent_hook(
         .unwrap_or_else(|| "shell".into());
     let normalized_title = title.unwrap_or_else(|| normalized_agent.clone());
     let metadata = Some(taskers_domain::SignalPaneMetadata {
-        title: Some(normalized_title.clone()),
+        title: None,
+        agent_title: Some(normalized_title.clone()),
         cwd: None,
         repo_name: None,
         git_branch: None,

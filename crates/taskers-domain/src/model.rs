@@ -66,6 +66,8 @@ pub enum PaneKind {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneMetadata {
     pub title: Option<String>,
+    #[serde(default)]
+    pub agent_title: Option<String>,
     pub cwd: Option<String>,
     pub url: Option<String>,
     pub repo_name: Option<String>,
@@ -233,6 +235,8 @@ pub struct NotificationItem {
     #[serde(default = "default_notification_kind")]
     pub kind: SignalKind,
     pub state: AttentionState,
+    #[serde(default)]
+    pub title: Option<String>,
     pub message: String,
     pub created_at: OffsetDateTime,
     pub cleared_at: Option<OffsetDateTime>,
@@ -246,6 +250,7 @@ pub struct ActivityItem {
     pub surface_id: SurfaceId,
     pub kind: SignalKind,
     pub state: AttentionState,
+    pub title: Option<String>,
     pub message: String,
     pub created_at: OffsetDateTime,
 }
@@ -810,8 +815,9 @@ impl Workspace {
                         agent_kind,
                         title: surface
                             .metadata
-                            .title
+                            .agent_title
                             .as_deref()
+                            .or(surface.metadata.title.as_deref())
                             .map(str::trim)
                             .filter(|title| !title.is_empty())
                             .map(str::to_owned),
@@ -1522,6 +1528,15 @@ impl AppModel {
                 surface_id,
             })?;
 
+        let notification_title = event
+            .metadata
+            .as_ref()
+            .and_then(|metadata| {
+                metadata
+                    .agent_title
+                    .clone()
+                    .or_else(|| metadata.title.clone())
+            });
         let metadata_reported_inactive = event
             .metadata
             .as_ref()
@@ -1531,6 +1546,9 @@ impl AppModel {
             let mut acknowledged_inactive_resolution = false;
             if let Some(metadata) = event.metadata {
                 surface.metadata.title = metadata.title;
+                if metadata.agent_title.is_some() {
+                    surface.metadata.agent_title = metadata.agent_title;
+                }
                 surface.metadata.cwd = metadata.cwd;
                 surface.metadata.repo_name = metadata.repo_name;
                 surface.metadata.git_branch = metadata.git_branch;
@@ -1572,6 +1590,7 @@ impl AppModel {
                 surface_id,
                 kind: event.kind,
                 state: surface_attention,
+                title: notification_title,
                 message,
                 created_at: event.timestamp,
                 cleared_at: None,
@@ -1887,6 +1906,7 @@ impl AppModel {
                         surface_id: notification.surface_id,
                         kind: notification.kind.clone(),
                         state: notification.state,
+                        title: notification.title.clone(),
                         message: notification.message.clone(),
                         created_at: notification.created_at,
                     })
@@ -2612,7 +2632,8 @@ mod tests {
                     kind: SignalKind::Completed,
                     message: Some("Done".into()),
                     metadata: Some(SignalPaneMetadata {
-                        title: Some("Codex".into()),
+                        title: None,
+                        agent_title: Some("Codex".into()),
                         cwd: None,
                         repo_name: None,
                         git_branch: None,
@@ -2635,6 +2656,7 @@ mod tests {
                     None,
                     Some(SignalPaneMetadata {
                         title: Some("codex :: taskers".into()),
+                        agent_title: None,
                         cwd: Some("/tmp".into()),
                         repo_name: Some("taskers".into()),
                         git_branch: Some("main".into()),
@@ -2685,7 +2707,8 @@ mod tests {
                     SignalKind::WaitingInput,
                     Some("Need review".into()),
                     Some(SignalPaneMetadata {
-                        title: Some("Codex".into()),
+                        title: None,
+                        agent_title: Some("Codex".into()),
                         cwd: None,
                         repo_name: None,
                         git_branch: None,
@@ -2738,7 +2761,8 @@ mod tests {
                     SignalKind::WaitingInput,
                     Some("Need input".into()),
                     Some(SignalPaneMetadata {
-                        title: Some("Codex".into()),
+                        title: None,
+                        agent_title: Some("Codex".into()),
                         cwd: None,
                         repo_name: None,
                         git_branch: None,
@@ -2760,6 +2784,7 @@ mod tests {
                     None,
                     Some(SignalPaneMetadata {
                         title: Some("codex :: taskers".into()),
+                        agent_title: None,
                         cwd: Some("/tmp".into()),
                         repo_name: Some("taskers".into()),
                         git_branch: Some("main".into()),
@@ -2819,7 +2844,8 @@ mod tests {
                     SignalKind::WaitingInput,
                     Some("Need review".into()),
                     Some(SignalPaneMetadata {
-                        title: Some("Codex".into()),
+                        title: None,
+                        agent_title: Some("Codex".into()),
                         cwd: None,
                         repo_name: None,
                         git_branch: None,
