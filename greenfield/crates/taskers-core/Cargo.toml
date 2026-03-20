@@ -12,4 +12,5 @@ taskers-control.workspace = true
 taskers-domain.workspace = true
 taskers-ghostty.workspace = true
 taskers-runtime.workspace = true
+time.workspace = true
 tokio.workspace = true

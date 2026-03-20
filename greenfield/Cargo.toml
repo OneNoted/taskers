@@ -23,6 +23,7 @@ dioxus-liveview = { version = "0.7.3", features = ["axum"] }
 gtk = { package = "gtk4", version = "0.11.0" }
 indexmap = "2"
 parking_lot = "0.12"
+time = { version = "0.3", features = ["formatting", "macros"] }
 tokio = { version = "1.50.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 webkit6 = { version = "0.6.1", features = ["v2_50"] }
 taskers-app-core = { package = "taskers-core", path = "../crates/taskers-core" }

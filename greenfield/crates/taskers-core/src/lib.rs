@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use time::OffsetDateTime;
 use taskers_app_core::{AppState, default_session_path};
 use taskers_control::{ControlCommand, ControlResponse};
 use taskers_domain::{
@@ -402,6 +403,10 @@ pub struct WorkspaceSummary {
     pub waiting_agent_count: usize,
     pub unread_activity: usize,
     pub attention: AttentionState,
+    pub notification_text: Option<String>,
+    pub git_branch: Option<String>,
+    pub working_directory: Option<String>,
+    pub listening_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -459,6 +464,9 @@ pub struct ActivityItemSnapshot {
     pub pane_id: Option<PaneId>,
     pub surface_id: Option<SurfaceId>,
     pub unread: bool,
+    pub timestamp: String,
+    pub body: Option<String>,
+    pub source_workspace_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -825,31 +833,50 @@ impl TaskersCore {
             .workspace_summaries(active_window)
             .unwrap_or_default()
             .into_iter()
-            .map(|summary| WorkspaceSummary {
-                id: summary.workspace_id,
-                title: summary.label.clone(),
-                preview: workspace_preview(&summary),
-                active: model.active_workspace_id() == Some(summary.workspace_id),
-                pane_count: model
-                    .workspaces
-                    .get(&summary.workspace_id)
-                    .map(|workspace| workspace.panes.len())
-                    .unwrap_or_default(),
-                surface_count: model
-                    .workspaces
-                    .get(&summary.workspace_id)
-                    .map(workspace_surface_count)
-                    .unwrap_or_default(),
-                agent_count: summary.agent_summaries.len(),
-                waiting_agent_count: summary
-                    .agent_summaries
-                    .iter()
-                    .filter(|agent| {
-                        matches!(agent.state, taskers_domain::WorkspaceAgentState::Waiting)
-                    })
-                    .count(),
-                unread_activity: summary.unread_count,
-                attention: summary.display_attention.into(),
+            .map(|summary| {
+                let workspace = model.workspaces.get(&summary.workspace_id);
+                let active_pane_surface = workspace
+                    .and_then(|ws| ws.panes.get(&summary.active_pane))
+                    .and_then(|pane| pane.active_surface());
+                let git_branch = active_pane_surface
+                    .and_then(|surface| surface.metadata.git_branch.clone());
+                let working_directory = active_pane_surface
+                    .and_then(|surface| surface.metadata.cwd.clone());
+                let mut listening_ports: Vec<u16> = workspace
+                    .into_iter()
+                    .flat_map(|ws| ws.panes.values())
+                    .flat_map(|pane| pane.surfaces.values())
+                    .flat_map(|surface| surface.metadata.ports.iter().copied())
+                    .collect();
+                listening_ports.sort_unstable();
+                listening_ports.dedup();
+
+                WorkspaceSummary {
+                    id: summary.workspace_id,
+                    title: summary.label.clone(),
+                    preview: workspace_preview(&summary),
+                    active: model.active_workspace_id() == Some(summary.workspace_id),
+                    pane_count: workspace
+                        .map(|ws| ws.panes.len())
+                        .unwrap_or_default(),
+                    surface_count: workspace
+                        .map(workspace_surface_count)
+                        .unwrap_or_default(),
+                    agent_count: summary.agent_summaries.len(),
+                    waiting_agent_count: summary
+                        .agent_summaries
+                        .iter()
+                        .filter(|agent| {
+                            matches!(agent.state, taskers_domain::WorkspaceAgentState::Waiting)
+                        })
+                        .count(),
+                    unread_activity: summary.unread_count,
+                    attention: summary.display_attention.into(),
+                    notification_text: summary.latest_notification,
+                    git_branch,
+                    working_directory,
+                    listening_ports,
+                }
             })
             .collect()
     }
@@ -2173,6 +2200,31 @@ fn normalized_cwd(metadata: &PaneMetadata) -> Option<String> {
         .map(str::to_string)
 }
 
+fn format_relative_time(timestamp: OffsetDateTime) -> String {
+    let now = OffsetDateTime::now_utc();
+    let delta = now - timestamp;
+    let seconds = delta.whole_seconds();
+    if seconds < 0 {
+        return "just now".into();
+    }
+    if seconds < 60 {
+        return "just now".into();
+    }
+    let minutes = delta.whole_minutes();
+    if minutes < 60 {
+        return format!("{minutes}m ago");
+    }
+    let hours = delta.whole_hours();
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = delta.whole_days();
+    if days < 7 {
+        return format!("{days}d ago");
+    }
+    format!("{days}d ago")
+}
+
 fn compact_preview(message: &str) -> String {
     let trimmed = message.split_whitespace().collect::<Vec<_>>().join(" ");
     if trimmed.len() <= 140 {
@@ -2208,13 +2260,23 @@ fn activity_item_snapshot(
     item: &ActivityItem,
     unread: bool,
 ) -> ActivityItemSnapshot {
+    let title = activity_title(model, item);
+    let body = if item.message.trim() != title.trim() && !item.message.is_empty() {
+        Some(item.message.clone())
+    } else {
+        None
+    };
+    let source_workspace_title = model
+        .workspaces
+        .get(&item.workspace_id)
+        .map(|workspace| workspace.label.clone());
     ActivityItemSnapshot {
         id: ActivityId {
             workspace_id: item.workspace_id,
             pane_id: item.pane_id,
             surface_id: item.surface_id,
         },
-        title: activity_title(model, item),
+        title,
         preview: compact_preview(&item.message),
         meta: activity_context_line(model, item),
         attention: item.state.into(),
@@ -2222,6 +2284,9 @@ fn activity_item_snapshot(
         pane_id: Some(item.pane_id),
         surface_id: Some(item.surface_id),
         unread,
+        timestamp: format_relative_time(item.created_at),
+        body,
+        source_workspace_title,
     }
 }
 
