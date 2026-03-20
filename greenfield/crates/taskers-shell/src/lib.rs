@@ -10,7 +10,9 @@ use taskers_core::{
 };
 
 fn app_css(snapshot: &ShellSnapshot) -> String {
-    theme::generate_css(&theme::resolve_palette(&snapshot.settings.selected_theme_id))
+    theme::generate_css(&theme::resolve_palette(
+        &snapshot.settings.selected_theme_id,
+    ))
 }
 
 #[component]
@@ -38,27 +40,35 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     let stylesheet = app_css(&snapshot);
     let show_workspace_nav = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::ShowSection {
-            section: ShellSection::Workspace,
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::ShowSection {
+                section: ShellSection::Workspace,
+            })
+        }
     };
     let show_workspace_header = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::ShowSection {
-            section: ShellSection::Workspace,
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::ShowSection {
+                section: ShellSection::Workspace,
+            })
+        }
     };
     let show_settings_nav = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::ShowSection {
-            section: ShellSection::Settings,
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::ShowSection {
+                section: ShellSection::Settings,
+            })
+        }
     };
     let show_settings_header = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::ShowSection {
-            section: ShellSection::Settings,
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::ShowSection {
+                section: ShellSection::Settings,
+            })
+        }
     };
     let create_workspace = {
         let core = core.clone();
@@ -184,8 +194,10 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                                     onclick: toggle_overview,
                                     "◫"
                                 }
-                                button { class: "workspace-header-action", onclick: scroll_left, "◀" }
-                                button { class: "workspace-header-action", onclick: scroll_right, "▶" }
+                                if !snapshot.overview_mode {
+                                    button { class: "workspace-header-action", onclick: scroll_left, "◀" }
+                                    button { class: "workspace-header-action", onclick: scroll_right, "▶" }
+                                }
                             }
                             div { class: "workspace-header-divider" }
                             div { class: "workspace-header-group",
@@ -281,7 +293,10 @@ fn render_workspace_item(
             workspace.attention.slug()
         )
     } else {
-        format!("workspace-tab workspace-tab-state-{}", workspace.attention.slug())
+        format!(
+            "workspace-tab workspace-tab-state-{}",
+            workspace.attention.slug()
+        )
     };
     let has_badge = workspace.unread_activity > 0 || workspace.waiting_agent_count > 0;
     let badge_text = if workspace.unread_activity > 0 {
@@ -526,6 +541,11 @@ fn render_workspace_strip(
     core: SharedCore,
     runtime_status: &RuntimeStatus,
 ) -> Element {
+    let viewport_class = if workspace.overview_scale < 1.0 {
+        "workspace-viewport workspace-viewport-overview"
+    } else {
+        "workspace-viewport"
+    };
     let scroll_viewport = {
         let core = core.clone();
         let overview_scale = workspace.overview_scale;
@@ -543,23 +563,13 @@ fn render_workspace_strip(
             core.dispatch_shell_action(ShellAction::ScrollViewport { dx, dy });
         }
     };
-    let translate_x = if workspace.overview_scale < 1.0 {
-        0
-    } else {
-        -workspace.viewport_x
-    };
-    let translate_y = if workspace.overview_scale < 1.0 {
-        0
-    } else {
-        -workspace.viewport_y
-    };
     let canvas_style = format!(
-        "width:{}px;height:{}px;transform:translate({}px, {}px);",
-        workspace.canvas_width, workspace.canvas_height, translate_x, translate_y
+        "width:{}px;height:{}px;",
+        workspace.canvas_width, workspace.canvas_height
     );
 
     rsx! {
-        div { class: "workspace-viewport", onwheel: scroll_viewport,
+        div { class: "{viewport_class}", onwheel: scroll_viewport,
             div { class: "workspace-strip-canvas", style: "{canvas_style}",
                 for column in &workspace.columns {
                     for window in &column.windows {
@@ -632,7 +642,10 @@ fn render_pane(
     runtime_status: &RuntimeStatus,
 ) -> Element {
     let pane_class = if pane.active {
-        format!("pane-card pane-card-active pane-card-state-{}", pane.attention.slug())
+        format!(
+            "pane-card pane-card-active pane-card-state-{}",
+            pane.attention.slug()
+        )
     } else {
         format!("pane-card pane-card-state-{}", pane.attention.slug())
     };
@@ -640,7 +653,11 @@ fn render_pane(
         .surfaces
         .iter()
         .find(|surface| surface.id == pane.active_surface)
-        .unwrap_or_else(|| pane.surfaces.first().expect("pane snapshot should contain surfaces"));
+        .unwrap_or_else(|| {
+            pane.surfaces
+                .first()
+                .expect("pane snapshot should contain surfaces")
+        });
     let subtitle = match active_surface.kind {
         SurfaceKind::Terminal => active_surface
             .cwd
@@ -674,34 +691,44 @@ fn render_pane(
     };
     let add_browser_surface = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::AddBrowserSurface {
-            pane_id: Some(pane_id),
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+                pane_id: Some(pane_id),
+            })
+        }
     };
     let add_terminal_surface = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::AddTerminalSurface {
-            pane_id: Some(pane_id),
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::AddTerminalSurface {
+                pane_id: Some(pane_id),
+            })
+        }
     };
     let split_browser = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::SplitBrowser {
-            pane_id: Some(pane_id),
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::SplitBrowser {
+                pane_id: Some(pane_id),
+            })
+        }
     };
     let split_terminal = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::SplitTerminal {
-            pane_id: Some(pane_id),
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::SplitTerminal {
+                pane_id: Some(pane_id),
+            })
+        }
     };
     let close_surface = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::CloseSurface {
-            pane_id,
-            surface_id: active_surface_id,
-        })
+        move |_| {
+            core.dispatch_shell_action(ShellAction::CloseSurface {
+                pane_id,
+                surface_id: active_surface_id,
+            })
+        }
     };
 
     let flash_key = pane.focus_flash_token;
@@ -766,7 +793,10 @@ fn render_surface_tab(
     };
     let surface_id = surface.id;
     let focus_surface = move |_| {
-        core.dispatch_shell_action(ShellAction::FocusSurface { pane_id, surface_id });
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id,
+            surface_id,
+        });
     };
 
     rsx! {
@@ -835,9 +865,8 @@ fn BrowserToolbar(
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::BrowserReload { surface_id })
     };
-    let toggle_devtools = move |_| {
-        core.dispatch_shell_action(ShellAction::ToggleBrowserDevtools { surface_id })
-    };
+    let toggle_devtools =
+        move |_| core.dispatch_shell_action(ShellAction::ToggleBrowserDevtools { surface_id });
 
     rsx! {
         form { class: "browser-toolbar", onsubmit: navigate,
@@ -874,13 +903,13 @@ fn BrowserToolbar(
 }
 
 fn render_surface_backdrop(surface: &SurfaceSnapshot, runtime_status: &RuntimeStatus) -> Element {
-    let badge_class = format!("status-pill status-pill-inline status-pill-{}", surface.attention.slug());
+    let badge_class = format!(
+        "status-pill status-pill-inline status-pill-{}",
+        surface.attention.slug()
+    );
     match surface.kind {
         SurfaceKind::Browser => {
-            let url = surface
-                .url
-                .clone()
-                .unwrap_or_else(|| "about:blank".into());
+            let url = surface.url.clone().unwrap_or_else(|| "about:blank".into());
             rsx! {
                 div { class: "surface-backdrop",
                     div { class: "surface-backdrop-copy",
@@ -935,7 +964,10 @@ fn render_agent_item(
         if workspace_id != current_workspace_id {
             core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
         }
-        core.dispatch_shell_action(ShellAction::FocusSurface { pane_id, surface_id });
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id,
+            surface_id,
+        });
     };
 
     rsx! {
@@ -950,7 +982,6 @@ fn render_agent_item(
         }
     }
 }
-
 
 fn render_notification_row(
     item: &ActivityItemSnapshot,
@@ -980,7 +1011,10 @@ fn render_notification_row(
             if workspace_id != current_workspace_id {
                 core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
             } else if let (Some(pane_id), Some(surface_id)) = (pane_id, surface_id) {
-                core.dispatch_shell_action(ShellAction::FocusSurface { pane_id, surface_id });
+                core.dispatch_shell_action(ShellAction::FocusSurface {
+                    pane_id,
+                    surface_id,
+                });
             } else if let Some(pane_id) = pane_id {
                 core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
             } else {
@@ -1056,10 +1090,7 @@ fn render_settings(settings: &SettingsSnapshot, core: SharedCore) -> Element {
     }
 }
 
-fn render_theme_option(
-    option: &taskers_core::ThemeOptionSnapshot,
-    core: SharedCore,
-) -> Element {
+fn render_theme_option(option: &taskers_core::ThemeOptionSnapshot, core: SharedCore) -> Element {
     let option_id = option.id.clone();
     let select = move |_| {
         core.dispatch_shell_action(ShellAction::SelectTheme {
@@ -1102,10 +1133,7 @@ fn render_shortcut_preset(
     }
 }
 
-fn render_shortcut_group(
-    category: &'static str,
-    bindings: &[ShortcutBindingSnapshot],
-) -> Element {
+fn render_shortcut_group(category: &'static str, bindings: &[ShortcutBindingSnapshot]) -> Element {
     let entries = bindings
         .iter()
         .filter(|binding| binding.category == category)

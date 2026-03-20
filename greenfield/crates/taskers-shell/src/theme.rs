@@ -641,7 +641,9 @@ button {{
 }}
 
 .workspace-main-overview .workspace-canvas {{
-  background: {border_03};
+  background:
+    radial-gradient(circle at top left, {accent_08} 0%, transparent 32%),
+    linear-gradient(180deg, {border_04} 0%, {base} 100%);
 }}
 
 .workspace-header {{
@@ -789,10 +791,22 @@ button {{
   overflow: hidden;
 }}
 
+.workspace-viewport-overview {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}}
+
 .workspace-strip-canvas {{
   position: absolute;
   inset: 0 auto auto 0;
   transform-origin: top left;
+}}
+
+.workspace-viewport-overview .workspace-strip-canvas {{
+  position: relative;
+  inset: auto;
 }}
 
 .workspace-window-shell {{
@@ -971,6 +985,18 @@ button {{
   font-size: 11px;
 }}
 
+.pane-action-cluster {{
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease-in-out;
+}}
+
+.pane-card:hover .pane-action-cluster,
+.pane-card-active .pane-action-cluster {{
+  opacity: 1;
+  pointer-events: auto;
+}}
+
 .pane-action-tab {{
   border-color: {accent_20};
 }}
@@ -1112,6 +1138,60 @@ button {{
   background:
     linear-gradient(180deg, {overlay_16} 0%, {overlay_05} 100%),
     {overlay_03};
+}}
+
+.workspace-main-overview .workspace-window-shell {{
+  box-shadow: 0 18px 42px {overlay_16};
+}}
+
+.workspace-main-overview .workspace-window-toolbar {{
+  min-height: 32px;
+  padding: 0 8px;
+  background: {surface_85};
+}}
+
+.workspace-main-overview .workspace-window-body {{
+  padding: 8px;
+  background: {border_03};
+}}
+
+.workspace-main-overview .workspace-window-flags,
+.workspace-main-overview .pane-action-cluster,
+.workspace-main-overview .surface-tabs,
+.workspace-main-overview .browser-toolbar,
+.workspace-main-overview .surface-backdrop-note,
+.workspace-main-overview .surface-chip {{
+  display: none;
+}}
+
+.workspace-main-overview .split-container {{
+  gap: 8px;
+}}
+
+.workspace-main-overview .pane-header {{
+  min-height: 30px;
+  padding: 0 8px;
+}}
+
+.workspace-main-overview .pane-title {{
+  font-size: 11px;
+}}
+
+.workspace-main-overview .pane-meta {{
+  font-size: 10px;
+}}
+
+.workspace-main-overview .pane-body {{
+  padding: 10px;
+}}
+
+.workspace-main-overview .surface-backdrop {{
+  gap: 8px;
+  padding: 10px;
+  border-style: solid;
+  background:
+    linear-gradient(180deg, {overlay_16} 0%, {overlay_03} 100%),
+    {border_02};
 }}
 
 .surface-backdrop-copy {{
@@ -1506,31 +1586,23 @@ button {{
         busy_10 = rgba(p.busy, 0.10),
         busy_12 = rgba(p.busy, 0.12),
         busy_16 = rgba(p.busy, 0.16),
-
-
         busy_text = p.busy_text.to_hex(),
         completed = p.completed.to_hex(),
         completed_10 = rgba(p.completed, 0.10),
         completed_12 = rgba(p.completed, 0.12),
         completed_16 = rgba(p.completed, 0.16),
-
-
         completed_text = p.completed_text.to_hex(),
         waiting = p.waiting.to_hex(),
         waiting_10 = rgba(p.waiting, 0.10),
         waiting_12 = rgba(p.waiting, 0.12),
         waiting_14 = rgba(p.waiting, 0.14),
         waiting_18 = rgba(p.waiting, 0.18),
-
-
         waiting_text = p.waiting_text.to_hex(),
         error = p.error.to_hex(),
         error_10 = rgba(p.error, 0.10),
         error_12 = rgba(p.error, 0.12),
         error_16 = rgba(p.error, 0.16),
         error_18 = rgba(p.error, 0.18),
-
-
         error_text = p.error_text.to_hex(),
         action_window_22 = rgba(p.action_window, 0.22),
         action_split_22 = rgba(p.action_split, 0.22),

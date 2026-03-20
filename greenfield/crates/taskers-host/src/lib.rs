@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use gtk::{
-    EventControllerFocus, Fixed, GestureClick, Overlay, Widget, glib,
-    prelude::*,
+    EventControllerFocus, EventControllerScroll, EventControllerScrollFlags, Fixed, GestureClick,
+    Overlay, Widget, glib, prelude::*,
 };
 use std::{
     cell::Cell,
@@ -120,9 +120,34 @@ impl TaskersHost {
         surface_layer.set_can_target(false);
         root.add_overlay(&surface_layer);
 
+        let pan_sink = event_sink.clone();
+        let pan_diagnostics = diagnostics.clone();
+        let workspace_pan = EventControllerScroll::new(EventControllerScrollFlags::BOTH_AXES);
+        workspace_pan.set_propagation_phase(gtk::PropagationPhase::Capture);
+        workspace_pan.connect_scroll(move |_, dx, dy| {
+            let Some((dx, dy)) = workspace_pan_delta(dx, dy) else {
+                return glib::Propagation::Proceed;
+            };
+            emit_diagnostic(
+                pan_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    format!("workspace pan gesture dx={dx} dy={dy}"),
+                ),
+            );
+            (pan_sink)(HostEvent::ViewportScrolled { dx, dy });
+            glib::Propagation::Proceed
+        });
+        root.add_controller(workspace_pan);
+
         emit_diagnostic(
             diagnostics.as_ref(),
-            DiagnosticRecord::new(DiagnosticCategory::Window, None, "created GTK4 host overlay"),
+            DiagnosticRecord::new(
+                DiagnosticCategory::Window,
+                None,
+                "created GTK4 host overlay",
+            ),
         );
 
         Self {
@@ -165,21 +190,19 @@ impl TaskersHost {
             HostCommand::BrowserBack { surface_id } => {
                 self.with_browser_surface(surface_id, "browser back", |surface| surface.go_back())
             }
-            HostCommand::BrowserForward { surface_id } => self.with_browser_surface(
-                surface_id,
-                "browser forward",
-                |surface| surface.go_forward(),
-            ),
-            HostCommand::BrowserReload { surface_id } => self.with_browser_surface(
-                surface_id,
-                "browser reload",
-                |surface| surface.reload(),
-            ),
-            HostCommand::BrowserToggleDevtools { surface_id } => self.with_browser_surface(
-                surface_id,
-                "browser devtools toggle",
-                |surface| surface.toggle_devtools(),
-            ),
+            HostCommand::BrowserForward { surface_id } => {
+                self.with_browser_surface(surface_id, "browser forward", |surface| {
+                    surface.go_forward()
+                })
+            }
+            HostCommand::BrowserReload { surface_id } => {
+                self.with_browser_surface(surface_id, "browser reload", |surface| surface.reload())
+            }
+            HostCommand::BrowserToggleDevtools { surface_id } => {
+                self.with_browser_surface(surface_id, "browser devtools toggle", |surface| {
+                    surface.toggle_devtools()
+                })
+            }
         }
     }
 
@@ -205,11 +228,7 @@ impl TaskersHost {
         Ok(())
     }
 
-    fn sync_browser_surfaces(
-        &mut self,
-        portal: &SurfacePortalPlan,
-        revision: u64,
-    ) -> Result<()> {
+    fn sync_browser_surfaces(&mut self, portal: &SurfacePortalPlan, revision: u64) -> Result<()> {
         let desired = browser_plans(portal);
         let desired_ids = desired
             .iter()
@@ -240,9 +259,12 @@ impl TaskersHost {
 
         for plan in desired {
             match self.browser_surfaces.get_mut(&plan.surface_id) {
-                Some(surface) => {
-                    surface.sync(&self.surface_layer, &plan, revision, self.diagnostics.as_ref())?
-                }
+                Some(surface) => surface.sync(
+                    &self.surface_layer,
+                    &plan,
+                    revision,
+                    self.diagnostics.as_ref(),
+                )?,
                 None => {
                     let surface = BrowserSurface::new(
                         &self.surface_layer,
@@ -259,11 +281,7 @@ impl TaskersHost {
         Ok(())
     }
 
-    fn sync_terminal_surfaces(
-        &mut self,
-        portal: &SurfacePortalPlan,
-        revision: u64,
-    ) -> Result<()> {
+    fn sync_terminal_surfaces(&mut self, portal: &SurfacePortalPlan, revision: u64) -> Result<()> {
         let desired = terminal_plans(portal);
         let desired_ids = desired
             .iter()
@@ -770,13 +788,9 @@ fn connect_ghostty_widget(
         if widget.property::<bool>("child-exited") {
             emit_diagnostic(
                 exit_diagnostics.as_ref(),
-                DiagnosticRecord::new(
-                    DiagnosticCategory::HostEvent,
-                    None,
-                    "terminal child exited",
-                )
-                .with_pane(pane_id)
-                .with_surface(surface_id),
+                DiagnosticRecord::new(DiagnosticCategory::HostEvent, None, "terminal child exited")
+                    .with_pane(pane_id)
+                    .with_surface(surface_id),
             );
             (exit_sink)(HostEvent::SurfaceClosed {
                 pane_id,
@@ -860,6 +874,16 @@ fn detach_from_fixed(fixed: &Fixed, widget: &Widget) {
     }
 }
 
+fn workspace_pan_delta(dx: f64, dy: f64) -> Option<(i32, i32)> {
+    if !dx.is_finite() || !dy.is_finite() {
+        return None;
+    }
+    if dx.abs() < 1.0 || dx.abs() < dy.abs() {
+        return None;
+    }
+    Some((dx.round() as i32, 0))
+}
+
 pub fn browser_plans(portal: &SurfacePortalPlan) -> Vec<PortalSurfacePlan> {
     portal
         .panes
@@ -921,7 +945,7 @@ fn current_timestamp_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_plans, terminal_plans};
+    use super::{browser_plans, terminal_plans, workspace_pan_delta};
     use taskers_core::{BootstrapModel, SharedCore, SurfaceMountSpec};
 
     #[test]
@@ -936,5 +960,13 @@ mod tests {
         assert_eq!(terminals.len(), 1);
         assert!(matches!(browsers[0].mount, SurfaceMountSpec::Browser(_)));
         assert!(matches!(terminals[0].mount, SurfaceMountSpec::Terminal(_)));
+    }
+
+    #[test]
+    fn workspace_pan_delta_prefers_deliberate_horizontal_motion() {
+        assert_eq!(workspace_pan_delta(64.4, 4.0), Some((64, 0)));
+        assert_eq!(workspace_pan_delta(0.4, 0.0), None);
+        assert_eq!(workspace_pan_delta(6.0, 18.0), None);
+        assert_eq!(workspace_pan_delta(f64::NAN, 0.0), None);
     }
 }

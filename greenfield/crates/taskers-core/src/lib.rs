@@ -5,18 +5,17 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use time::OffsetDateTime;
 use taskers_app_core::{AppState, default_session_path};
 use taskers_control::{ControlCommand, ControlResponse};
 use taskers_domain::{
-    ActivityItem, AppModel, PaneKind, PaneMetadata, PaneMetadataPatch,
-    SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame,
-    Workspace, DEFAULT_WORKSPACE_WINDOW_GAP, MIN_WORKSPACE_WINDOW_HEIGHT,
-    MIN_WORKSPACE_WINDOW_WIDTH,
+    ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, MIN_WORKSPACE_WINDOW_HEIGHT,
+    MIN_WORKSPACE_WINDOW_WIDTH, PaneKind, PaneMetadata, PaneMetadataPatch,
+    SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
     WorkspaceSummary as DomainWorkspaceSummary,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
+use time::OffsetDateTime;
 use tokio::sync::watch;
 
 pub use taskers_domain::{PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId};
@@ -597,11 +596,29 @@ pub struct ShellSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostEvent {
-    PaneFocused { pane_id: PaneId },
-    SurfaceClosed { pane_id: PaneId, surface_id: SurfaceId },
-    SurfaceTitleChanged { surface_id: SurfaceId, title: String },
-    SurfaceUrlChanged { surface_id: SurfaceId, url: String },
-    SurfaceCwdChanged { surface_id: SurfaceId, cwd: String },
+    PaneFocused {
+        pane_id: PaneId,
+    },
+    ViewportScrolled {
+        dx: i32,
+        dy: i32,
+    },
+    SurfaceClosed {
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    SurfaceTitleChanged {
+        surface_id: SurfaceId,
+        title: String,
+    },
+    SurfaceUrlChanged {
+        surface_id: SurfaceId,
+        url: String,
+    },
+    SurfaceCwdChanged {
+        surface_id: SurfaceId,
+        cwd: String,
+    },
     BrowserNavigationStateChanged {
         surface_id: SurfaceId,
         can_go_back: bool,
@@ -620,30 +637,78 @@ pub enum HostCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellAction {
-    ShowSection { section: ShellSection },
+    ShowSection {
+        section: ShellSection,
+    },
     ToggleOverview,
-    FocusWorkspace { workspace_id: WorkspaceId },
-    CloseWorkspace { workspace_id: WorkspaceId },
-    ReorderWorkspaces { workspace_ids: Vec<WorkspaceId> },
+    FocusWorkspace {
+        workspace_id: WorkspaceId,
+    },
+    CloseWorkspace {
+        workspace_id: WorkspaceId,
+    },
+    ReorderWorkspaces {
+        workspace_ids: Vec<WorkspaceId>,
+    },
     CreateWorkspace,
-    CreateWorkspaceWindow { direction: WorkspaceDirection },
-    FocusWorkspaceWindow { window_id: WorkspaceWindowId },
-    ScrollViewport { dx: i32, dy: i32 },
-    SplitBrowser { pane_id: Option<PaneId> },
-    SplitTerminal { pane_id: Option<PaneId> },
-    AddBrowserSurface { pane_id: Option<PaneId> },
-    AddTerminalSurface { pane_id: Option<PaneId> },
-    FocusPane { pane_id: PaneId },
-    FocusSurface { pane_id: PaneId, surface_id: SurfaceId },
-    NavigateBrowser { surface_id: SurfaceId, url: String },
-    BrowserBack { surface_id: SurfaceId },
-    BrowserForward { surface_id: SurfaceId },
-    BrowserReload { surface_id: SurfaceId },
-    ToggleBrowserDevtools { surface_id: SurfaceId },
-    CloseSurface { pane_id: PaneId, surface_id: SurfaceId },
-    DismissActivity { activity_id: ActivityId },
-    SelectTheme { theme_id: String },
-    SelectShortcutPreset { preset_id: String },
+    CreateWorkspaceWindow {
+        direction: WorkspaceDirection,
+    },
+    FocusWorkspaceWindow {
+        window_id: WorkspaceWindowId,
+    },
+    ScrollViewport {
+        dx: i32,
+        dy: i32,
+    },
+    SplitBrowser {
+        pane_id: Option<PaneId>,
+    },
+    SplitTerminal {
+        pane_id: Option<PaneId>,
+    },
+    AddBrowserSurface {
+        pane_id: Option<PaneId>,
+    },
+    AddTerminalSurface {
+        pane_id: Option<PaneId>,
+    },
+    FocusPane {
+        pane_id: PaneId,
+    },
+    FocusSurface {
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    NavigateBrowser {
+        surface_id: SurfaceId,
+        url: String,
+    },
+    BrowserBack {
+        surface_id: SurfaceId,
+    },
+    BrowserForward {
+        surface_id: SurfaceId,
+    },
+    BrowserReload {
+        surface_id: SurfaceId,
+    },
+    ToggleBrowserDevtools {
+        surface_id: SurfaceId,
+    },
+    CloseSurface {
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    DismissActivity {
+        activity_id: ActivityId,
+    },
+    SelectTheme {
+        theme_id: String,
+    },
+    SelectShortcutPreset {
+        preset_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -798,14 +863,11 @@ impl TaskersCore {
             activity: self.activity_snapshot(&model),
             done_activity: self.done_activity_snapshot(&model),
             portal: SurfacePortalPlan {
-                window: Frame::new(
-                    0,
-                    0,
-                    self.ui.window_size.width,
-                    self.ui.window_size.height,
-                ),
+                window: Frame::new(0, 0, self.ui.window_size.width, self.ui.window_size.height),
                 content: viewport,
-                panes: if matches!(self.ui.section, ShellSection::Workspace) {
+                panes: if matches!(self.ui.section, ShellSection::Workspace)
+                    && !self.ui.overview_mode
+                {
                     self.collect_workspace_surface_plans(workspace_id, workspace, &window_frames)
                 } else {
                     Vec::new()
@@ -819,8 +881,8 @@ impl TaskersCore {
 
     fn workspace_viewport_frame(&self) -> Frame {
         let metrics = self.metrics;
-        let width = (self.ui.window_size.width - metrics.sidebar_width - metrics.activity_width)
-            .max(640);
+        let width =
+            (self.ui.window_size.width - metrics.sidebar_width - metrics.activity_width).max(640);
         let height = self.ui.window_size.height.max(320);
         let inset = metrics.workspace_padding;
         Frame::new(
@@ -859,10 +921,10 @@ impl TaskersCore {
                 let active_pane_surface = workspace
                     .and_then(|ws| ws.panes.get(&summary.active_pane))
                     .and_then(|pane| pane.active_surface());
-                let git_branch = active_pane_surface
-                    .and_then(|surface| surface.metadata.git_branch.clone());
-                let working_directory = active_pane_surface
-                    .and_then(|surface| surface.metadata.cwd.clone());
+                let git_branch =
+                    active_pane_surface.and_then(|surface| surface.metadata.git_branch.clone());
+                let working_directory =
+                    active_pane_surface.and_then(|surface| surface.metadata.cwd.clone());
                 let mut listening_ports: Vec<u16> = workspace
                     .into_iter()
                     .flat_map(|ws| ws.panes.values())
@@ -877,12 +939,8 @@ impl TaskersCore {
                     title: summary.label.clone(),
                     preview: workspace_preview(&summary),
                     active: model.active_workspace_id() == Some(summary.workspace_id),
-                    pane_count: workspace
-                        .map(|ws| ws.panes.len())
-                        .unwrap_or_default(),
-                    surface_count: workspace
-                        .map(workspace_surface_count)
-                        .unwrap_or_default(),
+                    pane_count: workspace.map(|ws| ws.panes.len()).unwrap_or_default(),
+                    surface_count: workspace.map(workspace_surface_count).unwrap_or_default(),
                     agent_count: summary.agent_summaries.len(),
                     waiting_agent_count: summary
                         .agent_summaries
@@ -897,17 +955,20 @@ impl TaskersCore {
                     git_branch,
                     working_directory,
                     listening_ports,
-                    custom_color: workspace
-                        .and_then(|ws| ws.custom_color.clone()),
+                    custom_color: workspace.and_then(|ws| ws.custom_color.clone()),
                     progress: workspace
                         .into_iter()
                         .flat_map(|ws| ws.panes.values())
                         .flat_map(|pane| pane.surfaces.values())
                         .find_map(|surface| {
-                            surface.metadata.progress.as_ref().map(|p| ProgressSnapshot {
-                                fraction: f32::from(p.value.min(1000)) / 1000.0,
-                                label: p.label.clone(),
-                            })
+                            surface
+                                .metadata
+                                .progress
+                                .as_ref()
+                                .map(|p| ProgressSnapshot {
+                                    fraction: f32::from(p.value.min(1000)) / 1000.0,
+                                    label: p.label.clone(),
+                                })
                         }),
                     pull_requests: workspace
                         .into_iter()
@@ -942,24 +1003,27 @@ impl TaskersCore {
             .unwrap_or_default()
             .into_iter()
             .flat_map(|summary| {
-                summary.agent_summaries.into_iter().map(move |agent| AgentSessionSnapshot {
-                    workspace_id: summary.workspace_id,
-                    workspace_title: summary.label.clone(),
-                    pane_id: agent.pane_id,
-                    surface_id: agent.surface_id,
-                    agent_kind: agent.agent_kind.clone(),
-                    title: agent
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| format!("{} {}", agent.agent_kind, agent.state.label())),
-                    state: agent.state.into(),
-                })
+                summary
+                    .agent_summaries
+                    .into_iter()
+                    .map(move |agent| AgentSessionSnapshot {
+                        workspace_id: summary.workspace_id,
+                        workspace_title: summary.label.clone(),
+                        pane_id: agent.pane_id,
+                        surface_id: agent.surface_id,
+                        agent_kind: agent.agent_kind.clone(),
+                        title: agent.title.clone().unwrap_or_else(|| {
+                            format!("{} {}", agent.agent_kind, agent.state.label())
+                        }),
+                        state: agent.state.into(),
+                    })
             })
             .collect()
     }
 
     fn activity_snapshot(&self, model: &AppModel) -> Vec<ActivityItemSnapshot> {
-        model.activity_items()
+        model
+            .activity_items()
             .into_iter()
             .map(|item| activity_item_snapshot(model, &item, true))
             .collect()
@@ -1013,12 +1077,7 @@ impl TaskersCore {
                     .filter_map(|window_id| {
                         let window = workspace.windows.get(window_id)?;
                         let (_, frame) = window_frames.get(window_id)?;
-                        Some(self.workspace_window_snapshot(
-                            workspace,
-                            column.id,
-                            window,
-                            *frame,
-                        ))
+                        Some(self.workspace_window_snapshot(workspace, column.id, window, *frame))
                     })
                     .collect(),
             })
@@ -1084,7 +1143,11 @@ impl TaskersCore {
         }
     }
 
-    fn pane_snapshot(&self, workspace: &Workspace, pane: &taskers_domain::PaneRecord) -> PaneSnapshot {
+    fn pane_snapshot(
+        &self,
+        workspace: &Workspace,
+        pane: &taskers_domain::PaneRecord,
+    ) -> PaneSnapshot {
         let is_active = workspace.active_pane == pane.id;
         let has_unread = pane.highest_attention() != taskers_domain::AttentionState::Normal;
         let flash_token = if is_active && has_unread {
@@ -1154,12 +1217,7 @@ impl TaskersCore {
             .values()
             .filter_map(|window| {
                 let (_, frame) = window_frames.get(&window.id)?;
-                Some(self.collect_surface_plans(
-                    workspace_id,
-                    workspace,
-                    &window.layout,
-                    *frame,
-                ))
+                Some(self.collect_surface_plans(workspace_id, workspace, &window.layout, *frame))
             })
             .flatten()
             .collect()
@@ -1183,7 +1241,11 @@ impl TaskersCore {
                         surface_id: active_surface.id,
                         active: workspace.active_pane == pane.id,
                         frame: pane_body_frame(frame, self.metrics, &active_surface.kind),
-                        mount: self.mount_spec_for_active_surface(workspace_id, pane, active_surface),
+                        mount: self.mount_spec_for_active_surface(
+                            workspace_id,
+                            pane,
+                            active_surface,
+                        ),
                     })
                 })
                 .into_iter()
@@ -1194,8 +1256,12 @@ impl TaskersCore {
                 first,
                 second,
             } => {
-                let (first_frame, second_frame) =
-                    split_frame(frame, SplitAxis::from_domain(*axis), *ratio, self.metrics.split_gap);
+                let (first_frame, second_frame) = split_frame(
+                    frame,
+                    SplitAxis::from_domain(*axis),
+                    *ratio,
+                    self.metrics.split_gap,
+                );
                 let mut plans =
                     self.collect_surface_plans(workspace_id, workspace, first, first_frame);
                 plans.extend(self.collect_surface_plans(
@@ -1234,7 +1300,15 @@ impl TaskersCore {
     fn apply_host_event(&mut self, event: HostEvent) -> bool {
         match event {
             HostEvent::PaneFocused { pane_id } => self.focus_pane_by_id(pane_id),
-            HostEvent::SurfaceClosed { pane_id, surface_id } => {
+            HostEvent::ViewportScrolled { dx, dy } => {
+                matches!(self.ui.section, ShellSection::Workspace)
+                    && !self.ui.overview_mode
+                    && self.scroll_viewport_by(dx, dy)
+            }
+            HostEvent::SurfaceClosed {
+                pane_id,
+                surface_id,
+            } => {
                 self.browser_navigation.remove(&surface_id);
                 self.close_surface_by_id(pane_id, surface_id)
             }
@@ -1310,10 +1384,16 @@ impl TaskersCore {
             ShellAction::CreateWorkspaceWindow { direction } => {
                 self.create_workspace_window(direction)
             }
-            ShellAction::FocusWorkspaceWindow { window_id } => self.focus_workspace_window(window_id),
+            ShellAction::FocusWorkspaceWindow { window_id } => {
+                self.focus_workspace_window(window_id)
+            }
             ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
-            ShellAction::SplitBrowser { pane_id } => self.split_with_kind(pane_id, PaneKind::Browser),
-            ShellAction::SplitTerminal { pane_id } => self.split_with_kind(pane_id, PaneKind::Terminal),
+            ShellAction::SplitBrowser { pane_id } => {
+                self.split_with_kind(pane_id, PaneKind::Browser)
+            }
+            ShellAction::SplitTerminal { pane_id } => {
+                self.split_with_kind(pane_id, PaneKind::Terminal)
+            }
             ShellAction::AddBrowserSurface { pane_id } => {
                 self.add_surface_to_pane(pane_id, PaneKind::Browser)
             }
@@ -1321,9 +1401,10 @@ impl TaskersCore {
                 self.add_surface_to_pane(pane_id, PaneKind::Terminal)
             }
             ShellAction::FocusPane { pane_id } => self.focus_pane_by_id(pane_id),
-            ShellAction::FocusSurface { pane_id, surface_id } => {
-                self.focus_surface_by_id(pane_id, surface_id)
-            }
+            ShellAction::FocusSurface {
+                pane_id,
+                surface_id,
+            } => self.focus_surface_by_id(pane_id, surface_id),
             ShellAction::NavigateBrowser { surface_id, url } => {
                 self.navigate_browser_surface(surface_id, &url)
             }
@@ -1339,9 +1420,10 @@ impl TaskersCore {
             ShellAction::ToggleBrowserDevtools { surface_id } => {
                 self.queue_host_command(HostCommand::BrowserToggleDevtools { surface_id })
             }
-            ShellAction::CloseSurface { pane_id, surface_id } => {
-                self.close_surface_by_id(pane_id, surface_id)
-            }
+            ShellAction::CloseSurface {
+                pane_id,
+                surface_id,
+            } => self.close_surface_by_id(pane_id, surface_id),
             ShellAction::DismissActivity { activity_id } => self.dismiss_activity(activity_id),
             ShellAction::SelectTheme { theme_id } => {
                 if self.ui.selected_theme_id == theme_id {
@@ -1439,7 +1521,10 @@ impl TaskersCore {
             None => return false,
         };
 
-        let ControlResponse::PaneSplit { pane_id: new_pane_id } = response else {
+        let ControlResponse::PaneSplit {
+            pane_id: new_pane_id,
+        } = response
+        else {
             return false;
         };
 
@@ -1486,7 +1571,9 @@ impl TaskersCore {
     }
 
     fn focus_pane_by_id(&mut self, pane_id: PaneId) -> bool {
-        let Some((workspace_id, _)) = self.resolve_workspace_pane(&self.app_state.snapshot_model(), pane_id) else {
+        let Some((workspace_id, _)) =
+            self.resolve_workspace_pane(&self.app_state.snapshot_model(), pane_id)
+        else {
             return false;
         };
         if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
@@ -1495,7 +1582,10 @@ impl TaskersCore {
                 workspace_id,
             });
         }
-        self.dispatch_control(ControlCommand::FocusPane { workspace_id, pane_id })
+        self.dispatch_control(ControlCommand::FocusPane {
+            workspace_id,
+            pane_id,
+        })
     }
 
     fn focus_surface_by_id(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
@@ -1554,11 +1644,7 @@ impl TaskersCore {
         })
     }
 
-    fn update_surface_metadata(
-        &mut self,
-        surface_id: SurfaceId,
-        patch: PaneMetadataPatch,
-    ) -> bool {
+    fn update_surface_metadata(&mut self, surface_id: SurfaceId, patch: PaneMetadataPatch) -> bool {
         self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch })
     }
 
@@ -1577,9 +1663,15 @@ impl TaskersCore {
         model: &AppModel,
         pane_id: PaneId,
     ) -> Option<(WorkspaceId, PaneId)> {
-        model.workspaces.iter().find_map(|(workspace_id, workspace)| {
-            workspace.panes.contains_key(&pane_id).then_some((*workspace_id, pane_id))
-        })
+        model
+            .workspaces
+            .iter()
+            .find_map(|(workspace_id, workspace)| {
+                workspace
+                    .panes
+                    .contains_key(&pane_id)
+                    .then_some((*workspace_id, pane_id))
+            })
     }
 
     fn resolve_surface_location(
@@ -1587,13 +1679,16 @@ impl TaskersCore {
         model: &AppModel,
         surface_id: SurfaceId,
     ) -> Option<(WorkspaceId, PaneId)> {
-        model.workspaces.iter().find_map(|(workspace_id, workspace)| {
-            workspace.panes.iter().find_map(|(pane_id, pane)| {
-                pane.surfaces
-                    .contains_key(&surface_id)
-                    .then_some((*workspace_id, *pane_id))
+        model
+            .workspaces
+            .iter()
+            .find_map(|(workspace_id, workspace)| {
+                workspace.panes.iter().find_map(|(pane_id, pane)| {
+                    pane.surfaces
+                        .contains_key(&surface_id)
+                        .then_some((*workspace_id, *pane_id))
+                })
             })
-        })
     }
 
     fn dispatch_control(&mut self, command: ControlCommand) -> bool {
@@ -1627,7 +1722,10 @@ impl TaskersCore {
     }
 
     fn bump_local_revision(&mut self) {
-        self.revision = self.revision.max(self.observed_app_revision).saturating_add(1);
+        self.revision = self
+            .revision
+            .max(self.observed_app_revision)
+            .saturating_add(1);
     }
 
     fn drain_host_commands(&mut self) -> Vec<HostCommand> {
@@ -1743,30 +1841,198 @@ struct ShortcutBindingSpec {
 }
 
 const SHORTCUT_BINDINGS: &[ShortcutBindingSpec] = &[
-    ShortcutBindingSpec { id: "toggle_overview", label: "Toggle overview", detail: "Zoom the current workspace out to fit the full column strip.", category: "General", balanced: &["<Control><Alt>o"], power_user: &["<Control><Alt>o"] },
-    ShortcutBindingSpec { id: "close_terminal", label: "Close terminal", detail: "Close the active pane or active top-level window.", category: "General", balanced: &["<Control><Alt>x"], power_user: &["<Control><Alt>x"] },
-    ShortcutBindingSpec { id: "open_browser_split", label: "Open browser in split", detail: "Split the active pane to the right and open a browser surface.", category: "Browser", balanced: &["<Control><Alt><Shift>l"], power_user: &["<Control><Alt><Shift>l"] },
-    ShortcutBindingSpec { id: "focus_browser_address", label: "Focus browser address bar", detail: "Focus the address bar for the active browser surface.", category: "Browser", balanced: &["<Control>l"], power_user: &["<Control>l"] },
-    ShortcutBindingSpec { id: "reload_browser_page", label: "Reload browser page", detail: "Reload the active browser surface.", category: "Browser", balanced: &["<Control>r"], power_user: &["<Control>r"] },
-    ShortcutBindingSpec { id: "toggle_browser_devtools", label: "Toggle browser devtools", detail: "Show or hide devtools for the active browser surface.", category: "Browser", balanced: &["<Control><Shift>i"], power_user: &["<Control><Shift>i"] },
-    ShortcutBindingSpec { id: "focus_left", label: "Focus left", detail: "Move focus to the column on the left, then fall back to pane focus.", category: "Focus", balanced: &["<Control><Alt>h", "<Control><Alt>Left"], power_user: &["<Control><Alt>h", "<Control><Alt>Left"] },
-    ShortcutBindingSpec { id: "focus_right", label: "Focus right", detail: "Move focus to the column on the right, then fall back to pane focus.", category: "Focus", balanced: &["<Control><Alt>l", "<Control><Alt>Right"], power_user: &["<Control><Alt>l", "<Control><Alt>Right"] },
-    ShortcutBindingSpec { id: "focus_up", label: "Focus up", detail: "Move focus to the stacked window above, then fall back to pane focus.", category: "Focus", balanced: &["<Control><Alt>k", "<Control><Alt>Up"], power_user: &["<Control><Alt>k", "<Control><Alt>Up"] },
-    ShortcutBindingSpec { id: "focus_down", label: "Focus down", detail: "Move focus to the stacked window below, then fall back to pane focus.", category: "Focus", balanced: &["<Control><Alt>j", "<Control><Alt>Down"], power_user: &["<Control><Alt>j", "<Control><Alt>Down"] },
-    ShortcutBindingSpec { id: "new_window_left", label: "New window left", detail: "Create a top-level window in a new column on the left.", category: "Top-level windows", balanced: &[], power_user: &["<Control><Alt><Shift>h", "<Control><Alt><Shift>Left"] },
-    ShortcutBindingSpec { id: "new_window_right", label: "New window right", detail: "Create a top-level window in a new column on the right.", category: "Top-level windows", balanced: &["<Control><Alt>t"], power_user: &["<Control><Alt>t"] },
-    ShortcutBindingSpec { id: "new_window_up", label: "New window up", detail: "Create a stacked top-level window above the active window.", category: "Top-level windows", balanced: &[], power_user: &["<Control><Alt><Shift>k", "<Control><Alt><Shift>Up"] },
-    ShortcutBindingSpec { id: "new_window_down", label: "New window down", detail: "Create a stacked top-level window below the active window.", category: "Top-level windows", balanced: &["<Control><Alt>g"], power_user: &["<Control><Alt>g"] },
-    ShortcutBindingSpec { id: "resize_window_left", label: "Make window narrower", detail: "Reduce the active column width.", category: "Advanced resize", balanced: &[], power_user: &["<Control><Alt>Home"] },
-    ShortcutBindingSpec { id: "resize_window_right", label: "Make window wider", detail: "Increase the active column width.", category: "Advanced resize", balanced: &[], power_user: &["<Control><Alt>End"] },
-    ShortcutBindingSpec { id: "resize_window_up", label: "Make window shorter", detail: "Reduce the active top-level window height.", category: "Advanced resize", balanced: &[], power_user: &["<Control><Alt>Page_Up"] },
-    ShortcutBindingSpec { id: "resize_window_down", label: "Make window taller", detail: "Increase the active top-level window height.", category: "Advanced resize", balanced: &[], power_user: &["<Control><Alt>Page_Down"] },
-    ShortcutBindingSpec { id: "resize_split_left", label: "Make split narrower", detail: "Reduce the active split width.", category: "Advanced resize", balanced: &[], power_user: &["<Control><Alt><Shift>Home"] },
-    ShortcutBindingSpec { id: "resize_split_right", label: "Make split wider", detail: "Increase the active split width.", category: "Advanced resize", balanced: &[], power_user: &["<Control><Alt><Shift>End"] },
-    ShortcutBindingSpec { id: "resize_split_up", label: "Make split shorter", detail: "Reduce the active split height.", category: "Advanced resize", balanced: &[], power_user: &["<Control><Alt><Shift>Page_Up"] },
-    ShortcutBindingSpec { id: "resize_split_down", label: "Make split taller", detail: "Increase the active split height.", category: "Advanced resize", balanced: &[], power_user: &["<Control><Alt><Shift>Page_Down"] },
-    ShortcutBindingSpec { id: "split_right", label: "Split right", detail: "Split the active pane to the right inside the current window.", category: "Pane splits", balanced: &["<Control><Alt><Shift>t"], power_user: &["<Control><Alt><Shift>t"] },
-    ShortcutBindingSpec { id: "split_down", label: "Split down", detail: "Split the active pane downward inside the current window.", category: "Pane splits", balanced: &["<Control><Alt><Shift>g"], power_user: &["<Control><Alt><Shift>g"] },
+    ShortcutBindingSpec {
+        id: "toggle_overview",
+        label: "Toggle overview",
+        detail: "Zoom the current workspace out to fit the full column strip.",
+        category: "General",
+        balanced: &["<Control><Alt>o"],
+        power_user: &["<Control><Alt>o"],
+    },
+    ShortcutBindingSpec {
+        id: "close_terminal",
+        label: "Close terminal",
+        detail: "Close the active pane or active top-level window.",
+        category: "General",
+        balanced: &["<Control><Alt>x"],
+        power_user: &["<Control><Alt>x"],
+    },
+    ShortcutBindingSpec {
+        id: "open_browser_split",
+        label: "Open browser in split",
+        detail: "Split the active pane to the right and open a browser surface.",
+        category: "Browser",
+        balanced: &["<Control><Alt><Shift>l"],
+        power_user: &["<Control><Alt><Shift>l"],
+    },
+    ShortcutBindingSpec {
+        id: "focus_browser_address",
+        label: "Focus browser address bar",
+        detail: "Focus the address bar for the active browser surface.",
+        category: "Browser",
+        balanced: &["<Control>l"],
+        power_user: &["<Control>l"],
+    },
+    ShortcutBindingSpec {
+        id: "reload_browser_page",
+        label: "Reload browser page",
+        detail: "Reload the active browser surface.",
+        category: "Browser",
+        balanced: &["<Control>r"],
+        power_user: &["<Control>r"],
+    },
+    ShortcutBindingSpec {
+        id: "toggle_browser_devtools",
+        label: "Toggle browser devtools",
+        detail: "Show or hide devtools for the active browser surface.",
+        category: "Browser",
+        balanced: &["<Control><Shift>i"],
+        power_user: &["<Control><Shift>i"],
+    },
+    ShortcutBindingSpec {
+        id: "focus_left",
+        label: "Focus left",
+        detail: "Move focus to the column on the left, then fall back to pane focus.",
+        category: "Focus",
+        balanced: &["<Control><Alt>h", "<Control><Alt>Left"],
+        power_user: &["<Control><Alt>h", "<Control><Alt>Left"],
+    },
+    ShortcutBindingSpec {
+        id: "focus_right",
+        label: "Focus right",
+        detail: "Move focus to the column on the right, then fall back to pane focus.",
+        category: "Focus",
+        balanced: &["<Control><Alt>l", "<Control><Alt>Right"],
+        power_user: &["<Control><Alt>l", "<Control><Alt>Right"],
+    },
+    ShortcutBindingSpec {
+        id: "focus_up",
+        label: "Focus up",
+        detail: "Move focus to the stacked window above, then fall back to pane focus.",
+        category: "Focus",
+        balanced: &["<Control><Alt>k", "<Control><Alt>Up"],
+        power_user: &["<Control><Alt>k", "<Control><Alt>Up"],
+    },
+    ShortcutBindingSpec {
+        id: "focus_down",
+        label: "Focus down",
+        detail: "Move focus to the stacked window below, then fall back to pane focus.",
+        category: "Focus",
+        balanced: &["<Control><Alt>j", "<Control><Alt>Down"],
+        power_user: &["<Control><Alt>j", "<Control><Alt>Down"],
+    },
+    ShortcutBindingSpec {
+        id: "new_window_left",
+        label: "New window left",
+        detail: "Create a top-level window in a new column on the left.",
+        category: "Top-level windows",
+        balanced: &[],
+        power_user: &["<Control><Alt><Shift>h", "<Control><Alt><Shift>Left"],
+    },
+    ShortcutBindingSpec {
+        id: "new_window_right",
+        label: "New window right",
+        detail: "Create a top-level window in a new column on the right.",
+        category: "Top-level windows",
+        balanced: &["<Control><Alt>t"],
+        power_user: &["<Control><Alt>t"],
+    },
+    ShortcutBindingSpec {
+        id: "new_window_up",
+        label: "New window up",
+        detail: "Create a stacked top-level window above the active window.",
+        category: "Top-level windows",
+        balanced: &[],
+        power_user: &["<Control><Alt><Shift>k", "<Control><Alt><Shift>Up"],
+    },
+    ShortcutBindingSpec {
+        id: "new_window_down",
+        label: "New window down",
+        detail: "Create a stacked top-level window below the active window.",
+        category: "Top-level windows",
+        balanced: &["<Control><Alt>g"],
+        power_user: &["<Control><Alt>g"],
+    },
+    ShortcutBindingSpec {
+        id: "resize_window_left",
+        label: "Make window narrower",
+        detail: "Reduce the active column width.",
+        category: "Advanced resize",
+        balanced: &[],
+        power_user: &["<Control><Alt>Home"],
+    },
+    ShortcutBindingSpec {
+        id: "resize_window_right",
+        label: "Make window wider",
+        detail: "Increase the active column width.",
+        category: "Advanced resize",
+        balanced: &[],
+        power_user: &["<Control><Alt>End"],
+    },
+    ShortcutBindingSpec {
+        id: "resize_window_up",
+        label: "Make window shorter",
+        detail: "Reduce the active top-level window height.",
+        category: "Advanced resize",
+        balanced: &[],
+        power_user: &["<Control><Alt>Page_Up"],
+    },
+    ShortcutBindingSpec {
+        id: "resize_window_down",
+        label: "Make window taller",
+        detail: "Increase the active top-level window height.",
+        category: "Advanced resize",
+        balanced: &[],
+        power_user: &["<Control><Alt>Page_Down"],
+    },
+    ShortcutBindingSpec {
+        id: "resize_split_left",
+        label: "Make split narrower",
+        detail: "Reduce the active split width.",
+        category: "Advanced resize",
+        balanced: &[],
+        power_user: &["<Control><Alt><Shift>Home"],
+    },
+    ShortcutBindingSpec {
+        id: "resize_split_right",
+        label: "Make split wider",
+        detail: "Increase the active split width.",
+        category: "Advanced resize",
+        balanced: &[],
+        power_user: &["<Control><Alt><Shift>End"],
+    },
+    ShortcutBindingSpec {
+        id: "resize_split_up",
+        label: "Make split shorter",
+        detail: "Reduce the active split height.",
+        category: "Advanced resize",
+        balanced: &[],
+        power_user: &["<Control><Alt><Shift>Page_Up"],
+    },
+    ShortcutBindingSpec {
+        id: "resize_split_down",
+        label: "Make split taller",
+        detail: "Increase the active split height.",
+        category: "Advanced resize",
+        balanced: &[],
+        power_user: &["<Control><Alt><Shift>Page_Down"],
+    },
+    ShortcutBindingSpec {
+        id: "split_right",
+        label: "Split right",
+        detail: "Split the active pane to the right inside the current window.",
+        category: "Pane splits",
+        balanced: &["<Control><Alt><Shift>t"],
+        power_user: &["<Control><Alt><Shift>t"],
+    },
+    ShortcutBindingSpec {
+        id: "split_down",
+        label: "Split down",
+        detail: "Split the active pane downward inside the current window.",
+        category: "Pane splits",
+        balanced: &["<Control><Alt><Shift>g"],
+        power_user: &["<Control><Alt><Shift>g"],
+    },
 ];
 
 fn shortcut_bindings(preset: ShortcutPreset) -> Vec<ShortcutBindingSnapshot> {
@@ -1934,7 +2200,10 @@ fn workspace_window_placements(
 }
 
 fn workspace_canvas_metrics(placements: &[WorkspaceWindowPlacement]) -> CanvasMetrics {
-    let frames = placements.iter().map(|placement| placement.frame).collect::<Vec<_>>();
+    let frames = placements
+        .iter()
+        .map(|placement| placement.frame)
+        .collect::<Vec<_>>();
     canvas_metrics_from_frames(&frames)
 }
 
@@ -2038,7 +2307,11 @@ fn distribute_weighted_total(weights: &[i32], total: i32) -> Vec<i32> {
     if weights.is_empty() {
         return Vec::new();
     }
-    let weight_sum = weights.iter().map(|weight| i64::from(*weight)).sum::<i64>().max(1);
+    let weight_sum = weights
+        .iter()
+        .map(|weight| i64::from(*weight))
+        .sum::<i64>()
+        .max(1);
     let mut distributed = Vec::with_capacity(weights.len());
     let mut allocated = 0;
     let mut remainders = Vec::with_capacity(weights.len());
@@ -2163,9 +2436,8 @@ fn pane_body_frame(frame: Frame, metrics: LayoutMetrics, kind: &PaneKind) -> Fra
         PaneKind::Terminal => 0,
         PaneKind::Browser => 42,
     };
-    frame.inset_top(
-        metrics.pane_header_height + metrics.surface_tab_height + browser_toolbar_height,
-    )
+    frame
+        .inset_top(metrics.pane_header_height + metrics.surface_tab_height + browser_toolbar_height)
 }
 
 fn workspace_preview(summary: &DomainWorkspaceSummary) -> String {
@@ -2319,7 +2591,8 @@ fn activity_title(model: &AppModel, item: &ActivityItem) -> String {
         return title.to_string();
     }
 
-    model.workspaces
+    model
+        .workspaces
         .get(&item.workspace_id)
         .and_then(|workspace| workspace.panes.get(&item.pane_id))
         .and_then(|pane| {
@@ -2480,9 +2753,8 @@ mod tests {
     use taskers_control::ControlCommand;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, HostCommand, HostEvent, RuntimeCapability,
-        RuntimeStatus, SharedCore, ShellAction, ShellSection, SurfaceMountSpec,
-        default_preview_app_state,
+        BootstrapModel, BrowserMountSpec, HostCommand, HostEvent, RuntimeCapability, RuntimeStatus,
+        SharedCore, ShellAction, ShellSection, SurfaceMountSpec, default_preview_app_state,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -2562,17 +2834,19 @@ mod tests {
 
         let snapshot = core.snapshot();
         let pane = match &snapshot.current_workspace.layout {
-            super::LayoutNodeSnapshot::Split { first, second, .. } => [first.as_ref(), second.as_ref()]
-                .into_iter()
-                .find_map(|node| match node {
-                    super::LayoutNodeSnapshot::Pane(pane) => pane
-                        .surfaces
-                        .iter()
-                        .any(|surface| surface.id == browser_surface.surface_id)
-                        .then_some(pane),
-                    _ => None,
-                })
-                .expect("browser pane"),
+            super::LayoutNodeSnapshot::Split { first, second, .. } => {
+                [first.as_ref(), second.as_ref()]
+                    .into_iter()
+                    .find_map(|node| match node {
+                        super::LayoutNodeSnapshot::Pane(pane) => pane
+                            .surfaces
+                            .iter()
+                            .any(|surface| surface.id == browser_surface.surface_id)
+                            .then_some(pane),
+                        _ => None,
+                    })
+                    .expect("browser pane")
+            }
             super::LayoutNodeSnapshot::Pane(_) => panic!("expected split layout"),
         };
 
@@ -2678,5 +2952,33 @@ mod tests {
                 .iter()
                 .any(|workspace| workspace.title == "External")
         );
+    }
+
+    #[test]
+    fn overview_mode_hides_live_portal_surfaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        assert!(!core.snapshot().portal.panes.is_empty());
+
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        assert!(snapshot.portal.panes.is_empty());
+    }
+
+    #[test]
+    fn horizontal_scroll_host_events_pan_workspace_outside_overview() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let before = core.snapshot().current_workspace.viewport_x;
+
+        core.apply_host_event(HostEvent::ViewportScrolled { dx: 180, dy: 0 });
+        let after = core.snapshot().current_workspace.viewport_x;
+        assert_eq!(after, before + 180);
+
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        core.apply_host_event(HostEvent::ViewportScrolled { dx: 180, dy: 0 });
+
+        let overview_snapshot = core.snapshot();
+        assert_eq!(overview_snapshot.current_workspace.viewport_x, after);
     }
 }
