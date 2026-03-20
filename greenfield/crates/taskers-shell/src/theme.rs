@@ -176,7 +176,9 @@ pub fn generate_css(p: &ThemePalette) -> String {
     let activity_width = metrics.activity_width;
     let workspace_toolbar_height = metrics.toolbar_height;
     let window_toolbar_height = metrics.window_toolbar_height;
+    let window_body_padding = metrics.window_body_padding;
     let pane_header_height = metrics.pane_header_height;
+    let surface_tab_height = metrics.surface_tab_height;
     let browser_toolbar_height = metrics.browser_toolbar_height;
     let split_gap = metrics.split_gap;
     let mut css = String::with_capacity(18_000);
@@ -808,8 +810,8 @@ button {{
   position: absolute;
   display: flex;
   flex-direction: column;
-  background: {elevated};
-  border: 1px solid {border_07};
+  background: {surface};
+  border: 2px solid {border_07};
   overflow: hidden;
 }}
 
@@ -820,9 +822,9 @@ button {{
 .workspace-window-toolbar {{
   height: {window_toolbar_height}px;
   min-height: {window_toolbar_height}px;
-  border-bottom: 1px solid {border_07};
+  border-bottom: 1px solid {border_10};
   background: {surface};
-  padding: 0 8px;
+  padding: 0 10px;
   display: flex;
   align-items: center;
   justify-content: flex-start;
@@ -832,8 +834,10 @@ button {{
 }}
 
 .workspace-window-title {{
-  color: inherit;
+  color: {text_bright};
   min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
 }}
 
 .workspace-window-toolbar:active {{
@@ -843,8 +847,8 @@ button {{
 .workspace-window-body {{
   flex: 1;
   min-height: 0;
-  padding: 0;
-  background: {border_02};
+  padding: {window_body_padding}px;
+  background: {surface};
 }}
 
 .split-container {{
@@ -870,12 +874,12 @@ button {{
   display: flex;
   flex-direction: column;
   background: {elevated};
-  border: 1px solid {border_07};
+  border: 1px solid {border_10};
   overflow: hidden;
 }}
 
 .pane-card-active {{
-  border-color: {accent_20};
+  border-color: {accent_24};
 }}
 
 .pane-card-drop-target {{
@@ -903,23 +907,44 @@ button {{
   animation: focus-flash 0.9s ease-in-out;
 }}
 
-.pane-header {{
+.pane-toolbar {{
   height: {pane_header_height}px;
   min-height: {pane_header_height}px;
-  border-bottom: 1px solid {border_07};
-  padding: 0 4px 0 6px;
+  border-bottom: 1px solid {border_10};
+  padding: 0 8px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
+  gap: 8px;
   background: {surface};
 }}
 
-.pane-meta,
+.pane-toolbar-meta,
 .surface-tab-label,
 .shortcut-label {{
   color: {text_subtle};
   font-size: 11px;
+}}
+
+.pane-toolbar-meta {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}}
+
+.pane-toolbar-eyebrow {{
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+  color: {text_dim};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+
+.pane-toolbar-detail {{
+  color: {text_subtle};
+  font-size: 11px;
+  white-space: nowrap;
 }}
 
 .pane-action-cluster {{
@@ -937,10 +962,20 @@ button {{
   pointer-events: auto;
 }}
 
+.pane-tabs {{
+  height: {surface_tab_height}px;
+  min-height: {surface_tab_height}px;
+  border-bottom: 1px solid {border_10};
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  background: {overlay_05};
+}}
+
 .surface-tabs {{
   flex: 1;
   min-width: 0;
-  min-height: {pane_header_height}px;
+  min-height: 0;
   display: flex;
   align-items: center;
   gap: 1px;
@@ -966,6 +1001,13 @@ button {{
 .surface-tab:hover {{
   background: {border_06};
   border-color: {border_10};
+}}
+
+.surface-tab-append-target {{
+  min-width: 28px;
+  justify-content: center;
+  border-style: dashed;
+  color: {text_dim};
 }}
 
 .surface-tab[draggable] {{
@@ -1036,6 +1078,7 @@ button {{
 .workspace-window-drop-zone-visible {{
   opacity: 0.45;
   pointer-events: auto;
+  background: {accent_12};
 }}
 
 .workspace-window-drop-zone-active {{
@@ -1136,6 +1179,72 @@ button {{
   min-height: 0;
   padding: 0;
   background: {border_02};
+  position: relative;
+  overflow: hidden;
+}}
+
+.pane-drop-overlay {{
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}}
+
+.pane-drop-target {{
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed {accent_24};
+  background: {accent_12};
+  color: {text_bright};
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: auto;
+}}
+
+.pane-drop-target-active {{
+  background: {accent_20};
+  border-style: solid;
+}}
+
+.pane-drop-target-center {{
+  inset: 18%;
+}}
+
+.pane-drop-target-edge {{
+  z-index: 1;
+}}
+
+.pane-drop-target-left,
+.pane-drop-target-right {{
+  top: 10px;
+  bottom: 10px;
+  width: 56px;
+}}
+
+.pane-drop-target-left {{
+  left: 10px;
+}}
+
+.pane-drop-target-right {{
+  right: 10px;
+}}
+
+.pane-drop-target-top,
+.pane-drop-target-bottom {{
+  left: 10px;
+  right: 10px;
+  height: 48px;
+}}
+
+.pane-drop-target-top {{
+  top: 10px;
+}}
+
+.pane-drop-target-bottom {{
+  bottom: 10px;
 }}
 
 .surface-backdrop {{
@@ -1178,8 +1287,9 @@ button {{
   gap: 8px;
 }}
 
-.workspace-main-overview .pane-header {{
-  min-height: 30px;
+.workspace-main-overview .pane-toolbar,
+.workspace-main-overview .pane-tabs {{
+  min-height: 28px;
   padding: 0 8px;
 }}
 
@@ -1196,6 +1306,10 @@ button {{
 
 .workspace-main-overview .pane-body {{
   padding: 10px;
+}}
+
+.workspace-main-overview .pane-drop-overlay {{
+  display: none;
 }}
 
 .workspace-main-overview .surface-backdrop {{

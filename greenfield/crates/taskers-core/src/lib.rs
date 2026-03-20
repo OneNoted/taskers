@@ -8,7 +8,7 @@ use std::{
 use taskers_app_core::{AppState, default_session_path};
 use taskers_control::{ControlCommand, ControlResponse};
 use taskers_domain::{
-    ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, Direction, KEYBOARD_RESIZE_STEP,
+    ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
     MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind, PaneMetadata,
     PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
     WorkspaceSummary as DomainWorkspaceSummary,
@@ -19,7 +19,8 @@ use time::OffsetDateTime;
 use tokio::sync::watch;
 
 pub use taskers_domain::{
-    PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowMoveTarget,
+    Direction, PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
+    WorkspaceWindowMoveTarget,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -592,11 +593,11 @@ impl Default for LayoutMetrics {
             toolbar_height: 42,
             workspace_padding: 16,
             window_toolbar_height: 28,
-            window_body_padding: 0,
-            split_gap: 12,
-            pane_header_height: 28,
+            window_body_padding: 10,
+            split_gap: 8,
+            pane_header_height: 26,
             browser_toolbar_height: 34,
-            surface_tab_height: 0,
+            surface_tab_height: 28,
         }
     }
 }
@@ -785,6 +786,14 @@ pub struct BrowserChromeSnapshot {
     pub devtools_open: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShellDragMode {
+    #[default]
+    None,
+    Window,
+    Surface,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStateSnapshot {
     Working,
@@ -869,6 +878,7 @@ pub struct ShellSnapshot {
     pub revision: u64,
     pub section: ShellSection,
     pub overview_mode: bool,
+    pub drag_mode: ShellDragMode,
     pub workspaces: Vec<WorkspaceSummary>,
     pub current_workspace: WorkspaceViewSnapshot,
     pub browser_chrome: Option<BrowserChromeSnapshot>,
@@ -976,6 +986,15 @@ pub enum ShellAction {
         target_pane_id: PaneId,
         target_index: usize,
     },
+    MoveSurfaceToSplit {
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        direction: Direction,
+    },
+    BeginWindowDrag,
+    BeginSurfaceDrag,
+    EndDrag,
     NavigateBrowser {
         surface_id: SurfaceId,
         url: String,
@@ -1011,6 +1030,7 @@ pub enum ShellAction {
 struct UiState {
     section: ShellSection,
     overview_mode: bool,
+    drag_mode: ShellDragMode,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     window_size: PixelSize,
@@ -1071,6 +1091,7 @@ impl TaskersCore {
             ui: UiState {
                 section: ShellSection::Workspace,
                 overview_mode: false,
+                drag_mode: ShellDragMode::None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 window_size: PixelSize::new(1440, 900),
@@ -1129,6 +1150,7 @@ impl TaskersCore {
             revision: self.revision,
             section: self.ui.section,
             overview_mode: self.ui.overview_mode,
+            drag_mode: self.ui.drag_mode,
             workspaces: self.workspace_summaries(&model),
             current_workspace: WorkspaceViewSnapshot {
                 id: workspace_id,
@@ -1714,6 +1736,20 @@ impl TaskersCore {
                 target_pane_id,
                 target_index,
             } => self.move_surface_by_id(surface_id, target_pane_id, target_index),
+            ShellAction::MoveSurfaceToSplit {
+                source_pane_id,
+                surface_id,
+                target_pane_id,
+                direction,
+            } => self.move_surface_to_split_by_id(
+                source_pane_id,
+                surface_id,
+                target_pane_id,
+                direction,
+            ),
+            ShellAction::BeginWindowDrag => self.set_drag_mode(ShellDragMode::Window),
+            ShellAction::BeginSurfaceDrag => self.set_drag_mode(ShellDragMode::Surface),
+            ShellAction::EndDrag => self.set_drag_mode(ShellDragMode::None),
             ShellAction::NavigateBrowser { surface_id, url } => {
                 self.navigate_browser_surface(surface_id, &url)
             }
@@ -2155,6 +2191,44 @@ impl TaskersCore {
         })
     }
 
+    fn move_surface_to_split_by_id(
+        &mut self,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        direction: Direction,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some((workspace_id, located_source_pane_id)) =
+            self.resolve_surface_location(&model, surface_id)
+        else {
+            return false;
+        };
+        let Some((target_workspace_id, _)) = self.resolve_workspace_pane(&model, target_pane_id)
+        else {
+            return false;
+        };
+        if workspace_id != target_workspace_id || located_source_pane_id != source_pane_id {
+            return false;
+        }
+        let Some(response) =
+            self.dispatch_control_with_response(ControlCommand::MoveSurfaceToSplit {
+                workspace_id,
+                source_pane_id,
+                surface_id,
+                target_pane_id,
+                direction,
+            })
+        else {
+            return false;
+        };
+        let changed = matches!(response, ControlResponse::SurfaceMovedToSplit { .. });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
+    }
+
     fn navigate_browser_surface(&mut self, surface_id: SurfaceId, raw_url: &str) -> bool {
         let normalized = resolved_browser_uri(raw_url);
         self.dispatch_control(ControlCommand::UpdateSurfaceMetadata {
@@ -2300,10 +2374,23 @@ impl TaskersCore {
             self.ui.overview_mode = false;
             changed = true;
         }
+        if self.ui.drag_mode != ShellDragMode::None {
+            self.ui.drag_mode = ShellDragMode::None;
+            changed = true;
+        }
         if changed {
             self.bump_local_revision();
         }
         self.app_state.snapshot_model().active_workspace_id()
+    }
+
+    fn set_drag_mode(&mut self, drag_mode: ShellDragMode) -> bool {
+        if self.ui.drag_mode == drag_mode {
+            return false;
+        }
+        self.ui.drag_mode = drag_mode;
+        self.bump_local_revision();
+        true
     }
 
     fn ensure_active_window_visible(&mut self) -> bool {
@@ -3297,9 +3384,9 @@ mod tests {
     use taskers_control::ControlCommand;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, HostCommand, HostEvent, LayoutMetrics, RuntimeCapability,
-        RuntimeStatus, SharedCore, ShellAction, ShellSection, SurfaceMountSpec,
-        default_preview_app_state, resolved_browser_uri,
+        BootstrapModel, BrowserMountSpec, Direction, HostCommand, HostEvent, LayoutMetrics,
+        RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
+        SurfaceMountSpec, default_preview_app_state, resolved_browser_uri,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -3314,6 +3401,31 @@ mod tests {
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
+        }
+    }
+
+    fn find_pane<'a>(
+        node: &'a super::LayoutNodeSnapshot,
+        pane_id: taskers_domain::PaneId,
+    ) -> Option<&'a super::PaneSnapshot> {
+        match node {
+            super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
+            super::LayoutNodeSnapshot::Split { first, second, .. } => {
+                find_pane(first, pane_id).or_else(|| find_pane(second, pane_id))
+            }
+        }
+    }
+
+    fn collect_pane_ids(
+        node: &super::LayoutNodeSnapshot,
+        pane_ids: &mut Vec<taskers_domain::PaneId>,
+    ) {
+        match node {
+            super::LayoutNodeSnapshot::Pane(pane) => pane_ids.push(pane.id),
+            super::LayoutNodeSnapshot::Split { first, second, .. } => {
+                collect_pane_ids(first, pane_ids);
+                collect_pane_ids(second, pane_ids);
+            }
         }
     }
 
@@ -3344,8 +3456,10 @@ mod tests {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
         let metrics = LayoutMetrics::default();
-        let min_content_y =
-            snapshot.portal.content.y + metrics.window_toolbar_height + metrics.pane_header_height;
+        let min_content_y = snapshot.portal.content.y
+            + metrics.window_toolbar_height
+            + metrics.pane_header_height
+            + metrics.surface_tab_height;
 
         assert!(
             snapshot
@@ -3492,6 +3606,20 @@ mod tests {
     }
 
     #[test]
+    fn shell_drag_actions_update_snapshot_drag_mode() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag);
+        assert_eq!(core.snapshot().drag_mode, ShellDragMode::Surface);
+
+        core.dispatch_shell_action(ShellAction::BeginWindowDrag);
+        assert_eq!(core.snapshot().drag_mode, ShellDragMode::Window);
+
+        core.dispatch_shell_action(ShellAction::EndDrag);
+        assert_eq!(core.snapshot().drag_mode, ShellDragMode::None);
+    }
+
+    #[test]
     fn external_app_state_mutations_advance_shared_core_revision() {
         let app_state = default_preview_app_state();
         let core = SharedCore::bootstrap(BootstrapModel {
@@ -3565,31 +3693,6 @@ mod tests {
 
     #[test]
     fn move_surface_shell_action_transfers_surface_between_panes() {
-        fn find_pane<'a>(
-            node: &'a super::LayoutNodeSnapshot,
-            pane_id: taskers_domain::PaneId,
-        ) -> Option<&'a super::PaneSnapshot> {
-            match node {
-                super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
-                super::LayoutNodeSnapshot::Split { first, second, .. } => {
-                    find_pane(first, pane_id).or_else(|| find_pane(second, pane_id))
-                }
-            }
-        }
-
-        fn collect_pane_ids(
-            node: &super::LayoutNodeSnapshot,
-            pane_ids: &mut Vec<taskers_domain::PaneId>,
-        ) {
-            match node {
-                super::LayoutNodeSnapshot::Pane(pane) => pane_ids.push(pane.id),
-                super::LayoutNodeSnapshot::Split { first, second, .. } => {
-                    collect_pane_ids(first, pane_ids);
-                    collect_pane_ids(second, pane_ids);
-                }
-            }
-        }
-
         let core = SharedCore::bootstrap(bootstrap());
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
@@ -3635,5 +3738,54 @@ mod tests {
             Some(moved_surface_id)
         );
         assert_eq!(snapshot.current_workspace.active_pane, target_pane_id);
+    }
+
+    #[test]
+    fn move_surface_to_split_shell_action_creates_neighbor_pane() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::MoveSurfaceToSplit {
+            source_pane_id,
+            surface_id: moved_surface_id,
+            target_pane_id: source_pane_id,
+            direction: Direction::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let mut pane_ids = Vec::new();
+        collect_pane_ids(&snapshot.current_workspace.layout, &mut pane_ids);
+        let new_pane_id = pane_ids
+            .into_iter()
+            .find(|pane_id| {
+                *pane_id != source_pane_id
+                    && find_pane(&snapshot.current_workspace.layout, *pane_id)
+                        .is_some_and(|pane| pane.active_surface == moved_surface_id)
+            })
+            .expect("new pane");
+        let source_pane =
+            find_pane(&snapshot.current_workspace.layout, source_pane_id).expect("source pane");
+        let target_pane =
+            find_pane(&snapshot.current_workspace.layout, new_pane_id).expect("target pane");
+
+        assert!(
+            !source_pane
+                .surfaces
+                .iter()
+                .any(|surface| surface.id == moved_surface_id)
+        );
+        assert_eq!(
+            target_pane.surfaces.first().map(|surface| surface.id),
+            Some(moved_surface_id)
+        );
+        assert_eq!(snapshot.current_workspace.active_pane, new_pane_id);
     }
 }

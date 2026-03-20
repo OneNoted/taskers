@@ -11,8 +11,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use taskers_core::{
-    BrowserMountSpec, HostCommand, HostEvent, PortalSurfacePlan, ShellSnapshot, SurfaceId,
-    SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
+    BrowserMountSpec, HostCommand, HostEvent, PortalSurfacePlan, ShellDragMode, ShellSnapshot,
+    SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
 };
 use taskers_domain::PaneKind;
 use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
@@ -166,6 +166,7 @@ impl TaskersHost {
     }
 
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
+        let interactive = native_surfaces_interactive(snapshot.drag_mode);
         emit_diagnostic(
             self.diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -174,8 +175,8 @@ impl TaskersHost {
                 format!("host sync start panes={}", snapshot.portal.panes.len()),
             ),
         );
-        self.sync_browser_surfaces(&snapshot.portal, snapshot.revision)?;
-        self.sync_terminal_surfaces(&snapshot.portal, snapshot.revision)?;
+        self.sync_browser_surfaces(&snapshot.portal, snapshot.revision, interactive)?;
+        self.sync_terminal_surfaces(&snapshot.portal, snapshot.revision, interactive)?;
         Ok(())
     }
 
@@ -228,7 +229,12 @@ impl TaskersHost {
         Ok(())
     }
 
-    fn sync_browser_surfaces(&mut self, portal: &SurfacePortalPlan, revision: u64) -> Result<()> {
+    fn sync_browser_surfaces(
+        &mut self,
+        portal: &SurfacePortalPlan,
+        revision: u64,
+        interactive: bool,
+    ) -> Result<()> {
         let desired = browser_plans(portal);
         let desired_ids = desired
             .iter()
@@ -263,6 +269,7 @@ impl TaskersHost {
                     &self.surface_layer,
                     &plan,
                     revision,
+                    interactive,
                     self.diagnostics.as_ref(),
                 )?,
                 None => {
@@ -270,6 +277,7 @@ impl TaskersHost {
                         &self.surface_layer,
                         &plan,
                         revision,
+                        interactive,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                     )?;
@@ -281,7 +289,12 @@ impl TaskersHost {
         Ok(())
     }
 
-    fn sync_terminal_surfaces(&mut self, portal: &SurfacePortalPlan, revision: u64) -> Result<()> {
+    fn sync_terminal_surfaces(
+        &mut self,
+        portal: &SurfacePortalPlan,
+        revision: u64,
+        interactive: bool,
+    ) -> Result<()> {
         let desired = terminal_plans(portal);
         let desired_ids = desired
             .iter()
@@ -321,6 +334,7 @@ impl TaskersHost {
                     plan.frame,
                     plan.active,
                     revision,
+                    interactive,
                     host,
                     self.diagnostics.as_ref(),
                 ),
@@ -329,6 +343,7 @@ impl TaskersHost {
                         &self.surface_layer,
                         &plan,
                         revision,
+                        interactive,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                         host,
@@ -356,6 +371,7 @@ impl BrowserSurface {
         fixed: &Fixed,
         plan: &PortalSurfacePlan,
         revision: u64,
+        interactive: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Result<Self> {
@@ -371,7 +387,7 @@ impl BrowserSurface {
             .focusable(true)
             .settings(&settings)
             .build();
-        webview.set_can_target(true);
+        webview.set_can_target(interactive);
         webview.load_uri(&url);
         (event_sink)(HostEvent::SurfaceUrlChanged {
             surface_id: plan.surface_id,
@@ -505,7 +521,7 @@ impl BrowserSurface {
             });
         }
 
-        if plan.active {
+        if plan.active && interactive {
             webview.grab_focus();
         }
 
@@ -543,16 +559,18 @@ impl BrowserSurface {
         fixed: &Fixed,
         plan: &PortalSurfacePlan,
         revision: u64,
+        interactive: bool,
         diagnostics: Option<&DiagnosticsSink>,
     ) -> Result<()> {
         position_widget(fixed, self.webview.upcast_ref(), plan.frame);
+        self.webview.set_can_target(interactive);
 
         let BrowserMountSpec { url } = browser_spec(plan)?;
         if self.url != *url {
             self.webview.load_uri(url);
             self.url = url.clone();
         }
-        if plan.active {
+        if plan.active && interactive {
             self.webview.grab_focus();
         }
 
@@ -629,6 +647,7 @@ impl TerminalSurface {
         fixed: &Fixed,
         plan: &PortalSurfacePlan,
         revision: u64,
+        interactive: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
         host: &GhosttyHost,
@@ -641,12 +660,12 @@ impl TerminalSurface {
         widget.set_hexpand(true);
         widget.set_vexpand(true);
         widget.set_focusable(true);
-        widget.set_can_target(true);
+        widget.set_can_target(interactive);
         position_widget(fixed, &widget, plan.frame);
 
         connect_ghostty_widget(host, &widget, plan, event_sink, diagnostics.clone());
 
-        if plan.active {
+        if plan.active && interactive {
             let _ = host.focus_surface(&widget);
         }
 
@@ -670,11 +689,13 @@ impl TerminalSurface {
         frame: taskers_core::Frame,
         active: bool,
         revision: u64,
+        interactive: bool,
         host: &GhosttyHost,
         diagnostics: Option<&DiagnosticsSink>,
     ) {
+        self.widget.set_can_target(interactive);
         position_widget(fixed, &self.widget, frame);
-        if active {
+        if active && interactive {
             let _ = host.focus_surface(&self.widget);
         }
 
@@ -874,6 +895,10 @@ fn detach_from_fixed(fixed: &Fixed, widget: &Widget) {
     }
 }
 
+fn native_surfaces_interactive(drag_mode: ShellDragMode) -> bool {
+    drag_mode == ShellDragMode::None
+}
+
 fn workspace_pan_delta(dx: f64, dy: f64) -> Option<(i32, i32)> {
     if !dx.is_finite() || !dy.is_finite() {
         return None;
@@ -945,8 +970,8 @@ fn current_timestamp_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{browser_plans, terminal_plans, workspace_pan_delta};
-    use taskers_core::{BootstrapModel, SharedCore, SurfaceMountSpec};
+    use super::{browser_plans, native_surfaces_interactive, terminal_plans, workspace_pan_delta};
+    use taskers_core::{BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec};
 
     #[test]
     fn partitions_portal_plans_by_surface_kind() {
@@ -968,5 +993,12 @@ mod tests {
         assert_eq!(workspace_pan_delta(0.4, 0.0), None);
         assert_eq!(workspace_pan_delta(6.0, 18.0), None);
         assert_eq!(workspace_pan_delta(f64::NAN, 0.0), None);
+    }
+
+    #[test]
+    fn native_surfaces_disable_pointer_targeting_during_shell_drags() {
+        assert!(native_surfaces_interactive(ShellDragMode::None));
+        assert!(!native_surfaces_interactive(ShellDragMode::Window));
+        assert!(!native_surfaces_interactive(ShellDragMode::Surface));
     }
 }

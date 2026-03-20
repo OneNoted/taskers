@@ -2,7 +2,7 @@ mod theme;
 
 use dioxus::prelude::*;
 use taskers_core::{
-    ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot,
+    ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot, Direction,
     LayoutNodeSnapshot, PaneId, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeStatus,
     SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutAction,
     ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId,
@@ -22,12 +22,16 @@ struct DraggedWindow {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SurfaceDropTarget {
-    PaneEnd {
+    AppendToPane {
         pane_id: PaneId,
     },
     BeforeSurface {
         pane_id: PaneId,
         surface_id: SurfaceId,
+    },
+    SplitPane {
+        pane_id: PaneId,
+        direction: Direction,
     },
 }
 
@@ -58,6 +62,71 @@ fn compute_surface_drop_index(
     }
 
     target_index
+}
+
+fn pane_has_surface_drop_target(target: Option<SurfaceDropTarget>, pane_id: PaneId) -> bool {
+    match target {
+        Some(SurfaceDropTarget::AppendToPane {
+            pane_id: target_pane_id,
+        })
+        | Some(SurfaceDropTarget::BeforeSurface {
+            pane_id: target_pane_id,
+            ..
+        })
+        | Some(SurfaceDropTarget::SplitPane {
+            pane_id: target_pane_id,
+            ..
+        }) => target_pane_id == pane_id,
+        None => false,
+    }
+}
+
+fn pane_allows_surface_split(
+    dragged: Option<DraggedSurface>,
+    pane_id: PaneId,
+    surface_count: usize,
+) -> bool {
+    dragged.is_some_and(|dragged| dragged.pane_id != pane_id || surface_count > 1)
+}
+
+fn apply_surface_drop(
+    core: &SharedCore,
+    dragged: DraggedSurface,
+    target: SurfaceDropTarget,
+    ordered_surface_ids: &[SurfaceId],
+) {
+    match target {
+        SurfaceDropTarget::AppendToPane { pane_id } => {
+            core.dispatch_shell_action(ShellAction::MoveSurface {
+                surface_id: dragged.surface_id,
+                target_pane_id: pane_id,
+                target_index: usize::MAX,
+            });
+        }
+        SurfaceDropTarget::BeforeSurface {
+            pane_id,
+            surface_id,
+        } => {
+            core.dispatch_shell_action(ShellAction::MoveSurface {
+                surface_id: dragged.surface_id,
+                target_pane_id: pane_id,
+                target_index: compute_surface_drop_index(
+                    dragged,
+                    pane_id,
+                    ordered_surface_ids,
+                    Some(surface_id),
+                ),
+            });
+        }
+        SurfaceDropTarget::SplitPane { pane_id, direction } => {
+            core.dispatch_shell_action(ShellAction::MoveSurfaceToSplit {
+                source_pane_id: dragged.pane_id,
+                surface_id: dragged.surface_id,
+                target_pane_id: pane_id,
+                direction,
+            });
+        }
+    }
 }
 
 fn app_css(snapshot: &ShellSnapshot) -> String {
@@ -580,12 +649,17 @@ fn render_workspace_window(
     let focus_window = move |_| {
         focus_core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
     };
-    let start_window_drag = move |_: Event<DragData>| {
-        surface_drag_source.set(None);
-        surface_drop_target.set(None);
-        window_drag_source.set(Some(DraggedWindow { window_id }));
+    let start_window_drag = {
+        let core = core.clone();
+        move |_: Event<DragData>| {
+            surface_drag_source.set(None);
+            surface_drop_target.set(None);
+            window_drag_source.set(Some(DraggedWindow { window_id }));
+            core.dispatch_shell_action(ShellAction::BeginWindowDrag);
+        }
     };
     let clear_window_drag = {
+        let core = core.clone();
         let mut window_drag_source = window_drag_source;
         let mut window_drop_target = window_drop_target;
         let mut surface_drop_target = surface_drop_target;
@@ -593,6 +667,7 @@ fn render_workspace_window(
             window_drag_source.set(None);
             window_drop_target.set(None);
             surface_drop_target.set(None);
+            core.dispatch_shell_action(ShellAction::EndDrag);
         }
     };
     let drag_active = window_drag_source.read().is_some();
@@ -704,6 +779,7 @@ fn render_window_drop_zone(
             window_id: dragged.window_id,
             target,
         });
+        core.dispatch_shell_action(ShellAction::EndDrag);
     };
 
     rsx! {
@@ -721,16 +797,12 @@ fn render_pane(
     browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
-    mut surface_drag_source: Signal<Option<DraggedSurface>>,
-    mut surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_drag_source: Signal<Option<DraggedSurface>>,
+    surface_drop_target: Signal<Option<SurfaceDropTarget>>,
 ) -> Element {
     let pane_id = pane.id;
-    let pane_is_drop_target = matches!(
-        *surface_drop_target.read(),
-        Some(SurfaceDropTarget::PaneEnd {
-            pane_id: target_pane_id,
-        }) if target_pane_id == pane_id
-    );
+    let dragged_surface = *surface_drag_source.read();
+    let pane_is_drop_target = pane_has_surface_drop_target(*surface_drop_target.read(), pane_id);
     let pane_class = if pane.active {
         format!(
             "pane-card pane-card-active{}",
@@ -778,6 +850,18 @@ fn render_pane(
                 .map(|url| format!("{}-{}", active_surface.id, url))
         })
         .unwrap_or_else(|| active_surface.id.to_string());
+    let pane_kind = match active_surface.kind {
+        SurfaceKind::Terminal => "terminal",
+        SurfaceKind::Browser => "browser",
+    };
+    let tab_count_label = if pane.surfaces.len() == 1 {
+        "1 tab".to_string()
+    } else {
+        format!("{} tabs", pane.surfaces.len())
+    };
+    let pane_allows_split =
+        pane_allows_surface_split(dragged_surface, pane_id, pane.surfaces.len());
+    let surface_drag_active = dragged_surface.is_some();
 
     let focus_pane = {
         let core = core.clone();
@@ -835,49 +919,23 @@ fn render_pane(
     } else {
         "Close current surface"
     };
-    let set_pane_drop_target = move |event: Event<DragData>| {
-        if surface_drag_source.read().is_none() {
-            return;
-        }
-        event.prevent_default();
-        surface_drop_target.set(Some(SurfaceDropTarget::PaneEnd { pane_id }));
-    };
-    let clear_pane_drop_target = move |_: Event<DragData>| {
-        if *surface_drop_target.read() == Some(SurfaceDropTarget::PaneEnd { pane_id }) {
-            surface_drop_target.set(None);
-        }
-    };
-    let drop_on_pane = {
-        let core = core.clone();
-        let ordered_surface_ids = ordered_surface_ids.clone();
-        move |event: Event<DragData>| {
-            event.prevent_default();
-            let dragged = *surface_drag_source.read();
-            surface_drag_source.set(None);
-            surface_drop_target.set(None);
-            let Some(dragged) = dragged else {
-                return;
-            };
-            core.dispatch_shell_action(ShellAction::MoveSurface {
-                surface_id: dragged.surface_id,
-                target_pane_id: pane_id,
-                target_index: compute_surface_drop_index(
-                    dragged,
-                    pane_id,
-                    &ordered_surface_ids,
-                    None,
-                ),
-            });
-        }
-    };
 
     rsx! {
         section { class: "{pane_class}", onclick: focus_pane,
-            div {
-                class: "pane-header",
-                ondragover: set_pane_drop_target,
-                ondragleave: clear_pane_drop_target,
-                ondrop: drop_on_pane,
+            div { class: "pane-toolbar",
+                div { class: "pane-toolbar-meta",
+                    span { class: "pane-toolbar-eyebrow", "pane" }
+                    span { class: "pane-toolbar-detail", "{pane_kind} · {tab_count_label}" }
+                }
+                div { class: "pane-action-cluster",
+                    button { class: "pane-utility pane-utility-tab", title: "New terminal tab", onclick: add_terminal_surface, "+t" }
+                    button { class: "pane-utility pane-utility-tab", title: "New browser tab", onclick: add_browser_surface, "+w" }
+                    button { class: "pane-utility pane-utility-split", title: "Split right", onclick: split_terminal, "|r" }
+                    button { class: "pane-utility pane-utility-split", title: "Split down", onclick: split_down, "|d" }
+                    button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface, "x" }
+                }
+            }
+            div { class: "pane-tabs",
                 div { class: "surface-tabs",
                     for surface in &pane.surfaces {
                         {render_surface_tab(
@@ -890,13 +948,16 @@ fn render_pane(
                             &ordered_surface_ids,
                         )}
                     }
-                }
-                div { class: "pane-action-cluster",
-                    button { class: "pane-utility pane-utility-tab", title: "New terminal tab", onclick: add_terminal_surface, "+t" }
-                    button { class: "pane-utility pane-utility-tab", title: "New browser tab", onclick: add_browser_surface, "+w" }
-                    button { class: "pane-utility pane-utility-split", title: "Split right", onclick: split_terminal, "|r" }
-                    button { class: "pane-utility pane-utility-split", title: "Split down", onclick: split_down, "|d" }
-                    button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface, "x" }
+                    if surface_drag_active {
+                        {render_surface_pane_drop_target(
+                            "surface-tab surface-tab-append-target",
+                            "+",
+                            SurfaceDropTarget::AppendToPane { pane_id },
+                            core.clone(),
+                            surface_drag_source,
+                            surface_drop_target,
+                        )}
+                    }
                 }
             }
             if matches!(active_surface.kind, SurfaceKind::Browser) {
@@ -909,8 +970,117 @@ fn render_pane(
             }
             div { class: "pane-body",
                 {render_surface_backdrop(active_surface, runtime_status)}
+                if surface_drag_active {
+                    div { class: "pane-drop-overlay",
+                        {render_surface_pane_drop_target(
+                            "pane-drop-target pane-drop-target-center",
+                            "append",
+                            SurfaceDropTarget::AppendToPane { pane_id },
+                            core.clone(),
+                            surface_drag_source,
+                            surface_drop_target,
+                        )}
+                        if pane_allows_split {
+                            {render_surface_pane_drop_target(
+                                "pane-drop-target pane-drop-target-edge pane-drop-target-left",
+                                "split left",
+                                SurfaceDropTarget::SplitPane {
+                                    pane_id,
+                                    direction: Direction::Left,
+                                },
+                                core.clone(),
+                                surface_drag_source,
+                                surface_drop_target,
+                            )}
+                            {render_surface_pane_drop_target(
+                                "pane-drop-target pane-drop-target-edge pane-drop-target-right",
+                                "split right",
+                                SurfaceDropTarget::SplitPane {
+                                    pane_id,
+                                    direction: Direction::Right,
+                                },
+                                core.clone(),
+                                surface_drag_source,
+                                surface_drop_target,
+                            )}
+                            {render_surface_pane_drop_target(
+                                "pane-drop-target pane-drop-target-edge pane-drop-target-top",
+                                "split up",
+                                SurfaceDropTarget::SplitPane {
+                                    pane_id,
+                                    direction: Direction::Up,
+                                },
+                                core.clone(),
+                                surface_drag_source,
+                                surface_drop_target,
+                            )}
+                            {render_surface_pane_drop_target(
+                                "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
+                                "split down",
+                                SurfaceDropTarget::SplitPane {
+                                    pane_id,
+                                    direction: Direction::Down,
+                                },
+                                core.clone(),
+                                surface_drag_source,
+                                surface_drop_target,
+                            )}
+                        }
+                    }
+                }
             }
             div { key: "{flash_key}", class: "{flash_class}" }
+        }
+    }
+}
+
+fn render_surface_pane_drop_target(
+    base_class: &'static str,
+    label: &'static str,
+    target: SurfaceDropTarget,
+    core: SharedCore,
+    mut surface_drag_source: Signal<Option<DraggedSurface>>,
+    mut surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+) -> Element {
+    let class = if *surface_drop_target.read() == Some(target) {
+        format!("{base_class} pane-drop-target-active")
+    } else {
+        base_class.to_string()
+    };
+    let set_drop_target = move |event: Event<DragData>| {
+        if surface_drag_source.read().is_none() {
+            return;
+        }
+        event.prevent_default();
+        surface_drop_target.set(Some(target));
+    };
+    let clear_drop_target = move |_: Event<DragData>| {
+        if *surface_drop_target.read() == Some(target) {
+            surface_drop_target.set(None);
+        }
+    };
+    let drop_surface = {
+        let core = core.clone();
+        move |event: Event<DragData>| {
+            event.prevent_default();
+            let dragged = *surface_drag_source.read();
+            surface_drag_source.set(None);
+            surface_drop_target.set(None);
+            let Some(dragged) = dragged else {
+                return;
+            };
+            apply_surface_drop(&core, dragged, target, &[]);
+            core.dispatch_shell_action(ShellAction::EndDrag);
+        }
+    };
+
+    rsx! {
+        div {
+            class: "{class}",
+            ondragover: set_drop_target,
+            ondragleave: clear_drop_target,
+            ondrop: drop_surface,
+            "{label}"
         }
     }
 }
@@ -962,15 +1132,23 @@ fn render_surface_tab(
             surface_id,
         });
     };
-    let start_drag = move |_: Event<DragData>| {
-        surface_drag_source.set(Some(DraggedSurface {
-            pane_id,
-            surface_id,
-        }));
+    let start_drag = {
+        let core = core.clone();
+        move |_: Event<DragData>| {
+            surface_drag_source.set(Some(DraggedSurface {
+                pane_id,
+                surface_id,
+            }));
+            core.dispatch_shell_action(ShellAction::BeginSurfaceDrag);
+        }
     };
-    let clear_drag = move |_: Event<DragData>| {
-        surface_drag_source.set(None);
-        surface_drop_target.set(None);
+    let clear_drag = {
+        let core = core.clone();
+        move |_: Event<DragData>| {
+            surface_drag_source.set(None);
+            surface_drop_target.set(None);
+            core.dispatch_shell_action(ShellAction::EndDrag);
+        }
     };
     let set_surface_drop_target = move |event: Event<DragData>| {
         if surface_drag_source.read().is_none() {
@@ -1003,16 +1181,16 @@ fn render_surface_tab(
             let Some(dragged) = dragged else {
                 return;
             };
-            core.dispatch_shell_action(ShellAction::MoveSurface {
-                surface_id: dragged.surface_id,
-                target_pane_id: pane_id,
-                target_index: compute_surface_drop_index(
-                    dragged,
+            apply_surface_drop(
+                &core,
+                dragged,
+                SurfaceDropTarget::BeforeSurface {
                     pane_id,
-                    &ordered_surface_ids,
-                    Some(surface_id),
-                ),
-            });
+                    surface_id,
+                },
+                &ordered_surface_ids,
+            );
+            core.dispatch_shell_action(ShellAction::EndDrag);
         }
     };
 
