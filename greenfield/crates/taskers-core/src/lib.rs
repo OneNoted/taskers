@@ -883,6 +883,7 @@ pub struct ShellSnapshot {
     pub section: ShellSection,
     pub overview_mode: bool,
     pub drag_mode: ShellDragMode,
+    pub attention_panel_visible: bool,
     pub workspaces: Vec<WorkspaceSummary>,
     pub current_workspace: WorkspaceViewSnapshot,
     pub browser_chrome: Option<BrowserChromeSnapshot>,
@@ -1118,6 +1119,11 @@ impl TaskersCore {
 
     fn snapshot(&self) -> ShellSnapshot {
         let model = self.app_state.snapshot_model();
+        let agents = self.agent_sessions_snapshot(&model);
+        let activity = self.activity_snapshot(&model);
+        let done_activity = self.done_activity_snapshot(&model);
+        let attention_panel_visible =
+            !agents.is_empty() || !activity.is_empty() || !done_activity.is_empty();
         let workspace_id = model
             .active_workspace_id()
             .expect("active workspace should exist");
@@ -1128,7 +1134,7 @@ impl TaskersCore {
         let active_window = workspace
             .active_window_record()
             .expect("active workspace window should exist");
-        let viewport = self.workspace_viewport_frame();
+        let viewport = self.workspace_viewport_frame(attention_panel_visible);
         let clamped_viewport = clamped_workspace_viewport(
             workspace,
             viewport.width,
@@ -1169,6 +1175,7 @@ impl TaskersCore {
             section: self.ui.section,
             overview_mode: self.ui.overview_mode,
             drag_mode: self.ui.drag_mode,
+            attention_panel_visible,
             workspaces: self.workspace_summaries(&model),
             current_workspace: WorkspaceViewSnapshot {
                 id: workspace_id,
@@ -1195,9 +1202,9 @@ impl TaskersCore {
                 layout: self.snapshot_layout(workspace, &active_window.layout),
             },
             browser_chrome: self.browser_chrome_snapshot(workspace),
-            agents: self.agent_sessions_snapshot(&model),
-            activity: self.activity_snapshot(&model),
-            done_activity: self.done_activity_snapshot(&model),
+            agents,
+            activity,
+            done_activity,
             portal: SurfacePortalPlan {
                 window: Frame::new(0, 0, self.ui.window_size.width, self.ui.window_size.height),
                 content: viewport,
@@ -1215,10 +1222,14 @@ impl TaskersCore {
         }
     }
 
-    fn workspace_viewport_frame(&self) -> Frame {
+    fn workspace_viewport_frame(&self, attention_panel_visible: bool) -> Frame {
         let metrics = self.metrics;
-        let width =
-            (self.ui.window_size.width - metrics.sidebar_width - metrics.activity_width).max(640);
+        let activity_width = if attention_panel_visible {
+            metrics.activity_width
+        } else {
+            0
+        };
+        let width = (self.ui.window_size.width - metrics.sidebar_width - activity_width).max(640);
         Frame::new(
             metrics.sidebar_width,
             metrics.toolbar_height,
@@ -2053,7 +2064,7 @@ impl TaskersCore {
         let Some(workspace) = model.workspaces.get(&workspace_id) else {
             return false;
         };
-        let viewport_frame = self.workspace_viewport_frame();
+        let viewport_frame = self.workspace_viewport_frame(attention_panel_visible(&model));
         let current_viewport = clamped_workspace_viewport(
             workspace,
             viewport_frame.width,
@@ -2479,7 +2490,7 @@ impl TaskersCore {
         let Some(workspace) = model.workspaces.get(&workspace_id) else {
             return false;
         };
-        let viewport_frame = self.workspace_viewport_frame();
+        let viewport_frame = self.workspace_viewport_frame(attention_panel_visible(&model));
         let current_viewport = clamped_workspace_viewport(
             workspace,
             viewport_frame.width,
@@ -3408,6 +3419,21 @@ fn activity_context_line(model: &AppModel, item: &ActivityItem) -> String {
 
 fn next_workspace_label(model: &AppModel) -> String {
     format!("Workspace {}", model.workspaces.len() + 1)
+}
+
+fn attention_panel_visible(model: &AppModel) -> bool {
+    model
+        .workspace_summaries(model.active_window)
+        .map(|summaries| {
+            summaries
+                .iter()
+                .any(|summary| !summary.agent_summaries.is_empty())
+        })
+        .unwrap_or(false)
+        || model
+            .workspaces
+            .values()
+            .any(|workspace| !workspace.notifications.is_empty())
 }
 
 fn fallback_surface_descriptor(surface: &SurfaceRecord) -> SurfaceDescriptor {

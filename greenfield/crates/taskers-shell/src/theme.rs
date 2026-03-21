@@ -170,8 +170,11 @@ fn rgba(color: Color, alpha: f32) -> String {
     format!("rgba({},{},{},{alpha:.2})", color.r, color.g, color.b)
 }
 
-pub fn generate_css(p: &ThemePalette) -> String {
-    let metrics = LayoutMetrics::default();
+pub fn generate_css(
+    p: &ThemePalette,
+    metrics: LayoutMetrics,
+    attention_panel_visible: bool,
+) -> String {
     let sidebar_width = metrics.sidebar_width;
     let activity_width = metrics.activity_width;
     let workspace_toolbar_height = metrics.toolbar_height;
@@ -183,6 +186,11 @@ pub fn generate_css(p: &ThemePalette) -> String {
     let surface_tab_height = metrics.surface_tab_height;
     let browser_toolbar_height = metrics.browser_toolbar_height;
     let split_gap = metrics.split_gap;
+    let app_shell_columns = if attention_panel_visible {
+        format!("{sidebar_width}px minmax(0, 1fr) {activity_width}px")
+    } else {
+        format!("{sidebar_width}px minmax(0, 1fr)")
+    };
     let mut css = String::with_capacity(18_000);
     let _ = write!(
         css,
@@ -209,7 +217,7 @@ button {{
   height: 100vh;
   background: {base};
   display: grid;
-  grid-template-columns: {sidebar_width}px minmax(0, 1fr) {activity_width}px;
+  grid-template-columns: {app_shell_columns};
   overflow: hidden;
 }}
 

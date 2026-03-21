@@ -130,9 +130,11 @@ fn apply_surface_drop(
 }
 
 fn app_css(snapshot: &ShellSnapshot) -> String {
-    theme::generate_css(&theme::resolve_palette(
-        &snapshot.settings.selected_theme_id,
-    ))
+    theme::generate_css(
+        &theme::resolve_palette(&snapshot.settings.selected_theme_id),
+        snapshot.metrics,
+        snapshot.attention_panel_visible,
+    )
 }
 
 #[component]
@@ -280,40 +282,42 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                 }
             }
 
-            aside { class: "attention-panel",
-                div { class: "notification-header",
-                    div { class: "sidebar-heading", "Notifications" }
-                    div { class: "notification-counts",
-                        if !snapshot.agents.is_empty() {
-                            span { class: "notification-count-pill notification-count-agents",
-                                "{snapshot.agents.len()} agents"
+            if snapshot.attention_panel_visible {
+                aside { class: "attention-panel",
+                    div { class: "notification-header",
+                        div { class: "sidebar-heading", "Notifications" }
+                        div { class: "notification-counts",
+                            if !snapshot.agents.is_empty() {
+                                span { class: "notification-count-pill notification-count-agents",
+                                    "{snapshot.agents.len()} agents"
+                                }
                             }
-                        }
-                        if snapshot.activity.len() > 0 {
-                            span { class: "notification-count-pill notification-count-unread",
-                                "{snapshot.activity.len()} unread"
+                            if snapshot.activity.len() > 0 {
+                                span { class: "notification-count-pill notification-count-unread",
+                                    "{snapshot.activity.len()} unread"
+                                }
                             }
                         }
                     }
-                }
-                if !snapshot.agents.is_empty() {
-                    div { class: "agent-session-list",
-                        for agent in &snapshot.agents {
-                            {render_agent_item(agent, core.clone(), &snapshot.current_workspace)}
+                    if !snapshot.agents.is_empty() {
+                        div { class: "agent-session-list",
+                            for agent in &snapshot.agents {
+                                {render_agent_item(agent, core.clone(), &snapshot.current_workspace)}
+                            }
                         }
                     }
-                }
-                div { class: "notification-timeline",
-                    if snapshot.activity.is_empty() && snapshot.done_activity.is_empty() {
-                        div { class: "notification-empty",
-                            div { class: "notification-empty-title", "No notifications" }
-                        }
-                    } else {
-                        for item in &snapshot.activity {
-                            {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
-                        }
-                        for item in snapshot.done_activity.iter().take(8) {
-                            {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
+                    div { class: "notification-timeline",
+                        if snapshot.activity.is_empty() && snapshot.done_activity.is_empty() {
+                            div { class: "notification-empty",
+                                div { class: "notification-empty-title", "No notifications" }
+                            }
+                        } else {
+                            for item in &snapshot.activity {
+                                {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
+                            }
+                            for item in snapshot.done_activity.iter().take(8) {
+                                {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
+                            }
                         }
                     }
                 }
