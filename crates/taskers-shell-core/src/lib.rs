@@ -790,6 +790,8 @@ pub struct BrowserChromeSnapshot {
     pub devtools_open: bool,
 }
 
+pub const DEFAULT_BROWSER_HOME: &str = "https://duckduckgo.com/";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShellDragMode {
     #[default]
@@ -1532,7 +1534,8 @@ impl TaskersCore {
             pane_id: pane.id,
             surface_id: surface.id,
             title: display_surface_title(surface),
-            url: normalized_surface_url(surface).unwrap_or_else(|| "about:blank".into()),
+            url: normalized_surface_url(surface)
+                .unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
             can_go_back: self
                 .browser_navigation
                 .get(&surface.id)
@@ -3465,7 +3468,7 @@ fn mount_spec_from_descriptor(
                 .url
                 .as_deref()
                 .map(resolved_browser_uri)
-                .unwrap_or_else(|| "about:blank".into()),
+                .unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
         }),
         PaneKind::Terminal => SurfaceMountSpec::Terminal(TerminalMountSpec {
             title: descriptor
@@ -3550,9 +3553,9 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, Direction, HostCommand, HostEvent, LayoutMetrics,
-        RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
-        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
+        BootstrapModel, BrowserMountSpec, DEFAULT_BROWSER_HOME, Direction, HostCommand, HostEvent,
+        LayoutMetrics, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
+        ShellSection, SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
         default_session_path_for_preview, pane_body_frame, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
@@ -3758,7 +3761,7 @@ mod tests {
             matches!(
                 &plan.mount,
                 SurfaceMountSpec::Browser(BrowserMountSpec { url })
-                    if url.starts_with("http")
+                    if url == DEFAULT_BROWSER_HOME
             )
         }));
     }
@@ -3817,7 +3820,7 @@ mod tests {
 
         let snapshot = core.snapshot();
         let browser = snapshot.browser_chrome.expect("active browser chrome");
-        assert!(!browser.url.trim().is_empty());
+        assert_eq!(browser.url, DEFAULT_BROWSER_HOME);
 
         core.dispatch_shell_action(ShellAction::NavigateBrowser {
             surface_id: browser.surface_id,
@@ -3872,6 +3875,21 @@ mod tests {
         assert!(browser.can_go_back);
         assert!(browser.can_go_forward);
         assert!(browser.devtools_open);
+    }
+
+    #[test]
+    fn explicit_about_blank_browser_urls_are_preserved() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+
+        let browser = core.snapshot().browser_chrome.expect("active browser chrome");
+        core.apply_host_event(HostEvent::SurfaceUrlChanged {
+            surface_id: browser.surface_id,
+            url: "about:blank".into(),
+        });
+
+        let browser = core.snapshot().browser_chrome.expect("active browser chrome");
+        assert_eq!(browser.url, "about:blank");
     }
 
     #[test]

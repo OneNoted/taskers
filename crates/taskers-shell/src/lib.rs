@@ -1270,7 +1270,7 @@ fn BrowserToolbar(
         .as_ref()
         .map(|chrome| chrome.url.clone())
         .or_else(|| surface.url.clone())
-        .unwrap_or_else(|| "about:blank".into());
+        .unwrap_or_else(|| taskers_core::DEFAULT_BROWSER_HOME.into());
     let mut address = use_signal(|| initial_url.clone());
     let surface_id = surface.id;
     let can_go_back = chrome
@@ -1358,7 +1358,10 @@ fn BrowserToolbar(
 fn render_surface_backdrop(surface: &SurfaceSnapshot, runtime_status: &RuntimeStatus) -> Element {
     match surface.kind {
         SurfaceKind::Browser => {
-            let url = surface.url.clone().unwrap_or_else(|| "about:blank".into());
+            let url = surface
+                .url
+                .clone()
+                .unwrap_or_else(|| taskers_core::DEFAULT_BROWSER_HOME.into());
             rsx! {
                 div { class: "surface-backdrop",
                     div { class: "surface-backdrop-copy",
