@@ -30,5 +30,6 @@ taskers-paths.workspace = true
 taskers-runtime.workspace = true
 taskers-shell.workspace = true
 taskers-shell-core.workspace = true
+time.workspace = true
 tokio.workspace = true
 webkit6.workspace = true

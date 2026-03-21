@@ -2,7 +2,7 @@ use adw::prelude::*;
 use anyhow::{Context, Result};
 use axum::{Router, extract::ws::WebSocketUpgrade, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
-use gtk::{EventControllerKey, gdk, glib};
+use gtk::{EventControllerKey, gdk, gio, glib};
 use std::{
     cell::{Cell, RefCell},
     fs::{File, OpenOptions, remove_file},
@@ -24,7 +24,7 @@ use taskers_control::{
     bind_socket, default_socket_path, serve_with_handler,
 };
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
-use taskers_domain::AppModel;
+use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
 use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
@@ -33,6 +33,8 @@ use taskers_shell_core::{
     ShellAction, ShellSection, ShortcutAction, ShortcutPreset, SurfaceKind,
 };
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
+
+use glib::variant::ToVariant;
 
 const APP_ID: &str = taskers_paths::APP_ID;
 
@@ -95,6 +97,16 @@ enum HostAutomationCommand {
 struct HostAutomationRequest {
     command: HostAutomationCommand,
     response_tx: tokio::sync::oneshot::Sender<Result<ControlResponse, ControlError>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDesktopNotification {
+    id: NotificationId,
+    workspace_id: taskers_shell_core::WorkspaceId,
+    pane_id: taskers_shell_core::PaneId,
+    surface_id: taskers_shell_core::SurfaceId,
+    title: String,
+    body: Option<String>,
 }
 
 fn main() -> glib::ExitCode {
@@ -199,6 +211,7 @@ fn build_ui_result(
     let host_widget = host.borrow().widget();
     window.set_content(Some(&host_widget));
     connect_navigation_shortcuts(&window, &shell_view, &core);
+    install_notification_action(app, &window, &core, &bootstrap.app_state);
     let last_revision = Rc::new(Cell::new(0_u64));
     let last_size = Rc::new(Cell::new((0_i32, 0_i32)));
     let (host_request_tx, host_request_rx) = mpsc::channel::<HostAutomationRequest>();
@@ -251,6 +264,8 @@ fn build_ui_result(
     let tick_revision = last_revision.clone();
     let tick_size = last_size.clone();
     let tick_diagnostics = diagnostics.clone();
+    let tick_app = app.clone();
+    let tick_app_state = bootstrap.app_state.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
         sync_window(
             &tick_window,
@@ -258,6 +273,13 @@ fn build_ui_result(
             &tick_host,
             &tick_revision,
             &tick_size,
+            tick_diagnostics.as_ref(),
+        );
+        process_pending_notifications(
+            &tick_app,
+            &tick_window,
+            &tick_core,
+            &tick_app_state,
             tick_diagnostics.as_ref(),
         );
         glib::ControlFlow::Continue
@@ -271,6 +293,8 @@ fn build_ui_result(
     let initial_revision = last_revision.clone();
     let initial_size = last_size.clone();
     let initial_diagnostics = diagnostics.clone();
+    let initial_app = app.clone();
+    let initial_app_state = bootstrap.app_state.clone();
     glib::timeout_add_local_once(Duration::from_millis(80), move || {
         sync_window(
             &initial_window,
@@ -278,6 +302,13 @@ fn build_ui_result(
             &initial_host,
             &initial_revision,
             &initial_size,
+            initial_diagnostics.as_ref(),
+        );
+        process_pending_notifications(
+            &initial_app,
+            &initial_window,
+            &initial_core,
+            &initial_app_state,
             initial_diagnostics.as_ref(),
         );
     });
@@ -297,6 +328,246 @@ fn normalize_shortcut_modifiers(state: gdk::ModifierType) -> gdk::ModifierType {
             | gdk::ModifierType::META_MASK
             | gdk::ModifierType::SUPER_MASK
             | gdk::ModifierType::HYPER_MASK)
+}
+
+fn install_notification_action(
+    app: &adw::Application,
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    app_state: &AppState,
+) {
+    let action = gio::SimpleAction::new("open-notification", Some(&String::static_variant_type()));
+    let action_window = window.clone();
+    let action_core = core.clone();
+    let action_state = app_state.clone();
+    action.connect_activate(move |_, parameter| {
+        let Some(notification_id) = parameter
+            .and_then(|value| value.str())
+            .and_then(|value| value.parse::<NotificationId>().ok())
+        else {
+            return;
+        };
+
+        let _ = action_state.dispatch(ControlCommand::OpenNotification {
+            window_id: None,
+            notification_id,
+        });
+        action_window.present();
+        action_core.sync_external_changes();
+    });
+    app.add_action(&action);
+}
+
+fn process_pending_notifications(
+    app: &adw::Application,
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    app_state: &AppState,
+    diagnostics: Option<&DiagnosticsWriter>,
+) {
+    let model = app_state.snapshot_model();
+    let pending = pending_desktop_notifications(&model);
+    if pending.is_empty() {
+        return;
+    }
+
+    for notification in pending {
+        let delivery = if notification_target_visible(&model, window, &notification) {
+            NotificationDeliveryState::Suppressed
+        } else {
+            let desktop = gio::Notification::new(&notification.title);
+            if let Some(body) = &notification.body {
+                desktop.set_body(Some(body));
+            }
+            desktop.set_default_action_and_target_value(
+                "app.open-notification",
+                Some(&notification.id.to_string().to_variant()),
+            );
+            app.send_notification(Some(&notification.id.to_string()), &desktop);
+            NotificationDeliveryState::Shown
+        };
+
+        if let Err(error) = app_state.dispatch(ControlCommand::MarkNotificationDelivery {
+            notification_id: notification.id,
+            delivery,
+        }) {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Sync,
+                    Some(core.revision()),
+                    format!("notification delivery update failed: {error:?}"),
+                )
+                .with_pane(notification.pane_id)
+                .with_surface(notification.surface_id),
+            );
+            eprintln!("taskers notification delivery update failed: {error:?}");
+        }
+    }
+
+    core.sync_external_changes();
+}
+
+fn pending_desktop_notifications(model: &AppModel) -> Vec<PendingDesktopNotification> {
+    model
+        .workspaces
+        .values()
+        .flat_map(|workspace| {
+            workspace.notifications.iter().filter_map(move |notification| {
+                if notification.cleared_at.is_some()
+                    || !matches!(notification.desktop_delivery, NotificationDeliveryState::Pending)
+                    || !notification_alerts_enabled(notification.kind.clone())
+                {
+                    return None;
+                }
+
+                let title = notification
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| notification.message.clone());
+                Some(PendingDesktopNotification {
+                    id: notification.id,
+                    workspace_id: workspace.id,
+                    pane_id: notification.pane_id,
+                    surface_id: notification.surface_id,
+                    title,
+                    body: notification_body(notification.subtitle.as_deref(), &notification.message),
+                })
+            })
+        })
+        .collect()
+}
+
+fn notification_alerts_enabled(kind: SignalKind) -> bool {
+    matches!(
+        kind,
+        SignalKind::WaitingInput
+            | SignalKind::Error
+            | SignalKind::Completed
+            | SignalKind::Notification
+    )
+}
+
+fn notification_body(subtitle: Option<&str>, message: &str) -> Option<String> {
+    let subtitle = subtitle
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let message = message.trim();
+
+    match (subtitle, message.is_empty()) {
+        (Some(subtitle), false) if subtitle != message => Some(format!("{subtitle}\n{message}")),
+        (Some(subtitle), _) => Some(subtitle),
+        (None, false) => Some(message.to_owned()),
+        (None, true) => None,
+    }
+}
+
+fn notification_target_visible(
+    model: &AppModel,
+    window: &adw::ApplicationWindow,
+    notification: &PendingDesktopNotification,
+) -> bool {
+    if !window.is_active() || model.active_workspace_id() != Some(notification.workspace_id) {
+        return false;
+    }
+
+    model.workspaces
+        .get(&notification.workspace_id)
+        .and_then(|workspace| {
+            if workspace.active_pane != notification.pane_id {
+                return None;
+            }
+            workspace.panes.get(&notification.pane_id)
+        })
+        .is_some_and(|pane| pane.active_surface == notification.surface_id)
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::{notification_alerts_enabled, notification_body, pending_desktop_notifications};
+    use taskers_domain::{
+        AppModel, AttentionState, NotificationDeliveryState, NotificationId, NotificationItem,
+        SignalKind,
+    };
+    use time::OffsetDateTime;
+
+    #[test]
+    fn desktop_alert_filter_includes_user_facing_notification_kinds() {
+        assert!(notification_alerts_enabled(SignalKind::WaitingInput));
+        assert!(notification_alerts_enabled(SignalKind::Error));
+        assert!(notification_alerts_enabled(SignalKind::Completed));
+        assert!(notification_alerts_enabled(SignalKind::Notification));
+        assert!(!notification_alerts_enabled(SignalKind::Started));
+        assert!(!notification_alerts_enabled(SignalKind::Progress));
+    }
+
+    #[test]
+    fn notification_body_prefers_subtitle_then_message() {
+        assert_eq!(
+            notification_body(Some("Codex"), "Finished"),
+            Some("Codex\nFinished".into())
+        );
+        assert_eq!(
+            notification_body(Some("Finished"), "Finished"),
+            Some("Finished".into())
+        );
+        assert_eq!(notification_body(None, "Done"), Some("Done".into()));
+        assert_eq!(notification_body(None, "   "), None);
+    }
+
+    #[test]
+    fn pending_desktop_notifications_only_returns_pending_active_items() {
+        let mut model = AppModel::new("Main");
+        let workspace = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+        let now = OffsetDateTime::now_utc();
+        let workspace = model.workspaces.get_mut(&workspace).expect("workspace");
+        workspace.notifications.push(NotificationItem {
+            id: NotificationId::new(),
+            pane_id,
+            surface_id,
+            kind: SignalKind::Notification,
+            state: AttentionState::WaitingInput,
+            title: Some("Codex".into()),
+            subtitle: Some("Waiting".into()),
+            external_id: None,
+            message: "Need input".into(),
+            created_at: now,
+            read_at: None,
+            cleared_at: None,
+            desktop_delivery: NotificationDeliveryState::Pending,
+        });
+        workspace.notifications.push(NotificationItem {
+            id: NotificationId::new(),
+            pane_id,
+            surface_id,
+            kind: SignalKind::Notification,
+            state: AttentionState::WaitingInput,
+            title: Some("Old".into()),
+            subtitle: None,
+            external_id: None,
+            message: "Shown already".into(),
+            created_at: now,
+            read_at: None,
+            cleared_at: None,
+            desktop_delivery: NotificationDeliveryState::Shown,
+        });
+
+        let pending = pending_desktop_notifications(&model);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].title, "Codex");
+        assert_eq!(pending[0].body.as_deref(), Some("Waiting\nNeed input"));
+    }
 }
 
 fn is_modifier_key(key: gdk::Key) -> bool {
