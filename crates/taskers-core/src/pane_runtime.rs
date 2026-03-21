@@ -7,8 +7,12 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, InMemoryController};
-use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
-use taskers_runtime::{CommandSpec, PtySession, ShellLaunchSpec, SignalStreamParser};
+use taskers_domain::{
+    AgentTarget, AppModel, AttentionState, PaneId, PaneKind, SignalKind, SurfaceId, WorkspaceId,
+};
+use taskers_runtime::{
+    CommandSpec, ParsedTerminalEvent, PtySession, ShellLaunchSpec, SignalStreamParser,
+};
 
 const MAX_OUTPUT_CHARS: usize = 24_000;
 
@@ -197,13 +201,33 @@ fn spawn_surface_runtime(
                         append_output(&reader_output, &clean);
                     }
 
-                    for signal in signal_parser.push(&chunk) {
-                        let _ = controller.handle(ControlCommand::EmitSignal {
-                            workspace_id,
-                            pane_id,
-                            surface_id: Some(surface_id),
-                            event: signal.clone().into_event("pty"),
-                        });
+                    for event in signal_parser.push_events(&chunk) {
+                        match event {
+                            ParsedTerminalEvent::Signal(signal) => {
+                                let _ = controller.handle(ControlCommand::EmitSignal {
+                                    workspace_id,
+                                    pane_id,
+                                    surface_id: Some(surface_id),
+                                    event: signal.into_event("pty"),
+                                });
+                            }
+                            ParsedTerminalEvent::Notification(notification) => {
+                                let _ =
+                                    controller.handle(ControlCommand::AgentCreateNotification {
+                                        target: AgentTarget::Surface {
+                                            workspace_id,
+                                            pane_id,
+                                            surface_id,
+                                        },
+                                        kind: SignalKind::Notification,
+                                        title: notification.title,
+                                        subtitle: notification.subtitle,
+                                        external_id: notification.external_id,
+                                        message: notification.body.unwrap_or_default(),
+                                        state: AttentionState::WaitingInput,
+                                    });
+                            }
+                        }
                     }
                 }
                 Err(_) => {
