@@ -142,7 +142,7 @@ impl TaskersHost {
             (pan_sink)(HostEvent::ViewportScrolled { dx, dy });
             glib::Propagation::Proceed
         });
-        root.add_controller(workspace_pan);
+        shell_widget.add_controller(workspace_pan);
 
         emit_diagnostic(
             diagnostics.as_ref(),
@@ -407,7 +407,7 @@ impl BrowserSurface {
             surface_id: plan.surface_id,
             url: url.clone(),
         });
-        let shell = NativeSurfaceShell::new(shell_class);
+        let shell = NativeSurfaceShell::new(shell_class, interactive);
         shell.mount_child(webview.upcast_ref());
         shell.position(fixed, plan.frame);
         let devtools_open = Rc::new(Cell::new(false));
@@ -431,6 +431,24 @@ impl BrowserSurface {
             (focus_sink)(HostEvent::PaneFocused { pane_id });
         });
         webview.add_controller(focus);
+
+        let click_sink = event_sink.clone();
+        let click_diagnostics = diagnostics.clone();
+        let click = GestureClick::new();
+        click.connect_pressed(move |_, _, _, _| {
+            emit_diagnostic(
+                click_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    "browser click focus event received",
+                )
+                .with_pane(pane_id)
+                .with_surface(surface_id),
+            );
+            (click_sink)(HostEvent::PaneFocused { pane_id });
+        });
+        webview.add_controller(click);
 
         let surface_id = plan.surface_id;
         let title_sink = event_sink.clone();
@@ -562,6 +580,7 @@ impl BrowserSurface {
         diagnostics: Option<&DiagnosticsSink>,
     ) -> Result<()> {
         self.shell.position(fixed, plan.frame);
+        self.shell.set_interactive(interactive);
         self.webview.set_can_target(interactive);
 
         let BrowserMountSpec { url } = browser_spec(plan)?;
@@ -680,7 +699,7 @@ impl TerminalSurface {
         widget.add_css_class(widget_class);
         widget.add_css_class("terminal-output");
         widget.set_can_target(interactive);
-        let shell = NativeSurfaceShell::new(shell_class);
+        let shell = NativeSurfaceShell::new(shell_class, interactive);
         shell.mount_child(&widget);
         shell.position(fixed, plan.frame);
 
@@ -720,6 +739,7 @@ impl TerminalSurface {
         diagnostics: Option<&DiagnosticsSink>,
     ) {
         self.widget.set_can_target(interactive);
+        self.shell.set_interactive(interactive);
         self.shell.position(fixed, frame);
         if active && interactive && (!self.active || !self.interactive) {
             let _ = host.focus_surface(&self.widget);
@@ -743,7 +763,7 @@ struct NativeSurfaceShell {
 }
 
 impl NativeSurfaceShell {
-    fn new(kind_class: &'static str) -> Self {
+    fn new(kind_class: &'static str, interactive: bool) -> Self {
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.set_hexpand(true);
         root.set_vexpand(true);
@@ -751,7 +771,7 @@ impl NativeSurfaceShell {
         root.set_valign(Align::Fill);
         root.set_overflow(Overflow::Hidden);
         root.set_focusable(false);
-        root.set_can_target(false);
+        root.set_can_target(interactive);
         root.add_css_class("native-surface-host");
         root.add_css_class(kind_class);
         Self { root }
@@ -769,6 +789,10 @@ impl NativeSurfaceShell {
 
     fn position(&self, fixed: &Fixed, frame: taskers_core::Frame) {
         position_widget(fixed, self.root.upcast_ref(), frame);
+    }
+
+    fn set_interactive(&self, interactive: bool) {
+        self.root.set_can_target(interactive);
     }
 
     fn detach(&self, fixed: &Fixed) {

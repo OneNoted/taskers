@@ -90,6 +90,10 @@ fn pane_allows_surface_split(
     dragged.is_some_and(|dragged| dragged.pane_id != pane_id || surface_count > 1)
 }
 
+fn show_live_surface_backdrop(surface_kind: SurfaceKind, overview_mode: bool) -> bool {
+    overview_mode || !matches!(surface_kind, SurfaceKind::Browser)
+}
+
 fn apply_surface_drop(
     core: &SharedCore,
     dragged: DraggedSurface,
@@ -267,6 +271,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                     div { class: if snapshot.overview_mode { "workspace-canvas workspace-canvas-overview" } else { "workspace-canvas" },
                         {render_workspace_strip(
                             &snapshot.current_workspace,
+                            snapshot.overview_mode,
                             snapshot.browser_chrome.as_ref(),
                             core.clone(),
                             &snapshot.runtime_status,
@@ -552,6 +557,7 @@ fn render_workspace_pull_requests(pull_requests: &[PullRequestSnapshot]) -> Elem
 
 fn render_layout(
     node: &LayoutNodeSnapshot,
+    overview_mode: bool,
     browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
@@ -577,16 +583,17 @@ fn render_layout(
             rsx! {
                 div { class: "split-container", style: "flex-direction: {direction};",
                     div { class: "split-child", style: "{first_style}",
-                        {render_layout(first, browser_chrome, core.clone(), runtime_status, surface_drag_source, surface_drop_target)}
+                        {render_layout(first, overview_mode, browser_chrome, core.clone(), runtime_status, surface_drag_source, surface_drop_target)}
                     }
                     div { class: "split-child", style: "{second_style}",
-                        {render_layout(second, browser_chrome, core.clone(), runtime_status, surface_drag_source, surface_drop_target)}
+                        {render_layout(second, overview_mode, browser_chrome, core.clone(), runtime_status, surface_drag_source, surface_drop_target)}
                     }
                 }
             }
         }
         LayoutNodeSnapshot::Pane(pane) => render_pane(
             pane,
+            overview_mode,
             browser_chrome,
             core,
             runtime_status,
@@ -598,6 +605,7 @@ fn render_layout(
 
 fn render_workspace_strip(
     workspace: &WorkspaceViewSnapshot,
+    overview_mode: bool,
     browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
@@ -643,6 +651,7 @@ fn render_workspace_strip(
                         {render_workspace_window(
                             window,
                             workspace,
+                            overview_mode,
                             browser_chrome,
                             core.clone(),
                             runtime_status,
@@ -661,6 +670,7 @@ fn render_workspace_strip(
 fn render_workspace_window(
     window: &WorkspaceWindowSnapshot,
     workspace: &WorkspaceViewSnapshot,
+    overview_mode: bool,
     browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
@@ -762,6 +772,7 @@ fn render_workspace_window(
             div { class: "workspace-window-body",
                 {render_layout(
                     &window.layout,
+                    overview_mode,
                     browser_chrome,
                     core.clone(),
                     runtime_status,
@@ -830,6 +841,7 @@ fn render_window_drop_zone(
 
 fn render_pane(
     pane: &PaneSnapshot,
+    overview_mode: bool,
     browser_chrome: Option<&BrowserChromeSnapshot>,
     core: SharedCore,
     runtime_status: &RuntimeStatus,
@@ -1005,7 +1017,9 @@ fn render_pane(
                 }
             }
             div { class: "pane-body",
-                {render_surface_backdrop(active_surface, runtime_status)}
+                if show_live_surface_backdrop(active_surface.kind, overview_mode) {
+                    {render_surface_backdrop(active_surface, runtime_status)}
+                }
                 if surface_drag_active {
                     div { class: "pane-drop-overlay",
                         {render_surface_pane_drop_target(
@@ -1478,6 +1492,18 @@ fn render_notification_row(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SurfaceKind, show_live_surface_backdrop};
+
+    #[test]
+    fn live_browser_panes_skip_decorative_backdrop_outside_overview() {
+        assert!(!show_live_surface_backdrop(SurfaceKind::Browser, false));
+        assert!(show_live_surface_backdrop(SurfaceKind::Browser, true));
+        assert!(show_live_surface_backdrop(SurfaceKind::Terminal, false));
     }
 }
 
