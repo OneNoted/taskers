@@ -219,6 +219,10 @@ button {{
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  contain: paint;
 }}
 
 .workspace-sidebar {{
@@ -644,6 +648,10 @@ button {{
   display: flex;
   flex-direction: column;
   background: {base};
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  contain: paint;
 }}
 
 .workspace-main-overview .workspace-canvas {{
