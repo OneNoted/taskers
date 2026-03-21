@@ -596,7 +596,7 @@ impl Default for LayoutMetrics {
             workspace_padding: 16,
             window_border_width: 2,
             window_toolbar_height: 28,
-            window_body_padding: 10,
+            window_body_padding: 0,
             split_gap: 8,
             pane_border_width: 1,
             pane_header_height: 26,
