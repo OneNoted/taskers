@@ -1072,6 +1072,7 @@ struct CanvasMetrics {
 struct WorkspaceRenderContext {
     overview_mode: bool,
     overview_scale: f64,
+    outer_padding: i32,
     viewport_width: i32,
     viewport_height: i32,
 }
@@ -1139,9 +1140,10 @@ impl TaskersCore {
             self.ui.overview_mode,
             viewport.width,
             viewport.height,
+            self.metrics,
         );
         let placements = workspace_display_window_placements(workspace, render_context);
-        let canvas_metrics = workspace_canvas_metrics(&placements);
+        let canvas_metrics = workspace_canvas_metrics(&placements, render_context.outer_padding);
         let window_frames = placements
             .iter()
             .map(|placement| {
@@ -1217,13 +1219,11 @@ impl TaskersCore {
         let metrics = self.metrics;
         let width =
             (self.ui.window_size.width - metrics.sidebar_width - metrics.activity_width).max(640);
-        let height = self.ui.window_size.height.max(320);
-        let inset = metrics.workspace_padding;
         Frame::new(
-            metrics.sidebar_width + inset,
-            metrics.toolbar_height + inset,
-            (width - inset * 2).max(320),
-            (height - metrics.toolbar_height - inset * 2).max(220),
+            metrics.sidebar_width,
+            metrics.toolbar_height,
+            width,
+            (self.ui.window_size.height - metrics.toolbar_height).max(220),
         )
     }
 
@@ -2783,11 +2783,13 @@ fn workspace_render_context(
     overview_mode: bool,
     viewport_width: i32,
     viewport_height: i32,
+    metrics: LayoutMetrics,
 ) -> WorkspaceRenderContext {
     if !overview_mode {
         return WorkspaceRenderContext {
             overview_mode: false,
             overview_scale: 1.0,
+            outer_padding: 0,
             viewport_width,
             viewport_height,
         };
@@ -2797,16 +2799,18 @@ fn workspace_render_context(
         .into_iter()
         .map(|placement| placement.frame)
         .collect::<Vec<_>>();
-    let base_metrics = canvas_metrics_from_frames(&base_frames);
-    let content_width = (base_metrics.width - 4).max(1);
-    let content_height = (base_metrics.height - 4).max(1);
-    let overview_scale = (f64::from(viewport_width.max(1)) / f64::from(content_width))
-        .min(f64::from(viewport_height.max(1)) / f64::from(content_height))
+    let base_metrics = canvas_metrics_from_frames(&base_frames, 0);
+    let outer_padding = metrics.workspace_padding;
+    let available_width = (viewport_width - outer_padding * 2).max(1);
+    let available_height = (viewport_height - outer_padding * 2).max(1);
+    let overview_scale = (f64::from(available_width) / f64::from(base_metrics.width.max(1)))
+        .min(f64::from(available_height) / f64::from(base_metrics.height.max(1)))
         .clamp(0.05, 1.0);
 
     WorkspaceRenderContext {
         overview_mode: true,
         overview_scale,
+        outer_padding,
         viewport_width,
         viewport_height,
     }
@@ -2903,12 +2907,15 @@ fn workspace_window_placements(
     placements
 }
 
-fn workspace_canvas_metrics(placements: &[WorkspaceWindowPlacement]) -> CanvasMetrics {
+fn workspace_canvas_metrics(
+    placements: &[WorkspaceWindowPlacement],
+    outer_padding: i32,
+) -> CanvasMetrics {
     let frames = placements
         .iter()
         .map(|placement| placement.frame)
         .collect::<Vec<_>>();
-    canvas_metrics_from_frames(&frames)
+    canvas_metrics_from_frames(&frames, outer_padding)
 }
 
 fn clamped_workspace_viewport(
@@ -2918,7 +2925,7 @@ fn clamped_workspace_viewport(
     viewport: taskers_domain::WorkspaceViewport,
 ) -> taskers_domain::WorkspaceViewport {
     let placements = workspace_window_placements(workspace, viewport_width, viewport_height);
-    let canvas = workspace_canvas_metrics(&placements);
+    let canvas = workspace_canvas_metrics(&placements, 0);
     let max_x = (canvas.width - viewport_width).max(0);
     let max_y = (canvas.height - viewport_height).max(0);
 
@@ -2928,21 +2935,21 @@ fn clamped_workspace_viewport(
     }
 }
 
-fn canvas_metrics_from_frames(frames: &[WindowFrame]) -> CanvasMetrics {
+fn canvas_metrics_from_frames(frames: &[WindowFrame], outer_padding: i32) -> CanvasMetrics {
     let min_x = frames.iter().map(|frame| frame.x).min().unwrap_or(0);
     let min_y = frames.iter().map(|frame| frame.y).min().unwrap_or(0);
-    let offset_x = 2 - min_x;
-    let offset_y = 2 - min_y;
+    let offset_x = outer_padding - min_x;
+    let offset_y = outer_padding - min_y;
     let width = frames
         .iter()
-        .map(|frame| frame.right() + offset_x + 2)
+        .map(|frame| frame.right() + offset_x + outer_padding)
         .max()
-        .unwrap_or(4);
+        .unwrap_or(outer_padding.saturating_mul(2));
     let height = frames
         .iter()
-        .map(|frame| frame.bottom() + offset_y + 2)
+        .map(|frame| frame.bottom() + offset_y + outer_padding)
         .max()
-        .unwrap_or(4);
+        .unwrap_or(outer_padding.saturating_mul(2));
 
     CanvasMetrics {
         offset_x,
