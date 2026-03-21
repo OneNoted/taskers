@@ -16,9 +16,9 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use taskers_app_core::{AppState, load_or_bootstrap};
+use taskers_core::{AppState, load_or_bootstrap};
 use taskers_control::{bind_socket, default_socket_path, serve_with_handler};
-use taskers_core::{
+use taskers_shell_core::{
     BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
     ShellSection, ShortcutAction, ShortcutPreset, SurfaceKind,
 };

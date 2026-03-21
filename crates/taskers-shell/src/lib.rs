@@ -1,6 +1,7 @@
 mod theme;
 
 use dioxus::prelude::*;
+use taskers_shell_core as taskers_core;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot, Direction,
     LayoutNodeSnapshot, PaneId, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeStatus,

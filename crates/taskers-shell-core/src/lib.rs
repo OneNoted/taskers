@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use taskers_app_core::{AppState, default_session_path};
+use taskers_core::{AppState, default_session_path};
 use taskers_control::{ControlCommand, ControlResponse};
 use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
@@ -3540,7 +3540,7 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use taskers_app_core::AppState;
+    use taskers_core::AppState;
     use taskers_control::ControlCommand;
     use taskers_domain::{
         AppModel, AttentionState as DomainAttentionState, NotificationItem, SignalKind,

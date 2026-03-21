@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+use taskers_shell_core as taskers_core;
 use taskers_core::{
     BrowserMountSpec, HostCommand, HostEvent, PortalSurfacePlan, ShellDragMode, ShellSnapshot,
     SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
@@ -1082,7 +1083,7 @@ mod tests {
         browser_plans, native_surface_classes, native_surface_css, native_surfaces_interactive,
         terminal_plans, workspace_pan_delta,
     };
-    use taskers_core::{BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec};
+    use taskers_shell_core::{BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec};
     use taskers_domain::PaneKind;
 
     #[test]

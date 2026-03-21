@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use taskers_shell_core as taskers_core;
 use taskers_core::LayoutMetrics;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

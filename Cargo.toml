@@ -1,13 +1,17 @@
 [workspace]
 members = [
+    "crates/taskers-app",
     "crates/taskers-launcher",
     "crates/taskers-core",
     "crates/taskers-cli",
     "crates/taskers-control",
     "crates/taskers-domain",
     "crates/taskers-ghostty",
+    "crates/taskers-host",
     "crates/taskers-paths",
     "crates/taskers-runtime",
+    "crates/taskers-shell",
+    "crates/taskers-shell-core",
 ]
 resolver = "2"
 
@@ -21,25 +25,34 @@ version = "0.3.0"
 [workspace.dependencies]
 adw = { package = "libadwaita", version = "0.9.1" }
 anyhow = "1"
+axum = { version = "0.8.4", features = ["ws"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+dioxus = { version = "0.7.3", default-features = false, features = ["hooks", "html", "macro", "signals"] }
+dioxus-liveview = { version = "0.7.3", features = ["axum"] }
 gtk = { package = "gtk4", version = "0.11.0" }
 indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"
+parking_lot = "0.12"
 portable-pty = "0.9.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-svgtypes = "0.15"
 tar = "0.4"
 tempfile = "3"
-toml = "0.8"
 thiserror = "2"
 time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde", "serde-human-readable"] }
-tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio = { version = "1.50.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 ureq = "2.12"
 uuid = { version = "1.22.0", features = ["serde", "v7"] }
 webkit6 = { version = "0.6.1", features = ["v2_50"] }
 xz2 = "0.1"
 taskers-core = { version = "0.3.0", path = "crates/taskers-core" }
+taskers-control = { version = "0.3.0", path = "crates/taskers-control" }
+taskers-domain = { version = "0.3.0", path = "crates/taskers-domain" }
+taskers-ghostty = { version = "0.3.0", path = "crates/taskers-ghostty" }
+taskers-host = { version = "0.3.0", path = "crates/taskers-host" }
 taskers-paths = { version = "0.3.0", path = "crates/taskers-paths" }
+taskers-runtime = { version = "0.3.0", path = "crates/taskers-runtime" }
+taskers-shell = { version = "0.3.0", path = "crates/taskers-shell" }
+taskers-shell-core = { version = "0.3.0", path = "crates/taskers-shell-core" }
