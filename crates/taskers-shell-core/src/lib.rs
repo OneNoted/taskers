@@ -736,6 +736,14 @@ pub struct BrowserSurfaceCatalogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalSurfaceCatalogEntry {
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub spec: TerminalMountSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestSnapshot {
     pub number: u32,
     pub title: String,
@@ -921,6 +929,7 @@ pub struct ShellSnapshot {
     pub current_workspace_progress: Option<ProgressSnapshot>,
     pub current_workspace_log: Vec<WorkspaceLogEntrySnapshot>,
     pub browser_catalog: Vec<BrowserSurfaceCatalogEntry>,
+    pub terminal_catalog: Vec<TerminalSurfaceCatalogEntry>,
     pub portal: SurfacePortalPlan,
     pub metrics: LayoutMetrics,
     pub runtime_status: RuntimeStatus,
@@ -1253,6 +1262,7 @@ impl TaskersCore {
             current_workspace_progress,
             current_workspace_log,
             browser_catalog: self.browser_catalog_snapshot(&model),
+            terminal_catalog: self.terminal_catalog_snapshot(&model),
             portal: SurfacePortalPlan {
                 window: Frame::new(0, 0, self.ui.window_size.width, self.ui.window_size.height),
                 content: viewport,
@@ -1613,6 +1623,31 @@ impl TaskersCore {
                         pane_id: pane.id,
                         surface_id: surface.id,
                         url,
+                    });
+                }
+            }
+        }
+        catalog
+    }
+
+    fn terminal_catalog_snapshot(&self, model: &AppModel) -> Vec<TerminalSurfaceCatalogEntry> {
+        let mut catalog = Vec::new();
+        for (workspace_id, workspace) in &model.workspaces {
+            for pane in workspace.panes.values() {
+                for surface in pane.surfaces.values() {
+                    if surface.kind != PaneKind::Terminal {
+                        continue;
+                    }
+                    let descriptor = fallback_surface_descriptor(surface);
+                    let mount = mount_spec_from_descriptor(surface, descriptor);
+                    let SurfaceMountSpec::Terminal(spec) = mount else {
+                        continue;
+                    };
+                    catalog.push(TerminalSurfaceCatalogEntry {
+                        workspace_id: *workspace_id,
+                        pane_id: pane.id,
+                        surface_id: surface.id,
+                        spec,
                     });
                 }
             }
@@ -3978,6 +4013,30 @@ mod tests {
                 .any(|entry| entry.workspace_id == second_workspace_id)
         );
         assert!(catalog.iter().all(|entry| !entry.url.is_empty()));
+    }
+
+    #[test]
+    fn terminal_catalog_keeps_background_terminal_surfaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let first_workspace_id = core.snapshot().current_workspace.id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let second_workspace_id = core.snapshot().current_workspace.id;
+
+        let catalog = core.snapshot().terminal_catalog;
+        assert!(catalog.len() >= 2);
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.workspace_id == first_workspace_id)
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.workspace_id == second_workspace_id)
+        );
+        assert!(catalog.iter().all(|entry| entry.spec.cols > 0));
+        assert!(catalog.iter().all(|entry| entry.spec.rows > 0));
     }
 
     #[test]

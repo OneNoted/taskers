@@ -20,8 +20,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use taskers_control::{
-    BrowserControlCommand, ControlCommand, ControlError, ControlResponse, bind_socket,
-    default_socket_path, serve_with_handler,
+    BrowserControlCommand, ControlCommand, ControlError, ControlResponse, TerminalDebugCommand,
+    bind_socket, default_socket_path, serve_with_handler,
 };
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_domain::AppModel;
@@ -87,8 +87,13 @@ struct RuntimeBootstrap {
     startup_notes: Vec<String>,
 }
 
-struct BrowserAutomationRequest {
-    command: BrowserControlCommand,
+enum HostAutomationCommand {
+    Browser(BrowserControlCommand),
+    TerminalDebug(TerminalDebugCommand),
+}
+
+struct HostAutomationRequest {
+    command: HostAutomationCommand,
     response_tx: tokio::sync::oneshot::Sender<Result<ControlResponse, ControlError>>,
 }
 
@@ -196,14 +201,14 @@ fn build_ui_result(
     connect_navigation_shortcuts(&window, &shell_view, &core);
     let last_revision = Rc::new(Cell::new(0_u64));
     let last_size = Rc::new(Cell::new((0_i32, 0_i32)));
-    let (browser_request_tx, browser_request_rx) = mpsc::channel::<BrowserAutomationRequest>();
+    let (host_request_tx, host_request_rx) = mpsc::channel::<HostAutomationRequest>();
     let control_server_note = spawn_control_server(
         bootstrap.app_state.clone(),
         bootstrap.socket_path,
-        browser_request_tx,
+        host_request_tx,
     );
-    install_browser_bridge(
-        browser_request_rx,
+    install_host_bridge(
+        host_request_rx,
         &window,
         &core,
         &host,
@@ -796,8 +801,8 @@ fn sync_window(
     host.borrow().tick();
 }
 
-fn install_browser_bridge(
-    receiver: Receiver<BrowserAutomationRequest>,
+fn install_host_bridge(
+    receiver: Receiver<HostAutomationRequest>,
     window: &adw::ApplicationWindow,
     core: &SharedCore,
     host: &Rc<RefCell<TaskersHost>>,
@@ -825,7 +830,7 @@ fn install_browser_bridge(
             let request_size = bridge_size.clone();
             let request_diagnostics = diagnostics.clone();
             glib::MainContext::default().spawn_local(async move {
-                let response = handle_browser_request(
+                let response = handle_host_request(
                     &request_window,
                     &request_core,
                     &request_host,
@@ -840,6 +845,40 @@ fn install_browser_bridge(
         }
         glib::ControlFlow::Continue
     });
+}
+
+async fn handle_host_request(
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    command: HostAutomationCommand,
+) -> Result<ControlResponse, ControlError> {
+    match command {
+        HostAutomationCommand::Browser(command) => {
+            handle_browser_request(
+                window,
+                core,
+                host,
+                last_revision,
+                last_size,
+                diagnostics,
+                command,
+            )
+            .await
+        }
+        HostAutomationCommand::TerminalDebug(command) => handle_terminal_debug_request(
+            window,
+            core,
+            host,
+            last_revision,
+            last_size,
+            diagnostics,
+            command,
+        ),
+    }
 }
 
 async fn handle_browser_request(
@@ -880,6 +919,21 @@ async fn handle_browser_request(
     Ok(ControlResponse::Browser { result })
 }
 
+fn handle_terminal_debug_request(
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    command: TerminalDebugCommand,
+) -> Result<ControlResponse, ControlError> {
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+    let result = host.borrow().execute_terminal_debug(command)?;
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+    Ok(ControlResponse::TerminalDebug { result })
+}
+
 fn browser_surface_id(command: &BrowserControlCommand) -> taskers_shell_core::SurfaceId {
     match command {
         BrowserControlCommand::Navigate { surface_id, .. }
@@ -914,7 +968,7 @@ fn browser_surface_id(command: &BrowserControlCommand) -> taskers_shell_core::Su
 fn spawn_control_server(
     app_state: AppState,
     socket_path: PathBuf,
-    browser_tx: Sender<BrowserAutomationRequest>,
+    host_tx: Sender<HostAutomationRequest>,
 ) -> String {
     if let Some(parent) = socket_path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
@@ -936,25 +990,48 @@ fn spawn_control_server(
                 Ok(listener) => {
                     let handler = move |command| {
                         let app_state = app_state.clone();
-                        let browser_tx = browser_tx.clone();
+                        let host_tx = host_tx.clone();
                         async move {
                             match command {
                                 ControlCommand::Browser { browser_command } => {
                                     let (response_tx, response_rx) =
                                         tokio::sync::oneshot::channel();
-                                    browser_tx
-                                        .send(BrowserAutomationRequest {
-                                            command: browser_command,
+                                    host_tx
+                                        .send(HostAutomationRequest {
+                                            command: HostAutomationCommand::Browser(
+                                                browser_command,
+                                            ),
                                             response_tx,
                                         })
                                         .map_err(|_| {
                                             ControlError::internal(
-                                                "browser automation bridge is unavailable",
+                                                "host automation bridge is unavailable",
                                             )
                                         })?;
                                     response_rx.await.map_err(|_| {
                                         ControlError::internal(
-                                            "browser automation bridge dropped the response",
+                                            "host automation bridge dropped the response",
+                                        )
+                                    })?
+                                }
+                                ControlCommand::TerminalDebug { debug_command } => {
+                                    let (response_tx, response_rx) =
+                                        tokio::sync::oneshot::channel();
+                                    host_tx
+                                        .send(HostAutomationRequest {
+                                            command: HostAutomationCommand::TerminalDebug(
+                                                debug_command,
+                                            ),
+                                            response_tx,
+                                        })
+                                        .map_err(|_| {
+                                            ControlError::internal(
+                                                "host automation bridge is unavailable",
+                                            )
+                                        })?;
+                                    response_rx.await.map_err(|_| {
+                                        ControlError::internal(
+                                            "host automation bridge dropped the response",
                                         )
                                     })?
                                 }

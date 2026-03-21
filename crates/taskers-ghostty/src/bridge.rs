@@ -7,6 +7,7 @@ use std::{
 use std::{
     ffi::{c_int, c_void},
     ptr::NonNull,
+    slice,
 };
 
 use gtk::Widget;
@@ -31,6 +32,8 @@ pub enum GhosttyError {
     Tick,
     #[error("failed to create ghostty surface")]
     SurfaceInit,
+    #[error("failed to read text from ghostty surface")]
+    SurfaceReadText,
     #[error("surface metadata contains NUL bytes: {0}")]
     InvalidString(&'static str),
     #[error("failed to load ghostty bridge library from {path}: {message}")]
@@ -60,6 +63,9 @@ struct GhosttyBridgeLibrary {
         *const taskers_ghostty_surface_options_s,
     ) -> *mut c_void,
     surface_grab_focus: unsafe extern "C" fn(*mut c_void) -> c_int,
+    surface_has_selection: unsafe extern "C" fn(*mut c_void) -> c_int,
+    surface_read_all_text: unsafe extern "C" fn(*mut c_void, *mut taskers_ghostty_text_s) -> c_int,
+    surface_free_text: unsafe extern "C" fn(*mut taskers_ghostty_text_s),
 }
 
 impl GhosttyHost {
@@ -214,6 +220,45 @@ impl GhosttyHost {
             Err(GhosttyError::Unavailable)
         }
     }
+
+    pub fn surface_has_selection(&self, widget: &Widget) -> Result<bool, GhosttyError> {
+        #[cfg(taskers_ghostty_bridge)]
+        unsafe {
+            Ok((self.bridge.surface_has_selection)(widget.as_ptr().cast()) != 0)
+        }
+
+        #[cfg(not(taskers_ghostty_bridge))]
+        {
+            let _ = widget;
+            Err(GhosttyError::Unavailable)
+        }
+    }
+
+    pub fn read_surface_text(&self, widget: &Widget) -> Result<String, GhosttyError> {
+        #[cfg(taskers_ghostty_bridge)]
+        unsafe {
+            let mut text = taskers_ghostty_text_s::default();
+            let ok = (self.bridge.surface_read_all_text)(widget.as_ptr().cast(), &mut text);
+            if ok == 0 {
+                return Err(GhosttyError::SurfaceReadText);
+            }
+
+            let bytes = if text.text.is_null() || text.text_len == 0 {
+                &[]
+            } else {
+                slice::from_raw_parts(text.text.cast::<u8>(), text.text_len)
+            };
+            let output = String::from_utf8_lossy(bytes).into_owned();
+            (self.bridge.surface_free_text)(&mut text);
+            Ok(output)
+        }
+
+        #[cfg(not(taskers_ghostty_bridge))]
+        {
+            let _ = widget;
+            Err(GhosttyError::Unavailable)
+        }
+    }
 }
 
 #[cfg(taskers_ghostty_bridge)]
@@ -239,9 +284,7 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
         let host_new = *library
             .get::<unsafe extern "C" fn(
                 *const taskers_ghostty_host_options_s,
-            ) -> *mut taskers_ghostty_host_t>(
-                b"taskers_ghostty_host_new\0",
-            )
+            ) -> *mut taskers_ghostty_host_t>(b"taskers_ghostty_host_new\0")
             .map_err(|error| GhosttyError::LibraryLoad {
                 path: path.clone(),
                 message: error.to_string(),
@@ -279,6 +322,30 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
                 path: path.clone(),
                 message: error.to_string(),
             })?;
+        let surface_has_selection = *library
+            .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(
+                b"taskers_ghostty_surface_has_selection\0",
+            )
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+        let surface_read_all_text = *library
+            .get::<unsafe extern "C" fn(*mut c_void, *mut taskers_ghostty_text_s) -> c_int>(
+                b"taskers_ghostty_surface_read_all_text\0",
+            )
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+        let surface_free_text = *library
+            .get::<unsafe extern "C" fn(*mut taskers_ghostty_text_s)>(
+                b"taskers_ghostty_surface_free_text\0",
+            )
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
 
         Ok(GhosttyBridgeLibrary {
             _library: library,
@@ -287,6 +354,9 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
             host_tick,
             surface_new,
             surface_grab_focus,
+            surface_has_selection,
+            surface_read_all_text,
+            surface_free_text,
         })
     }
 }
@@ -313,4 +383,12 @@ struct taskers_ghostty_surface_options_s {
     title: *const c_char,
     env_entries: *const *const c_char,
     env_count: usize,
+}
+
+#[cfg(taskers_ghostty_bridge)]
+#[repr(C)]
+#[derive(Default)]
+struct taskers_ghostty_text_s {
+    text: *const c_char,
+    text_len: usize,
 }

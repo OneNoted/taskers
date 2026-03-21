@@ -1,8 +1,12 @@
 use std::sync::{Arc, Mutex};
 
-use taskers_domain::{AppModel, DomainError, WindowId, WorkspaceId};
+use taskers_domain::{
+    AppModel, DomainError, PaneId, PaneKind, SurfaceId, SurfaceRecord, WindowId, WorkspaceId,
+};
 
-use crate::protocol::{ControlCommand, ControlQuery, ControlResponse};
+use crate::protocol::{
+    ControlCommand, ControlQuery, ControlResponse, IdentifyContext, IdentifyResult,
+};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryController {
@@ -544,6 +548,11 @@ impl InMemoryController {
                     "browser automation commands require a live GTK host",
                 ));
             }
+            ControlCommand::TerminalDebug { .. } => {
+                return Err(DomainError::InvalidOperation(
+                    "terminal debug commands require a live GTK host",
+                ));
+            }
             ControlCommand::QueryStatus { query } => match query {
                 ControlQuery::ActiveWindow | ControlQuery::All => (
                     ControlResponse::Status {
@@ -555,6 +564,16 @@ impl InMemoryController {
                 ControlQuery::Workspace { workspace_id } => {
                     (workspace_snapshot(model, workspace_id)?, false)
                 }
+                ControlQuery::Identify {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                } => (
+                    ControlResponse::Identify {
+                        result: identify_snapshot(model, workspace_id, pane_id, surface_id)?,
+                    },
+                    false,
+                ),
             },
         };
 
@@ -590,11 +609,148 @@ fn workspace_snapshot(
     })
 }
 
+fn identify_snapshot(
+    model: &AppModel,
+    workspace_id: Option<WorkspaceId>,
+    pane_id: Option<PaneId>,
+    surface_id: Option<SurfaceId>,
+) -> Result<IdentifyResult, DomainError> {
+    let focused = focused_identify_context(model)?;
+    let caller = if workspace_id.is_some() || pane_id.is_some() || surface_id.is_some() {
+        Some(resolve_identify_context(
+            model,
+            workspace_id,
+            pane_id,
+            surface_id,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(IdentifyResult { focused, caller })
+}
+
+fn focused_identify_context(model: &AppModel) -> Result<IdentifyContext, DomainError> {
+    let window_id = model.active_window;
+    let workspace = model
+        .active_workspace()
+        .ok_or(DomainError::InvalidOperation("app has no active workspace"))?;
+    let pane = workspace
+        .panes
+        .get(&workspace.active_pane)
+        .ok_or(DomainError::MissingPane(workspace.active_pane))?;
+    let surface = pane
+        .surfaces
+        .get(&pane.active_surface)
+        .ok_or(DomainError::MissingSurface(pane.active_surface))?;
+
+    Ok(identify_context_from_parts(
+        window_id, workspace, pane.id, surface,
+    ))
+}
+
+fn resolve_identify_context(
+    model: &AppModel,
+    workspace_id: Option<WorkspaceId>,
+    pane_id: Option<PaneId>,
+    surface_id: Option<SurfaceId>,
+) -> Result<IdentifyContext, DomainError> {
+    let window_id = model.active_window;
+
+    if let Some(surface_id) = surface_id {
+        for (candidate_workspace_id, workspace) in &model.workspaces {
+            if workspace_id.is_some_and(|expected| expected != *candidate_workspace_id) {
+                continue;
+            }
+            for (candidate_pane_id, pane) in &workspace.panes {
+                if pane_id.is_some_and(|expected| expected != *candidate_pane_id) {
+                    continue;
+                }
+                if let Some(surface) = pane.surfaces.get(&surface_id) {
+                    return Ok(identify_context_from_parts(
+                        window_id,
+                        workspace,
+                        *candidate_pane_id,
+                        surface,
+                    ));
+                }
+            }
+        }
+        return Err(DomainError::MissingSurface(surface_id));
+    }
+
+    if let Some(pane_id) = pane_id {
+        for (candidate_workspace_id, workspace) in &model.workspaces {
+            if workspace_id.is_some_and(|expected| expected != *candidate_workspace_id) {
+                continue;
+            }
+            if let Some(pane) = workspace.panes.get(&pane_id) {
+                let surface = pane
+                    .surfaces
+                    .get(&pane.active_surface)
+                    .ok_or(DomainError::MissingSurface(pane.active_surface))?;
+                return Ok(identify_context_from_parts(
+                    window_id, workspace, pane_id, surface,
+                ));
+            }
+        }
+        return Err(DomainError::MissingPane(pane_id));
+    }
+
+    if let Some(workspace_id) = workspace_id {
+        let workspace = model
+            .workspaces
+            .get(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let pane = workspace
+            .panes
+            .get(&workspace.active_pane)
+            .ok_or(DomainError::MissingPane(workspace.active_pane))?;
+        let surface = pane
+            .surfaces
+            .get(&pane.active_surface)
+            .ok_or(DomainError::MissingSurface(pane.active_surface))?;
+        return Ok(identify_context_from_parts(
+            window_id, workspace, pane.id, surface,
+        ));
+    }
+
+    focused_identify_context(model)
+}
+
+fn identify_context_from_parts(
+    window_id: WindowId,
+    workspace: &taskers_domain::Workspace,
+    pane_id: PaneId,
+    surface: &SurfaceRecord,
+) -> IdentifyContext {
+    IdentifyContext {
+        window_id,
+        workspace_id: workspace.id,
+        workspace_label: workspace.label.clone(),
+        workspace_window_id: workspace.window_for_pane(pane_id),
+        pane_id,
+        surface_id: surface.id,
+        surface_kind: surface.kind.clone(),
+        title: normalized_value(surface.metadata.title.as_deref()),
+        cwd: normalized_value(surface.metadata.cwd.as_deref()),
+        url: normalized_value(surface.metadata.url.as_deref()),
+        loading: matches!(surface.kind, PaneKind::Browser).then_some(false),
+    }
+}
+
+fn normalized_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
-    use taskers_domain::{AppModel, SignalEvent, SignalKind};
+    use taskers_domain::{AppModel, PaneKind, SignalEvent, SignalKind};
 
-    use crate::{ControlCommand, ControlQuery};
+    use crate::{ControlCommand, ControlQuery, ControlResponse};
 
     use super::InMemoryController;
 
@@ -635,5 +791,52 @@ mod tests {
             .expect("emit signal");
 
         assert_eq!(controller.revision(), 1);
+    }
+
+    #[test]
+    fn identify_returns_focused_context_and_optional_caller() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+        let pane = workspace
+            .panes
+            .get(&workspace.active_pane)
+            .expect("active pane");
+        let surface = pane.active_surface().expect("active surface");
+
+        let response = controller
+            .handle(ControlCommand::QueryStatus {
+                query: ControlQuery::Identify {
+                    workspace_id: None,
+                    pane_id: None,
+                    surface_id: None,
+                },
+            })
+            .expect("identify focused");
+        let ControlResponse::Identify { result } = response else {
+            panic!("unexpected identify response");
+        };
+        assert_eq!(result.focused.workspace_id, workspace.id);
+        assert_eq!(result.focused.pane_id, workspace.active_pane);
+        assert_eq!(result.focused.surface_id, surface.id);
+        assert_eq!(result.focused.surface_kind, PaneKind::Terminal);
+        assert!(result.caller.is_none());
+
+        let response = controller
+            .handle(ControlCommand::QueryStatus {
+                query: ControlQuery::Identify {
+                    workspace_id: Some(workspace.id),
+                    pane_id: Some(workspace.active_pane),
+                    surface_id: Some(surface.id),
+                },
+            })
+            .expect("identify caller");
+        let ControlResponse::Identify { result } = response else {
+            panic!("unexpected identify response");
+        };
+        let caller = result.caller.expect("caller context");
+        assert_eq!(caller.workspace_id, workspace.id);
+        assert_eq!(caller.pane_id, workspace.active_pane);
+        assert_eq!(caller.surface_id, surface.id);
     }
 }

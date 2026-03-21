@@ -1,6 +1,6 @@
 mod browser_automation;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use gtk::{
     Align, Box as GtkBox, CssProvider, EventControllerFocus, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, Orientation, Overflow, Overlay,
@@ -13,10 +13,14 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use taskers_control::{BrowserControlCommand, BrowserLoadState, ControlError};
+use taskers_control::{
+    BrowserControlCommand, BrowserLoadState, ControlError, TerminalDebugCommand,
+    TerminalDebugResult, TerminalRenderStats,
+};
 use taskers_core::{
     BrowserSurfaceCatalogEntry, HostCommand, HostEvent, PaneId, PortalSurfacePlan, ShellDragMode,
-    ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec, WorkspaceId,
+    ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
+    TerminalSurfaceCatalogEntry, WorkspaceId,
 };
 use taskers_domain::PaneKind;
 use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
@@ -248,7 +252,12 @@ impl TaskersHost {
             ),
         );
         self.sync_browser_surfaces(snapshot, interactive)?;
-        self.sync_terminal_surfaces(&snapshot.portal, snapshot.revision, interactive)?;
+        self.sync_terminal_surfaces(
+            &snapshot.portal,
+            &snapshot.terminal_catalog,
+            snapshot.revision,
+            interactive,
+        )?;
         Ok(())
     }
 
@@ -291,6 +300,57 @@ impl TaskersHost {
         let surface_id = browser_command_surface_id(&command);
         let handle = self.browser_surface_handle(surface_id)?;
         handle.execute(command).await
+    }
+
+    pub fn execute_terminal_debug(
+        &self,
+        command: TerminalDebugCommand,
+    ) -> Result<TerminalDebugResult, ControlError> {
+        let Some(host) = self.ghostty_host.as_ref() else {
+            return Err(ControlError::not_supported(
+                "terminal debug requires the Ghostty host backend",
+            ));
+        };
+
+        let surface_id = terminal_debug_surface_id(&command);
+        let surface = self.terminal_surfaces.get(&surface_id).ok_or_else(|| {
+            ControlError::not_found(format!("terminal surface {surface_id} not found"))
+        })?;
+
+        match command {
+            TerminalDebugCommand::IsFocused { .. } => Ok(TerminalDebugResult::IsFocused {
+                focused: surface.is_focused(),
+            }),
+            TerminalDebugCommand::ReadText { tail_lines, .. } => {
+                let text = host
+                    .read_surface_text(&surface.widget)
+                    .map_err(|error| ControlError::internal(error.to_string()))?;
+                Ok(TerminalDebugResult::ReadText {
+                    text: trim_terminal_tail(text, tail_lines),
+                })
+            }
+            TerminalDebugCommand::RenderStats { .. } => {
+                let has_selection = host
+                    .surface_has_selection(&surface.widget)
+                    .map_err(|error| ControlError::internal(error.to_string()))?;
+                Ok(TerminalDebugResult::RenderStats {
+                    stats: TerminalRenderStats {
+                        surface_id,
+                        workspace_id: surface.workspace_id.get(),
+                        pane_id: surface.pane_id.get(),
+                        mounted: true,
+                        visible: surface.visible,
+                        focused: surface.is_focused(),
+                        backend: "ghostty".into(),
+                        cols: surface.spec.cols,
+                        rows: surface.spec.rows,
+                        width_px: surface.width_px,
+                        height_px: surface.height_px,
+                        has_selection,
+                    },
+                })
+            }
+        }
     }
 
     fn with_browser_surface(
@@ -394,14 +454,20 @@ impl TaskersHost {
     fn sync_terminal_surfaces(
         &mut self,
         portal: &SurfacePortalPlan,
+        catalog: &[TerminalSurfaceCatalogEntry],
         revision: u64,
         interactive: bool,
     ) -> Result<()> {
         let desired = terminal_plans(portal);
-        let desired_ids = desired
+        let desired_by_id = desired
+            .into_iter()
+            .map(|plan| (plan.surface_id, plan))
+            .collect::<HashMap<_, _>>();
+        let catalog_by_id = catalog
             .iter()
-            .map(|plan| plan.surface_id)
-            .collect::<HashSet<_>>();
+            .map(|entry| (entry.surface_id, entry))
+            .collect::<HashMap<_, _>>();
+        let desired_ids = catalog_by_id.keys().copied().collect::<HashSet<_>>();
 
         let stale = self
             .terminal_surfaces
@@ -429,12 +495,13 @@ impl TaskersHost {
             return Ok(());
         };
 
-        for plan in desired {
-            match self.terminal_surfaces.get_mut(&plan.surface_id) {
+        for entry in catalog {
+            let visible_plan = desired_by_id.get(&entry.surface_id);
+            match self.terminal_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
-                    plan.frame,
-                    plan.active,
+                    entry,
+                    visible_plan,
                     revision,
                     interactive,
                     host,
@@ -443,14 +510,15 @@ impl TaskersHost {
                 None => {
                     let surface = TerminalSurface::new(
                         &self.root,
-                        &plan,
+                        entry,
+                        visible_plan,
                         revision,
                         interactive,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                         host,
                     )?;
-                    self.terminal_surfaces.insert(plan.surface_id, surface);
+                    self.terminal_surfaces.insert(entry.surface_id, surface);
                 }
             }
         }
@@ -798,23 +866,32 @@ impl BrowserSurface {
 }
 
 struct TerminalSurface {
+    surface_id: SurfaceId,
+    workspace_id: Rc<Cell<WorkspaceId>>,
+    pane_id: Rc<Cell<PaneId>>,
+    spec: TerminalMountSpec,
     shell: NativeSurfaceShell,
     widget: Widget,
+    focus_state: Rc<Cell<bool>>,
     active: bool,
     interactive: bool,
+    visible: bool,
+    width_px: i32,
+    height_px: i32,
 }
 
 impl TerminalSurface {
     fn new(
         overlay: &Overlay,
-        plan: &PortalSurfacePlan,
+        entry: &TerminalSurfaceCatalogEntry,
+        visible_plan: Option<&PortalSurfacePlan>,
         revision: u64,
         interactive: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
         host: &GhosttyHost,
     ) -> Result<Self> {
-        let spec = terminal_spec(plan)?.clone();
+        let spec = entry.spec.clone();
         let descriptor = surface_descriptor_from(&spec);
         let widget = host
             .create_surface(&descriptor)
@@ -828,14 +905,29 @@ impl TerminalSurface {
         widget.add_css_class("native-surface-widget");
         widget.add_css_class(widget_class);
         widget.add_css_class("terminal-output");
-        widget.set_can_target(interactive);
-        let shell = NativeSurfaceShell::new(shell_class, interactive);
+        let effective_interactive = visible_plan.is_some() && interactive;
+        widget.set_can_target(effective_interactive);
+        let shell = NativeSurfaceShell::new(shell_class, effective_interactive);
         shell.mount_child(&widget);
-        shell.position(overlay, plan.frame);
+        match visible_plan {
+            Some(plan) => shell.show_at(overlay, plan.frame),
+            None => shell.park_hidden(overlay),
+        }
 
-        connect_ghostty_widget(host, &widget, plan, event_sink, diagnostics.clone());
+        let workspace_id = Rc::new(Cell::new(entry.workspace_id));
+        let pane_id = Rc::new(Cell::new(entry.pane_id));
+        let focus_state = Rc::new(Cell::new(false));
+        connect_ghostty_widget(
+            host,
+            &widget,
+            pane_id.clone(),
+            entry.surface_id,
+            event_sink,
+            diagnostics.clone(),
+            focus_state.clone(),
+        );
 
-        if plan.active && interactive {
+        if visible_plan.is_some_and(|plan| plan.active) && effective_interactive {
             let _ = host.focus_surface(&widget);
         }
 
@@ -846,36 +938,61 @@ impl TerminalSurface {
                 Some(revision),
                 "terminal surface created",
             )
-            .with_pane(plan.pane_id)
-            .with_surface(plan.surface_id),
+            .with_pane(entry.pane_id)
+            .with_surface(entry.surface_id),
         );
 
         Ok(Self {
+            surface_id: entry.surface_id,
+            workspace_id,
+            pane_id,
+            spec,
             shell,
             widget,
-            active: plan.active,
-            interactive,
+            focus_state,
+            active: visible_plan.is_some_and(|plan| plan.active),
+            interactive: effective_interactive,
+            visible: visible_plan.is_some(),
+            width_px: visible_plan.map_or(0, |plan| plan.frame.width),
+            height_px: visible_plan.map_or(0, |plan| plan.frame.height),
         })
     }
 
     fn sync(
         &mut self,
         overlay: &Overlay,
-        frame: taskers_core::Frame,
-        active: bool,
+        entry: &TerminalSurfaceCatalogEntry,
+        visible_plan: Option<&PortalSurfacePlan>,
         revision: u64,
         interactive: bool,
         host: &GhosttyHost,
         diagnostics: Option<&DiagnosticsSink>,
     ) {
-        self.widget.set_can_target(interactive);
-        self.shell.set_interactive(interactive);
-        self.shell.position(overlay, frame);
-        if active && interactive && (!self.active || !self.interactive) {
+        self.workspace_id.set(entry.workspace_id);
+        self.pane_id.set(entry.pane_id);
+        self.spec = entry.spec.clone();
+        let visible = visible_plan.is_some();
+        let effective_interactive = visible && interactive;
+        self.widget.set_can_target(effective_interactive);
+        self.shell.set_interactive(effective_interactive);
+        match visible_plan {
+            Some(plan) => self.shell.show_at(overlay, plan.frame),
+            None => self.shell.park_hidden(overlay),
+        }
+        if visible_plan.is_some_and(|plan| plan.active)
+            && effective_interactive
+            && (!self.active || !self.interactive || !self.visible)
+        {
             let _ = host.focus_surface(&self.widget);
         }
-        self.active = active;
-        self.interactive = interactive;
+        if !visible || !effective_interactive {
+            self.focus_state.set(false);
+        }
+        self.active = visible_plan.is_some_and(|plan| plan.active);
+        self.interactive = effective_interactive;
+        self.visible = visible;
+        self.width_px = visible_plan.map_or(0, |plan| plan.frame.width);
+        self.height_px = visible_plan.map_or(0, |plan| plan.frame.height);
 
         emit_diagnostic(
             diagnostics,
@@ -883,8 +1000,14 @@ impl TerminalSurface {
                 DiagnosticCategory::SurfaceLifecycle,
                 Some(revision),
                 "terminal surface updated",
-            ),
+            )
+            .with_pane(entry.pane_id)
+            .with_surface(self.surface_id),
         );
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focus_state.get() || self.widget.has_focus()
     }
 }
 
@@ -990,18 +1113,20 @@ fn native_surface_css() -> &'static str {
 fn connect_ghostty_widget(
     host: &GhosttyHost,
     widget: &Widget,
-    plan: &PortalSurfacePlan,
+    pane_id: Rc<Cell<PaneId>>,
+    surface_id: SurfaceId,
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
+    focus_state: Rc<Cell<bool>>,
 ) {
     let _ = host;
 
-    let pane_id = plan.pane_id;
-    let surface_id = plan.surface_id;
+    let click_pane_id = pane_id.clone();
     let focus_sink = event_sink.clone();
     let focus_diagnostics = diagnostics.clone();
     let click = GestureClick::new();
     click.connect_pressed(move |_, _, _, _| {
+        let pane_id = click_pane_id.get();
         emit_diagnostic(
             focus_diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -1016,12 +1141,14 @@ fn connect_ghostty_widget(
     });
     widget.add_controller(click);
 
-    let pane_id = plan.pane_id;
-    let surface_id = plan.surface_id;
+    let focus_pane_id = pane_id.clone();
     let focus_sink = event_sink.clone();
     let focus_diagnostics = diagnostics.clone();
+    let focus_enter_state = focus_state.clone();
     let focus = EventControllerFocus::new();
     focus.connect_enter(move |_| {
+        let pane_id = focus_pane_id.get();
+        focus_enter_state.set(true);
         emit_diagnostic(
             focus_diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -1034,9 +1161,12 @@ fn connect_ghostty_widget(
         );
         (focus_sink)(HostEvent::PaneFocused { pane_id });
     });
+    let focus_leave_state = focus_state;
+    focus.connect_leave(move |_| {
+        focus_leave_state.set(false);
+    });
     widget.add_controller(focus);
 
-    let surface_id = plan.surface_id;
     let title_sink = event_sink.clone();
     let title_diagnostics = diagnostics.clone();
     widget.connect_notify_local(Some("title"), move |widget, _| {
@@ -1057,7 +1187,6 @@ fn connect_ghostty_widget(
         }
     });
 
-    let surface_id = plan.surface_id;
     let cwd_sink = event_sink.clone();
     let cwd_diagnostics = diagnostics.clone();
     widget.connect_notify_local(Some("pwd"), move |widget, _| {
@@ -1078,12 +1207,12 @@ fn connect_ghostty_widget(
         }
     });
 
-    let pane_id = plan.pane_id;
-    let surface_id = plan.surface_id;
+    let exit_pane_id = pane_id;
     let exit_sink = event_sink;
     let exit_diagnostics = diagnostics;
     widget.connect_notify_local(Some("child-exited"), move |widget, _| {
         if widget.property::<bool>("child-exited") {
+            let pane_id = exit_pane_id.get();
             emit_diagnostic(
                 exit_diagnostics.as_ref(),
                 DiagnosticRecord::new(DiagnosticCategory::HostEvent, None, "terminal child exited")
@@ -1168,6 +1297,27 @@ fn browser_command_surface_id(command: &BrowserControlCommand) -> SurfaceId {
     }
 }
 
+fn terminal_debug_surface_id(command: &TerminalDebugCommand) -> SurfaceId {
+    match command {
+        TerminalDebugCommand::IsFocused { surface_id }
+        | TerminalDebugCommand::ReadText { surface_id, .. }
+        | TerminalDebugCommand::RenderStats { surface_id } => *surface_id,
+    }
+}
+
+fn trim_terminal_tail(text: String, tail_lines: Option<usize>) -> String {
+    let Some(limit) = tail_lines else {
+        return text;
+    };
+    if limit == 0 {
+        return String::new();
+    }
+
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(limit);
+    lines[start..].join("\n")
+}
+
 fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
     SurfaceDescriptor {
         cols: spec.cols,
@@ -1181,13 +1331,6 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
         // proven across hosts.
         command_argv: Vec::new(),
         env: spec.env.clone(),
-    }
-}
-
-fn terminal_spec(plan: &PortalSurfacePlan) -> Result<&TerminalMountSpec> {
-    match &plan.mount {
-        SurfaceMountSpec::Terminal(spec) => Ok(spec),
-        SurfaceMountSpec::Browser(_) => bail!("surface {} is not a terminal", plan.surface_id),
     }
 }
 
@@ -1289,7 +1432,7 @@ fn current_timestamp_ms() -> u128 {
 mod tests {
     use super::{
         browser_plans, native_surface_classes, native_surface_css, native_surfaces_interactive,
-        terminal_plans, workspace_pan_delta,
+        terminal_plans, trim_terminal_tail, workspace_pan_delta,
     };
     use taskers_domain::PaneKind;
     use taskers_shell_core::{BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec};
@@ -1342,5 +1485,13 @@ mod tests {
         assert!(css.contains(".native-surface-terminal-widget"));
         assert!(css.contains(".terminal-output"));
         assert!(css.contains("background: #0f1117;"));
+    }
+
+    #[test]
+    fn trim_terminal_tail_keeps_requested_suffix() {
+        let text = "one\ntwo\nthree\nfour".to_string();
+        assert_eq!(trim_terminal_tail(text.clone(), None), text);
+        assert_eq!(trim_terminal_tail(text.clone(), Some(2)), "three\nfour");
+        assert_eq!(trim_terminal_tail(text, Some(10)), "one\ntwo\nthree\nfour");
     }
 }

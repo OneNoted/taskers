@@ -10,6 +10,7 @@ pub use paths::default_socket_path;
 pub use protocol::{
     BrowserControlCommand, BrowserGetCommand, BrowserLoadState, BrowserPredicateCommand,
     BrowserTarget, BrowserWaitCondition, ControlCommand, ControlError, ControlErrorCode,
-    ControlQuery, ControlResponse, RequestFrame, ResponseFrame,
+    ControlQuery, ControlResponse, IdentifyContext, IdentifyResult, RequestFrame, ResponseFrame,
+    TerminalDebugCommand, TerminalDebugResult, TerminalRenderStats,
 };
 pub use socket::{bind_socket, serve, serve_with_handler};

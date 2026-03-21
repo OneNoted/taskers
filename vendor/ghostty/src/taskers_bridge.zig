@@ -1,5 +1,6 @@
 const std = @import("std");
 const gtk = @import("gtk");
+const terminal = @import("terminal/main.zig");
 
 const CoreApp = @import("App.zig");
 const GtkRuntimeApp = @import("apprt/gtk/App.zig");
@@ -31,6 +32,11 @@ pub const SurfaceOptions = extern struct {
     title: ?[*:0]const u8 = null,
     env_entries: ?[*]const [*:0]const u8 = null,
     env_count: usize = 0,
+};
+
+pub const Text = extern struct {
+    text: ?[*:0]const u8 = null,
+    text_len: usize = 0,
 };
 
 fn ensureInitialized() !void {
@@ -139,6 +145,53 @@ pub export fn taskers_ghostty_surface_grab_focus(widget: ?*gtk.Widget) c_int {
     const surface: *Surface = @ptrCast(@alignCast(ptr));
     surface.grabFocus();
     return 1;
+}
+
+pub export fn taskers_ghostty_surface_has_selection(widget: ?*gtk.Widget) c_int {
+    const ptr = widget orelse return 0;
+    const surface: *Surface = @ptrCast(@alignCast(ptr));
+    const core = surface.core() orelse return 0;
+    return if (core.hasSelection()) 1 else 0;
+}
+
+pub export fn taskers_ghostty_surface_read_all_text(
+    widget: ?*gtk.Widget,
+    result: ?*Text,
+) c_int {
+    const ptr = widget orelse return 0;
+    const text = result orelse return 0;
+    const surface: *Surface = @ptrCast(@alignCast(ptr));
+    const core = surface.core() orelse return 0;
+    const screen = core.io.terminal.screens.active;
+    const br = screen.pages.getBottomRight(.screen) orelse {
+        text.* = .{};
+        return 1;
+    };
+    const selection = terminal.Selection.init(
+        screen.pages.getTopLeft(.screen),
+        br,
+        true,
+    );
+
+    var dumped = core.dumpText(state.alloc, selection) catch |err| {
+        std.log.warn("failed to read Ghostty surface text err={}", .{err});
+        return 0;
+    };
+    errdefer dumped.deinit(state.alloc);
+
+    text.* = .{
+        .text = dumped.text.ptr,
+        .text_len = dumped.text.len,
+    };
+    return 1;
+}
+
+pub export fn taskers_ghostty_surface_free_text(text: ?*Text) void {
+    const ptr = text orelse return;
+    if (ptr.text) |value| {
+        state.alloc.free(value[0..ptr.text_len :0]);
+    }
+    ptr.* = .{};
 }
 
 fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOptions) !*Config {

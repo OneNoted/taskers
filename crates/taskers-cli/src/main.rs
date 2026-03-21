@@ -5,7 +5,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use taskers_control::{
     BrowserControlCommand, BrowserGetCommand, BrowserLoadState, BrowserPredicateCommand,
     BrowserTarget, BrowserWaitCondition, ControlClient, ControlCommand, ControlQuery,
-    ControlResponse, InMemoryController, bind_socket, default_socket_path, serve,
+    ControlResponse, InMemoryController, TerminalDebugCommand, bind_socket, default_socket_path,
+    serve,
 };
 use taskers_domain::{
     AgentTarget, AppModel, AttentionState, Direction, KEYBOARD_RESIZE_STEP, PaneId, PaneKind,
@@ -93,6 +94,20 @@ enum Command {
     Browser {
         #[command(subcommand)]
         command: BrowserCommand,
+    },
+    Identify {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+    },
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommand,
     },
     Pane {
         #[command(subcommand)]
@@ -614,8 +629,46 @@ enum BrowserCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum DebugCommand {
+    Terminal {
+        #[command(subcommand)]
+        command: TerminalDebugCliCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TerminalDebugCliCommand {
+    IsFocused {
+        #[command(flatten)]
+        terminal: TerminalSurfaceArgs,
+    },
+    ReadText {
+        #[command(flatten)]
+        terminal: TerminalSurfaceArgs,
+        #[arg(long)]
+        tail_lines: Option<usize>,
+    },
+    RenderStats {
+        #[command(flatten)]
+        terminal: TerminalSurfaceArgs,
+    },
+}
+
 #[derive(Debug, Clone, Args)]
 struct BrowserSurfaceArgs {
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    #[arg(long)]
+    workspace: Option<WorkspaceId>,
+    #[arg(long)]
+    pane: Option<PaneId>,
+    #[arg(long)]
+    surface: Option<SurfaceId>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct TerminalSurfaceArgs {
     #[arg(long)]
     socket: Option<PathBuf>,
     #[arg(long)]
@@ -1531,6 +1584,36 @@ async fn main() -> anyhow::Result<()> {
         Command::Browser { command } => {
             handle_browser_cli_command(command).await?;
         }
+        Command::Identify {
+            socket,
+            workspace,
+            pane,
+            surface,
+        } => {
+            let client = ControlClient::new(resolve_socket_path(socket));
+            let response = send_control_command(
+                &client,
+                ControlCommand::QueryStatus {
+                    query: ControlQuery::Identify {
+                        workspace_id: workspace.or_else(env_workspace_id),
+                        pane_id: pane.or_else(env_pane_id),
+                        surface_id: surface.or_else(env_surface_id),
+                    },
+                },
+            )
+            .await?;
+            match response {
+                ControlResponse::Identify { result } => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                other => bail!("unexpected identify response: {other:?}"),
+            }
+        }
+        Command::Debug { command } => match command {
+            DebugCommand::Terminal { command } => {
+                handle_terminal_debug_cli_command(command).await?;
+            }
+        },
         Command::Pane { command } => match command {
             PaneCommand::NewWindow {
                 socket,
@@ -2371,6 +2454,47 @@ where
     print_browser_result(&result)
 }
 
+async fn handle_terminal_debug_cli_command(command: TerminalDebugCliCommand) -> anyhow::Result<()> {
+    match command {
+        TerminalDebugCliCommand::IsFocused { terminal } => {
+            run_terminal_surface_command(&terminal, |surface_id| TerminalDebugCommand::IsFocused {
+                surface_id,
+            })
+            .await
+        }
+        TerminalDebugCliCommand::ReadText {
+            terminal,
+            tail_lines,
+        } => {
+            run_terminal_surface_command(&terminal, |surface_id| TerminalDebugCommand::ReadText {
+                surface_id,
+                tail_lines,
+            })
+            .await
+        }
+        TerminalDebugCliCommand::RenderStats { terminal } => {
+            run_terminal_surface_command(&terminal, |surface_id| {
+                TerminalDebugCommand::RenderStats { surface_id }
+            })
+            .await
+        }
+    }
+}
+
+async fn run_terminal_surface_command<F>(
+    terminal: &TerminalSurfaceArgs,
+    build: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(SurfaceId) -> TerminalDebugCommand,
+{
+    let client = ControlClient::new(resolve_socket_path(terminal.socket.clone()));
+    let (_, _, surface_id) = resolve_terminal_surface(&client, terminal).await?;
+    let result = send_terminal_debug_command(&client, build(surface_id)).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
 async fn send_browser_command(
     client: &ControlClient,
     browser_command: BrowserControlCommand,
@@ -2386,6 +2510,23 @@ async fn send_browser_command(
 fn print_browser_result(result: &serde_json::Value) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(result)?);
     Ok(())
+}
+
+async fn send_terminal_debug_command(
+    client: &ControlClient,
+    command: TerminalDebugCommand,
+) -> anyhow::Result<serde_json::Value> {
+    let response = send_control_command(
+        client,
+        ControlCommand::TerminalDebug {
+            debug_command: command,
+        },
+    )
+    .await?;
+    match response {
+        ControlResponse::TerminalDebug { result } => Ok(serde_json::to_value(result)?),
+        other => bail!("unexpected terminal debug response: {other:?}"),
+    }
 }
 
 async fn resolve_browser_surface(
@@ -2435,6 +2576,58 @@ async fn resolve_browser_surface(
     if surface.kind != PaneKind::Browser {
         bail!(
             "active surface {surface_id} in pane {pane_id} is not a browser; pass --surface or activate a browser pane"
+        );
+    }
+    Ok((workspace_id, pane_id, surface_id))
+}
+
+async fn resolve_terminal_surface(
+    client: &ControlClient,
+    terminal: &TerminalSurfaceArgs,
+) -> anyhow::Result<(WorkspaceId, PaneId, SurfaceId)> {
+    let model = query_model(client).await?;
+    if let Some(surface_id) = terminal.surface.or_else(env_surface_id) {
+        let (workspace_id, pane_id, kind) = find_surface_location(&model, surface_id)
+            .ok_or_else(|| anyhow!("surface {surface_id} is not present in the current session"))?;
+        if kind != PaneKind::Terminal {
+            bail!("surface {surface_id} is not a terminal");
+        }
+        if let Some(workspace_id_arg) = terminal.workspace
+            && workspace_id_arg != workspace_id
+        {
+            bail!(
+                "surface {surface_id} belongs to workspace {workspace_id}, not {workspace_id_arg}"
+            );
+        }
+        if let Some(pane_id_arg) = terminal.pane
+            && pane_id_arg != pane_id
+        {
+            bail!("surface {surface_id} belongs to pane {pane_id}, not {pane_id_arg}");
+        }
+        return Ok((workspace_id, pane_id, surface_id));
+    }
+
+    let workspace_id = resolve_workspace_id_from_model(&model, terminal.workspace)?;
+    let workspace = model
+        .workspaces
+        .get(&workspace_id)
+        .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+    let pane_id = terminal
+        .pane
+        .or_else(env_pane_id)
+        .unwrap_or(workspace.active_pane);
+    let pane = workspace
+        .panes
+        .get(&pane_id)
+        .ok_or_else(|| anyhow!("pane {pane_id} is not present in workspace {workspace_id}"))?;
+    let surface_id = pane.active_surface;
+    let surface = pane
+        .surfaces
+        .get(&surface_id)
+        .ok_or_else(|| anyhow!("surface {surface_id} is not present in pane {pane_id}"))?;
+    if surface.kind != PaneKind::Terminal {
+        bail!(
+            "active surface {surface_id} in pane {pane_id} is not a terminal; pass --surface or activate a terminal pane"
         );
     }
     Ok((workspace_id, pane_id, surface_id))

@@ -196,6 +196,9 @@ pub enum ControlCommand {
     Browser {
         browser_command: BrowserControlCommand,
     },
+    TerminalDebug {
+        debug_command: TerminalDebugCommand,
+    },
     QueryStatus {
         query: ControlQuery,
     },
@@ -453,11 +456,80 @@ pub enum BrowserPredicateCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "terminal_command", rename_all = "snake_case")]
+pub enum TerminalDebugCommand {
+    IsFocused {
+        surface_id: SurfaceId,
+    },
+    ReadText {
+        surface_id: SurfaceId,
+        tail_lines: Option<usize>,
+    },
+    RenderStats {
+        surface_id: SurfaceId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum TerminalDebugResult {
+    IsFocused { focused: bool },
+    ReadText { text: String },
+    RenderStats { stats: TerminalRenderStats },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalRenderStats {
+    pub surface_id: SurfaceId,
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub mounted: bool,
+    pub visible: bool,
+    pub focused: bool,
+    pub backend: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub width_px: i32,
+    pub height_px: i32,
+    pub has_selection: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentifyContext {
+    pub window_id: WindowId,
+    pub workspace_id: WorkspaceId,
+    pub workspace_label: String,
+    pub workspace_window_id: Option<WorkspaceWindowId>,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub surface_kind: PaneKind,
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub url: Option<String>,
+    pub loading: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentifyResult {
+    pub focused: IdentifyContext,
+    pub caller: Option<IdentifyContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum ControlQuery {
     ActiveWindow,
-    Window { window_id: WindowId },
-    Workspace { workspace_id: WorkspaceId },
+    Window {
+        window_id: WindowId,
+    },
+    Workspace {
+        workspace_id: WorkspaceId,
+    },
+    Identify {
+        workspace_id: Option<WorkspaceId>,
+        pane_id: Option<PaneId>,
+        surface_id: Option<SurfaceId>,
+    },
     All,
 }
 
@@ -494,6 +566,12 @@ pub enum ControlResponse {
     },
     Browser {
         result: JsonValue,
+    },
+    TerminalDebug {
+        result: TerminalDebugResult,
+    },
+    Identify {
+        result: IdentifyResult,
     },
 }
 
