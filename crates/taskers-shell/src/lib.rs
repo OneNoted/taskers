@@ -3,11 +3,11 @@ mod theme;
 use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot, Direction,
-    LayoutNodeSnapshot, PaneId, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeStatus,
-    SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutAction,
-    ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId,
-    WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget,
-    WorkspaceWindowSnapshot,
+    LayoutNodeSnapshot, NotificationPreferenceKey, PaneId, PaneSnapshot, ProgressSnapshot,
+    PullRequestSnapshot, RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection,
+    ShellSnapshot, ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind,
+    SurfaceSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary,
+    WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
 };
 use taskers_shell_core as taskers_core;
 
@@ -1566,6 +1566,42 @@ fn render_settings(settings: &SettingsSnapshot, core: SharedCore) -> Element {
                     }
                 }
             }
+            section { class: "settings-card",
+                div { class: "sidebar-heading", "Notifications" }
+                div { class: "settings-copy",
+                    "Desktop alerts follow the active Taskers lifecycle policy. Manual notifications always alert unless the target is already visible."
+                }
+                div { class: "settings-toggle-list",
+                    {render_notification_preference(
+                        "Alert on waiting",
+                        "Show a desktop notification when an agent needs input.",
+                        settings.notification_preferences.alerts_on_waiting,
+                        NotificationPreferenceKey::AlertsOnWaiting,
+                        core.clone(),
+                    )}
+                    {render_notification_preference(
+                        "Alert on errors",
+                        "Show a desktop notification when an agent exits with an error.",
+                        settings.notification_preferences.alerts_on_error,
+                        NotificationPreferenceKey::AlertsOnError,
+                        core.clone(),
+                    )}
+                    {render_notification_preference(
+                        "Alert on completion",
+                        "Show a desktop notification when an agent finishes successfully.",
+                        settings.notification_preferences.alerts_on_completed,
+                        NotificationPreferenceKey::AlertsOnCompleted,
+                        core.clone(),
+                    )}
+                    {render_notification_preference(
+                        "Suppress when visible",
+                        "Skip the desktop banner if the target pane is already visible in the focused Taskers window.",
+                        settings.notification_preferences.suppress_when_visible,
+                        NotificationPreferenceKey::SuppressWhenVisible,
+                        core.clone(),
+                    )}
+                }
+            }
             section { class: "settings-card settings-card-span",
                 div { class: "sidebar-heading", "Shortcut Reference" }
                 div { class: "shortcut-groups",
@@ -1652,6 +1688,37 @@ fn render_shortcut_group(category: &'static str, bindings: &[ShortcutBindingSnap
                     }
                 }
             }
+        }
+    }
+}
+
+fn render_notification_preference(
+    label: &'static str,
+    detail: &'static str,
+    enabled: bool,
+    key: NotificationPreferenceKey,
+    core: SharedCore,
+) -> Element {
+    let toggle = move |_| {
+        core.dispatch_shell_action(ShellAction::SetNotificationPreference {
+            key,
+            enabled: !enabled,
+        })
+    };
+    let button_class = if enabled {
+        "settings-toggle-button settings-toggle-button-active"
+    } else {
+        "settings-toggle-button"
+    };
+    let state_label = if enabled { "On" } else { "Off" };
+
+    rsx! {
+        button { class: "settings-toggle-row", onclick: toggle,
+            div { class: "settings-toggle-copy",
+                div { class: "workspace-label", "{label}" }
+                div { class: "settings-copy", "{detail}" }
+            }
+            span { class: "{button_class}", "{state_label}" }
         }
     }
 }

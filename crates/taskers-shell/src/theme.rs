@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
-use taskers_shell_core as taskers_core;
 use taskers_core::LayoutMetrics;
+use taskers_shell_core as taskers_core;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -600,6 +600,51 @@ button {{
   display: flex;
   flex-direction: column;
   gap: 4px;
+}}
+
+.settings-toggle-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}}
+
+.settings-toggle-row {{
+  border: 1px solid {border_06};
+  background: {surface};
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+}}
+
+.settings-toggle-row:hover {{
+  border-color: {accent_24};
+  background: {accent_08};
+}}
+
+.settings-toggle-copy {{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
+.settings-toggle-button {{
+  min-width: 42px;
+  padding: 4px 8px;
+  border: 1px solid {border_08};
+  color: {text_dim};
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}}
+
+.settings-toggle-button-active {{
+  border-color: {accent_24};
+  background: {accent_12};
+  color: {text_bright};
 }}
 
 .runtime-status-row {{

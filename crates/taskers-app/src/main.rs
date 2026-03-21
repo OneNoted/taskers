@@ -3,9 +3,10 @@ use anyhow::{Context, Result};
 use axum::{Router, extract::ws::WebSocketUpgrade, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
 use gtk::{EventControllerKey, gdk, gio, glib};
+use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
-    fs::{File, OpenOptions, remove_file},
+    fs::{File, OpenOptions, create_dir_all, read_to_string, remove_file, write},
     future::pending,
     io::{self, Write},
     net::TcpListener,
@@ -29,8 +30,9 @@ use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_run
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
 use taskers_shell_core::{
-    BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
-    ShellAction, ShellSection, ShortcutAction, ShortcutPreset, SurfaceKind,
+    BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PixelSize,
+    RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
+    ShortcutPreset, SurfaceKind,
 };
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
@@ -77,6 +79,7 @@ struct BootstrapContext {
     app_state: AppState,
     socket_path: PathBuf,
     ghostty_host: Option<GhosttyHost>,
+    config: TaskersConfig,
     startup_notes: Vec<String>,
 }
 
@@ -107,6 +110,128 @@ struct PendingDesktopNotification {
     surface_id: taskers_shell_core::SurfaceId,
     title: String,
     body: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaskersConfig {
+    #[serde(default = "default_theme_id")]
+    selected_theme_id: String,
+    #[serde(default = "default_shortcut_preset_id")]
+    selected_shortcut_preset: String,
+    #[serde(default)]
+    notification_preferences: NotificationPreferencesConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct NotificationPreferencesConfig {
+    #[serde(default = "default_true")]
+    alerts_on_waiting: bool,
+    #[serde(default = "default_true")]
+    alerts_on_error: bool,
+    #[serde(default = "default_true")]
+    alerts_on_completed: bool,
+    #[serde(default = "default_true")]
+    suppress_when_visible: bool,
+}
+
+impl Default for TaskersConfig {
+    fn default() -> Self {
+        Self {
+            selected_theme_id: default_theme_id(),
+            selected_shortcut_preset: default_shortcut_preset_id(),
+            notification_preferences: NotificationPreferencesConfig::default(),
+        }
+    }
+}
+
+impl Default for NotificationPreferencesConfig {
+    fn default() -> Self {
+        Self {
+            alerts_on_waiting: true,
+            alerts_on_error: true,
+            alerts_on_completed: true,
+            suppress_when_visible: true,
+        }
+    }
+}
+
+impl NotificationPreferencesConfig {
+    fn to_snapshot(self) -> NotificationPreferencesSnapshot {
+        NotificationPreferencesSnapshot {
+            alerts_on_waiting: self.alerts_on_waiting,
+            alerts_on_error: self.alerts_on_error,
+            alerts_on_completed: self.alerts_on_completed,
+            suppress_when_visible: self.suppress_when_visible,
+        }
+    }
+
+    fn from_snapshot(snapshot: NotificationPreferencesSnapshot) -> Self {
+        Self {
+            alerts_on_waiting: snapshot.alerts_on_waiting,
+            alerts_on_error: snapshot.alerts_on_error,
+            alerts_on_completed: snapshot.alerts_on_completed,
+            suppress_when_visible: snapshot.suppress_when_visible,
+        }
+    }
+}
+
+fn default_theme_id() -> String {
+    "dark".into()
+}
+
+fn default_shortcut_preset_id() -> String {
+    ShortcutPreset::PowerUser.id().into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl TaskersConfig {
+    fn load() -> Result<Self> {
+        let path = taskers_paths::default_config_path();
+        let data = match read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read config {}", path.display()));
+            }
+        };
+        let config: Self = serde_json::from_str(&data)
+            .with_context(|| format!("failed to parse config {}", path.display()))?;
+        Ok(config)
+    }
+
+    fn save(&self) -> Result<()> {
+        let path = taskers_paths::default_config_path();
+        if let Some(parent) = path.parent() {
+            create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory {}", parent.display())
+            })?;
+        }
+        let data = serde_json::to_string_pretty(self).context("failed to serialize config")?;
+        write(&path, data).with_context(|| format!("failed to write config {}", path.display()))
+    }
+
+    fn shortcut_preset(&self) -> ShortcutPreset {
+        ShortcutPreset::parse(&self.selected_shortcut_preset).unwrap_or(ShortcutPreset::PowerUser)
+    }
+
+    fn from_settings(settings: &taskers_shell_core::SettingsSnapshot) -> Self {
+        Self {
+            selected_theme_id: settings.selected_theme_id.clone(),
+            selected_shortcut_preset: settings
+                .shortcut_presets
+                .iter()
+                .find(|preset| preset.active)
+                .map(|preset| preset.id.clone())
+                .unwrap_or_else(default_shortcut_preset_id),
+            notification_preferences: NotificationPreferencesConfig::from_snapshot(
+                settings.notification_preferences,
+            ),
+        }
+    }
 }
 
 fn main() -> glib::ExitCode {
@@ -197,6 +322,7 @@ fn build_ui_result(
         event_sink,
         diagnostics_sink,
     )));
+    let persisted_config = Rc::new(RefCell::new(bootstrap.config.clone()));
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -266,6 +392,7 @@ fn build_ui_result(
     let tick_diagnostics = diagnostics.clone();
     let tick_app = app.clone();
     let tick_app_state = bootstrap.app_state.clone();
+    let tick_config = persisted_config.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
         sync_window(
             &tick_window,
@@ -282,6 +409,7 @@ fn build_ui_result(
             &tick_app_state,
             tick_diagnostics.as_ref(),
         );
+        persist_settings_if_needed(&tick_core, &tick_config, tick_diagnostics.as_ref());
         glib::ControlFlow::Continue
     });
 
@@ -366,13 +494,17 @@ fn process_pending_notifications(
     diagnostics: Option<&DiagnosticsWriter>,
 ) {
     let model = app_state.snapshot_model();
-    let pending = pending_desktop_notifications(&model);
+    let settings = core.snapshot().settings;
+    let prefs = settings.notification_preferences;
+    let pending = pending_desktop_notifications_with_prefs(&model, prefs);
     if pending.is_empty() {
         return;
     }
 
     for notification in pending {
-        let delivery = if notification_target_visible(&model, window, &notification) {
+        let delivery = if prefs.suppress_when_visible
+            && notification_target_visible(&model, window, &notification)
+        {
             NotificationDeliveryState::Suppressed
         } else {
             let desktop = gio::Notification::new(&notification.title);
@@ -408,47 +540,59 @@ fn process_pending_notifications(
     core.sync_external_changes();
 }
 
-fn pending_desktop_notifications(model: &AppModel) -> Vec<PendingDesktopNotification> {
+fn pending_desktop_notifications_with_prefs(
+    model: &AppModel,
+    prefs: NotificationPreferencesSnapshot,
+) -> Vec<PendingDesktopNotification> {
     model
         .workspaces
         .values()
         .flat_map(|workspace| {
-            workspace.notifications.iter().filter_map(move |notification| {
-                if notification.cleared_at.is_some()
-                    || !matches!(notification.desktop_delivery, NotificationDeliveryState::Pending)
-                    || !notification_alerts_enabled(notification.kind.clone())
-                {
-                    return None;
-                }
+            workspace
+                .notifications
+                .iter()
+                .filter_map(move |notification| {
+                    if notification.cleared_at.is_some()
+                        || !matches!(
+                            notification.desktop_delivery,
+                            NotificationDeliveryState::Pending
+                        )
+                        || !notification_alerts_enabled(&notification.kind, prefs)
+                    {
+                        return None;
+                    }
 
-                let title = notification
-                    .title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| notification.message.clone());
-                Some(PendingDesktopNotification {
-                    id: notification.id,
-                    workspace_id: workspace.id,
-                    pane_id: notification.pane_id,
-                    surface_id: notification.surface_id,
-                    title,
-                    body: notification_body(notification.subtitle.as_deref(), &notification.message),
+                    let title = notification
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| notification.message.clone());
+                    Some(PendingDesktopNotification {
+                        id: notification.id,
+                        workspace_id: workspace.id,
+                        pane_id: notification.pane_id,
+                        surface_id: notification.surface_id,
+                        title,
+                        body: notification_body(
+                            notification.subtitle.as_deref(),
+                            &notification.message,
+                        ),
+                    })
                 })
-            })
         })
         .collect()
 }
 
-fn notification_alerts_enabled(kind: SignalKind) -> bool {
-    matches!(
-        kind,
-        SignalKind::WaitingInput
-            | SignalKind::Error
-            | SignalKind::Completed
-            | SignalKind::Notification
-    )
+fn notification_alerts_enabled(kind: &SignalKind, prefs: NotificationPreferencesSnapshot) -> bool {
+    match kind {
+        SignalKind::WaitingInput => prefs.alerts_on_waiting,
+        SignalKind::Error => prefs.alerts_on_error,
+        SignalKind::Completed => prefs.alerts_on_completed,
+        SignalKind::Notification => true,
+        SignalKind::Started | SignalKind::Progress | SignalKind::Metadata => false,
+    }
 }
 
 fn notification_body(subtitle: Option<&str>, message: &str) -> Option<String> {
@@ -475,7 +619,8 @@ fn notification_target_visible(
         return false;
     }
 
-    model.workspaces
+    model
+        .workspaces
         .get(&notification.workspace_id)
         .and_then(|workspace| {
             if workspace.active_pane != notification.pane_id {
@@ -486,23 +631,60 @@ fn notification_target_visible(
         .is_some_and(|pane| pane.active_surface == notification.surface_id)
 }
 
+fn persist_settings_if_needed(
+    core: &SharedCore,
+    persisted_config: &Rc<RefCell<TaskersConfig>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+) {
+    let snapshot = core.snapshot();
+    let next = TaskersConfig::from_settings(&snapshot.settings);
+    if *persisted_config.borrow() == next {
+        return;
+    }
+
+    if let Err(error) = next.save() {
+        log_diagnostic(
+            diagnostics,
+            DiagnosticRecord::new(
+                DiagnosticCategory::Startup,
+                Some(core.revision()),
+                format!("failed to persist config: {error:?}"),
+            ),
+        );
+        eprintln!("taskers config save failed: {error:?}");
+        return;
+    }
+
+    *persisted_config.borrow_mut() = next;
+}
+
 #[cfg(test)]
 mod notification_tests {
-    use super::{notification_alerts_enabled, notification_body, pending_desktop_notifications};
+    use super::{
+        notification_alerts_enabled, notification_body, pending_desktop_notifications_with_prefs,
+    };
     use taskers_domain::{
         AppModel, AttentionState, NotificationDeliveryState, NotificationId, NotificationItem,
         SignalKind,
     };
+    use taskers_shell_core::NotificationPreferencesSnapshot;
     use time::OffsetDateTime;
 
     #[test]
     fn desktop_alert_filter_includes_user_facing_notification_kinds() {
-        assert!(notification_alerts_enabled(SignalKind::WaitingInput));
-        assert!(notification_alerts_enabled(SignalKind::Error));
-        assert!(notification_alerts_enabled(SignalKind::Completed));
-        assert!(notification_alerts_enabled(SignalKind::Notification));
-        assert!(!notification_alerts_enabled(SignalKind::Started));
-        assert!(!notification_alerts_enabled(SignalKind::Progress));
+        let prefs = NotificationPreferencesSnapshot::default();
+        assert!(notification_alerts_enabled(
+            &SignalKind::WaitingInput,
+            prefs
+        ));
+        assert!(notification_alerts_enabled(&SignalKind::Error, prefs));
+        assert!(notification_alerts_enabled(&SignalKind::Completed, prefs));
+        assert!(notification_alerts_enabled(
+            &SignalKind::Notification,
+            prefs
+        ));
+        assert!(!notification_alerts_enabled(&SignalKind::Started, prefs));
+        assert!(!notification_alerts_enabled(&SignalKind::Progress, prefs));
     }
 
     #[test]
@@ -563,10 +745,52 @@ mod notification_tests {
             desktop_delivery: NotificationDeliveryState::Shown,
         });
 
-        let pending = pending_desktop_notifications(&model);
+        let pending = pending_desktop_notifications_with_prefs(
+            &model,
+            NotificationPreferencesSnapshot::default(),
+        );
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].title, "Codex");
         assert_eq!(pending[0].body.as_deref(), Some("Waiting\nNeed input"));
+    }
+
+    #[test]
+    fn pending_desktop_notifications_respects_waiting_toggle() {
+        let mut model = AppModel::new("Main");
+        let workspace = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+        let workspace = model.workspaces.get_mut(&workspace).expect("workspace");
+        workspace.notifications.push(NotificationItem {
+            id: NotificationId::new(),
+            pane_id,
+            surface_id,
+            kind: SignalKind::WaitingInput,
+            state: AttentionState::WaitingInput,
+            title: Some("Codex".into()),
+            subtitle: None,
+            external_id: None,
+            message: "Need input".into(),
+            created_at: OffsetDateTime::now_utc(),
+            read_at: None,
+            cleared_at: None,
+            desktop_delivery: NotificationDeliveryState::Pending,
+        });
+
+        let pending = pending_desktop_notifications_with_prefs(
+            &model,
+            NotificationPreferencesSnapshot {
+                alerts_on_waiting: false,
+                ..NotificationPreferencesSnapshot::default()
+            },
+        );
+
+        assert!(pending.is_empty());
     }
 }
 
@@ -663,6 +887,13 @@ fn connect_navigation_shortcuts(
 fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
     let runtime = resolve_runtime_bootstrap();
     let mut startup_notes = runtime.startup_notes;
+    let config = match TaskersConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            startup_notes.push(format!("Taskers config unavailable: {error}"));
+            TaskersConfig::default()
+        }
+    };
     let session_path = default_session_path();
     let initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
         format!(
@@ -721,8 +952,9 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
     let core = SharedCore::bootstrap(BootstrapModel {
         app_state: app_state.clone(),
         runtime_status,
-        selected_theme_id: "dark".into(),
-        selected_shortcut_preset: ShortcutPreset::PowerUser,
+        selected_theme_id: config.selected_theme_id.clone(),
+        selected_shortcut_preset: config.shortcut_preset(),
+        notification_preferences: config.notification_preferences.to_snapshot(),
     });
 
     log_runtime_status(diagnostics, &core.snapshot().runtime_status);
@@ -732,6 +964,7 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         app_state,
         socket_path: runtime.socket_path,
         ghostty_host,
+        config,
         startup_notes,
     })
 }
@@ -867,6 +1100,7 @@ fn run_internal_surface_probe(
         },
         selected_theme_id: "dark".into(),
         selected_shortcut_preset: ShortcutPreset::PowerUser,
+        notification_preferences: NotificationPreferencesSnapshot::default(),
     });
     core.set_window_size(PixelSize::new(1200, 800));
 

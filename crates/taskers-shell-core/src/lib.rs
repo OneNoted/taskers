@@ -510,6 +510,7 @@ pub struct BootstrapModel {
     pub runtime_status: RuntimeStatus,
     pub selected_theme_id: String,
     pub selected_shortcut_preset: ShortcutPreset,
+    pub notification_preferences: NotificationPreferencesSnapshot,
 }
 
 impl Default for BootstrapModel {
@@ -519,8 +520,36 @@ impl Default for BootstrapModel {
             runtime_status: RuntimeStatus::default(),
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: ShortcutPreset::Balanced,
+            notification_preferences: NotificationPreferencesSnapshot::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationPreferencesSnapshot {
+    pub alerts_on_waiting: bool,
+    pub alerts_on_error: bool,
+    pub alerts_on_completed: bool,
+    pub suppress_when_visible: bool,
+}
+
+impl Default for NotificationPreferencesSnapshot {
+    fn default() -> Self {
+        Self {
+            alerts_on_waiting: true,
+            alerts_on_error: true,
+            alerts_on_completed: true,
+            suppress_when_visible: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationPreferenceKey {
+    AlertsOnWaiting,
+    AlertsOnError,
+    AlertsOnCompleted,
+    SuppressWhenVisible,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -904,6 +933,7 @@ pub struct SettingsSnapshot {
     pub theme_options: Vec<ThemeOptionSnapshot>,
     pub shortcut_presets: Vec<ShortcutPresetSnapshot>,
     pub shortcuts: Vec<ShortcutBindingSnapshot>,
+    pub notification_preferences: NotificationPreferencesSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1073,6 +1103,10 @@ pub enum ShellAction {
     SelectShortcutPreset {
         preset_id: String,
     },
+    SetNotificationPreference {
+        key: NotificationPreferenceKey,
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1082,6 +1116,7 @@ struct UiState {
     drag_mode: ShellDragMode,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
+    notification_preferences: NotificationPreferencesSnapshot,
     window_size: PixelSize,
 }
 
@@ -1144,6 +1179,7 @@ impl TaskersCore {
                 drag_mode: ShellDragMode::None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
+                notification_preferences: bootstrap.notification_preferences,
                 window_size: PixelSize::new(1440, 900),
             },
             host_commands: VecDeque::new(),
@@ -1307,6 +1343,7 @@ impl TaskersCore {
                 })
                 .collect(),
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
+            notification_preferences: self.ui.notification_preferences,
         }
     }
 
@@ -1930,6 +1967,28 @@ impl TaskersCore {
                     return false;
                 }
                 self.ui.selected_shortcut_preset = preset;
+                self.bump_local_revision();
+                true
+            }
+            ShellAction::SetNotificationPreference { key, enabled } => {
+                let changed = match key {
+                    NotificationPreferenceKey::AlertsOnWaiting => {
+                        &mut self.ui.notification_preferences.alerts_on_waiting
+                    }
+                    NotificationPreferenceKey::AlertsOnError => {
+                        &mut self.ui.notification_preferences.alerts_on_error
+                    }
+                    NotificationPreferenceKey::AlertsOnCompleted => {
+                        &mut self.ui.notification_preferences.alerts_on_completed
+                    }
+                    NotificationPreferenceKey::SuppressWhenVisible => {
+                        &mut self.ui.notification_preferences.suppress_when_visible
+                    }
+                };
+                if *changed == enabled {
+                    return false;
+                }
+                *changed = enabled;
                 self.bump_local_revision();
                 true
             }
@@ -3689,10 +3748,10 @@ mod tests {
 
     use super::{
         BootstrapModel, BrowserMountSpec, DEFAULT_BROWSER_HOME, Direction, HostCommand, HostEvent,
-        LayoutMetrics, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
-        ShellSection, SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
-        default_session_path_for_preview, pane_body_frame, resolved_browser_uri, split_frame,
-        workspace_window_content_frame,
+        LayoutMetrics, NotificationPreferencesSnapshot, RuntimeCapability, RuntimeStatus,
+        SharedCore, ShellAction, ShellDragMode, ShellSection, SurfaceMountSpec, WorkspaceDirection,
+        default_preview_app_state, default_session_path_for_preview, pane_body_frame,
+        resolved_browser_uri, split_frame, workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -3707,6 +3766,7 @@ mod tests {
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
+            notification_preferences: NotificationPreferencesSnapshot::default(),
         }
     }
 

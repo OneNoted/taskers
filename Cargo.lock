@@ -2495,6 +2495,8 @@ dependencies = [
  "dioxus-liveview",
  "gtk4",
  "libadwaita",
+ "serde",
+ "serde_json",
  "taskers-control",
  "taskers-core",
  "taskers-domain",
