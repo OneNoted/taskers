@@ -3540,13 +3540,21 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use taskers_app_core::AppState;
     use taskers_control::ControlCommand;
+    use taskers_domain::{
+        AppModel, AttentionState as DomainAttentionState, NotificationItem, SignalKind,
+    };
+    use taskers_ghostty::BackendChoice;
+    use taskers_runtime::ShellLaunchSpec;
+    use time::OffsetDateTime;
 
     use super::{
         BootstrapModel, BrowserMountSpec, Direction, HostCommand, HostEvent, LayoutMetrics,
         RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
-        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state, pane_body_frame,
-        resolved_browser_uri, split_frame, workspace_window_content_frame,
+        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
+        default_session_path_for_preview, pane_body_frame, resolved_browser_uri, split_frame,
+        workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -3561,6 +3569,53 @@ mod tests {
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
+        }
+    }
+
+    fn bootstrap_with_notification(cleared: bool) -> BootstrapModel {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let (pane_id, surface_id) = {
+            let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+            let pane_id = workspace.active_pane;
+            let surface_id = workspace
+                .panes
+                .get(&pane_id)
+                .and_then(|pane| pane.active_surface())
+                .map(|surface| surface.id)
+                .expect("surface");
+            (pane_id, surface_id)
+        };
+        let now = OffsetDateTime::now_utc();
+        model
+            .workspaces
+            .get_mut(&workspace_id)
+            .expect("workspace")
+            .notifications
+            .push(NotificationItem {
+                pane_id,
+                surface_id,
+                kind: SignalKind::Notification,
+                state: DomainAttentionState::WaitingInput,
+                title: Some("Heads up".into()),
+                message: "Needs attention".into(),
+                created_at: now,
+                cleared_at: cleared.then_some(now),
+            });
+
+        BootstrapModel {
+            app_state: AppState::new(
+                model,
+                default_session_path_for_preview(if cleared {
+                    "greenfield-preview-done-activity"
+                } else {
+                    "greenfield-preview-activity"
+                }),
+                BackendChoice::Mock,
+                ShellLaunchSpec::fallback(),
+            )
+            .expect("preview app state"),
+            ..bootstrap()
         }
     }
 
@@ -3882,6 +3937,75 @@ mod tests {
         let snapshot = core.snapshot();
         assert!(snapshot.overview_mode);
         assert!(snapshot.portal.panes.is_empty());
+    }
+
+    #[test]
+    fn single_window_fills_normal_mode_viewport_when_attention_panel_hidden() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let workspace = &snapshot.current_workspace;
+        let active_window = workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == workspace.active_window_id)
+            .expect("active window");
+
+        assert!(!snapshot.attention_panel_visible);
+        assert_eq!(snapshot.portal.content.x, snapshot.metrics.sidebar_width);
+        assert_eq!(snapshot.portal.content.y, snapshot.metrics.toolbar_height);
+        assert_eq!(active_window.frame.x, snapshot.portal.content.x);
+        assert_eq!(active_window.frame.y, snapshot.portal.content.y);
+        assert_eq!(active_window.frame.width, snapshot.portal.content.width);
+        assert_eq!(active_window.frame.height, snapshot.portal.content.height);
+    }
+
+    #[test]
+    fn normal_mode_canvas_offsets_are_zero() {
+        let snapshot = SharedCore::bootstrap(bootstrap()).snapshot();
+
+        assert_eq!(snapshot.current_workspace.canvas_offset_x, 0);
+        assert_eq!(snapshot.current_workspace.canvas_offset_y, 0);
+    }
+
+    #[test]
+    fn overview_mode_uses_outer_padding() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        let snapshot = core.snapshot();
+        let workspace = &snapshot.current_workspace;
+        let active_window = workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == workspace.active_window_id)
+            .expect("active window");
+
+        assert!(snapshot.overview_mode);
+        assert!(workspace.canvas_offset_x > 0);
+        assert!(workspace.canvas_offset_y > 0);
+        assert!(active_window.frame.x > workspace.viewport_origin_x);
+        assert!(active_window.frame.y > workspace.viewport_origin_y);
+    }
+
+    #[test]
+    fn attention_panel_visibility_tracks_activity_content() {
+        let empty_snapshot = SharedCore::bootstrap(bootstrap()).snapshot();
+        let unread_snapshot = SharedCore::bootstrap(bootstrap_with_notification(false)).snapshot();
+        let done_snapshot = SharedCore::bootstrap(bootstrap_with_notification(true)).snapshot();
+
+        assert!(!empty_snapshot.attention_panel_visible);
+        assert!(empty_snapshot.activity.is_empty());
+        assert!(empty_snapshot.done_activity.is_empty());
+
+        assert!(unread_snapshot.attention_panel_visible);
+        assert!(!unread_snapshot.activity.is_empty());
+        assert!(unread_snapshot.portal.content.width < empty_snapshot.portal.content.width);
+
+        assert!(done_snapshot.attention_panel_visible);
+        assert!(done_snapshot.activity.is_empty());
+        assert!(!done_snapshot.done_activity.is_empty());
+        assert!(done_snapshot.portal.content.width < empty_snapshot.portal.content.width);
     }
 
     #[test]
