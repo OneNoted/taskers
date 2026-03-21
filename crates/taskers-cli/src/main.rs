@@ -11,8 +11,9 @@ use taskers_control::{
     default_socket_path, serve,
 };
 use taskers_domain::{
-    AppModel, Direction, KEYBOARD_RESIZE_STEP, PaneId, PaneKind, PaneMetadataPatch, SignalEvent,
-    SignalKind, SplitAxis, SurfaceId, WorkspaceId,
+    AgentTarget, AppModel, AttentionState, Direction, KEYBOARD_RESIZE_STEP, PaneId, PaneKind,
+    PaneMetadataPatch, ProgressState, SignalEvent, SignalKind, SplitAxis, SurfaceId,
+    WorkspaceId, WorkspaceLogEntry,
 };
 use time::OffsetDateTime;
 
@@ -79,6 +80,10 @@ enum Command {
         body: Option<String>,
         #[arg(long)]
         agent: Option<String>,
+    },
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
     },
     Workspace {
         #[command(subcommand)]
@@ -253,6 +258,144 @@ enum AgentHookCommand {
         title: Option<String>,
         #[arg(long)]
         message: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    Status {
+        #[command(subcommand)]
+        command: AgentStatusCommand,
+    },
+    Progress {
+        #[command(subcommand)]
+        command: AgentProgressCommand,
+    },
+    Log {
+        #[command(subcommand)]
+        command: AgentLogCommand,
+    },
+    Notify {
+        #[command(subcommand)]
+        command: AgentNotifyCommand,
+    },
+    Flash {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+    },
+    FocusUnread {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentStatusCommand {
+    Set {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        text: String,
+    },
+    Clear {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentProgressCommand {
+    Set {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        value: u16,
+        #[arg(long)]
+        label: Option<String>,
+    },
+    Clear {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentLogCommand {
+    Append {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        message: String,
+        #[arg(long)]
+        source: Option<String>,
+    },
+    List {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+    },
+    Clear {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentNotifyCommand {
+    Create {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long, value_enum, default_value_t = CliAgentTargetScope::Surface)]
+        scope: CliAgentTargetScope,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        message: String,
+        #[arg(long, value_enum, default_value_t = CliAttentionState::Waiting)]
+        state: CliAttentionState,
+    },
+    List {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+    },
+    Clear {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: Option<WorkspaceId>,
+        #[arg(long)]
+        pane: Option<PaneId>,
+        #[arg(long)]
+        surface: Option<SurfaceId>,
+        #[arg(long, value_enum, default_value_t = CliAgentTargetScope::Surface)]
+        scope: CliAgentTargetScope,
     },
 }
 
@@ -445,6 +588,22 @@ enum CliPaneKind {
     Browser,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliAgentTargetScope {
+    Workspace,
+    Pane,
+    Surface,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliAttentionState {
+    Normal,
+    Busy,
+    Completed,
+    Waiting,
+    Error,
+}
+
 impl From<CliSignalKind> for SignalKind {
     fn from(value: CliSignalKind) -> Self {
         match value {
@@ -484,6 +643,18 @@ impl From<CliPaneKind> for PaneKind {
         match value {
             CliPaneKind::Terminal => PaneKind::Terminal,
             CliPaneKind::Browser => PaneKind::Browser,
+        }
+    }
+}
+
+impl From<CliAttentionState> for AttentionState {
+    fn from(value: CliAttentionState) -> Self {
+        match value {
+            CliAttentionState::Normal => AttentionState::Normal,
+            CliAttentionState::Busy => AttentionState::Busy,
+            CliAttentionState::Completed => AttentionState::Completed,
+            CliAttentionState::Waiting => AttentionState::WaitingInput,
+            CliAttentionState::Error => AttentionState::Error,
         }
     }
 }
@@ -640,14 +811,15 @@ async fn main() -> anyhow::Result<()> {
             body,
             agent,
         } => {
-            let workspace_id = workspace
-                .or_else(env_workspace_id)
-                .context("missing workspace id; pass --workspace or run from inside Taskers")?;
-            let pane_id = pane
-                .or_else(env_pane_id)
-                .context("missing pane id; pass --pane or run from inside Taskers")?;
-            let surface_id = surface.or_else(env_surface_id);
             let client = ControlClient::new(resolve_socket_path(socket));
+            let model = query_model(&client).await?;
+            let target = resolve_agent_target(
+                &model,
+                workspace,
+                pane,
+                surface,
+                CliAgentTargetScope::Surface,
+            )?;
             let normalized_title = title.trim();
             let normalized_body = body
                 .as_deref()
@@ -655,33 +827,243 @@ async fn main() -> anyhow::Result<()> {
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned);
             let message = normalized_body.unwrap_or_else(|| normalized_title.to_string());
-            let inferred_agent = agent.or_else(|| infer_agent_kind(normalized_title));
-            let metadata = Some(taskers_domain::SignalPaneMetadata {
-                title: None,
-                agent_title: Some(normalized_title.to_string()),
-                cwd: None,
-                repo_name: None,
-                git_branch: None,
-                ports: Vec::new(),
-                agent_kind: inferred_agent,
-                agent_active: None,
-            });
+            let title = if agent.is_some() {
+                Some(normalized_title.to_string())
+            } else {
+                Some(normalized_title.to_string())
+            };
             let response = client
-                .send(ControlCommand::EmitSignal {
-                    workspace_id,
-                    pane_id,
-                    surface_id,
-                    event: SignalEvent {
-                        source: format!("notify:{normalized_title}"),
-                        kind: SignalKind::Notification,
-                        message: Some(message),
-                        metadata,
-                        timestamp: OffsetDateTime::now_utc(),
-                    },
+                .send(ControlCommand::AgentCreateNotification {
+                    target,
+                    title,
+                    message,
+                    state: AttentionState::WaitingInput,
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
+        Command::Agent { command } => match command {
+            AgentCommand::Status { command } => match command {
+                AgentStatusCommand::Set {
+                    socket,
+                    workspace,
+                    text,
+                } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let workspace_id = resolve_workspace_id_from_model(&model, workspace)?;
+                    let response = send_control_command(
+                        &client,
+                        ControlCommand::AgentSetStatus { workspace_id, text },
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+                AgentStatusCommand::Clear { socket, workspace } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let workspace_id = resolve_workspace_id_from_model(&model, workspace)?;
+                    let response = send_control_command(
+                        &client,
+                        ControlCommand::AgentClearStatus { workspace_id },
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+            },
+            AgentCommand::Progress { command } => match command {
+                AgentProgressCommand::Set {
+                    socket,
+                    workspace,
+                    value,
+                    label,
+                } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let workspace_id = resolve_workspace_id_from_model(&model, workspace)?;
+                    let response = send_control_command(
+                        &client,
+                        ControlCommand::AgentSetProgress {
+                            workspace_id,
+                            progress: ProgressState {
+                                value,
+                                label,
+                            },
+                        },
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+                AgentProgressCommand::Clear { socket, workspace } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let workspace_id = resolve_workspace_id_from_model(&model, workspace)?;
+                    let response = send_control_command(
+                        &client,
+                        ControlCommand::AgentClearProgress { workspace_id },
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+            },
+            AgentCommand::Log { command } => match command {
+                AgentLogCommand::Append {
+                    socket,
+                    workspace,
+                    message,
+                    source,
+                } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let workspace_id = resolve_workspace_id_from_model(&model, workspace)?;
+                    let response = send_control_command(
+                        &client,
+                        ControlCommand::AgentAppendLog {
+                            workspace_id,
+                            entry: WorkspaceLogEntry {
+                                source,
+                                message,
+                                created_at: OffsetDateTime::now_utc(),
+                            },
+                        },
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+                AgentLogCommand::List { socket, workspace } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let workspace_id = resolve_workspace_id_from_model(&model, workspace)?;
+                    let workspace = model
+                        .workspaces
+                        .get(&workspace_id)
+                        .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+                    println!("{}", serde_json::to_string_pretty(&workspace.log_entries)?);
+                }
+                AgentLogCommand::Clear { socket, workspace } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let workspace_id = resolve_workspace_id_from_model(&model, workspace)?;
+                    let response = send_control_command(
+                        &client,
+                        ControlCommand::AgentClearLog { workspace_id },
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+            },
+            AgentCommand::Notify { command } => match command {
+                AgentNotifyCommand::Create {
+                    socket,
+                    workspace,
+                    pane,
+                    surface,
+                    scope,
+                    title,
+                    message,
+                    state,
+                } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let target = resolve_agent_target(&model, workspace, pane, surface, scope)?;
+                    let response = send_control_command(
+                        &client,
+                        ControlCommand::AgentCreateNotification {
+                            target,
+                            title,
+                            message,
+                            state: state.into(),
+                        },
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+                AgentNotifyCommand::List { socket, workspace } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let workspace_filter = workspace.or_else(env_workspace_id);
+                    let payload = model
+                        .activity_items()
+                        .into_iter()
+                        .filter(|item| workspace_filter.is_none_or(|workspace_id| item.workspace_id == workspace_id))
+                        .map(|item| {
+                            serde_json::json!({
+                                "workspace_id": item.workspace_id,
+                                "workspace_window_id": item.workspace_window_id,
+                                "pane_id": item.pane_id,
+                                "surface_id": item.surface_id,
+                                "kind": format!("{:?}", item.kind).to_lowercase(),
+                                "state": format!("{:?}", item.state).to_lowercase(),
+                                "title": item.title,
+                                "message": item.message,
+                                "created_at": item.created_at,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                }
+                AgentNotifyCommand::Clear {
+                    socket,
+                    workspace,
+                    pane,
+                    surface,
+                    scope,
+                } => {
+                    let client = ControlClient::new(resolve_socket_path(socket));
+                    let model = query_model(&client).await?;
+                    let target = resolve_agent_target(&model, workspace, pane, surface, scope)?;
+                    let response = send_control_command(
+                        &client,
+                        ControlCommand::AgentClearNotifications { target },
+                    )
+                    .await?;
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+            },
+            AgentCommand::Flash {
+                socket,
+                workspace,
+                pane,
+                surface,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let model = query_model(&client).await?;
+                let target = resolve_agent_target(
+                    &model,
+                    workspace,
+                    pane,
+                    surface,
+                    CliAgentTargetScope::Surface,
+                )?;
+                let AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                } = target
+                else {
+                    bail!("surface flash requires a surface target");
+                };
+                let response = send_control_command(
+                    &client,
+                    ControlCommand::AgentTriggerFlash {
+                        workspace_id,
+                        pane_id,
+                        surface_id,
+                    },
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            AgentCommand::FocusUnread { socket } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = send_control_command(
+                    &client,
+                    ControlCommand::AgentFocusLatestUnread { window_id: None },
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+        },
         Command::Workspace { command } => match command {
             WorkspaceCommand::List { socket } => {
                 let client = ControlClient::new(resolve_socket_path(socket));
@@ -1288,6 +1670,54 @@ fn active_surface_for_pane(
         .and_then(|workspace| workspace.panes.get(&pane_id))
         .map(|pane| pane.active_surface)
         .ok_or_else(|| anyhow!("pane {pane_id} is not present in workspace {workspace_id}"))
+}
+
+fn resolve_workspace_id_from_model(
+    model: &AppModel,
+    workspace: Option<WorkspaceId>,
+) -> anyhow::Result<WorkspaceId> {
+    workspace
+        .or_else(env_workspace_id)
+        .or_else(|| model.active_workspace_id())
+        .context("missing workspace id; pass --workspace or run from inside Taskers")
+}
+
+fn resolve_agent_target(
+    model: &AppModel,
+    workspace: Option<WorkspaceId>,
+    pane: Option<PaneId>,
+    surface: Option<SurfaceId>,
+    scope: CliAgentTargetScope,
+) -> anyhow::Result<AgentTarget> {
+    let workspace_id = resolve_workspace_id_from_model(model, workspace)?;
+    let workspace_record = model
+        .workspaces
+        .get(&workspace_id)
+        .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+
+    let resolved_pane = pane
+        .or_else(env_pane_id)
+        .unwrap_or(workspace_record.active_pane);
+    let pane_record = workspace_record
+        .panes
+        .get(&resolved_pane)
+        .ok_or_else(|| anyhow!("pane {resolved_pane} is not present in workspace {workspace_id}"))?;
+    let resolved_surface = surface
+        .or_else(env_surface_id)
+        .unwrap_or(pane_record.active_surface);
+
+    match scope {
+        CliAgentTargetScope::Workspace => Ok(AgentTarget::Workspace { workspace_id }),
+        CliAgentTargetScope::Pane => Ok(AgentTarget::Pane {
+            workspace_id,
+            pane_id: resolved_pane,
+        }),
+        CliAgentTargetScope::Surface => Ok(AgentTarget::Surface {
+            workspace_id,
+            pane_id: resolved_pane,
+            surface_id: resolved_surface,
+        }),
+    }
 }
 
 async fn create_surface(

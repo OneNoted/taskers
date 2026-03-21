@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use taskers_domain::{
-    AppModel, Direction, PaneId, PaneKind, PaneMetadataPatch, PersistedSession, SignalEvent,
-    SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceViewport,
-    WorkspaceWindowId, WorkspaceWindowMoveTarget,
+    AgentTarget, AppModel, AttentionState, Direction, PaneId, PaneKind, PaneMetadataPatch,
+    PersistedSession, ProgressState, SignalEvent, SplitAxis, SurfaceId, WindowId,
+    WorkspaceColumnId, WorkspaceId, WorkspaceLogEntry, WorkspaceViewport, WorkspaceWindowId,
+    WorkspaceWindowMoveTarget,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +153,44 @@ pub enum ControlCommand {
         pane_id: PaneId,
         surface_id: Option<SurfaceId>,
         event: SignalEvent,
+    },
+    AgentSetStatus {
+        workspace_id: WorkspaceId,
+        text: String,
+    },
+    AgentClearStatus {
+        workspace_id: WorkspaceId,
+    },
+    AgentSetProgress {
+        workspace_id: WorkspaceId,
+        progress: ProgressState,
+    },
+    AgentClearProgress {
+        workspace_id: WorkspaceId,
+    },
+    AgentAppendLog {
+        workspace_id: WorkspaceId,
+        entry: WorkspaceLogEntry,
+    },
+    AgentClearLog {
+        workspace_id: WorkspaceId,
+    },
+    AgentCreateNotification {
+        target: AgentTarget,
+        title: Option<String>,
+        message: String,
+        state: AttentionState,
+    },
+    AgentClearNotifications {
+        target: AgentTarget,
+    },
+    AgentTriggerFlash {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    AgentFocusLatestUnread {
+        window_id: Option<WindowId>,
     },
     QueryStatus {
         query: ControlQuery,

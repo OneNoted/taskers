@@ -17,6 +17,7 @@ pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 10;
 pub const MIN_WORKSPACE_WINDOW_WIDTH: i32 = 720;
 pub const MIN_WORKSPACE_WINDOW_HEIGHT: i32 = 420;
 pub const KEYBOARD_RESIZE_STEP: i32 = 80;
+const WORKSPACE_LOG_RETENTION: usize = 200;
 
 fn split_top_level_extent(extent: i32, min_extent: i32) -> (i32, i32) {
     let extent = extent.max(min_extent);
@@ -348,6 +349,14 @@ pub struct NotificationItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceLogEntry {
+    #[serde(default)]
+    pub source: Option<String>,
+    pub message: String,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityItem {
     pub workspace_id: WorkspaceId,
     pub workspace_window_id: Option<WorkspaceWindowId>,
@@ -395,6 +404,23 @@ pub struct WorkspaceAgentSummary {
     pub title: Option<String>,
     pub state: WorkspaceAgentState,
     pub last_signal_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum AgentTarget {
+    Workspace {
+        workspace_id: WorkspaceId,
+    },
+    Pane {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+    },
+    Surface {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
 }
 
 fn default_notification_kind() -> SignalKind {
@@ -558,6 +584,16 @@ pub struct Workspace {
     pub viewport: WorkspaceViewport,
     pub notifications: Vec<NotificationItem>,
     #[serde(default)]
+    pub status_text: Option<String>,
+    #[serde(default)]
+    pub progress: Option<ProgressState>,
+    #[serde(default)]
+    pub log_entries: Vec<WorkspaceLogEntry>,
+    #[serde(default)]
+    pub surface_flash_tokens: BTreeMap<SurfaceId, u64>,
+    #[serde(default)]
+    pub next_flash_token: u64,
+    #[serde(default)]
     pub custom_color: Option<String>,
 }
 
@@ -594,6 +630,11 @@ impl Workspace {
             active_pane,
             viewport: WorkspaceViewport::default(),
             notifications: Vec::new(),
+            status_text: None,
+            progress: None,
+            log_entries: Vec::new(),
+            surface_flash_tokens: BTreeMap::new(),
+            next_flash_token: 0,
             custom_color: None,
         }
     }
@@ -697,6 +738,145 @@ impl Workspace {
                 notification.cleared_at = Some(now);
             }
         }
+    }
+
+    fn active_surface_for_pane(&self, pane_id: PaneId) -> Option<SurfaceId> {
+        self.panes.get(&pane_id).map(|pane| pane.active_surface)
+    }
+
+    fn notification_target_ids(
+        &self,
+        target: &AgentTarget,
+    ) -> Result<(WorkspaceId, PaneId, SurfaceId), DomainError> {
+        match *target {
+            AgentTarget::Workspace { workspace_id } => {
+                if workspace_id != self.id {
+                    return Err(DomainError::MissingWorkspace(workspace_id));
+                }
+                let pane_id = self.active_pane;
+                let surface_id = self
+                    .active_surface_for_pane(pane_id)
+                    .ok_or(DomainError::PaneNotInWorkspace {
+                        workspace_id,
+                        pane_id,
+                    })?;
+                Ok((workspace_id, pane_id, surface_id))
+            }
+            AgentTarget::Pane {
+                workspace_id,
+                pane_id,
+            } => {
+                if workspace_id != self.id {
+                    return Err(DomainError::MissingWorkspace(workspace_id));
+                }
+                let surface_id = self
+                    .active_surface_for_pane(pane_id)
+                    .ok_or(DomainError::PaneNotInWorkspace {
+                        workspace_id,
+                        pane_id,
+                    })?;
+                Ok((workspace_id, pane_id, surface_id))
+            }
+            AgentTarget::Surface {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                if workspace_id != self.id {
+                    return Err(DomainError::MissingWorkspace(workspace_id));
+                }
+                if !self
+                    .panes
+                    .get(&pane_id)
+                    .is_some_and(|pane| pane.surfaces.contains_key(&surface_id))
+                {
+                    return Err(DomainError::SurfaceNotInPane {
+                        workspace_id,
+                        pane_id,
+                        surface_id,
+                    });
+                }
+                Ok((workspace_id, pane_id, surface_id))
+            }
+        }
+    }
+
+    fn clear_notifications_matching(&mut self, target: &AgentTarget) -> Result<(), DomainError> {
+        let now = OffsetDateTime::now_utc();
+        match *target {
+            AgentTarget::Workspace { workspace_id } => {
+                if workspace_id != self.id {
+                    return Err(DomainError::MissingWorkspace(workspace_id));
+                }
+                for notification in &mut self.notifications {
+                    if notification.cleared_at.is_none() {
+                        notification.cleared_at = Some(now);
+                    }
+                }
+            }
+            AgentTarget::Pane {
+                workspace_id,
+                pane_id,
+            } => {
+                if workspace_id != self.id {
+                    return Err(DomainError::MissingWorkspace(workspace_id));
+                }
+                if !self.panes.contains_key(&pane_id) {
+                    return Err(DomainError::PaneNotInWorkspace {
+                        workspace_id,
+                        pane_id,
+                    });
+                }
+                for notification in &mut self.notifications {
+                    if notification.pane_id == pane_id && notification.cleared_at.is_none() {
+                        notification.cleared_at = Some(now);
+                    }
+                }
+            }
+            AgentTarget::Surface {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                if workspace_id != self.id {
+                    return Err(DomainError::MissingWorkspace(workspace_id));
+                }
+                if !self
+                    .panes
+                    .get(&pane_id)
+                    .is_some_and(|pane| pane.surfaces.contains_key(&surface_id))
+                {
+                    return Err(DomainError::SurfaceNotInPane {
+                        workspace_id,
+                        pane_id,
+                        surface_id,
+                    });
+                }
+                for notification in &mut self.notifications {
+                    if notification.pane_id == pane_id
+                        && notification.surface_id == surface_id
+                        && notification.cleared_at.is_none()
+                    {
+                        notification.cleared_at = Some(now);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn append_log_entry(&mut self, entry: WorkspaceLogEntry) {
+        self.log_entries.push(entry);
+        let overflow = self.log_entries.len().saturating_sub(WORKSPACE_LOG_RETENTION);
+        if overflow > 0 {
+            self.log_entries.drain(0..overflow);
+        }
+    }
+
+    fn trigger_surface_flash(&mut self, surface_id: SurfaceId) {
+        self.next_flash_token = self.next_flash_token.saturating_add(1);
+        self.surface_flash_tokens
+            .insert(surface_id, self.next_flash_token);
     }
 
     fn top_level_neighbor(
@@ -971,6 +1151,7 @@ pub struct WorkspaceSummary {
     pub display_attention: AttentionState,
     pub unread_count: usize,
     pub latest_notification: Option<String>,
+    pub status_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1846,6 +2027,185 @@ impl AppModel {
         Ok(())
     }
 
+    pub fn set_workspace_status(
+        &mut self,
+        workspace_id: WorkspaceId,
+        text: String,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let normalized = text.trim();
+        workspace.status_text = (!normalized.is_empty()).then(|| normalized.to_owned());
+        Ok(())
+    }
+
+    pub fn clear_workspace_status(&mut self, workspace_id: WorkspaceId) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        workspace.status_text = None;
+        Ok(())
+    }
+
+    pub fn set_workspace_progress(
+        &mut self,
+        workspace_id: WorkspaceId,
+        progress: ProgressState,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        workspace.progress = Some(ProgressState {
+            value: progress.value.min(1000),
+            label: progress.label,
+        });
+        Ok(())
+    }
+
+    pub fn clear_workspace_progress(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        workspace.progress = None;
+        Ok(())
+    }
+
+    pub fn append_workspace_log(
+        &mut self,
+        workspace_id: WorkspaceId,
+        entry: WorkspaceLogEntry,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        workspace.append_log_entry(entry);
+        Ok(())
+    }
+
+    pub fn clear_workspace_log(&mut self, workspace_id: WorkspaceId) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        workspace.log_entries.clear();
+        Ok(())
+    }
+
+    pub fn create_agent_notification(
+        &mut self,
+        target: AgentTarget,
+        title: Option<String>,
+        message: String,
+        state: AttentionState,
+    ) -> Result<(), DomainError> {
+        let workspace_id = match target {
+            AgentTarget::Workspace { workspace_id }
+            | AgentTarget::Pane { workspace_id, .. }
+            | AgentTarget::Surface { workspace_id, .. } => workspace_id,
+        };
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let (_, pane_id, surface_id) = workspace.notification_target_ids(&target)?;
+        let now = OffsetDateTime::now_utc();
+
+        if let Some(pane) = workspace.panes.get_mut(&pane_id)
+            && let Some(surface) = pane.surfaces.get_mut(&surface_id)
+        {
+            surface.attention = state;
+        }
+
+        workspace.notifications.push(NotificationItem {
+            pane_id,
+            surface_id,
+            kind: SignalKind::Notification,
+            state,
+            title: title.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()),
+            message,
+            created_at: now,
+            cleared_at: None,
+        });
+        Ok(())
+    }
+
+    pub fn clear_agent_notifications(&mut self, target: AgentTarget) -> Result<(), DomainError> {
+        let workspace_id = match target {
+            AgentTarget::Workspace { workspace_id }
+            | AgentTarget::Pane { workspace_id, .. }
+            | AgentTarget::Surface { workspace_id, .. } => workspace_id,
+        };
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        workspace.clear_notifications_matching(&target)
+    }
+
+    pub fn trigger_surface_flash(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        if !workspace
+            .panes
+            .get(&pane_id)
+            .is_some_and(|pane| pane.surfaces.contains_key(&surface_id))
+        {
+            return Err(DomainError::SurfaceNotInPane {
+                workspace_id,
+                pane_id,
+                surface_id,
+            });
+        }
+        workspace.trigger_surface_flash(surface_id);
+        Ok(())
+    }
+
+    pub fn focus_latest_unread(&mut self, window_id: WindowId) -> Result<bool, DomainError> {
+        let window = self
+            .windows
+            .get(&window_id)
+            .ok_or(DomainError::MissingWindow(window_id))?;
+        let target = window
+            .workspace_order
+            .iter()
+            .filter_map(|workspace_id| self.workspaces.get(workspace_id))
+            .flat_map(|workspace| {
+                workspace
+                    .notifications
+                    .iter()
+                    .filter(|notification| notification.cleared_at.is_none())
+                    .map(move |notification| (workspace.id, notification))
+            })
+            .max_by_key(|(_, notification)| notification.created_at)
+            .map(|(workspace_id, notification)| {
+                (workspace_id, notification.pane_id, notification.surface_id)
+            });
+
+        let Some((workspace_id, pane_id, surface_id)) = target else {
+            return Ok(false);
+        };
+
+        self.switch_workspace(window_id, workspace_id)?;
+        self.focus_surface(workspace_id, pane_id, surface_id)?;
+        Ok(true)
+    }
+
     pub fn close_surface(
         &mut self,
         workspace_id: WorkspaceId,
@@ -2421,6 +2781,7 @@ impl AppModel {
                     display_attention: unread_attention.unwrap_or(highest_attention),
                     unread_count: unread.len(),
                     latest_notification,
+                    status_text: workspace.status_text.clone(),
                 }
             })
             .collect();
@@ -2478,6 +2839,16 @@ struct CurrentWorkspaceSerde {
     #[serde(default)]
     notifications: Vec<NotificationItem>,
     #[serde(default)]
+    status_text: Option<String>,
+    #[serde(default)]
+    progress: Option<ProgressState>,
+    #[serde(default)]
+    log_entries: Vec<WorkspaceLogEntry>,
+    #[serde(default)]
+    surface_flash_tokens: BTreeMap<SurfaceId, u64>,
+    #[serde(default)]
+    next_flash_token: u64,
+    #[serde(default)]
     custom_color: Option<String>,
 }
 
@@ -2493,6 +2864,11 @@ impl CurrentWorkspaceSerde {
             active_pane: self.active_pane,
             viewport: self.viewport,
             notifications: self.notifications,
+            status_text: self.status_text,
+            progress: self.progress,
+            log_entries: self.log_entries,
+            surface_flash_tokens: self.surface_flash_tokens,
+            next_flash_token: self.next_flash_token,
             custom_color: self.custom_color,
         };
         workspace.normalize();

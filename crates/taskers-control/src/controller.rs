@@ -434,6 +434,111 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::AgentSetStatus { workspace_id, text } => {
+                model.set_workspace_status(workspace_id, text)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace agent status updated".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentClearStatus { workspace_id } => {
+                model.clear_workspace_status(workspace_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace agent status cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentSetProgress {
+                workspace_id,
+                progress,
+            } => {
+                model.set_workspace_progress(workspace_id, progress)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace progress updated".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentClearProgress { workspace_id } => {
+                model.clear_workspace_progress(workspace_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace progress cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentAppendLog {
+                workspace_id,
+                entry,
+            } => {
+                model.append_workspace_log(workspace_id, entry)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace log appended".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentClearLog { workspace_id } => {
+                model.clear_workspace_log(workspace_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace log cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentCreateNotification {
+                target,
+                title,
+                message,
+                state,
+            } => {
+                model.create_agent_notification(target, title, message, state)?;
+                (
+                    ControlResponse::Ack {
+                        message: "agent notification created".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentClearNotifications { target } => {
+                model.clear_agent_notifications(target)?;
+                (
+                    ControlResponse::Ack {
+                        message: "agent notifications cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentTriggerFlash {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                model.trigger_surface_flash(workspace_id, pane_id, surface_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface flash triggered".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentFocusLatestUnread { window_id } => {
+                model.focus_latest_unread(window_id.unwrap_or(model.active_window))?;
+                (
+                    ControlResponse::Ack {
+                        message: "focused latest unread activity".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::QueryStatus { query } => match query {
                 ControlQuery::ActiveWindow | ControlQuery::All => (
                     ControlResponse::Status {
