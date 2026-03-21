@@ -1,13 +1,11 @@
 [workspace]
 members = [
-    "crates/taskers-app",
     "crates/taskers-launcher",
     "crates/taskers-core",
     "crates/taskers-cli",
     "crates/taskers-control",
     "crates/taskers-domain",
     "crates/taskers-ghostty",
-    "crates/taskers-macos-ffi",
     "crates/taskers-paths",
     "crates/taskers-runtime",
 ]
