@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use gtk::{
     Align, Box as GtkBox, CssProvider, EventControllerFocus, EventControllerScroll,
-    EventControllerScrollFlags, Fixed, GestureClick, Orientation, Overflow, Overlay,
+    EventControllerScrollFlags, GestureClick, Orientation, Overflow, Overlay,
     STYLE_PROVIDER_PRIORITY_APPLICATION, Widget, glib, prelude::*,
 };
 use std::{
@@ -93,7 +93,6 @@ impl DiagnosticRecord {
 
 pub struct TaskersHost {
     root: Overlay,
-    surface_layer: Fixed,
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
     ghostty_host: Option<GhosttyHost>,
@@ -113,15 +112,6 @@ impl TaskersHost {
         root.set_vexpand(true);
         root.set_child(Some(shell_widget));
         install_native_surface_css();
-
-        let surface_layer = Fixed::new();
-        surface_layer.set_hexpand(true);
-        surface_layer.set_vexpand(true);
-        // The surface layer spans the full window, but only mounted native pane
-        // bodies should intercept pointer events. Leaving the layer targetable
-        // blocks the shared shell webview underneath.
-        surface_layer.set_can_target(false);
-        root.add_overlay(&surface_layer);
 
         let pan_sink = event_sink.clone();
         let pan_diagnostics = diagnostics.clone();
@@ -155,7 +145,6 @@ impl TaskersHost {
 
         Self {
             root,
-            surface_layer,
             event_sink,
             diagnostics,
             ghostty_host,
@@ -258,7 +247,7 @@ impl TaskersHost {
 
         for surface_id in stale {
             if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
-                surface.shell.detach(&self.surface_layer);
+                surface.shell.detach(&self.root);
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -274,7 +263,7 @@ impl TaskersHost {
         for plan in desired {
             match self.browser_surfaces.get_mut(&plan.surface_id) {
                 Some(surface) => surface.sync(
-                    &self.surface_layer,
+                    &self.root,
                     &plan,
                     revision,
                     interactive,
@@ -282,7 +271,7 @@ impl TaskersHost {
                 )?,
                 None => {
                     let surface = BrowserSurface::new(
-                        &self.surface_layer,
+                        &self.root,
                         &plan,
                         revision,
                         interactive,
@@ -318,7 +307,7 @@ impl TaskersHost {
 
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
-                surface.shell.detach(&self.surface_layer);
+                surface.shell.detach(&self.root);
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -338,7 +327,7 @@ impl TaskersHost {
         for plan in desired {
             match self.terminal_surfaces.get_mut(&plan.surface_id) {
                 Some(surface) => surface.sync(
-                    &self.surface_layer,
+                    &self.root,
                     plan.frame,
                     plan.active,
                     revision,
@@ -348,7 +337,7 @@ impl TaskersHost {
                 ),
                 None => {
                     let surface = TerminalSurface::new(
-                        &self.surface_layer,
+                        &self.root,
                         &plan,
                         revision,
                         interactive,
@@ -379,7 +368,7 @@ struct BrowserSurface {
 
 impl BrowserSurface {
     fn new(
-        fixed: &Fixed,
+        overlay: &Overlay,
         plan: &PortalSurfacePlan,
         revision: u64,
         interactive: bool,
@@ -409,7 +398,7 @@ impl BrowserSurface {
         });
         let shell = NativeSurfaceShell::new(shell_class, interactive);
         shell.mount_child(webview.upcast_ref());
-        shell.position(fixed, plan.frame);
+        shell.position(overlay, plan.frame);
         let devtools_open = Rc::new(Cell::new(false));
 
         let pane_id = plan.pane_id;
@@ -573,13 +562,13 @@ impl BrowserSurface {
 
     fn sync(
         &mut self,
-        fixed: &Fixed,
+        overlay: &Overlay,
         plan: &PortalSurfacePlan,
         revision: u64,
         interactive: bool,
         diagnostics: Option<&DiagnosticsSink>,
     ) -> Result<()> {
-        self.shell.position(fixed, plan.frame);
+        self.shell.position(overlay, plan.frame);
         self.shell.set_interactive(interactive);
         self.webview.set_can_target(interactive);
 
@@ -676,7 +665,7 @@ struct TerminalSurface {
 
 impl TerminalSurface {
     fn new(
-        fixed: &Fixed,
+        overlay: &Overlay,
         plan: &PortalSurfacePlan,
         revision: u64,
         interactive: bool,
@@ -701,7 +690,7 @@ impl TerminalSurface {
         widget.set_can_target(interactive);
         let shell = NativeSurfaceShell::new(shell_class, interactive);
         shell.mount_child(&widget);
-        shell.position(fixed, plan.frame);
+        shell.position(overlay, plan.frame);
 
         connect_ghostty_widget(host, &widget, plan, event_sink, diagnostics.clone());
 
@@ -730,7 +719,7 @@ impl TerminalSurface {
 
     fn sync(
         &mut self,
-        fixed: &Fixed,
+        overlay: &Overlay,
         frame: taskers_core::Frame,
         active: bool,
         revision: u64,
@@ -740,7 +729,7 @@ impl TerminalSurface {
     ) {
         self.widget.set_can_target(interactive);
         self.shell.set_interactive(interactive);
-        self.shell.position(fixed, frame);
+        self.shell.position(overlay, frame);
         if active && interactive && (!self.active || !self.interactive) {
             let _ = host.focus_surface(&self.widget);
         }
@@ -787,16 +776,16 @@ impl NativeSurfaceShell {
         }
     }
 
-    fn position(&self, fixed: &Fixed, frame: taskers_core::Frame) {
-        position_widget(fixed, self.root.upcast_ref(), frame);
+    fn position(&self, overlay: &Overlay, frame: taskers_core::Frame) {
+        position_widget(overlay, self.root.upcast_ref(), frame);
     }
 
     fn set_interactive(&self, interactive: bool) {
         self.root.set_can_target(interactive);
     }
 
-    fn detach(&self, fixed: &Fixed) {
-        detach_from_fixed(fixed, self.root.upcast_ref());
+    fn detach(&self, overlay: &Overlay) {
+        detach_from_overlay(overlay, self.root.upcast_ref());
     }
 }
 
@@ -1013,18 +1002,24 @@ fn terminal_spec(plan: &PortalSurfacePlan) -> Result<&TerminalMountSpec> {
     }
 }
 
-fn position_widget(fixed: &Fixed, widget: &Widget, frame: taskers_core::Frame) {
+fn position_widget(overlay: &Overlay, widget: &Widget, frame: taskers_core::Frame) {
     widget.set_size_request(frame.width.max(1), frame.height.max(1));
+    widget.set_halign(Align::Start);
+    widget.set_valign(Align::Start);
+    widget.set_margin_start(frame.x.max(0));
+    widget.set_margin_top(frame.y.max(0));
     if widget.parent().is_some() {
-        fixed.move_(widget, f64::from(frame.x), f64::from(frame.y));
+        widget.queue_allocate();
     } else {
-        fixed.put(widget, f64::from(frame.x), f64::from(frame.y));
+        overlay.add_overlay(widget);
+        overlay.set_measure_overlay(widget, false);
+        overlay.set_clip_overlay(widget, true);
     }
 }
 
-fn detach_from_fixed(fixed: &Fixed, widget: &Widget) {
+fn detach_from_overlay(overlay: &Overlay, widget: &Widget) {
     if widget.parent().is_some() {
-        fixed.remove(widget);
+        overlay.remove_overlay(widget);
     }
 }
 
