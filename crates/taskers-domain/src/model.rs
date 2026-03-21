@@ -4227,4 +4227,127 @@ mod tests {
         assert_eq!(model.active_workspace_id(), Some(workspace_id));
         assert_ne!(workspace_id, other_workspace_id);
     }
+
+    #[test]
+    fn workspace_agent_state_flows_into_summary_and_logs_are_bounded() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+
+        model
+            .set_workspace_status(workspace_id, "Running import".into())
+            .expect("set status");
+        model
+            .set_workspace_progress(
+                workspace_id,
+                ProgressState {
+                    value: 420,
+                    label: Some("42%".into()),
+                },
+            )
+            .expect("set progress");
+
+        for index in 0..205 {
+            model
+                .append_workspace_log(
+                    workspace_id,
+                    WorkspaceLogEntry {
+                        source: Some("codex".into()),
+                        message: format!("log {index}"),
+                        created_at: OffsetDateTime::now_utc(),
+                    },
+                )
+                .expect("append log");
+        }
+
+        let summary = model
+            .workspace_summaries(model.active_window)
+            .expect("workspace summaries")
+            .into_iter()
+            .find(|summary| summary.workspace_id == workspace_id)
+            .expect("workspace summary");
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+
+        assert_eq!(summary.status_text.as_deref(), Some("Running import"));
+        assert_eq!(workspace.progress.as_ref().map(|progress| progress.value), Some(420));
+        assert_eq!(workspace.log_entries.len(), 200);
+        assert_eq!(workspace.log_entries.first().map(|entry| entry.message.as_str()), Some("log 5"));
+        assert_eq!(workspace.log_entries.last().map(|entry| entry.message.as_str()), Some("log 204"));
+    }
+
+    #[test]
+    fn focusing_latest_unread_prefers_newest_notification_in_active_window() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+        let second_workspace_id = model.create_workspace("Secondary");
+
+        model
+            .create_agent_notification(
+                AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                Some("Older".into()),
+                "First".into(),
+                AttentionState::WaitingInput,
+            )
+            .expect("older notification");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        model
+            .create_agent_notification(
+                AgentTarget::Workspace {
+                    workspace_id: second_workspace_id,
+                },
+                Some("Newest".into()),
+                "Second".into(),
+                AttentionState::WaitingInput,
+            )
+            .expect("newer notification");
+
+        let focused = model
+            .focus_latest_unread(model.active_window)
+            .expect("focus latest unread");
+
+        assert!(focused);
+        assert_eq!(model.active_workspace_id(), Some(second_workspace_id));
+    }
+
+    #[test]
+    fn triggering_surface_flash_advances_workspace_flash_token() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        model
+            .trigger_surface_flash(workspace_id, pane_id, surface_id)
+            .expect("trigger first flash");
+        let first_token = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.surface_flash_tokens.get(&surface_id))
+            .copied()
+            .expect("first flash token");
+        model
+            .trigger_surface_flash(workspace_id, pane_id, surface_id)
+            .expect("trigger second flash");
+        let second_token = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.surface_flash_tokens.get(&surface_id))
+            .copied()
+            .expect("second flash token");
+
+        assert!(second_token > first_token);
+    }
 }

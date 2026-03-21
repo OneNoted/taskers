@@ -6,8 +6,9 @@ use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot, Direction,
     LayoutNodeSnapshot, PaneId, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeStatus,
     SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutAction,
-    ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId,
-    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind, SurfaceSnapshot,
+    WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot,
+    WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -192,6 +193,10 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             core.dispatch_shell_action(ShellAction::ShowSection { section });
         }
     };
+    let jump_unread = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::FocusLatestUnread)
+    };
     let drag_source = use_signal(|| None::<WorkspaceId>);
     let drag_target = use_signal(|| None::<WorkspaceId>);
     let surface_drag_source = use_signal(|| None::<DraggedSurface>);
@@ -302,7 +307,23 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                                 span { class: "notification-count-pill notification-count-unread",
                                     "{snapshot.activity.len()} unread"
                                 }
+                                button {
+                                    class: "notification-jump-button",
+                                    onclick: jump_unread,
+                                    "Jump unread"
+                                }
                             }
+                        }
+                    }
+                    if snapshot.current_workspace_status.is_some()
+                        || snapshot.current_workspace_progress.is_some()
+                    {
+                        section { class: "attention-section attention-status",
+                            div { class: "attention-section-title", "Workspace status" }
+                            if let Some(status) = &snapshot.current_workspace_status {
+                                div { class: "attention-status-text", "{status}" }
+                            }
+                            {render_workspace_progress(&snapshot.current_workspace_progress)}
                         }
                     }
                     if !snapshot.agents.is_empty() {
@@ -323,6 +344,16 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             }
                             for item in snapshot.done_activity.iter().take(8) {
                                 {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
+                            }
+                        }
+                    }
+                    if !snapshot.current_workspace_log.is_empty() {
+                        section { class: "attention-section attention-log",
+                            div { class: "attention-section-title", "Workspace log" }
+                            div { class: "workspace-log-list",
+                                for entry in &snapshot.current_workspace_log {
+                                    {render_workspace_log_entry(entry)}
+                                }
                             }
                         }
                     }
@@ -506,7 +537,9 @@ fn render_workspace_item(
                             }
                         }
                     }
-                    if let Some(notification) = &workspace.notification_text {
+                    if let Some(status) = &workspace.status_text {
+                        div { class: "workspace-notification workspace-status", "{status}" }
+                    } else if let Some(notification) = &workspace.notification_text {
                         div { class: "workspace-notification", "{notification}" }
                     }
                     if let Some(branch) = &branch_row {
@@ -551,6 +584,20 @@ fn render_workspace_pull_requests(pull_requests: &[PullRequestSnapshot]) -> Elem
                 span { class: "workspace-pr-number", "#{pr.number}" }
                 span { class: "workspace-pr-title", "{pr.title}" }
             }
+        }
+    }
+}
+
+fn render_workspace_log_entry(entry: &WorkspaceLogEntrySnapshot) -> Element {
+    rsx! {
+        div { class: "workspace-log-entry",
+            div { class: "workspace-log-entry-header",
+                if let Some(source) = &entry.source {
+                    span { class: "workspace-log-source", "{source}" }
+                }
+                span { class: "workspace-log-time", "{entry.timestamp}" }
+            }
+            div { class: "workspace-log-message", "{entry.message}" }
         }
     }
 }

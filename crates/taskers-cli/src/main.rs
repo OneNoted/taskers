@@ -809,7 +809,7 @@ async fn main() -> anyhow::Result<()> {
             surface,
             title,
             body,
-            agent,
+            agent: _agent,
         } => {
             let client = ControlClient::new(resolve_socket_path(socket));
             let model = query_model(&client).await?;
@@ -827,15 +827,10 @@ async fn main() -> anyhow::Result<()> {
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned);
             let message = normalized_body.unwrap_or_else(|| normalized_title.to_string());
-            let title = if agent.is_some() {
-                Some(normalized_title.to_string())
-            } else {
-                Some(normalized_title.to_string())
-            };
             let response = client
                 .send(ControlCommand::AgentCreateNotification {
                     target,
-                    title,
+                    title: Some(normalized_title.to_string()),
                     message,
                     state: AttentionState::WaitingInput,
                 })
@@ -1802,9 +1797,17 @@ async fn emit_agent_hook(
                 | CliSignalKind::Notification
         )),
     });
-
-    let response = client
-        .send(ControlCommand::EmitSignal {
+    let normalized_message = message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let status_text = normalized_message
+        .clone()
+        .unwrap_or_else(|| normalized_title.clone());
+    let signal_response = send_control_command(
+        &client,
+        ControlCommand::EmitSignal {
             workspace_id,
             pane_id,
             surface_id,
@@ -1815,9 +1818,79 @@ async fn emit_agent_hook(
                 metadata,
                 timestamp: OffsetDateTime::now_utc(),
             },
-        })
+        },
+    )
+    .await?;
+
+    if let Some(log_message) = normalized_message.clone() {
+        let _ = send_control_command(
+            &client,
+            ControlCommand::AgentAppendLog {
+                workspace_id,
+                entry: WorkspaceLogEntry {
+                    source: Some(normalized_agent.clone()),
+                    message: log_message,
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            },
+        )
         .await?;
-    println!("{}", serde_json::to_string_pretty(&response)?);
+    }
+
+    match kind {
+        CliSignalKind::Started
+        | CliSignalKind::Progress
+        | CliSignalKind::WaitingInput
+        | CliSignalKind::Notification => {
+            let _ = send_control_command(
+                &client,
+                ControlCommand::AgentSetStatus {
+                    workspace_id,
+                    text: status_text,
+                },
+            )
+            .await?;
+        }
+        CliSignalKind::Completed => {
+            let _ = send_control_command(
+                &client,
+                ControlCommand::AgentClearStatus { workspace_id },
+            )
+            .await?;
+            let _ = send_control_command(
+                &client,
+                ControlCommand::AgentClearProgress { workspace_id },
+            )
+            .await?;
+        }
+        CliSignalKind::Metadata | CliSignalKind::Error => {}
+    }
+
+    if matches!(
+        kind,
+        CliSignalKind::WaitingInput | CliSignalKind::Notification | CliSignalKind::Error
+    ) {
+        let flash_surface_id = match surface_id.or_else(env_surface_id) {
+            Some(surface_id) => Some(surface_id),
+            None => {
+                let model = query_model(&client).await?;
+                Some(active_surface_for_pane(&model, workspace_id, pane_id)?)
+            }
+        };
+        if let Some(surface_id) = flash_surface_id {
+            let _ = send_control_command(
+                &client,
+                ControlCommand::AgentTriggerFlash {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+            )
+            .await?;
+        }
+    }
+
+    println!("{}", serde_json::to_string_pretty(&signal_response)?);
     Ok(())
 }
 

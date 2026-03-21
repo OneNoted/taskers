@@ -191,6 +191,7 @@ impl ShortcutPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutAction {
     ToggleOverview,
+    FocusLatestUnread,
     CloseTerminal,
     OpenBrowserSplit,
     FocusBrowserAddress,
@@ -221,8 +222,9 @@ pub enum ShortcutAction {
 }
 
 impl ShortcutAction {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::ToggleOverview,
+        Self::FocusLatestUnread,
         Self::CloseTerminal,
         Self::OpenBrowserSplit,
         Self::FocusBrowserAddress,
@@ -255,6 +257,7 @@ impl ShortcutAction {
     pub fn id(self) -> &'static str {
         match self {
             Self::ToggleOverview => "toggle_overview",
+            Self::FocusLatestUnread => "focus_latest_unread",
             Self::CloseTerminal => "close_terminal",
             Self::OpenBrowserSplit => "open_browser_split",
             Self::FocusBrowserAddress => "focus_browser_address",
@@ -288,6 +291,7 @@ impl ShortcutAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::ToggleOverview => "Toggle overview",
+            Self::FocusLatestUnread => "Jump to latest unread",
             Self::CloseTerminal => "Close terminal",
             Self::OpenBrowserSplit => "Open browser in split",
             Self::FocusBrowserAddress => "Focus browser address bar",
@@ -321,6 +325,9 @@ impl ShortcutAction {
     pub fn detail(self) -> &'static str {
         match self {
             Self::ToggleOverview => "Zoom the current workspace out to fit the full column strip.",
+            Self::FocusLatestUnread => {
+                "Focus the most recent unread attention item in the current app window."
+            }
             Self::CloseTerminal => "Close the active pane.",
             Self::OpenBrowserSplit => {
                 "Split the active pane to the right and open a browser surface."
@@ -365,7 +372,7 @@ impl ShortcutAction {
 
     pub fn category(self) -> &'static str {
         match self {
-            Self::ToggleOverview | Self::CloseTerminal => "General",
+            Self::ToggleOverview | Self::FocusLatestUnread | Self::CloseTerminal => "General",
             Self::OpenBrowserSplit
             | Self::FocusBrowserAddress
             | Self::ReloadBrowserPage
@@ -395,6 +402,7 @@ impl ShortcutAction {
         match preset {
             ShortcutPreset::Balanced => match self {
                 Self::ToggleOverview => &["<Control><Alt>o"],
+                Self::FocusLatestUnread => &["<Control><Shift>u"],
                 Self::CloseTerminal => &["<Control><Alt>x"],
                 Self::OpenBrowserSplit => &["<Control><Alt><Shift>l"],
                 Self::FocusBrowserAddress => &["<Control>l"],
@@ -425,6 +433,7 @@ impl ShortcutAction {
             },
             ShortcutPreset::PowerUser => match self {
                 Self::ToggleOverview => &["<Control><Alt>o"],
+                Self::FocusLatestUnread => &["<Control><Shift>u"],
                 Self::CloseTerminal => &["<Control><Alt>x"],
                 Self::OpenBrowserSplit => &["<Control><Alt><Shift>l"],
                 Self::FocusBrowserAddress => &["<Control>l"],
@@ -696,6 +705,7 @@ pub struct WorkspaceSummary {
     pub unread_activity: usize,
     pub attention: AttentionState,
     pub notification_text: Option<String>,
+    pub status_text: Option<String>,
     pub git_branch: Option<String>,
     pub working_directory: Option<String>,
     pub listening_ports: Vec<u16>,
@@ -708,6 +718,13 @@ pub struct WorkspaceSummary {
 pub struct ProgressSnapshot {
     pub fraction: f32,
     pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceLogEntrySnapshot {
+    pub source: Option<String>,
+    pub message: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -892,6 +909,9 @@ pub struct ShellSnapshot {
     pub agents: Vec<AgentSessionSnapshot>,
     pub activity: Vec<ActivityItemSnapshot>,
     pub done_activity: Vec<ActivityItemSnapshot>,
+    pub current_workspace_status: Option<String>,
+    pub current_workspace_progress: Option<ProgressSnapshot>,
+    pub current_workspace_log: Vec<WorkspaceLogEntrySnapshot>,
     pub portal: SurfacePortalPlan,
     pub metrics: LayoutMetrics,
     pub runtime_status: RuntimeStatus,
@@ -1012,6 +1032,7 @@ pub enum ShellAction {
         surface_id: SurfaceId,
         url: String,
     },
+    FocusLatestUnread,
     BrowserBack {
         surface_id: SurfaceId,
     },
@@ -1133,6 +1154,18 @@ impl TaskersCore {
             .workspaces
             .get(&workspace_id)
             .expect("active workspace should exist");
+        let current_workspace_progress = workspace_progress_snapshot(workspace);
+        let current_workspace_log = workspace
+            .log_entries
+            .iter()
+            .rev()
+            .take(12)
+            .map(|entry| WorkspaceLogEntrySnapshot {
+                source: entry.source.clone(),
+                message: entry.message.clone(),
+                timestamp: format_relative_time(entry.created_at),
+            })
+            .collect::<Vec<_>>();
         let active_window = workspace
             .active_window_record()
             .expect("active workspace window should exist");
@@ -1207,6 +1240,9 @@ impl TaskersCore {
             agents,
             activity,
             done_activity,
+            current_workspace_status: workspace.status_text.clone(),
+            current_workspace_progress,
+            current_workspace_log,
             portal: SurfacePortalPlan {
                 window: Frame::new(0, 0, self.ui.window_size.width, self.ui.window_size.height),
                 content: viewport,
@@ -1299,24 +1335,12 @@ impl TaskersCore {
                     unread_activity: summary.unread_count,
                     attention: summary.display_attention.into(),
                     notification_text: summary.latest_notification,
+                    status_text: summary.status_text,
                     git_branch,
                     working_directory,
                     listening_ports,
                     custom_color: workspace.and_then(|ws| ws.custom_color.clone()),
-                    progress: workspace
-                        .into_iter()
-                        .flat_map(|ws| ws.panes.values())
-                        .flat_map(|pane| pane.surfaces.values())
-                        .find_map(|surface| {
-                            surface
-                                .metadata
-                                .progress
-                                .as_ref()
-                                .map(|p| ProgressSnapshot {
-                                    fraction: f32::from(p.value.min(1000)) / 1000.0,
-                                    label: p.label.clone(),
-                                })
-                        }),
+                    progress: workspace.and_then(workspace_progress_snapshot),
                     pull_requests: workspace
                         .into_iter()
                         .flat_map(|ws| ws.panes.values())
@@ -1497,11 +1521,19 @@ impl TaskersCore {
     ) -> PaneSnapshot {
         let is_active = workspace.active_pane == pane.id;
         let has_unread = pane.highest_attention() != taskers_domain::AttentionState::Normal;
-        let flash_token = if is_active && has_unread {
+        let explicit_flash_token = pane
+            .surfaces
+            .values()
+            .filter_map(|surface| workspace.surface_flash_tokens.get(&surface.id))
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let focus_flash_token = if is_active && has_unread {
             self.revision
         } else {
             0
         };
+        let flash_token = focus_flash_token.max(explicit_flash_token);
         PaneSnapshot {
             id: pane.id,
             active: is_active,
@@ -1792,6 +1824,9 @@ impl TaskersCore {
             ShellAction::NavigateBrowser { surface_id, url } => {
                 self.navigate_browser_surface(surface_id, &url)
             }
+            ShellAction::FocusLatestUnread => {
+                self.dispatch_control(ControlCommand::AgentFocusLatestUnread { window_id: None })
+            }
             ShellAction::BrowserBack { surface_id } => {
                 self.queue_host_command(HostCommand::BrowserBack { surface_id })
             }
@@ -1835,6 +1870,9 @@ impl TaskersCore {
         match action {
             ShortcutAction::ToggleOverview => {
                 self.dispatch_shell_action(ShellAction::ToggleOverview)
+            }
+            ShortcutAction::FocusLatestUnread => {
+                self.dispatch_shell_action(ShellAction::FocusLatestUnread)
             }
             ShortcutAction::CloseTerminal => self.run_workspace_shortcut(|core, workspace_id| {
                 let pane_id = core
@@ -3424,19 +3462,41 @@ fn next_workspace_label(model: &AppModel) -> String {
     format!("Workspace {}", model.workspaces.len() + 1)
 }
 
+fn workspace_progress_snapshot(workspace: &Workspace) -> Option<ProgressSnapshot> {
+    workspace.progress.as_ref().map(|progress| ProgressSnapshot {
+        fraction: f32::from(progress.value.min(1000)) / 1000.0,
+        label: progress.label.clone(),
+    }).or_else(|| {
+        workspace
+            .panes
+            .values()
+            .flat_map(|pane| pane.surfaces.values())
+            .find_map(|surface| {
+                surface.metadata.progress.as_ref().map(|progress| ProgressSnapshot {
+                    fraction: f32::from(progress.value.min(1000)) / 1000.0,
+                    label: progress.label.clone(),
+                })
+            })
+    })
+}
+
 fn attention_panel_visible(model: &AppModel) -> bool {
     model
         .workspace_summaries(model.active_window)
         .map(|summaries| {
             summaries
                 .iter()
-                .any(|summary| !summary.agent_summaries.is_empty())
+                .any(|summary| !summary.agent_summaries.is_empty() || summary.status_text.is_some())
         })
         .unwrap_or(false)
         || model
-            .workspaces
-            .values()
-            .any(|workspace| !workspace.notifications.is_empty())
+        .workspaces
+        .values()
+        .any(|workspace| {
+            !workspace.notifications.is_empty()
+                || !workspace.log_entries.is_empty()
+                || workspace.progress.is_some()
+        })
 }
 
 fn fallback_surface_descriptor(surface: &SurfaceRecord) -> SurfaceDescriptor {
@@ -4233,5 +4293,153 @@ mod tests {
             Some(moved_surface_id)
         );
         assert_eq!(snapshot.current_workspace.active_pane, moved_pane_id);
+    }
+
+    #[test]
+    fn snapshot_exposes_workspace_agent_status_progress_and_log() {
+        let app_state = default_preview_app_state();
+        let workspace_id = app_state
+            .snapshot_model()
+            .active_workspace_id()
+            .expect("workspace");
+        let _ = app_state
+            .dispatch(ControlCommand::AgentSetStatus {
+                workspace_id,
+                text: "Running agent sync".into(),
+            })
+            .expect("set status");
+        let _ = app_state
+            .dispatch(ControlCommand::AgentSetProgress {
+                workspace_id,
+                progress: taskers_domain::ProgressState {
+                    value: 650,
+                    label: Some("65%".into()),
+                },
+            })
+            .expect("set progress");
+        let _ = app_state
+            .dispatch(ControlCommand::AgentAppendLog {
+                workspace_id,
+                entry: taskers_domain::WorkspaceLogEntry {
+                    source: Some("codex".into()),
+                    message: "Applied patch".into(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            })
+            .expect("append log");
+
+        let core = SharedCore::bootstrap(BootstrapModel {
+            app_state,
+            ..bootstrap()
+        });
+        let snapshot = core.snapshot();
+
+        assert_eq!(
+            snapshot.current_workspace_status.as_deref(),
+            Some("Running agent sync")
+        );
+        assert_eq!(
+            snapshot
+                .current_workspace_progress
+                .as_ref()
+                .map(|progress| progress.label.as_deref()),
+            Some(Some("65%"))
+        );
+        assert_eq!(snapshot.current_workspace_log.len(), 1);
+        assert_eq!(
+            snapshot.current_workspace_log[0].source.as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn agent_focus_latest_unread_command_switches_to_newest_workspace() {
+        let app_state = default_preview_app_state();
+        let core = SharedCore::bootstrap(BootstrapModel {
+            app_state: app_state.clone(),
+            ..bootstrap()
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let second_workspace_id = core.snapshot().current_workspace.id;
+        let second_pane_id = core.snapshot().current_workspace.active_pane;
+        let second_surface_id = find_pane(&core.snapshot().current_workspace.layout, second_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("second surface");
+        let first_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id != second_workspace_id)
+            .map(|workspace| workspace.id)
+            .expect("first workspace");
+
+        core.dispatch_shell_action(ShellAction::FocusWorkspace {
+            workspace_id: first_workspace_id,
+        });
+        let first_pane_id = core.snapshot().current_workspace.active_pane;
+        let first_surface_id = find_pane(&core.snapshot().current_workspace.layout, first_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("first surface");
+
+        let _ = app_state
+            .dispatch(ControlCommand::AgentCreateNotification {
+                target: taskers_domain::AgentTarget::Surface {
+                    workspace_id: first_workspace_id,
+                    pane_id: first_pane_id,
+                    surface_id: first_surface_id,
+                },
+                title: Some("Older".into()),
+                message: "Older".into(),
+                state: DomainAttentionState::WaitingInput,
+            })
+            .expect("create older notification");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = app_state
+            .dispatch(ControlCommand::AgentCreateNotification {
+                target: taskers_domain::AgentTarget::Surface {
+                    workspace_id: second_workspace_id,
+                    pane_id: second_pane_id,
+                    surface_id: second_surface_id,
+                },
+                title: Some("Newest".into()),
+                message: "Newest".into(),
+                state: DomainAttentionState::WaitingInput,
+            })
+            .expect("create newest notification");
+        core.sync_external_changes();
+
+        core.dispatch_shortcut_action(super::ShortcutAction::FocusLatestUnread);
+
+        assert_eq!(core.snapshot().current_workspace.id, second_workspace_id);
+    }
+
+    #[test]
+    fn surface_flash_command_updates_pane_flash_token() {
+        let app_state = default_preview_app_state();
+        let snapshot_model = app_state.snapshot_model();
+        let workspace_id = snapshot_model.active_workspace_id().expect("workspace");
+        let pane_id = snapshot_model
+            .active_workspace()
+            .expect("workspace")
+            .active_pane;
+        let surface_id = snapshot_model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+        let _ = app_state
+            .dispatch(ControlCommand::AgentTriggerFlash {
+                workspace_id,
+                pane_id,
+                surface_id,
+            })
+            .expect("trigger flash");
+        let core = SharedCore::bootstrap(BootstrapModel {
+            app_state,
+            ..bootstrap()
+        });
+        let snapshot = core.snapshot();
+        let pane = find_pane(&snapshot.current_workspace.layout, pane_id).expect("pane");
+        assert!(pane.focus_flash_token > 0);
     }
 }

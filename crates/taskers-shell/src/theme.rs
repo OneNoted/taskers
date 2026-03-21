@@ -483,6 +483,10 @@ button {{
   overflow: hidden;
 }}
 
+.workspace-status {{
+  color: {text_bright};
+}}
+
 .workspace-branch-row {{
   color: {text_muted};
   font-size: 10px;
@@ -1446,7 +1450,17 @@ button {{
 
 .notification-counts {{
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+}}
+
+.notification-jump-button {{
+  border: 1px solid {border_08};
+  background: transparent;
+  color: {text_bright};
+  font-size: 10px;
+  padding: 3px 7px;
 }}
 
 .notification-count-pill {{
@@ -1466,6 +1480,25 @@ button {{
   display: flex;
   flex-direction: column;
   gap: 4px;
+}}
+
+.attention-section {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+
+.attention-section-title {{
+  font-size: 10px;
+  font-weight: 600;
+  color: {text_dim};
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}}
+
+.attention-status-text {{
+  font-size: 12px;
+  color: {text_bright};
 }}
 
 .notification-timeline {{
@@ -1492,6 +1525,41 @@ button {{
   padding: 10px;
   background: {border_03};
   transition: background 0.14s ease-in-out;
+}}
+
+.workspace-log-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}}
+
+.workspace-log-entry {{
+  background: {border_03};
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
+.workspace-log-entry-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}}
+
+.workspace-log-source,
+.workspace-log-time {{
+  font-size: 10px;
+  color: {text_dim};
+}}
+
+.workspace-log-message {{
+  font-size: 11px;
+  color: {text_bright};
+  line-height: 1.35;
 }}
 
 .notification-row-button:hover .notification-row {{
