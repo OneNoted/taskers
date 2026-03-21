@@ -3,10 +3,10 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use taskers_domain::{
-    AgentTarget, AppModel, AttentionState, Direction, PaneId, PaneKind, PaneMetadataPatch,
-    PersistedSession, ProgressState, SignalEvent, SplitAxis, SurfaceId, WindowId,
-    WorkspaceColumnId, WorkspaceId, WorkspaceLogEntry, WorkspaceViewport, WorkspaceWindowId,
-    WorkspaceWindowMoveTarget,
+    AgentTarget, AppModel, AttentionState, Direction, NotificationDeliveryState, NotificationId,
+    PaneId, PaneKind, PaneMetadataPatch, PersistedSession, ProgressState, SignalEvent, SignalKind,
+    SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceLogEntry,
+    WorkspaceViewport, WorkspaceWindowId, WorkspaceWindowMoveTarget,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,9 +178,23 @@ pub enum ControlCommand {
     },
     AgentCreateNotification {
         target: AgentTarget,
+        kind: SignalKind,
         title: Option<String>,
+        subtitle: Option<String>,
+        external_id: Option<String>,
         message: String,
         state: AttentionState,
+    },
+    OpenNotification {
+        window_id: Option<WindowId>,
+        notification_id: NotificationId,
+    },
+    ClearNotification {
+        notification_id: NotificationId,
+    },
+    MarkNotificationDelivery {
+        notification_id: NotificationId,
+        delivery: NotificationDeliveryState,
     },
     AgentClearNotifications {
         target: AgentTarget,

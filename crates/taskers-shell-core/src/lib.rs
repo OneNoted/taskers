@@ -9,9 +9,9 @@ use taskers_control::{ControlCommand, ControlResponse};
 use taskers_core::{AppState, default_session_path};
 use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
-    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind, PaneMetadata,
-    PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
-    WorkspaceSummary as DomainWorkspaceSummary,
+    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, NotificationId, PaneKind,
+    PaneMetadata, PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame,
+    Workspace, WorkspaceSummary as DomainWorkspaceSummary,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
@@ -25,18 +25,12 @@ pub use taskers_domain::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivityId {
-    pub workspace_id: WorkspaceId,
-    pub pane_id: PaneId,
-    pub surface_id: SurfaceId,
+    pub notification_id: NotificationId,
 }
 
 impl fmt::Display for ActivityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "activity-{}-{}-{}",
-            self.workspace_id, self.pane_id, self.surface_id
-        )
+        write!(f, "activity-{}", self.notification_id)
     }
 }
 
@@ -1067,6 +1061,9 @@ pub enum ShellAction {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    OpenActivity {
+        activity_id: ActivityId,
+    },
     DismissActivity {
         activity_id: ActivityId,
     },
@@ -1416,7 +1413,7 @@ impl TaskersCore {
         model
             .activity_items()
             .into_iter()
-            .map(|item| activity_item_snapshot(model, &item, true))
+            .map(|item| activity_item_snapshot(model, &item))
             .collect()
     }
 
@@ -1430,6 +1427,7 @@ impl TaskersCore {
                     .iter()
                     .filter(|notification| notification.cleared_at.is_some())
                     .map(move |notification| ActivityItem {
+                        notification_id: notification.id,
                         workspace_id: workspace.id,
                         workspace_window_id: workspace.window_for_pane(notification.pane_id),
                         pane_id: notification.pane_id,
@@ -1437,7 +1435,9 @@ impl TaskersCore {
                         kind: notification.kind.clone(),
                         state: notification.state,
                         title: notification.title.clone(),
+                        subtitle: notification.subtitle.clone(),
                         message: notification.message.clone(),
+                        read_at: notification.read_at,
                         created_at: notification.created_at,
                     })
             })
@@ -1445,7 +1445,7 @@ impl TaskersCore {
         items.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         items
             .into_iter()
-            .map(|item| activity_item_snapshot(model, &item, false))
+            .map(|item| activity_item_snapshot(model, &item))
             .collect()
     }
 
@@ -1912,6 +1912,7 @@ impl TaskersCore {
                 pane_id,
                 surface_id,
             } => self.close_surface_by_id(pane_id, surface_id),
+            ShellAction::OpenActivity { activity_id } => self.open_activity(activity_id),
             ShellAction::DismissActivity { activity_id } => self.dismiss_activity(activity_id),
             ShellAction::SelectTheme { theme_id } => {
                 if self.ui.selected_theme_id == theme_id {
@@ -2445,10 +2446,15 @@ impl TaskersCore {
     }
 
     fn dismiss_activity(&mut self, activity_id: ActivityId) -> bool {
-        self.dispatch_control(ControlCommand::MarkSurfaceCompleted {
-            workspace_id: activity_id.workspace_id,
-            pane_id: activity_id.pane_id,
-            surface_id: activity_id.surface_id,
+        self.dispatch_control(ControlCommand::ClearNotification {
+            notification_id: activity_id.notification_id,
+        })
+    }
+
+    fn open_activity(&mut self, activity_id: ActivityId) -> bool {
+        self.dispatch_control(ControlCommand::OpenNotification {
+            window_id: None,
+            notification_id: activity_id.notification_id,
         })
     }
 
@@ -3461,11 +3467,7 @@ fn activity_title(model: &AppModel, item: &ActivityItem) -> String {
         .unwrap_or_else(|| "Terminal pane".into())
 }
 
-fn activity_item_snapshot(
-    model: &AppModel,
-    item: &ActivityItem,
-    unread: bool,
-) -> ActivityItemSnapshot {
+fn activity_item_snapshot(model: &AppModel, item: &ActivityItem) -> ActivityItemSnapshot {
     let title = activity_title(model, item);
     let body = if item.message.trim() != title.trim() && !item.message.is_empty() {
         Some(item.message.clone())
@@ -3478,9 +3480,7 @@ fn activity_item_snapshot(
         .map(|workspace| workspace.label.clone());
     ActivityItemSnapshot {
         id: ActivityId {
-            workspace_id: item.workspace_id,
-            pane_id: item.pane_id,
-            surface_id: item.surface_id,
+            notification_id: item.notification_id,
         },
         title,
         preview: compact_preview(&item.message),
@@ -3489,7 +3489,7 @@ fn activity_item_snapshot(
         workspace_id: item.workspace_id,
         pane_id: Some(item.pane_id),
         surface_id: Some(item.surface_id),
-        unread,
+        unread: item.read_at.is_none(),
         timestamp: format_relative_time(item.created_at),
         body,
         source_workspace_title,
@@ -3680,7 +3680,8 @@ mod tests {
     use taskers_control::ControlCommand;
     use taskers_core::AppState;
     use taskers_domain::{
-        AppModel, AttentionState as DomainAttentionState, NotificationItem, SignalKind,
+        AppModel, AttentionState as DomainAttentionState, NotificationId, NotificationItem,
+        SignalKind,
     };
     use taskers_ghostty::BackendChoice;
     use taskers_runtime::ShellLaunchSpec;
@@ -3730,14 +3731,19 @@ mod tests {
             .expect("workspace")
             .notifications
             .push(NotificationItem {
+                id: NotificationId::new(),
                 pane_id,
                 surface_id,
                 kind: SignalKind::Notification,
                 state: DomainAttentionState::WaitingInput,
                 title: Some("Heads up".into()),
+                subtitle: None,
+                external_id: None,
                 message: "Needs attention".into(),
                 created_at: now,
+                read_at: cleared.then_some(now),
                 cleared_at: cleared.then_some(now),
+                desktop_delivery: taskers_domain::NotificationDeliveryState::Shown,
             });
 
         BootstrapModel {
@@ -4524,7 +4530,10 @@ mod tests {
                     pane_id: first_pane_id,
                     surface_id: first_surface_id,
                 },
+                kind: SignalKind::Notification,
                 title: Some("Older".into()),
+                subtitle: None,
+                external_id: None,
                 message: "Older".into(),
                 state: DomainAttentionState::WaitingInput,
             })
@@ -4537,7 +4546,10 @@ mod tests {
                     pane_id: second_pane_id,
                     surface_id: second_surface_id,
                 },
+                kind: SignalKind::Notification,
                 title: Some("Newest".into()),
+                subtitle: None,
+                external_id: None,
                 message: "Newest".into(),
                 state: DomainAttentionState::WaitingInput,
             })

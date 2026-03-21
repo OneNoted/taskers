@@ -46,3 +46,4 @@ define_id!(WorkspaceWindowId);
 define_id!(PaneId);
 define_id!(SurfaceId);
 define_id!(SessionId);
+define_id!(NotificationId);

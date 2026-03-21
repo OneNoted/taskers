@@ -1,15 +1,15 @@
 mod theme;
 
 use dioxus::prelude::*;
-use taskers_shell_core as taskers_core;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot, Direction,
     LayoutNodeSnapshot, PaneId, PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeStatus,
     SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutAction,
-    ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind, SurfaceSnapshot,
-    WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot,
-    WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    ShortcutBindingSnapshot, SplitAxis, SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId,
+    WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget,
+    WorkspaceWindowSnapshot,
 };
+use taskers_shell_core as taskers_core;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DraggedSurface {
@@ -165,6 +165,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 
     let _ = revision();
     let snapshot = core.snapshot();
+    let unread_activity = snapshot.activity.iter().filter(|item| item.unread).count();
     let stylesheet = app_css(&snapshot);
     let show_workspace_nav = {
         let core = core.clone();
@@ -303,9 +304,9 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                                     "{snapshot.agents.len()} agents"
                                 }
                             }
-                            if snapshot.activity.len() > 0 {
+                            if unread_activity > 0 {
                                 span { class: "notification-count-pill notification-count-unread",
-                                    "{snapshot.activity.len()} unread"
+                                    "{unread_activity} unread"
                                 }
                                 button {
                                     class: "notification-jump-button",
@@ -1478,7 +1479,7 @@ fn render_agent_item(
 fn render_notification_row(
     item: &ActivityItemSnapshot,
     core: SharedCore,
-    current_workspace: &taskers_core::WorkspaceViewSnapshot,
+    _current_workspace: &taskers_core::WorkspaceViewSnapshot,
 ) -> Element {
     let dot_class = if item.unread {
         "notification-dot notification-dot-unread"
@@ -1495,23 +1496,8 @@ fn render_notification_row(
     };
     let focus_target = {
         let core = core.clone();
-        let workspace_id = item.workspace_id;
-        let pane_id = item.pane_id;
-        let surface_id = item.surface_id;
-        let current_workspace_id = current_workspace.id;
         move |_| {
-            if workspace_id != current_workspace_id {
-                core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
-            } else if let (Some(pane_id), Some(surface_id)) = (pane_id, surface_id) {
-                core.dispatch_shell_action(ShellAction::FocusSurface {
-                    pane_id,
-                    surface_id,
-                });
-            } else if let Some(pane_id) = pane_id {
-                core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
-            } else {
-                core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
-            }
+            core.dispatch_shell_action(ShellAction::OpenActivity { activity_id });
         }
     };
 
@@ -1531,12 +1517,10 @@ fn render_notification_row(
                         if let Some(source) = &item.source_workspace_title {
                             div { class: "notification-source", "{source}" }
                         }
-                        if item.unread {
-                            button {
-                                class: "notification-clear",
-                                onclick: dismiss,
-                                "×"
-                            }
+                        button {
+                            class: "notification-clear",
+                            onclick: dismiss,
+                            "×"
                         }
                     }
                 }

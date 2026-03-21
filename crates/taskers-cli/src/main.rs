@@ -75,7 +75,11 @@ enum Command {
         #[arg(long)]
         title: String,
         #[arg(long)]
+        subtitle: Option<String>,
+        #[arg(long)]
         body: Option<String>,
+        #[arg(long = "notification-id")]
+        notification_id: Option<String>,
         #[arg(long)]
         agent: Option<String>,
     },
@@ -386,6 +390,10 @@ enum AgentNotifyCommand {
         scope: CliAgentTargetScope,
         #[arg(long)]
         title: Option<String>,
+        #[arg(long)]
+        subtitle: Option<String>,
+        #[arg(long = "notification-id")]
+        notification_id: Option<String>,
         #[arg(long)]
         message: String,
         #[arg(long, value_enum, default_value_t = CliAttentionState::Waiting)]
@@ -1149,7 +1157,9 @@ async fn main() -> anyhow::Result<()> {
             pane,
             surface,
             title,
+            subtitle,
             body,
+            notification_id,
             agent: _agent,
         } => {
             let client = ControlClient::new(resolve_socket_path(socket));
@@ -1171,7 +1181,10 @@ async fn main() -> anyhow::Result<()> {
             let response = client
                 .send(ControlCommand::AgentCreateNotification {
                     target,
+                    kind: SignalKind::Notification,
                     title: Some(normalized_title.to_string()),
+                    subtitle,
+                    external_id: notification_id,
                     message,
                     state: AttentionState::WaitingInput,
                 })
@@ -1293,6 +1306,8 @@ async fn main() -> anyhow::Result<()> {
                     surface,
                     scope,
                     title,
+                    subtitle,
+                    notification_id,
                     message,
                     state,
                 } => {
@@ -1303,7 +1318,10 @@ async fn main() -> anyhow::Result<()> {
                         &client,
                         ControlCommand::AgentCreateNotification {
                             target,
+                            kind: SignalKind::Notification,
                             title,
+                            subtitle,
+                            external_id: notification_id,
                             message,
                             state: state.into(),
                         },
@@ -1326,12 +1344,15 @@ async fn main() -> anyhow::Result<()> {
                             serde_json::json!({
                                 "workspace_id": item.workspace_id,
                                 "workspace_window_id": item.workspace_window_id,
+                                "notification_id": item.notification_id,
                                 "pane_id": item.pane_id,
                                 "surface_id": item.surface_id,
                                 "kind": format!("{:?}", item.kind).to_lowercase(),
                                 "state": format!("{:?}", item.state).to_lowercase(),
                                 "title": item.title,
+                                "subtitle": item.subtitle,
                                 "message": item.message,
+                                "read_at": item.read_at,
                                 "created_at": item.created_at,
                             })
                         })
@@ -2799,10 +2820,7 @@ async fn emit_agent_hook(
     }
 
     match kind {
-        CliSignalKind::Started
-        | CliSignalKind::Progress
-        | CliSignalKind::WaitingInput
-        | CliSignalKind::Notification => {
+        CliSignalKind::Started | CliSignalKind::Progress => {
             let _ = send_control_command(
                 &client,
                 ControlCommand::AgentSetStatus {
@@ -2812,15 +2830,105 @@ async fn emit_agent_hook(
             )
             .await?;
         }
-        CliSignalKind::Completed => {
-            let _ =
-                send_control_command(&client, ControlCommand::AgentClearStatus { workspace_id })
-                    .await?;
-            let _ =
-                send_control_command(&client, ControlCommand::AgentClearProgress { workspace_id })
-                    .await?;
+        CliSignalKind::WaitingInput | CliSignalKind::Notification => {
+            let _ = send_control_command(
+                &client,
+                ControlCommand::AgentSetStatus {
+                    workspace_id,
+                    text: status_text.clone(),
+                },
+            )
+            .await?;
+            if normalized_message.is_none() {
+                let target_surface_id =
+                    surface_id
+                        .or_else(env_surface_id)
+                        .unwrap_or(active_surface_for_pane(
+                            &query_model(&client).await?,
+                            workspace_id,
+                            pane_id,
+                        )?);
+                let kind = if matches!(kind, CliSignalKind::WaitingInput) {
+                    SignalKind::WaitingInput
+                } else {
+                    SignalKind::Notification
+                };
+                let state = if matches!(kind, SignalKind::WaitingInput) {
+                    AttentionState::WaitingInput
+                } else {
+                    AttentionState::WaitingInput
+                };
+                let _ = send_control_command(
+                    &client,
+                    ControlCommand::AgentCreateNotification {
+                        target: AgentTarget::Surface {
+                            workspace_id,
+                            pane_id,
+                            surface_id: target_surface_id,
+                        },
+                        kind,
+                        title: Some(normalized_title.clone()),
+                        subtitle: None,
+                        external_id: None,
+                        message: status_text.clone(),
+                        state,
+                    },
+                )
+                .await?;
+            }
         }
-        CliSignalKind::Metadata | CliSignalKind::Error => {}
+        CliSignalKind::Completed | CliSignalKind::Error => {
+            let signal_kind = if matches!(kind, CliSignalKind::Completed) {
+                SignalKind::Completed
+            } else {
+                SignalKind::Error
+            };
+            let state = if matches!(signal_kind, SignalKind::Completed) {
+                AttentionState::Completed
+            } else {
+                AttentionState::Error
+            };
+            if normalized_message.is_none() {
+                let target_surface_id =
+                    surface_id
+                        .or_else(env_surface_id)
+                        .unwrap_or(active_surface_for_pane(
+                            &query_model(&client).await?,
+                            workspace_id,
+                            pane_id,
+                        )?);
+                let _ = send_control_command(
+                    &client,
+                    ControlCommand::AgentCreateNotification {
+                        target: AgentTarget::Surface {
+                            workspace_id,
+                            pane_id,
+                            surface_id: target_surface_id,
+                        },
+                        kind: signal_kind.clone(),
+                        title: Some(normalized_title.clone()),
+                        subtitle: None,
+                        external_id: None,
+                        message: status_text.clone(),
+                        state,
+                    },
+                )
+                .await?;
+            }
+            if matches!(signal_kind, SignalKind::Completed) {
+                let _ = send_control_command(
+                    &client,
+                    ControlCommand::AgentClearStatus { workspace_id },
+                )
+                .await?;
+                let _ = send_control_command(
+                    &client,
+                    ControlCommand::AgentClearProgress { workspace_id },
+                )
+                .await?;
+            }
+        }
+        CliSignalKind::Metadata => {}
     }
 
     if matches!(

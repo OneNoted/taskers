@@ -500,14 +500,59 @@ impl InMemoryController {
             }
             ControlCommand::AgentCreateNotification {
                 target,
+                kind,
                 title,
+                subtitle,
+                external_id,
                 message,
                 state,
             } => {
-                model.create_agent_notification(target, title, message, state)?;
+                model.create_agent_notification(
+                    target,
+                    kind,
+                    title,
+                    subtitle,
+                    external_id,
+                    message,
+                    state,
+                )?;
                 (
                     ControlResponse::Ack {
                         message: "agent notification created".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::OpenNotification {
+                window_id,
+                notification_id,
+            } => {
+                model
+                    .open_notification(window_id.unwrap_or(model.active_window), notification_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "notification opened".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::ClearNotification { notification_id } => {
+                model.clear_notification(notification_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "notification cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MarkNotificationDelivery {
+                notification_id,
+                delivery,
+            } => {
+                model.mark_notification_delivery(notification_id, delivery)?;
+                (
+                    ControlResponse::Ack {
+                        message: "notification delivery updated".into(),
                     },
                     true,
                 )
