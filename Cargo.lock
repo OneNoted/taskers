@@ -2514,6 +2514,8 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "gtk4",
+ "serde_json",
+ "taskers-control",
  "taskers-domain",
  "taskers-ghostty",
  "taskers-shell-core",

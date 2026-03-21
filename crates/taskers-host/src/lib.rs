@@ -1,3 +1,5 @@
+mod browser_automation;
+
 use anyhow::{Result, anyhow, bail};
 use gtk::{
     Align, Box as GtkBox, CssProvider, EventControllerFocus, EventControllerScroll,
@@ -11,14 +13,15 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use taskers_shell_core as taskers_core;
+use taskers_control::{BrowserControlCommand, BrowserLoadState, ControlError};
 use taskers_core::{
-    BrowserMountSpec, HostCommand, HostEvent, PortalSurfacePlan, ShellDragMode, ShellSnapshot,
-    SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
+    BrowserSurfaceCatalogEntry, HostCommand, HostEvent, PaneId, PortalSurfacePlan, ShellDragMode,
+    ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec, WorkspaceId,
 };
 use taskers_domain::PaneKind;
 use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
-use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
+use taskers_shell_core as taskers_core;
+use webkit6::{LoadEvent, Settings as WebKitSettings, WebView, prelude::*};
 
 pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
@@ -100,6 +103,83 @@ pub struct TaskersHost {
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
 }
 
+#[derive(Clone)]
+pub struct BrowserSurfaceHandle {
+    surface_id: SurfaceId,
+    workspace_id: Rc<Cell<WorkspaceId>>,
+    pane_id: Rc<Cell<PaneId>>,
+    webview: WebView,
+    last_load_state: Rc<Cell<Option<BrowserLoadState>>>,
+}
+
+impl BrowserSurfaceHandle {
+    pub fn surface_id(&self) -> SurfaceId {
+        self.surface_id
+    }
+
+    pub fn workspace_id(&self) -> WorkspaceId {
+        self.workspace_id.get()
+    }
+
+    pub fn pane_id(&self) -> PaneId {
+        self.pane_id.get()
+    }
+
+    pub(crate) fn webview(&self) -> &WebView {
+        &self.webview
+    }
+
+    pub(crate) fn url(&self) -> String {
+        self.webview
+            .uri()
+            .map(|uri| uri.to_string())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn title(&self) -> String {
+        self.webview
+            .title()
+            .map(|title| title.to_string())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn is_loading(&self) -> bool {
+        self.webview.is_loading()
+    }
+
+    pub(crate) fn load_state(&self) -> Option<BrowserLoadState> {
+        self.last_load_state.get()
+    }
+
+    pub(crate) fn focus_webview(&self) {
+        self.webview.grab_focus();
+    }
+
+    pub(crate) fn is_webview_focused(&self) -> bool {
+        self.webview.has_focus()
+    }
+
+    pub(crate) fn navigate(&self, url: &str) {
+        self.webview.load_uri(url);
+    }
+
+    pub(crate) fn go_back(&self) {
+        if self.webview.can_go_back() {
+            self.webview.go_back();
+        }
+    }
+
+    pub(crate) fn go_forward(&self) {
+        if self.webview.can_go_forward() {
+            self.webview.go_forward();
+        }
+    }
+
+    pub(crate) fn reload(&self) {
+        self.webview.reload();
+    }
+}
+
 impl TaskersHost {
     pub fn new(
         shell_widget: &impl IsA<Widget>,
@@ -167,7 +247,7 @@ impl TaskersHost {
                 format!("host sync start panes={}", snapshot.portal.panes.len()),
             ),
         );
-        self.sync_browser_surfaces(&snapshot.portal, snapshot.revision, interactive)?;
+        self.sync_browser_surfaces(snapshot, interactive)?;
         self.sync_terminal_surfaces(&snapshot.portal, snapshot.revision, interactive)?;
         Ok(())
     }
@@ -204,6 +284,15 @@ impl TaskersHost {
         }
     }
 
+    pub async fn execute_browser_command(
+        &self,
+        command: BrowserControlCommand,
+    ) -> Result<serde_json::Value, ControlError> {
+        let surface_id = browser_command_surface_id(&command);
+        let handle = self.browser_surface_handle(surface_id)?;
+        handle.execute(command).await
+    }
+
     fn with_browser_surface(
         &mut self,
         surface_id: SurfaceId,
@@ -226,17 +315,30 @@ impl TaskersHost {
         Ok(())
     }
 
-    fn sync_browser_surfaces(
-        &mut self,
-        portal: &SurfacePortalPlan,
-        revision: u64,
-        interactive: bool,
-    ) -> Result<()> {
-        let desired = browser_plans(portal);
-        let desired_ids = desired
+    pub fn browser_surface_handle(
+        &self,
+        surface_id: SurfaceId,
+    ) -> Result<BrowserSurfaceHandle, ControlError> {
+        self.browser_surfaces
+            .get(&surface_id)
+            .map(BrowserSurface::handle)
+            .ok_or_else(|| {
+                ControlError::not_found(format!("browser surface {surface_id} not found"))
+            })
+    }
+
+    fn sync_browser_surfaces(&mut self, snapshot: &ShellSnapshot, interactive: bool) -> Result<()> {
+        let desired = browser_plans(&snapshot.portal);
+        let desired_by_id = desired
+            .into_iter()
+            .map(|plan| (plan.surface_id, plan))
+            .collect::<HashMap<_, _>>();
+        let catalog_by_id = snapshot
+            .browser_catalog
             .iter()
-            .map(|plan| plan.surface_id)
-            .collect::<HashSet<_>>();
+            .map(|entry| (entry.surface_id, entry))
+            .collect::<HashMap<_, _>>();
+        let desired_ids = catalog_by_id.keys().copied().collect::<HashSet<_>>();
 
         let stale = self
             .browser_surfaces
@@ -252,7 +354,7 @@ impl TaskersHost {
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
                         DiagnosticCategory::SurfaceLifecycle,
-                        Some(revision),
+                        Some(snapshot.revision),
                         "browser surface removed",
                     )
                     .with_surface(surface_id),
@@ -260,25 +362,28 @@ impl TaskersHost {
             }
         }
 
-        for plan in desired {
-            match self.browser_surfaces.get_mut(&plan.surface_id) {
+        for entry in snapshot.browser_catalog.iter() {
+            let visible_plan = desired_by_id.get(&entry.surface_id);
+            match self.browser_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
-                    &plan,
-                    revision,
+                    entry,
+                    visible_plan,
+                    snapshot.revision,
                     interactive,
                     self.diagnostics.as_ref(),
                 )?,
                 None => {
                     let surface = BrowserSurface::new(
                         &self.root,
-                        &plan,
-                        revision,
+                        entry,
+                        visible_plan,
+                        snapshot.revision,
                         interactive,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                     )?;
-                    self.browser_surfaces.insert(plan.surface_id, surface);
+                    self.browser_surfaces.insert(entry.surface_id, surface);
                 }
             }
         }
@@ -357,11 +462,15 @@ impl TaskersHost {
 struct BrowserSurface {
     shell: NativeSurfaceShell,
     surface_id: SurfaceId,
+    workspace_id: Rc<Cell<WorkspaceId>>,
+    pane_id: Rc<Cell<PaneId>>,
     webview: WebView,
     url: String,
     active: bool,
     interactive: bool,
+    visible: bool,
     devtools_open: Rc<Cell<bool>>,
+    last_load_state: Rc<Cell<Option<BrowserLoadState>>>,
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
 }
@@ -369,13 +478,14 @@ struct BrowserSurface {
 impl BrowserSurface {
     fn new(
         overlay: &Overlay,
-        plan: &PortalSurfacePlan,
+        entry: &BrowserSurfaceCatalogEntry,
+        visible_plan: Option<&PortalSurfacePlan>,
         revision: u64,
         interactive: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Result<Self> {
-        let BrowserMountSpec { url } = browser_spec(plan)?.clone();
+        let url = entry.url.clone();
 
         let settings = WebKitSettings::builder()
             .enable_back_forward_navigation_gestures(true)
@@ -390,23 +500,30 @@ impl BrowserSurface {
         let (shell_class, widget_class) = native_surface_classes(PaneKind::Browser);
         webview.add_css_class("native-surface-widget");
         webview.add_css_class(widget_class);
-        webview.set_can_target(interactive);
+        webview.set_can_target(visible_plan.is_some() && interactive);
         webview.load_uri(&url);
         (event_sink)(HostEvent::SurfaceUrlChanged {
-            surface_id: plan.surface_id,
+            surface_id: entry.surface_id,
             url: url.clone(),
         });
-        let shell = NativeSurfaceShell::new(shell_class, interactive);
+        let shell = NativeSurfaceShell::new(shell_class, visible_plan.is_some() && interactive);
         shell.mount_child(webview.upcast_ref());
-        shell.position(overlay, plan.frame);
+        match visible_plan {
+            Some(plan) => shell.show_at(overlay, plan.frame),
+            None => shell.park_hidden(overlay),
+        }
         let devtools_open = Rc::new(Cell::new(false));
+        let workspace_id = Rc::new(Cell::new(entry.workspace_id));
+        let pane_id = Rc::new(Cell::new(entry.pane_id));
+        let last_load_state = Rc::new(Cell::new(None));
 
-        let pane_id = plan.pane_id;
-        let surface_id = plan.surface_id;
+        let focus_pane_id = pane_id.clone();
+        let surface_id = entry.surface_id;
         let focus_sink = event_sink.clone();
         let focus_diagnostics = diagnostics.clone();
         let focus = EventControllerFocus::new();
         focus.connect_enter(move |_| {
+            let pane_id = focus_pane_id.get();
             emit_diagnostic(
                 focus_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -421,10 +538,12 @@ impl BrowserSurface {
         });
         webview.add_controller(focus);
 
+        let click_pane_id = pane_id.clone();
         let click_sink = event_sink.clone();
         let click_diagnostics = diagnostics.clone();
         let click = GestureClick::new();
         click.connect_pressed(move |_, _, _, _| {
+            let pane_id = click_pane_id.get();
             emit_diagnostic(
                 click_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -439,7 +558,7 @@ impl BrowserSurface {
         });
         webview.add_controller(click);
 
-        let surface_id = plan.surface_id;
+        let surface_id = entry.surface_id;
         let title_sink = event_sink.clone();
         let title_diagnostics = diagnostics.clone();
         webview.connect_title_notify(move |web_view| {
@@ -460,11 +579,13 @@ impl BrowserSurface {
             }
         });
 
-        let surface_id = plan.surface_id;
+        let surface_id = entry.surface_id;
         let navigation_sink = event_sink.clone();
         let navigation_diagnostics = diagnostics.clone();
         let navigation_devtools = devtools_open.clone();
-        webview.connect_load_changed(move |web_view, _| {
+        let load_state_cell = last_load_state.clone();
+        webview.connect_load_changed(move |web_view, load_event| {
+            load_state_cell.set(Some(browser_load_state_from_webkit(load_event)));
             emit_browser_navigation_state(
                 web_view,
                 surface_id,
@@ -474,7 +595,7 @@ impl BrowserSurface {
             );
         });
 
-        let url_surface_id = plan.surface_id;
+        let url_surface_id = entry.surface_id;
         let url_sink = event_sink;
         let uri_sink = url_sink.clone();
         let url_diagnostics = diagnostics.clone();
@@ -511,7 +632,7 @@ impl BrowserSurface {
             let navigation_sink = url_sink.clone();
             let navigation_diagnostics = diagnostics.clone();
             let navigation_devtools = devtools_open.clone();
-            let inspector_surface_id = plan.surface_id;
+            let inspector_surface_id = entry.surface_id;
             inspector.connect_closed(move |_| {
                 navigation_devtools.set(false);
                 emit_browser_navigation_state(
@@ -524,7 +645,7 @@ impl BrowserSurface {
             });
         }
 
-        if plan.active && interactive {
+        if visible_plan.is_some_and(|plan| plan.active) && interactive {
             webview.grab_focus();
         }
 
@@ -535,13 +656,13 @@ impl BrowserSurface {
                 Some(revision),
                 "browser surface created",
             )
-            .with_pane(plan.pane_id)
-            .with_surface(plan.surface_id),
+            .with_pane(entry.pane_id)
+            .with_surface(entry.surface_id),
         );
 
         emit_browser_navigation_state(
             &webview,
-            plan.surface_id,
+            entry.surface_id,
             devtools_open.get(),
             &url_sink,
             diagnostics.as_ref(),
@@ -549,12 +670,16 @@ impl BrowserSurface {
 
         Ok(Self {
             shell,
-            surface_id: plan.surface_id,
+            surface_id: entry.surface_id,
+            workspace_id,
+            pane_id,
             webview,
             url,
-            active: plan.active,
-            interactive,
+            active: visible_plan.is_some_and(|plan| plan.active),
+            interactive: visible_plan.is_some() && interactive,
+            visible: visible_plan.is_some(),
             devtools_open,
+            last_load_state,
             event_sink: url_sink,
             diagnostics,
         })
@@ -563,25 +688,36 @@ impl BrowserSurface {
     fn sync(
         &mut self,
         overlay: &Overlay,
-        plan: &PortalSurfacePlan,
+        entry: &BrowserSurfaceCatalogEntry,
+        visible_plan: Option<&PortalSurfacePlan>,
         revision: u64,
         interactive: bool,
         diagnostics: Option<&DiagnosticsSink>,
     ) -> Result<()> {
-        self.shell.position(overlay, plan.frame);
-        self.shell.set_interactive(interactive);
-        self.webview.set_can_target(interactive);
-
-        let BrowserMountSpec { url } = browser_spec(plan)?;
-        if self.url != *url {
-            self.webview.load_uri(url);
-            self.url = url.clone();
+        self.workspace_id.set(entry.workspace_id);
+        self.pane_id.set(entry.pane_id);
+        let visible = visible_plan.is_some();
+        let effective_interactive = visible && interactive;
+        self.shell.set_interactive(effective_interactive);
+        self.webview.set_can_target(effective_interactive);
+        match visible_plan {
+            Some(plan) => self.shell.show_at(overlay, plan.frame),
+            None => self.shell.park_hidden(overlay),
         }
-        if plan.active && interactive && (!self.active || !self.interactive) {
+
+        if self.url != entry.url {
+            self.webview.load_uri(&entry.url);
+            self.url = entry.url.clone();
+        }
+        if visible_plan.is_some_and(|plan| plan.active)
+            && effective_interactive
+            && (!self.active || !self.interactive || !self.visible)
+        {
             self.webview.grab_focus();
         }
-        self.active = plan.active;
-        self.interactive = interactive;
+        self.active = visible_plan.is_some_and(|plan| plan.active);
+        self.interactive = effective_interactive;
+        self.visible = visible;
 
         emit_diagnostic(
             diagnostics,
@@ -590,8 +726,8 @@ impl BrowserSurface {
                 Some(revision),
                 "browser surface updated",
             )
-            .with_pane(plan.pane_id)
-            .with_surface(plan.surface_id),
+            .with_pane(entry.pane_id)
+            .with_surface(entry.surface_id),
         );
 
         Ok(())
@@ -602,7 +738,6 @@ impl BrowserSurface {
             self.webview.load_uri(url);
             self.url = url.to_string();
         }
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
@@ -610,7 +745,6 @@ impl BrowserSurface {
         if self.webview.can_go_back() {
             self.webview.go_back();
         }
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
@@ -618,13 +752,11 @@ impl BrowserSurface {
         if self.webview.can_go_forward() {
             self.webview.go_forward();
         }
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
     fn reload(&mut self) {
         self.webview.reload();
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
@@ -641,7 +773,6 @@ impl BrowserSurface {
             inspector.show();
             self.devtools_open.set(true);
         }
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
@@ -653,6 +784,16 @@ impl BrowserSurface {
             &self.event_sink,
             self.diagnostics.as_ref(),
         );
+    }
+
+    fn handle(&self) -> BrowserSurfaceHandle {
+        BrowserSurfaceHandle {
+            surface_id: self.surface_id,
+            workspace_id: self.workspace_id.clone(),
+            pane_id: self.pane_id.clone(),
+            webview: self.webview.clone(),
+            last_load_state: self.last_load_state.clone(),
+        }
     }
 }
 
@@ -780,12 +921,26 @@ impl NativeSurfaceShell {
         position_widget(overlay, self.root.upcast_ref(), frame);
     }
 
+    fn show_at(&self, overlay: &Overlay, frame: taskers_core::Frame) {
+        self.root.set_opacity(1.0);
+        self.position(overlay, frame);
+    }
+
+    fn park_hidden(&self, overlay: &Overlay) {
+        self.root.set_opacity(0.0);
+        self.position(overlay, self.hidden_frame());
+    }
+
     fn set_interactive(&self, interactive: bool) {
         self.root.set_can_target(interactive);
     }
 
     fn detach(&self, overlay: &Overlay) {
         detach_from_overlay(overlay, self.root.upcast_ref());
+    }
+
+    fn hidden_frame(&self) -> taskers_core::Frame {
+        taskers_core::Frame::new(100_000, 100_000, 1, 1)
     }
 }
 
@@ -972,6 +1127,47 @@ fn emit_browser_navigation_state(
     });
 }
 
+fn browser_load_state_from_webkit(load_event: LoadEvent) -> BrowserLoadState {
+    match load_event {
+        LoadEvent::Started => BrowserLoadState::Started,
+        LoadEvent::Redirected => BrowserLoadState::Redirected,
+        LoadEvent::Committed => BrowserLoadState::Committed,
+        LoadEvent::Finished => BrowserLoadState::Finished,
+        _ => BrowserLoadState::Finished,
+    }
+}
+
+fn browser_command_surface_id(command: &BrowserControlCommand) -> SurfaceId {
+    match command {
+        BrowserControlCommand::Navigate { surface_id, .. }
+        | BrowserControlCommand::Back { surface_id }
+        | BrowserControlCommand::Forward { surface_id }
+        | BrowserControlCommand::Reload { surface_id }
+        | BrowserControlCommand::FocusWebview { surface_id }
+        | BrowserControlCommand::IsWebviewFocused { surface_id }
+        | BrowserControlCommand::Snapshot { surface_id }
+        | BrowserControlCommand::Eval { surface_id, .. }
+        | BrowserControlCommand::Wait { surface_id, .. }
+        | BrowserControlCommand::Click { surface_id, .. }
+        | BrowserControlCommand::Dblclick { surface_id, .. }
+        | BrowserControlCommand::Type { surface_id, .. }
+        | BrowserControlCommand::Fill { surface_id, .. }
+        | BrowserControlCommand::Press { surface_id, .. }
+        | BrowserControlCommand::Keydown { surface_id, .. }
+        | BrowserControlCommand::Keyup { surface_id, .. }
+        | BrowserControlCommand::Hover { surface_id, .. }
+        | BrowserControlCommand::Focus { surface_id, .. }
+        | BrowserControlCommand::Check { surface_id, .. }
+        | BrowserControlCommand::Uncheck { surface_id, .. }
+        | BrowserControlCommand::Select { surface_id, .. }
+        | BrowserControlCommand::Scroll { surface_id, .. }
+        | BrowserControlCommand::ScrollIntoView { surface_id, .. }
+        | BrowserControlCommand::Get { surface_id, .. }
+        | BrowserControlCommand::Is { surface_id, .. }
+        | BrowserControlCommand::Screenshot { surface_id, .. } => *surface_id,
+    }
+}
+
 fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
     SurfaceDescriptor {
         cols: spec.cols,
@@ -985,13 +1181,6 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
         // proven across hosts.
         command_argv: Vec::new(),
         env: spec.env.clone(),
-    }
-}
-
-fn browser_spec(plan: &PortalSurfacePlan) -> Result<&BrowserMountSpec> {
-    match &plan.mount {
-        SurfaceMountSpec::Browser(spec) => Ok(spec),
-        SurfaceMountSpec::Terminal(_) => bail!("surface {} is not a browser", plan.surface_id),
     }
 }
 
@@ -1102,8 +1291,8 @@ mod tests {
         browser_plans, native_surface_classes, native_surface_css, native_surfaces_interactive,
         terminal_plans, workspace_pan_delta,
     };
-    use taskers_shell_core::{BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec};
     use taskers_domain::PaneKind;
+    use taskers_shell_core::{BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec};
 
     #[test]
     fn partitions_portal_plans_by_surface_kind() {

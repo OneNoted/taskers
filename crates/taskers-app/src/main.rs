@@ -12,20 +12,26 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use taskers_core::{AppState, default_session_path, load_or_bootstrap};
-use taskers_control::{bind_socket, default_socket_path, serve_with_handler};
-use taskers_shell_core::{
-    BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
-    ShellSection, ShortcutAction, ShortcutPreset, SurfaceKind,
+use taskers_control::{
+    BrowserControlCommand, ControlCommand, ControlError, ControlResponse, bind_socket,
+    default_socket_path, serve_with_handler,
 };
+use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_domain::AppModel;
 use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
+use taskers_shell_core::{
+    BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
+    ShellAction, ShellSection, ShortcutAction, ShortcutPreset, SurfaceKind,
+};
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
 const APP_ID: &str = taskers_paths::APP_ID;
@@ -66,6 +72,8 @@ impl GhosttyProbeMode {
 
 struct BootstrapContext {
     core: SharedCore,
+    app_state: AppState,
+    socket_path: PathBuf,
     ghostty_host: Option<GhosttyHost>,
     startup_notes: Vec<String>,
 }
@@ -77,6 +85,11 @@ struct RuntimeBootstrap {
     host_options: GhosttyHostOptions,
     socket_path: PathBuf,
     startup_notes: Vec<String>,
+}
+
+struct BrowserAutomationRequest {
+    command: BrowserControlCommand,
+    response_tx: tokio::sync::oneshot::Sender<Result<ControlResponse, ControlError>>,
 }
 
 fn main() -> glib::ExitCode {
@@ -181,6 +194,23 @@ fn build_ui_result(
     let host_widget = host.borrow().widget();
     window.set_content(Some(&host_widget));
     connect_navigation_shortcuts(&window, &shell_view, &core);
+    let last_revision = Rc::new(Cell::new(0_u64));
+    let last_size = Rc::new(Cell::new((0_i32, 0_i32)));
+    let (browser_request_tx, browser_request_rx) = mpsc::channel::<BrowserAutomationRequest>();
+    let control_server_note = spawn_control_server(
+        bootstrap.app_state.clone(),
+        bootstrap.socket_path,
+        browser_request_tx,
+    );
+    install_browser_bridge(
+        browser_request_rx,
+        &window,
+        &core,
+        &host,
+        &last_revision,
+        &last_size,
+        diagnostics.clone(),
+    );
 
     for note in bootstrap.startup_notes {
         log_diagnostic(
@@ -194,6 +224,15 @@ fn build_ui_result(
         DiagnosticRecord::new(
             DiagnosticCategory::Startup,
             Some(core.revision()),
+            control_server_note.clone(),
+        ),
+    );
+    eprintln!("{control_server_note}");
+    log_diagnostic(
+        diagnostics.as_ref(),
+        DiagnosticRecord::new(
+            DiagnosticCategory::Startup,
+            Some(core.revision()),
             format!("shared shell listening on {shell_url}"),
         ),
     );
@@ -201,8 +240,6 @@ fn build_ui_result(
 
     let smoke_script = cli.smoke_script;
     let quit_after_ms = cli.quit_after_ms.unwrap_or(8_000);
-    let last_revision = Rc::new(Cell::new(0_u64));
-    let last_size = Rc::new(Cell::new((0_i32, 0_i32)));
     let tick_window = window.clone();
     let tick_core = core.clone();
     let tick_host = host.clone();
@@ -405,12 +442,8 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         runtime.shell_launch,
     )
     .context("failed to initialize Taskers app state")?;
-    startup_notes.push(spawn_control_server(
-        app_state.clone(),
-        runtime.socket_path.clone(),
-    ));
     let core = SharedCore::bootstrap(BootstrapModel {
-        app_state,
+        app_state: app_state.clone(),
         runtime_status,
         selected_theme_id: "dark".into(),
         selected_shortcut_preset: ShortcutPreset::PowerUser,
@@ -420,6 +453,8 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
 
     Ok(BootstrapContext {
         core,
+        app_state,
+        socket_path: runtime.socket_path,
         ghostty_host,
         startup_notes,
     })
@@ -761,7 +796,126 @@ fn sync_window(
     host.borrow().tick();
 }
 
-fn spawn_control_server(app_state: AppState, socket_path: PathBuf) -> String {
+fn install_browser_bridge(
+    receiver: Receiver<BrowserAutomationRequest>,
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<DiagnosticsWriter>,
+) {
+    let receiver = Rc::new(receiver);
+    let bridge_window = window.clone();
+    let bridge_core = core.clone();
+    let bridge_host = host.clone();
+    let bridge_revision = last_revision.clone();
+    let bridge_size = last_size.clone();
+    glib::timeout_add_local(Duration::from_millis(8), move || {
+        loop {
+            let request = match receiver.try_recv() {
+                Ok(request) => request,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return glib::ControlFlow::Break,
+            };
+            let request_window = bridge_window.clone();
+            let request_core = bridge_core.clone();
+            let request_host = bridge_host.clone();
+            let request_revision = bridge_revision.clone();
+            let request_size = bridge_size.clone();
+            let request_diagnostics = diagnostics.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let response = handle_browser_request(
+                    &request_window,
+                    &request_core,
+                    &request_host,
+                    &request_revision,
+                    &request_size,
+                    request_diagnostics.as_ref(),
+                    request.command,
+                )
+                .await;
+                let _ = request.response_tx.send(response);
+            });
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+async fn handle_browser_request(
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    command: BrowserControlCommand,
+) -> Result<ControlResponse, ControlError> {
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+
+    if let BrowserControlCommand::FocusWebview { surface_id } = &command {
+        let snapshot = core.snapshot();
+        let Some(entry) = snapshot
+            .browser_catalog
+            .iter()
+            .find(|entry| entry.surface_id == *surface_id)
+        else {
+            return Err(ControlError::not_found(format!(
+                "browser surface {surface_id} not found"
+            )));
+        };
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id: entry.pane_id,
+            surface_id: *surface_id,
+        });
+        sync_window(window, core, host, last_revision, last_size, diagnostics);
+    }
+
+    let handle = {
+        let host_ref = host.borrow();
+        host_ref.browser_surface_handle(browser_surface_id(&command))?
+    };
+    let result = handle.execute(command).await?;
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+    Ok(ControlResponse::Browser { result })
+}
+
+fn browser_surface_id(command: &BrowserControlCommand) -> taskers_shell_core::SurfaceId {
+    match command {
+        BrowserControlCommand::Navigate { surface_id, .. }
+        | BrowserControlCommand::Back { surface_id }
+        | BrowserControlCommand::Forward { surface_id }
+        | BrowserControlCommand::Reload { surface_id }
+        | BrowserControlCommand::FocusWebview { surface_id }
+        | BrowserControlCommand::IsWebviewFocused { surface_id }
+        | BrowserControlCommand::Snapshot { surface_id }
+        | BrowserControlCommand::Eval { surface_id, .. }
+        | BrowserControlCommand::Wait { surface_id, .. }
+        | BrowserControlCommand::Click { surface_id, .. }
+        | BrowserControlCommand::Dblclick { surface_id, .. }
+        | BrowserControlCommand::Type { surface_id, .. }
+        | BrowserControlCommand::Fill { surface_id, .. }
+        | BrowserControlCommand::Press { surface_id, .. }
+        | BrowserControlCommand::Keydown { surface_id, .. }
+        | BrowserControlCommand::Keyup { surface_id, .. }
+        | BrowserControlCommand::Hover { surface_id, .. }
+        | BrowserControlCommand::Focus { surface_id, .. }
+        | BrowserControlCommand::Check { surface_id, .. }
+        | BrowserControlCommand::Uncheck { surface_id, .. }
+        | BrowserControlCommand::Select { surface_id, .. }
+        | BrowserControlCommand::Scroll { surface_id, .. }
+        | BrowserControlCommand::ScrollIntoView { surface_id, .. }
+        | BrowserControlCommand::Get { surface_id, .. }
+        | BrowserControlCommand::Is { surface_id, .. }
+        | BrowserControlCommand::Screenshot { surface_id, .. } => *surface_id,
+    }
+}
+
+fn spawn_control_server(
+    app_state: AppState,
+    socket_path: PathBuf,
+    browser_tx: Sender<BrowserAutomationRequest>,
+) -> String {
     if let Some(parent) = socket_path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
@@ -781,9 +935,34 @@ fn spawn_control_server(app_state: AppState, socket_path: PathBuf) -> String {
             match bind_socket(&socket_path) {
                 Ok(listener) => {
                     let handler = move |command| {
-                        app_state
-                            .dispatch(command)
-                            .map_err(|error| error.to_string())
+                        let app_state = app_state.clone();
+                        let browser_tx = browser_tx.clone();
+                        async move {
+                            match command {
+                                ControlCommand::Browser { browser_command } => {
+                                    let (response_tx, response_rx) =
+                                        tokio::sync::oneshot::channel();
+                                    browser_tx
+                                        .send(BrowserAutomationRequest {
+                                            command: browser_command,
+                                            response_tx,
+                                        })
+                                        .map_err(|_| {
+                                            ControlError::internal(
+                                                "browser automation bridge is unavailable",
+                                            )
+                                        })?;
+                                    response_rx.await.map_err(|_| {
+                                        ControlError::internal(
+                                            "browser automation bridge dropped the response",
+                                        )
+                                    })?
+                                }
+                                other => app_state
+                                    .dispatch(other)
+                                    .map_err(|error| ControlError::internal(error.to_string())),
+                            }
+                        }
                     };
                     if let Err(error) = serve_with_handler(listener, handler, pending::<()>()).await
                     {

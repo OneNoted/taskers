@@ -539,6 +539,11 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::Browser { .. } => {
+                return Err(DomainError::InvalidOperation(
+                    "browser automation commands require a live GTK host",
+                ));
+            }
             ControlCommand::QueryStatus { query } => match query {
                 ControlQuery::ActiveWindow | ControlQuery::All => (
                     ControlResponse::Status {

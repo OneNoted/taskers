@@ -5,8 +5,8 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use taskers_core::{AppState, default_session_path};
 use taskers_control::{ControlCommand, ControlResponse};
+use taskers_core::{AppState, default_session_path};
 use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
     MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind, PaneMetadata,
@@ -728,6 +728,14 @@ pub struct WorkspaceLogEntrySnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserSurfaceCatalogEntry {
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestSnapshot {
     pub number: u32,
     pub title: String,
@@ -912,6 +920,7 @@ pub struct ShellSnapshot {
     pub current_workspace_status: Option<String>,
     pub current_workspace_progress: Option<ProgressSnapshot>,
     pub current_workspace_log: Vec<WorkspaceLogEntrySnapshot>,
+    pub browser_catalog: Vec<BrowserSurfaceCatalogEntry>,
     pub portal: SurfacePortalPlan,
     pub metrics: LayoutMetrics,
     pub runtime_status: RuntimeStatus,
@@ -1243,6 +1252,7 @@ impl TaskersCore {
             current_workspace_status: workspace.status_text.clone(),
             current_workspace_progress,
             current_workspace_log,
+            browser_catalog: self.browser_catalog_snapshot(&model),
             portal: SurfacePortalPlan {
                 window: Frame::new(0, 0, self.ui.window_size.width, self.ui.window_size.height),
                 content: viewport,
@@ -1566,8 +1576,7 @@ impl TaskersCore {
             pane_id: pane.id,
             surface_id: surface.id,
             title: display_surface_title(surface),
-            url: normalized_surface_url(surface)
-                .unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
+            url: normalized_surface_url(surface).unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
             can_go_back: self
                 .browser_navigation
                 .get(&surface.id)
@@ -1584,6 +1593,31 @@ impl TaskersCore {
                 .map(|state| state.devtools_open)
                 .unwrap_or(false),
         })
+    }
+
+    fn browser_catalog_snapshot(&self, model: &AppModel) -> Vec<BrowserSurfaceCatalogEntry> {
+        let mut catalog = Vec::new();
+        for (workspace_id, workspace) in &model.workspaces {
+            for pane in workspace.panes.values() {
+                for surface in pane.surfaces.values() {
+                    if surface.kind != PaneKind::Browser {
+                        continue;
+                    }
+                    let descriptor = fallback_surface_descriptor(surface);
+                    let mount = mount_spec_from_descriptor(surface, descriptor);
+                    let SurfaceMountSpec::Browser(BrowserMountSpec { url }) = mount else {
+                        continue;
+                    };
+                    catalog.push(BrowserSurfaceCatalogEntry {
+                        workspace_id: *workspace_id,
+                        pane_id: pane.id,
+                        surface_id: surface.id,
+                        url,
+                    });
+                }
+            }
+        }
+        catalog
     }
 
     fn collect_workspace_surface_plans(
@@ -3463,21 +3497,29 @@ fn next_workspace_label(model: &AppModel) -> String {
 }
 
 fn workspace_progress_snapshot(workspace: &Workspace) -> Option<ProgressSnapshot> {
-    workspace.progress.as_ref().map(|progress| ProgressSnapshot {
-        fraction: f32::from(progress.value.min(1000)) / 1000.0,
-        label: progress.label.clone(),
-    }).or_else(|| {
-        workspace
-            .panes
-            .values()
-            .flat_map(|pane| pane.surfaces.values())
-            .find_map(|surface| {
-                surface.metadata.progress.as_ref().map(|progress| ProgressSnapshot {
-                    fraction: f32::from(progress.value.min(1000)) / 1000.0,
-                    label: progress.label.clone(),
+    workspace
+        .progress
+        .as_ref()
+        .map(|progress| ProgressSnapshot {
+            fraction: f32::from(progress.value.min(1000)) / 1000.0,
+            label: progress.label.clone(),
+        })
+        .or_else(|| {
+            workspace
+                .panes
+                .values()
+                .flat_map(|pane| pane.surfaces.values())
+                .find_map(|surface| {
+                    surface
+                        .metadata
+                        .progress
+                        .as_ref()
+                        .map(|progress| ProgressSnapshot {
+                            fraction: f32::from(progress.value.min(1000)) / 1000.0,
+                            label: progress.label.clone(),
+                        })
                 })
-            })
-    })
+        })
 }
 
 fn attention_panel_visible(model: &AppModel) -> bool {
@@ -3489,10 +3531,7 @@ fn attention_panel_visible(model: &AppModel) -> bool {
                 .any(|summary| !summary.agent_summaries.is_empty() || summary.status_text.is_some())
         })
         .unwrap_or(false)
-        || model
-        .workspaces
-        .values()
-        .any(|workspace| {
+        || model.workspaces.values().any(|workspace| {
             !workspace.notifications.is_empty()
                 || !workspace.log_entries.is_empty()
                 || workspace.progress.is_some()
@@ -3603,8 +3642,8 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use taskers_core::AppState;
     use taskers_control::ControlCommand;
+    use taskers_core::AppState;
     use taskers_domain::{
         AppModel, AttentionState as DomainAttentionState, NotificationItem, SignalKind,
     };
@@ -3911,6 +3950,37 @@ mod tests {
     }
 
     #[test]
+    fn browser_catalog_keeps_background_browser_surfaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let first_workspace_id = core.snapshot().current_workspace.id;
+        let first_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: Some(first_pane_id),
+        });
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let second_workspace_id = core.snapshot().current_workspace.id;
+        let second_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: Some(second_pane_id),
+        });
+
+        let catalog = core.snapshot().browser_catalog;
+        assert!(catalog.len() >= 2);
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.workspace_id == first_workspace_id)
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.workspace_id == second_workspace_id)
+        );
+        assert!(catalog.iter().all(|entry| !entry.url.is_empty()));
+    }
+
+    #[test]
     fn browser_navigation_host_events_update_browser_chrome_snapshot() {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
@@ -3942,13 +4012,19 @@ mod tests {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
 
-        let browser = core.snapshot().browser_chrome.expect("active browser chrome");
+        let browser = core
+            .snapshot()
+            .browser_chrome
+            .expect("active browser chrome");
         core.apply_host_event(HostEvent::SurfaceUrlChanged {
             surface_id: browser.surface_id,
             url: "about:blank".into(),
         });
 
-        let browser = core.snapshot().browser_chrome.expect("active browser chrome");
+        let browser = core
+            .snapshot()
+            .browser_chrome
+            .expect("active browser chrome");
         assert_eq!(browser.url, "about:blank");
     }
 
@@ -4362,9 +4438,10 @@ mod tests {
         core.dispatch_shell_action(ShellAction::CreateWorkspace);
         let second_workspace_id = core.snapshot().current_workspace.id;
         let second_pane_id = core.snapshot().current_workspace.active_pane;
-        let second_surface_id = find_pane(&core.snapshot().current_workspace.layout, second_pane_id)
-            .map(|pane| pane.active_surface)
-            .expect("second surface");
+        let second_surface_id =
+            find_pane(&core.snapshot().current_workspace.layout, second_pane_id)
+                .map(|pane| pane.active_surface)
+                .expect("second surface");
         let first_workspace_id = core
             .snapshot()
             .workspaces
