@@ -1,6 +1,6 @@
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 compile_error!(
-    "taskers on crates.io currently supports x86_64 Linux only. Download the macOS DMG from https://github.com/OneNoted/taskers/releases if you are on macOS."
+    "taskers on crates.io currently supports x86_64 Linux only. Mainline macOS support is not shipped from this repo root."
 );
 
 use std::{

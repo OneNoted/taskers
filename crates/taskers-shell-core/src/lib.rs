@@ -2614,7 +2614,7 @@ impl TaskersCore {
                 Some(response)
             }
             Err(error) => {
-                eprintln!("greenfield control dispatch failed: {error}");
+                eprintln!("taskers control dispatch failed: {error}");
                 None
             }
         }
@@ -3119,7 +3119,7 @@ fn default_preview_app_state() -> AppState {
 
     AppState::new(
         model,
-        default_session_path_for_preview("greenfield-preview-bootstrap"),
+        default_session_path_for_preview("taskers-preview-bootstrap"),
         BackendChoice::Mock,
         ShellLaunchSpec::fallback(),
     )
@@ -3607,9 +3607,9 @@ mod tests {
             app_state: AppState::new(
                 model,
                 default_session_path_for_preview(if cleared {
-                    "greenfield-preview-done-activity"
+                    "taskers-preview-done-activity"
                 } else {
-                    "greenfield-preview-activity"
+                    "taskers-preview-activity"
                 }),
                 BackendChoice::Mock,
                 ShellLaunchSpec::fallback(),

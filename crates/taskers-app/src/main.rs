@@ -16,7 +16,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use taskers_core::{AppState, load_or_bootstrap};
+use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_control::{bind_socket, default_socket_path, serve_with_handler};
 use taskers_shell_core::{
     BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
@@ -28,11 +28,11 @@ use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, Tasker
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
-const APP_ID: &str = "dev.onenoted.Taskers.Greenfield";
+const APP_ID: &str = taskers_paths::APP_ID;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "taskers")]
-#[command(about = "Greenfield Taskers unified shell")]
+#[command(about = "Taskers workspace shell")]
 struct Cli {
     #[arg(long, value_enum)]
     smoke_script: Option<SmokeScript>,
@@ -89,7 +89,7 @@ fn main() -> glib::ExitCode {
     let bootstrap = match bootstrap_runtime(None) {
         Ok(bootstrap) => bootstrap,
         Err(error) => {
-            eprintln!("failed to bootstrap greenfield Taskers host: {error:?}");
+            eprintln!("failed to bootstrap Taskers host: {error:?}");
             return glib::ExitCode::FAILURE;
         }
     };
@@ -126,7 +126,7 @@ fn build_ui(
     cli: Cli,
 ) {
     if let Err(error) = build_ui_result(app, bootstrap, hold_guard, cli) {
-        eprintln!("failed to launch greenfield Taskers host: {error:?}");
+        eprintln!("failed to launch Taskers host: {error:?}");
     }
 }
 
@@ -350,10 +350,10 @@ fn connect_navigation_shortcuts(
 fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
     let runtime = resolve_runtime_bootstrap();
     let mut startup_notes = runtime.startup_notes;
-    let session_path = greenfield_session_path();
+    let session_path = default_session_path();
     let initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
         format!(
-            "failed to load or bootstrap greenfield session at {}",
+            "failed to load or bootstrap Taskers session at {}",
             session_path.display()
         )
     })?;
@@ -404,7 +404,7 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         backend_choice,
         runtime.shell_launch,
     )
-    .context("failed to initialize greenfield app state")?;
+    .context("failed to initialize Taskers app state")?;
     startup_notes.push(spawn_control_server(
         app_state.clone(),
         runtime.socket_path.clone(),
@@ -469,15 +469,9 @@ fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
     }
 }
 
-fn greenfield_session_path() -> PathBuf {
-    taskers_paths::TaskersPaths::detect()
-        .state_dir()
-        .join("greenfield-session.json")
-}
-
-fn greenfield_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
+fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
     std::env::temp_dir().join(format!(
-        "taskers-greenfield-probe-{}-{}.json",
+        "taskers-probe-{}-{}.json",
         mode.as_arg(),
         std::process::id()
     ))
@@ -539,7 +533,7 @@ fn run_internal_surface_probe(
 
     let app_state = match AppState::new(
         AppModel::new("Ghostty Probe"),
-        greenfield_probe_session_path(mode),
+        taskers_probe_session_path(mode),
         BackendChoice::GhosttyEmbedded,
         shell_launch,
     ) {
@@ -1075,7 +1069,7 @@ impl DiagnosticsWriter {
             .diagnostic_log
             .clone()
             .or_else(|| {
-                std::env::var("TASKERS_GREENFIELD_DIAGNOSTIC_LOG")
+                std::env::var("TASKERS_DIAGNOSTIC_LOG")
                     .ok()
                     .filter(|value| !value.is_empty())
             })

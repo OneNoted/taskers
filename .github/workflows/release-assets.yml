@@ -48,118 +48,29 @@ jobs:
           echo "${prefix}/bin" >> "$GITHUB_PATH"
           "${prefix}/bin/blueprint-compiler" --version
 
+      - name: Build debug app for smoke
+        run: cargo build -p taskers-gtk --bin taskers-gtk
+
+      - name: Run headless app smoke
+        run: |
+          TASKERS_TERMINAL_BACKEND=mock \
+            bash scripts/headless-smoke.sh \
+            ./target/debug/taskers-gtk \
+            --smoke-script baseline \
+            --diagnostic-log stderr \
+            --quit-after-ms 5000
+
       - name: Build Linux bundle
         run: bash scripts/build_linux_bundle.sh
 
-      - name: Run Linux smoke checks
-        run: |
-          bash scripts/smoke_taskers_ui.sh
-          bash scripts/smoke_taskers_focus_churn.sh
-          bash scripts/smoke_linux_release_launcher.sh
+      - name: Run launcher smoke
+        run: bash scripts/smoke_linux_release_launcher.sh
 
       - name: Upload Linux bundle
         uses: actions/upload-artifact@v4
         with:
           name: linux-bundle
           path: dist/taskers-linux-bundle-v*.tar.xz
-
-  macos-universal-dmg:
-    runs-on: macos-15
-    env:
-      TASKERS_MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.TASKERS_MACOS_CERTIFICATE_P12_BASE64 }}
-      TASKERS_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.TASKERS_MACOS_CERTIFICATE_PASSWORD }}
-      TASKERS_MACOS_CODESIGN_IDENTITY: ${{ secrets.TASKERS_MACOS_CODESIGN_IDENTITY }}
-      TASKERS_MACOS_NOTARY_APPLE_ID: ${{ secrets.TASKERS_MACOS_NOTARY_APPLE_ID }}
-      TASKERS_MACOS_NOTARY_TEAM_ID: ${{ secrets.TASKERS_MACOS_NOTARY_TEAM_ID }}
-      TASKERS_MACOS_NOTARY_PASSWORD: ${{ secrets.TASKERS_MACOS_NOTARY_PASSWORD }}
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Decide whether to build signed macOS release
-        id: release-gate
-        run: |
-          signed_release=true
-          missing=()
-          for name in \
-            TASKERS_MACOS_CERTIFICATE_P12_BASE64 \
-            TASKERS_MACOS_CERTIFICATE_PASSWORD \
-            TASKERS_MACOS_CODESIGN_IDENTITY \
-            TASKERS_MACOS_NOTARY_APPLE_ID \
-            TASKERS_MACOS_NOTARY_TEAM_ID \
-            TASKERS_MACOS_NOTARY_PASSWORD; do
-            if [[ -z "${!name:-}" ]]; then
-              missing+=("${name}")
-              signed_release=false
-            fi
-          done
-
-          echo "signed_release=${signed_release}" >> "$GITHUB_OUTPUT"
-
-          if [[ "${signed_release}" != "true" ]]; then
-            echo "Building unsigned macOS DMG; missing signing/notary secrets: ${missing[*]}"
-          fi
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: |
-            aarch64-apple-darwin
-            x86_64-apple-darwin
-
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.15.2
-
-      - name: Install macOS build tools
-        run: |
-          brew update
-          brew install xcodegen
-
-      - name: Install Developer ID certificate
-        if: steps.release-gate.outputs.signed_release == 'true'
-        run: bash scripts/install_macos_codesign_certificate.sh
-
-      - name: Build universal macOS dependencies
-        run: TASKERS_MACOS_DEP_MODE=universal bash scripts/macos-build-preview-deps.sh
-
-      - name: Generate Xcode project
-        run: TASKERS_MACOS_DEP_MODE=universal bash scripts/generate_macos_project.sh
-
-      - name: Build universal Taskers.app
-        run: |
-          TASKERS_SKIP_MACOS_PREBUILD_DEPS=1 xcodebuild build \
-            -project macos/Taskers.xcodeproj \
-            -scheme TaskersMac \
-            -configuration Release \
-            -derivedDataPath build/macos/DerivedData \
-            ARCHS="arm64 x86_64" \
-            ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
-
-      - name: Sign universal Taskers.app
-        run: bash scripts/sign_macos_app.sh
-
-      - name: Build universal DMG
-        run: bash scripts/build_macos_dmg.sh
-
-      - name: Notarize and staple universal DMG
-        if: steps.release-gate.outputs.signed_release == 'true'
-        run: |
-          version="$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
-          bash scripts/notarize_macos_dmg.sh "dist/Taskers-v${version}-universal2.dmg"
-
-      - name: Upload universal DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-universal-dmg
-          path: dist/Taskers-v*-universal2.dmg
 
   release-manifest:
     needs:
@@ -193,7 +104,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - release-manifest
-      - macos-universal-dmg
     runs-on: ubuntu-latest
 
     steps:
@@ -214,9 +124,6 @@ jobs:
             echo 'files<<EOF'
             echo 'dist/release/taskers-manifest-v*.json'
             echo 'dist/release/taskers-linux-bundle-v*.tar.xz'
-            if compgen -G 'dist/release/Taskers-v*-universal2.dmg' > /dev/null; then
-              echo 'dist/release/Taskers-v*-universal2.dmg'
-            fi
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 

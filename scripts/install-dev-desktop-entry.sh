@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
 launcher_home="${HOME}/.local/bin"
 desktop_entry_path="${xdg_data_home}/applications/dev.taskers.app.desktop"
-launcher_path="${launcher_home}/taskers-greenfield"
+launcher_path="${launcher_home}/taskers-dev"
 
 if [[ -n "${CARGO:-}" ]]; then
   cargo_bin="${CARGO}"
@@ -25,7 +25,7 @@ cat > "${launcher_path}" <<EOF
 #!/usr/bin/env sh
 set -eu
 
-exec "${cargo_bin}" run --manifest-path "${repo_root}/greenfield/Cargo.toml" -p taskers -- "\$@"
+exec "${cargo_bin}" run --manifest-path "${repo_root}/Cargo.toml" -p taskers-gtk --bin taskers-gtk -- "\$@"
 EOF
 chmod +x "${launcher_path}"
 
