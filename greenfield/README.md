@@ -19,6 +19,17 @@ Run it from this workspace:
 cargo run -p taskers
 ```
 
+To keep the desktop launcher pointed at the repo-local greenfield app instead of the installed
+`taskers` launcher, run:
+
+```bash
+greenfield/scripts/install-dev-desktop-entry.sh
+```
+
+This writes `~/.local/bin/taskers-greenfield` and updates
+`~/.local/share/applications/dev.taskers.app.desktop` to launch greenfield through `cargo run`,
+so desktop launches pick up the latest local code.
+
 Run the scripted baseline smoke with isolated XDG and runtime paths:
 
 ```bash
