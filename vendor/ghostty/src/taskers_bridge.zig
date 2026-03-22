@@ -202,19 +202,7 @@ fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOpti
     var cloned = try base.get().clone(alloc);
     defer cloned.deinit();
 
-    cloned.command = if (ptr.command_argv.len == 0)
-        null
-    else
-        configpkg.Command{ .direct = ptr.command_argv };
-    cloned.@"shell-integration" = .none;
-    cloned.@"shell-integration-features" = .{};
-    cloned.@"linux-cgroup" = .never;
-    // Embedded Taskers panes already supply their own chrome and spacing.
-    // Ghostty's default window padding makes the terminal grid float inside
-    // the pane body and visibly misalign with the shell layout.
-    cloned.@"window-padding-x" = .{ .top_left = 0, .bottom_right = 0 };
-    cloned.@"window-padding-y" = .{ .top_left = 0, .bottom_right = 0 };
-    cloned.@"window-padding-balance" = false;
+    try applyTaskersEmbeddedSurfaceInvariants(alloc, &cloned, ptr.command_argv);
     for (ptr.env_entries) |entry| {
         try cloned.env.parseCLI(alloc, entry);
     }
@@ -225,6 +213,30 @@ fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOpti
     }
 
     return try Config.new(alloc, &cloned);
+}
+
+fn applyTaskersEmbeddedSurfaceInvariants(
+    alloc: std.mem.Allocator,
+    config: *configpkg.Config,
+    command_argv: []const [:0]u8,
+) !void {
+    // Embedded panes inherit the user's loaded Ghostty config and only pin
+    // the handful of settings Taskers must own for layout and shell startup.
+    if (config.command) |command| command.deinit(alloc);
+    config.command = if (command_argv.len == 0) null else command: {
+        const direct = configpkg.Command{ .direct = command_argv };
+        break :command try direct.clone(alloc);
+    };
+    config.@"shell-integration" = .none;
+    config.@"shell-integration-features" = .{};
+    config.@"linux-cgroup" = .never;
+
+    // Embedded Taskers panes already supply their own chrome and spacing.
+    // Ghostty's default window padding makes the terminal grid float inside
+    // the pane body and visibly misalign with the shell layout.
+    config.@"window-padding-x" = .{ .top_left = 0, .bottom_right = 0 };
+    config.@"window-padding-y" = .{ .top_left = 0, .bottom_right = 0 };
+    config.@"window-padding-balance" = false;
 }
 
 fn duplicateStringList(
@@ -250,4 +262,63 @@ fn duplicateStringList(
 fn freeStringList(alloc: std.mem.Allocator, entries: []const [:0]u8) void {
     for (entries) |entry| alloc.free(entry);
     alloc.free(entries);
+}
+
+test "taskers embedded config preserves user settings beyond required invariants" {
+    const testing = std.testing;
+    var config = try configpkg.Config.default(testing.allocator);
+    defer config.deinit();
+
+    config.@"font-size" = 19;
+    config.command = .{ .shell = try testing.allocator.dupeZ(u8, "echo from-user-config") };
+    config.@"shell-integration" = .zsh;
+    config.@"shell-integration-features" = .{
+        .cursor = false,
+        .sudo = true,
+        .title = false,
+        .@"ssh-env" = true,
+        .@"ssh-terminfo" = true,
+        .path = false,
+    };
+    config.@"linux-cgroup" = .always;
+    config.@"window-padding-x" = .{ .top_left = 7, .bottom_right = 9 };
+    config.@"window-padding-y" = .{ .top_left = 11, .bottom_right = 13 };
+    config.@"window-padding-balance" = true;
+
+    const command_argv = [_][:0]const u8{ "/opt/taskers-shell-wrapper.sh", "-i" };
+    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, command_argv[0..]);
+
+    try testing.expectEqual(@as(f32, 19), config.@"font-size");
+    try testing.expectEqual(configpkg.Config.ShellIntegration.none, config.@"shell-integration");
+    try testing.expectEqual(configpkg.ShellIntegrationFeatures{}, config.@"shell-integration-features");
+    try testing.expectEqual(configpkg.Config.LinuxCgroup.never, config.@"linux-cgroup");
+    try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".top_left);
+    try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".bottom_right);
+    try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".top_left);
+    try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".bottom_right);
+    try testing.expect(!config.@"window-padding-balance");
+
+    const command = config.command orelse return error.TestUnexpectedResult;
+    switch (command) {
+        .direct => |argv| {
+            try testing.expectEqual(@as(usize, 2), argv.len);
+            try testing.expectEqualStrings("/opt/taskers-shell-wrapper.sh", argv[0]);
+            try testing.expectEqualStrings("-i", argv[1]);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "taskers embedded config clears user command when taskers does not provide one" {
+    const testing = std.testing;
+    var config = try configpkg.Config.default(testing.allocator);
+    defer config.deinit();
+
+    config.@"font-size" = 17;
+    config.command = .{ .shell = try testing.allocator.dupeZ(u8, "echo from-user-config") };
+
+    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, &.{});
+
+    try testing.expectEqual(@as(f32, 17), config.@"font-size");
+    try testing.expect(config.command == null);
 }
