@@ -1018,10 +1018,10 @@ struct NativeSurfaceShell {
 impl NativeSurfaceShell {
     fn new(kind_class: &'static str, interactive: bool) -> Self {
         let root = GtkBox::new(Orientation::Vertical, 0);
-        root.set_hexpand(true);
-        root.set_vexpand(true);
-        root.set_halign(Align::Fill);
-        root.set_valign(Align::Fill);
+        root.set_hexpand(false);
+        root.set_vexpand(false);
+        root.set_halign(Align::Start);
+        root.set_valign(Align::Start);
         root.set_overflow(Overflow::Hidden);
         root.set_focusable(false);
         root.set_can_target(interactive);
@@ -1336,6 +1336,8 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
 
 fn position_widget(overlay: &Overlay, widget: &Widget, frame: taskers_core::Frame) {
     widget.set_size_request(frame.width.max(1), frame.height.max(1));
+    widget.set_hexpand(false);
+    widget.set_vexpand(false);
     widget.set_halign(Align::Start);
     widget.set_valign(Align::Start);
     widget.set_margin_start(frame.x.max(0));
