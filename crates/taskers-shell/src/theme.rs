@@ -266,13 +266,6 @@ input:focus-visible {{
   gap: 4px;
 }}
 
-.sidebar-brand h1 {{
-  margin: 0;
-  font-size: 24px;
-  line-height: 1;
-  color: {text_bright};
-}}
-
 .sidebar-brand-wordmark {{
   margin: 0;
   font-size: 13px;
@@ -1290,10 +1283,6 @@ input:focus-visible {{
   box-shadow: 0 1px 2px rgba(0,0,0,0.20);
 }}
 
-.pane-utility-split {{
-  color: {text_subtle};
-}}
-
 .workspace-window-drop-zone {{
   position: absolute;
   z-index: 12;
@@ -1541,8 +1530,7 @@ input:focus-visible {{
   padding: 0 6px;
 }}
 
-.workspace-main-overview .surface-tab-title,
-.workspace-main-overview .surface-tab-label {{
+.workspace-main-overview .surface-tab-title {{
   font-size: 10px;
 }}
 
