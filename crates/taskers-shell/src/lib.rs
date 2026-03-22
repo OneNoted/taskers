@@ -13,6 +13,10 @@ use taskers_shell_core as taskers_core;
 
 type DraggedSurface = SurfaceDragSessionSnapshot;
 
+const WORKSPACE_DRAG_MIME: &str = "application/x-taskers-workspace";
+const WINDOW_DRAG_MIME: &str = "application/x-taskers-window";
+const SURFACE_DRAG_MIME: &str = "application/x-taskers-surface";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DraggedWindow {
     window_id: taskers_core::WorkspaceWindowId,
@@ -107,6 +111,19 @@ fn same_kind_add_surface_title(surface_kind: SurfaceKind) -> &'static str {
         SurfaceKind::Terminal => "New terminal tab",
         SurfaceKind::Browser => "New browser tab",
     }
+}
+
+fn prime_drag_transfer(event: &Event<DragData>, mime: &str, payload: &str) {
+    let transfer = event.data().data_transfer();
+    let _ = transfer.set_data(mime, payload);
+    let _ = transfer.set_data("text/plain", payload);
+    transfer.set_effect_allowed("move");
+    transfer.set_drop_effect("move");
+}
+
+fn mark_move_drop(event: &Event<DragData>) {
+    event.prevent_default();
+    event.data().data_transfer().set_drop_effect("move");
 }
 
 fn apply_surface_drop(
@@ -474,13 +491,14 @@ fn render_workspace_item(
     };
 
     let all_ids = all_ids.to_vec();
-    let on_dragstart = move |_: Event<DragData>| {
+    let on_dragstart = move |event: Event<DragData>| {
+        prime_drag_transfer(&event, WORKSPACE_DRAG_MIME, &workspace_id.to_string());
         drag_source.set(Some(workspace_id));
     };
     let on_dragover = {
         let core = core.clone();
         move |event: Event<DragData>| {
-            event.prevent_default();
+            mark_move_drop(&event);
             if core.snapshot().surface_drag.is_some() {
                 drag_target.set(None);
                 surface_drop_target.set(None);
@@ -645,13 +663,13 @@ fn render_surface_workspace_fallback_drop(
     let on_dragover = {
         let core = core.clone();
         move |event: Event<DragData>| {
+            mark_move_drop(&event);
             let Some(dragged) = core.snapshot().surface_drag else {
                 return;
             };
             if dragged.workspace_id == target_workspace_id {
                 return;
             }
-            event.prevent_default();
             surface_drop_target.set(None);
             core.dispatch_shell_action(ShellAction::PreviewSurfaceDragWorkspace {
                 workspace_id: target_workspace_id,
@@ -843,7 +861,8 @@ fn render_workspace_window(
     };
     let start_window_drag = {
         let core = core.clone();
-        move |_: Event<DragData>| {
+        move |event: Event<DragData>| {
+            prime_drag_transfer(&event, WINDOW_DRAG_MIME, &window_id.to_string());
             surface_drop_target.set(None);
             window_drag_source.set(Some(DraggedWindow { window_id }));
             core.dispatch_shell_action(ShellAction::BeginWindowDrag);
@@ -949,7 +968,7 @@ fn render_window_drop_zone(
         if window_drag_source.read().is_none() {
             return;
         }
-        event.prevent_default();
+        mark_move_drop(&event);
         window_drop_target.set(Some(target));
     };
     let clear_drop_target = move |_: Event<DragData>| {
@@ -1255,7 +1274,7 @@ fn render_surface_pane_drop_target(
             if core.snapshot().surface_drag.is_none() {
                 return;
             }
-            event.prevent_default();
+            mark_move_drop(&event);
             surface_drop_target.set(Some(target));
         }
     };
@@ -1338,7 +1357,8 @@ fn render_surface_tab(
     };
     let start_drag = {
         let core = core.clone();
-        move |_: Event<DragData>| {
+        move |event: Event<DragData>| {
+            prime_drag_transfer(&event, SURFACE_DRAG_MIME, &surface_id.to_string());
             core.dispatch_shell_action(ShellAction::BeginSurfaceDrag {
                 workspace_id,
                 pane_id,
@@ -1359,7 +1379,7 @@ fn render_surface_tab(
             if core.snapshot().surface_drag.is_none() {
                 return;
             }
-            event.prevent_default();
+            mark_move_drop(&event);
             surface_drop_target.set(Some(SurfaceDropTarget::BeforeSurface {
                 pane_id,
                 surface_id,
