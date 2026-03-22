@@ -2839,86 +2839,26 @@ async fn emit_agent_hook(
                 },
             )
             .await?;
-            if normalized_message.is_none() {
-                let target_surface_id =
-                    surface_id
-                        .or_else(env_surface_id)
-                        .unwrap_or(active_surface_for_pane(
-                            &query_model(&client).await?,
-                            workspace_id,
-                            pane_id,
-                        )?);
-                let kind = if matches!(kind, CliSignalKind::WaitingInput) {
-                    SignalKind::WaitingInput
-                } else {
-                    SignalKind::Notification
-                };
-                let state = if matches!(kind, SignalKind::WaitingInput) {
-                    AttentionState::WaitingInput
-                } else {
-                    AttentionState::WaitingInput
-                };
-                let _ = send_control_command(
-                    &client,
-                    ControlCommand::AgentCreateNotification {
-                        target: AgentTarget::Surface {
-                            workspace_id,
-                            pane_id,
-                            surface_id: target_surface_id,
-                        },
-                        kind,
-                        title: Some(normalized_title.clone()),
-                        subtitle: None,
-                        external_id: None,
-                        message: status_text.clone(),
-                        state,
-                    },
-                )
-                .await?;
-            }
         }
         CliSignalKind::Completed | CliSignalKind::Error => {
-            let signal_kind = if matches!(kind, CliSignalKind::Completed) {
-                SignalKind::Completed
-            } else {
-                SignalKind::Error
-            };
-            let state = if matches!(signal_kind, SignalKind::Completed) {
-                AttentionState::Completed
-            } else {
-                AttentionState::Error
-            };
-            if normalized_message.is_none() {
-                let target_surface_id =
-                    surface_id
-                        .or_else(env_surface_id)
-                        .unwrap_or(active_surface_for_pane(
-                            &query_model(&client).await?,
-                            workspace_id,
-                            pane_id,
-                        )?);
-                let _ = send_control_command(
-                    &client,
-                    ControlCommand::AgentCreateNotification {
-                        target: AgentTarget::Surface {
-                            workspace_id,
-                            pane_id,
-                            surface_id: target_surface_id,
-                        },
-                        kind: signal_kind.clone(),
-                        title: Some(normalized_title.clone()),
-                        subtitle: None,
-                        external_id: None,
-                        message: status_text.clone(),
-                        state,
-                    },
-                )
-                .await?;
-            }
-            if matches!(signal_kind, SignalKind::Completed) {
+            if matches!(kind, CliSignalKind::Completed) {
                 let _ = send_control_command(
                     &client,
                     ControlCommand::AgentClearStatus { workspace_id },
+                )
+                .await?;
+                let _ = send_control_command(
+                    &client,
+                    ControlCommand::AgentClearProgress { workspace_id },
+                )
+                .await?;
+            } else {
+                let _ = send_control_command(
+                    &client,
+                    ControlCommand::AgentSetStatus {
+                        workspace_id,
+                        text: status_text,
+                    },
                 )
                 .await?;
                 let _ = send_control_command(

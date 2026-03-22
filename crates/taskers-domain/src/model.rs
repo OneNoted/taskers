@@ -7,7 +7,8 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{
     AttentionState, Direction, LayoutNode, NotificationId, PaneId, SessionId, SignalEvent,
-    SignalKind, SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
+    SignalKind, SignalPaneMetadata, SplitAxis, SurfaceId, WindowId, WorkspaceColumnId,
+    WorkspaceId, WorkspaceWindowId,
 };
 
 pub const SESSION_SCHEMA_VERSION: u32 = 4;
@@ -174,6 +175,10 @@ pub struct PaneMetadata {
     pub agent_kind: Option<String>,
     #[serde(default)]
     pub agent_active: bool,
+    #[serde(default)]
+    pub agent_state: Option<WorkspaceAgentState>,
+    #[serde(default)]
+    pub latest_agent_message: Option<String>,
     pub last_signal_at: Option<OffsetDateTime>,
     #[serde(default)]
     pub progress: Option<ProgressState>,
@@ -404,7 +409,8 @@ pub enum NotificationDeliveryState {
 pub enum WorkspaceAgentState {
     Working,
     Waiting,
-    Inactive,
+    Completed,
+    Failed,
 }
 
 impl WorkspaceAgentState {
@@ -412,7 +418,8 @@ impl WorkspaceAgentState {
         match self {
             Self::Working => "Working",
             Self::Waiting => "Waiting",
-            Self::Inactive => "Inactive",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
         }
     }
 
@@ -420,7 +427,8 @@ impl WorkspaceAgentState {
         match self {
             Self::Waiting => 0,
             Self::Working => 1,
-            Self::Inactive => 2,
+            Self::Failed => 2,
+            Self::Completed => 3,
         }
     }
 }
@@ -1663,6 +1671,7 @@ impl AppModel {
 
         surface.attention = AttentionState::Completed;
         surface.metadata.agent_active = false;
+        surface.metadata.agent_state = Some(WorkspaceAgentState::Completed);
         surface.metadata.last_signal_at = Some(OffsetDateTime::now_utc());
         workspace.complete_surface_notifications(pane_id, surface_id);
         Ok(())
@@ -2033,6 +2042,13 @@ impl AppModel {
         surface_id: SurfaceId,
         event: SignalEvent,
     ) -> Result<(), DomainError> {
+        let SignalEvent {
+            source,
+            kind,
+            message,
+            metadata,
+            timestamp,
+        } = event;
         let workspace = self
             .workspaces
             .get_mut(&workspace_id)
@@ -2053,20 +2069,18 @@ impl AppModel {
                 surface_id,
             })?;
 
-        let notification_title = event.metadata.as_ref().and_then(|metadata| {
-            metadata
-                .agent_title
-                .clone()
-                .or_else(|| metadata.title.clone())
-        });
-        let metadata_reported_inactive = event
-            .metadata
+        let agent_signal = is_agent_signal(surface, &source, metadata.as_ref());
+        let normalized_message = normalized_signal_message(message.as_deref());
+        let metadata_reported_inactive = metadata
             .as_ref()
             .and_then(|metadata| metadata.agent_active)
             .is_some_and(|active| !active);
         let (surface_attention, should_acknowledge_surface_notifications) = {
             let mut acknowledged_inactive_resolution = false;
-            if let Some(metadata) = event.metadata {
+            if agent_signal && matches!(kind, SignalKind::Started) {
+                surface.metadata.latest_agent_message = None;
+            }
+            if let Some(metadata) = metadata {
                 surface.metadata.title = metadata.title;
                 if metadata.agent_title.is_some() {
                     surface.metadata.agent_title = metadata.agent_title;
@@ -2080,44 +2094,57 @@ impl AppModel {
                     surface.metadata.agent_active = agent_active;
                 }
             }
-            if !matches!(event.kind, SignalKind::Metadata) {
-                surface.metadata.last_signal_at = Some(event.timestamp);
-                surface.attention = map_signal_to_attention(&event.kind);
-                if let Some(agent_active) = signal_agent_active(&event.kind) {
+            if agent_signal {
+                if let Some(agent_state) = signal_agent_state(&kind) {
+                    surface.metadata.agent_state = Some(agent_state);
+                }
+                if let Some(message) = normalized_message.as_ref() {
+                    surface.metadata.latest_agent_message = Some(message.clone());
+                }
+            }
+            if !matches!(kind, SignalKind::Metadata) {
+                surface.metadata.last_signal_at = Some(timestamp);
+                surface.attention = map_signal_to_attention(&kind);
+                if let Some(agent_active) = signal_agent_active(&kind) {
                     surface.metadata.agent_active = agent_active;
                 }
             } else if metadata_reported_inactive
                 && matches!(
-                    surface.attention,
-                    AttentionState::Busy | AttentionState::WaitingInput
+                    surface.metadata.agent_state,
+                    Some(WorkspaceAgentState::Working | WorkspaceAgentState::Waiting)
                 )
             {
                 surface.attention = AttentionState::Completed;
-                surface.metadata.last_signal_at = Some(event.timestamp);
+                surface.metadata.agent_state = Some(WorkspaceAgentState::Completed);
+                surface.metadata.last_signal_at = Some(timestamp);
                 acknowledged_inactive_resolution = true;
             }
 
             (surface.attention, acknowledged_inactive_resolution)
+        };
+        let notification_title = surface_notification_title(surface);
+        let notification_message = if signal_creates_notification(&source, &kind) {
+            notification_message_for_signal(&kind, normalized_message, &notification_title, surface)
+        } else {
+            None
         };
 
         if should_acknowledge_surface_notifications {
             workspace.complete_surface_notifications(pane_id, surface_id);
         }
 
-        if signal_creates_notification(&event.kind)
-            && let Some(message) = event.message
-        {
+        if let Some(message) = notification_message {
             workspace.upsert_notification(NotificationItem {
                 id: NotificationId::new(),
                 pane_id,
                 surface_id,
-                kind: event.kind,
+                kind,
                 state: surface_attention,
                 title: notification_title,
                 subtitle: None,
                 external_id: None,
                 message,
-                created_at: event.timestamp,
+                created_at: timestamp,
                 read_at: None,
                 cleared_at: None,
                 desktop_delivery: NotificationDeliveryState::Pending,
@@ -3123,14 +3150,10 @@ impl CurrentWorkspaceSerde {
 
 const RECENT_INACTIVE_AGENT_RETENTION: Duration = Duration::minutes(15);
 
-fn signal_creates_notification(kind: &SignalKind) -> bool {
+fn signal_kind_creates_notification(kind: &SignalKind) -> bool {
     matches!(
         kind,
-        SignalKind::Started
-            | SignalKind::Completed
-            | SignalKind::WaitingInput
-            | SignalKind::Error
-            | SignalKind::Notification
+        SignalKind::Completed | SignalKind::WaitingInput | SignalKind::Error
     )
 }
 
@@ -3138,6 +3161,61 @@ fn is_agent_kind(agent_kind: Option<&str>) -> bool {
     agent_kind
         .map(str::trim)
         .is_some_and(|agent| !agent.is_empty() && agent != "shell")
+}
+
+fn is_agent_hook_source(source: &str) -> bool {
+    source.trim().starts_with("agent-hook:")
+}
+
+fn is_agent_signal(
+    surface: &SurfaceRecord,
+    source: &str,
+    metadata: Option<&SignalPaneMetadata>,
+) -> bool {
+    is_agent_hook_source(source)
+        || is_agent_kind(metadata.and_then(|metadata| metadata.agent_kind.as_deref()))
+        || is_agent_kind(surface.metadata.agent_kind.as_deref())
+}
+
+fn normalized_signal_message(message: Option<&str>) -> Option<String> {
+    message
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_owned)
+}
+
+fn surface_notification_title(surface: &SurfaceRecord) -> Option<String> {
+    surface
+        .metadata
+        .agent_title
+        .as_deref()
+        .or(surface.metadata.title.as_deref())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+}
+
+fn notification_message_for_signal(
+    kind: &SignalKind,
+    explicit_message: Option<String>,
+    notification_title: &Option<String>,
+    surface: &SurfaceRecord,
+) -> Option<String> {
+    match kind {
+        SignalKind::Metadata | SignalKind::Started | SignalKind::Progress => None,
+        SignalKind::Notification => explicit_message.or_else(|| notification_title.clone()),
+        SignalKind::WaitingInput => explicit_message.or_else(|| notification_title.clone()),
+        SignalKind::Completed | SignalKind::Error => explicit_message
+            .or_else(|| surface.metadata.latest_agent_message.clone())
+            .or_else(|| notification_title.clone()),
+    }
+}
+
+fn signal_creates_notification(source: &str, kind: &SignalKind) -> bool {
+    match kind {
+        SignalKind::Notification => !is_agent_hook_source(source),
+        _ => signal_kind_creates_notification(kind),
+    }
 }
 
 fn recent_inactive_cutoff(now: OffsetDateTime) -> OffsetDateTime {
@@ -3152,22 +3230,34 @@ fn workspace_agent_state(
         return None;
     }
 
-    if !surface.metadata.agent_active {
-        return surface
-            .metadata
-            .last_signal_at
-            .filter(|timestamp| *timestamp >= recent_inactive_cutoff(now))
-            .map(|_| WorkspaceAgentState::Inactive);
-    }
+    let state = surface.metadata.agent_state.or_else(|| {
+        if surface.metadata.agent_active {
+            match surface.attention {
+                AttentionState::Busy => Some(WorkspaceAgentState::Working),
+                AttentionState::WaitingInput => Some(WorkspaceAgentState::Waiting),
+                AttentionState::Completed => Some(WorkspaceAgentState::Completed),
+                AttentionState::Error => Some(WorkspaceAgentState::Failed),
+                AttentionState::Normal => None,
+            }
+        } else {
+            match surface.attention {
+                AttentionState::Completed => Some(WorkspaceAgentState::Completed),
+                AttentionState::Error => Some(WorkspaceAgentState::Failed),
+                AttentionState::Busy | AttentionState::WaitingInput => {
+                    Some(WorkspaceAgentState::Completed)
+                }
+                AttentionState::Normal => None,
+            }
+        }
+    })?;
 
-    match surface.attention {
-        AttentionState::Busy => Some(WorkspaceAgentState::Working),
-        AttentionState::WaitingInput => Some(WorkspaceAgentState::Waiting),
-        AttentionState::Completed | AttentionState::Error | AttentionState::Normal => surface
+    match state {
+        WorkspaceAgentState::Working | WorkspaceAgentState::Waiting => Some(state),
+        WorkspaceAgentState::Completed | WorkspaceAgentState::Failed => surface
             .metadata
             .last_signal_at
             .filter(|timestamp| *timestamp >= recent_inactive_cutoff(now))
-            .map(|_| WorkspaceAgentState::Inactive),
+            .map(|_| state),
     }
 }
 
@@ -3238,6 +3328,16 @@ fn signal_agent_active(kind: &SignalKind) -> Option<bool> {
         SignalKind::Started | SignalKind::Progress | SignalKind::WaitingInput => Some(true),
         SignalKind::Completed | SignalKind::Error => Some(false),
         SignalKind::Notification => None,
+    }
+}
+
+fn signal_agent_state(kind: &SignalKind) -> Option<WorkspaceAgentState> {
+    match kind {
+        SignalKind::Metadata => None,
+        SignalKind::Started | SignalKind::Progress => Some(WorkspaceAgentState::Working),
+        SignalKind::WaitingInput | SignalKind::Notification => Some(WorkspaceAgentState::Waiting),
+        SignalKind::Completed => Some(WorkspaceAgentState::Completed),
+        SignalKind::Error => Some(WorkspaceAgentState::Failed),
     }
 }
 
@@ -4338,6 +4438,124 @@ mod tests {
     }
 
     #[test]
+    fn agent_hook_notification_updates_context_without_creating_attention_item() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+
+        model
+            .apply_signal(
+                workspace_id,
+                pane_id,
+                SignalEvent::with_metadata(
+                    "agent-hook:codex",
+                    SignalKind::Notification,
+                    Some("Turn complete".into()),
+                    Some(SignalPaneMetadata {
+                        title: None,
+                        agent_title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                    }),
+                ),
+            )
+            .expect("notification applied");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let surface = workspace
+            .panes
+            .get(&pane_id)
+            .and_then(PaneRecord::active_surface)
+            .expect("surface");
+        assert_eq!(surface.attention, AttentionState::WaitingInput);
+        assert_eq!(
+            surface.metadata.latest_agent_message.as_deref(),
+            Some("Turn complete")
+        );
+        assert_eq!(
+            surface.metadata.agent_state,
+            Some(WorkspaceAgentState::Waiting)
+        );
+        assert!(workspace.notifications.is_empty());
+    }
+
+    #[test]
+    fn stop_signal_uses_cached_agent_message_for_final_notification() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+
+        model
+            .apply_signal(
+                workspace_id,
+                pane_id,
+                SignalEvent::with_metadata(
+                    "agent-hook:codex",
+                    SignalKind::Notification,
+                    Some("Turn complete".into()),
+                    Some(SignalPaneMetadata {
+                        title: None,
+                        agent_title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                    }),
+                ),
+            )
+            .expect("notification applied");
+
+        model
+            .apply_signal(
+                workspace_id,
+                pane_id,
+                SignalEvent::with_metadata(
+                    "agent-hook:codex",
+                    SignalKind::Completed,
+                    None,
+                    Some(SignalPaneMetadata {
+                        title: None,
+                        agent_title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(false),
+                    }),
+                ),
+            )
+            .expect("completed applied");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let notification = workspace
+            .notifications
+            .last()
+            .expect("completion notification");
+        assert_eq!(notification.kind, SignalKind::Completed);
+        assert_eq!(notification.state, AttentionState::Completed);
+        assert_eq!(notification.message, "Turn complete");
+        assert_eq!(notification.title.as_deref(), Some("Codex"));
+
+        let surface = workspace
+            .panes
+            .get(&pane_id)
+            .and_then(PaneRecord::active_surface)
+            .expect("surface");
+        assert_eq!(
+            surface.metadata.agent_state,
+            Some(WorkspaceAgentState::Completed)
+        );
+        assert!(!surface.metadata.agent_active);
+    }
+
+    #[test]
     fn progress_signals_update_attention_without_creating_activity_items() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
@@ -4364,6 +4582,44 @@ mod tests {
                 SignalEvent::new("test", SignalKind::Progress, Some("Still working".into())),
             )
             .expect("signal applied");
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(PaneRecord::active_surface)
+            .expect("surface");
+
+        assert_eq!(surface.attention, AttentionState::Busy);
+        assert!(model.activity_items().is_empty());
+    }
+
+    #[test]
+    fn started_signals_do_not_create_attention_items() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+
+        model
+            .apply_signal(
+                workspace_id,
+                pane_id,
+                SignalEvent::with_metadata(
+                    "agent-hook:codex",
+                    SignalKind::Started,
+                    None,
+                    Some(SignalPaneMetadata {
+                        title: None,
+                        agent_title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                    }),
+                ),
+            )
+            .expect("started applied");
 
         let surface = model
             .active_workspace()
@@ -4447,7 +4703,7 @@ mod tests {
     }
 
     #[test]
-    fn marking_surface_completed_clears_activity_and_keeps_recent_inactive_status() {
+    fn marking_surface_completed_clears_activity_and_keeps_recent_completed_status() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
         let pane_id = model.active_workspace().expect("workspace").active_pane;
@@ -4501,7 +4757,7 @@ mod tests {
                 .first()
                 .and_then(|summary| summary.agent_summaries.first())
                 .map(|summary| summary.state),
-            Some(WorkspaceAgentState::Inactive)
+            Some(WorkspaceAgentState::Completed)
         );
     }
 
@@ -4578,7 +4834,7 @@ mod tests {
                 .first()
                 .and_then(|summary| summary.agent_summaries.first())
                 .map(|summary| summary.state),
-            Some(WorkspaceAgentState::Inactive)
+            Some(WorkspaceAgentState::Completed)
         );
     }
 
