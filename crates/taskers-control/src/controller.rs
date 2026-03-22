@@ -315,16 +315,18 @@ impl InMemoryController {
                 )
             }
             ControlCommand::TransferSurface {
-                workspace_id,
+                source_workspace_id,
                 source_pane_id,
                 surface_id,
+                target_workspace_id,
                 target_pane_id,
                 to_index,
             } => {
                 model.transfer_surface(
-                    workspace_id,
+                    source_workspace_id,
                     source_pane_id,
                     surface_id,
+                    target_workspace_id,
                     target_pane_id,
                     to_index,
                 )?;
@@ -336,16 +338,18 @@ impl InMemoryController {
                 )
             }
             ControlCommand::MoveSurfaceToSplit {
-                workspace_id,
+                source_workspace_id,
                 source_pane_id,
                 surface_id,
+                target_workspace_id,
                 target_pane_id,
                 direction,
             } => {
                 let new_pane_id = model.move_surface_to_split(
-                    workspace_id,
+                    source_workspace_id,
                     source_pane_id,
                     surface_id,
+                    target_workspace_id,
                     target_pane_id,
                     direction,
                 )?;

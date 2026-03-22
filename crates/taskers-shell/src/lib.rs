@@ -13,6 +13,7 @@ use taskers_shell_core as taskers_core;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DraggedSurface {
+    workspace_id: WorkspaceId,
     pane_id: PaneId,
     surface_id: SurfaceId,
 }
@@ -200,9 +201,9 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     };
     let drag_source = use_signal(|| None::<WorkspaceId>);
     let drag_target = use_signal(|| None::<WorkspaceId>);
-    let surface_drag_source = use_signal(|| None::<DraggedSurface>);
-    let surface_drop_target = use_signal(|| None::<SurfaceDropTarget>);
-    let surface_workspace_target = use_signal(|| None::<WorkspaceId>);
+    let mut surface_drag_source = use_signal(|| None::<DraggedSurface>);
+    let mut surface_drop_target = use_signal(|| None::<SurfaceDropTarget>);
+    let mut surface_workspace_target = use_signal(|| None::<WorkspaceId>);
     let window_drag_source = use_signal(|| None::<DraggedWindow>);
     let window_drop_target = use_signal(|| None::<WorkspaceWindowMoveTarget>);
     let workspace_ids: Vec<WorkspaceId> = snapshot.workspaces.iter().map(|ws| ws.id).collect();
@@ -275,6 +276,24 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 
                 if matches!(snapshot.section, ShellSection::Workspace) {
                     div { class: if snapshot.overview_mode { "workspace-canvas workspace-canvas-overview" } else { "workspace-canvas" },
+                        ondragend: {
+                            let core = core.clone();
+                            move |_: Event<DragData>| {
+                                let dragged = *surface_drag_source.read();
+                                surface_drag_source.set(None);
+                                surface_drop_target.set(None);
+                                surface_workspace_target.set(None);
+                                let Some(dragged) = dragged else {
+                                    return;
+                                };
+                                if core.snapshot().current_workspace.id != dragged.workspace_id {
+                                    core.dispatch_shell_action(ShellAction::FocusWorkspace {
+                                        workspace_id: dragged.workspace_id,
+                                    });
+                                }
+                                core.dispatch_shell_action(ShellAction::EndDrag);
+                            }
+                        },
                         {render_workspace_strip(
                             &snapshot.current_workspace,
                             snapshot.overview_mode,
@@ -283,6 +302,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             &snapshot.runtime_status,
                             surface_drag_source,
                             surface_drop_target,
+                            surface_workspace_target,
                             window_drag_source,
                             window_drop_target,
                         )}
@@ -454,14 +474,20 @@ fn render_workspace_item(
     let on_dragstart = move |_: Event<DragData>| {
         drag_source.set(Some(workspace_id));
     };
-    let on_dragover = move |event: Event<DragData>| {
-        event.prevent_default();
-        if surface_drag_source.read().is_some() {
-            surface_workspace_target.set(Some(workspace_id));
-            drag_target.set(None);
-        } else {
-            drag_target.set(Some(workspace_id));
-            surface_workspace_target.set(None);
+    let on_dragover = {
+        let core = core.clone();
+        move |event: Event<DragData>| {
+            event.prevent_default();
+            if let Some(dragged_surface) = *surface_drag_source.read() {
+                surface_workspace_target.set(Some(workspace_id));
+                drag_target.set(None);
+                if dragged_surface.workspace_id != workspace_id {
+                    core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
+                }
+            } else {
+                drag_target.set(Some(workspace_id));
+                surface_workspace_target.set(None);
+            }
         }
     };
     let on_dragleave = move |_: Event<DragData>| {
@@ -484,11 +510,13 @@ fn render_workspace_item(
             surface_workspace_target.set(None);
             if let Some(dragged_surface) = dragged_surface {
                 surface_drag_source.set(None);
-                core.dispatch_shell_action(ShellAction::MoveSurfaceToWorkspace {
-                    source_pane_id: dragged_surface.pane_id,
-                    surface_id: dragged_surface.surface_id,
-                    target_workspace_id: workspace_id,
-                });
+                if dragged_surface.workspace_id != workspace_id {
+                    core.dispatch_shell_action(ShellAction::MoveSurfaceToWorkspace {
+                        source_pane_id: dragged_surface.pane_id,
+                        surface_id: dragged_surface.surface_id,
+                        target_workspace_id: workspace_id,
+                    });
+                }
                 core.dispatch_shell_action(ShellAction::EndDrag);
                 return;
             }
@@ -603,7 +631,67 @@ fn render_workspace_log_entry(entry: &WorkspaceLogEntrySnapshot) -> Element {
     }
 }
 
+fn render_surface_workspace_fallback_drop(
+    target_workspace_id: WorkspaceId,
+    core: SharedCore,
+    mut surface_drag_source: Signal<Option<DraggedSurface>>,
+    mut surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    mut surface_workspace_target: Signal<Option<WorkspaceId>>,
+) -> Element {
+    let active = *surface_workspace_target.read() == Some(target_workspace_id);
+    let class = if active {
+        "workspace-surface-fallback-drop workspace-surface-fallback-drop-active"
+    } else {
+        "workspace-surface-fallback-drop"
+    };
+    let on_dragover = move |event: Event<DragData>| {
+        let Some(dragged) = *surface_drag_source.read() else {
+            return;
+        };
+        if dragged.workspace_id == target_workspace_id {
+            return;
+        }
+        event.prevent_default();
+        surface_workspace_target.set(Some(target_workspace_id));
+        surface_drop_target.set(None);
+    };
+    let on_dragleave = move |_: Event<DragData>| {
+        if *surface_workspace_target.read() == Some(target_workspace_id) {
+            surface_workspace_target.set(None);
+        }
+    };
+    let on_drop = move |event: Event<DragData>| {
+        event.prevent_default();
+        let dragged = *surface_drag_source.read();
+        surface_drag_source.set(None);
+        surface_drop_target.set(None);
+        surface_workspace_target.set(None);
+        let Some(dragged) = dragged else {
+            return;
+        };
+        if dragged.workspace_id != target_workspace_id {
+            core.dispatch_shell_action(ShellAction::MoveSurfaceToWorkspace {
+                source_pane_id: dragged.pane_id,
+                surface_id: dragged.surface_id,
+                target_workspace_id,
+            });
+        }
+        core.dispatch_shell_action(ShellAction::EndDrag);
+    };
+
+    rsx! {
+        div {
+            class: "{class}",
+            ondragover: on_dragover,
+            ondragleave: on_dragleave,
+            ondrop: on_drop,
+            div { class: "workspace-surface-fallback-label", "Drop to create a new window" }
+        }
+    }
+}
+
 fn render_layout(
+    workspace_id: WorkspaceId,
     node: &LayoutNodeSnapshot,
     overview_mode: bool,
     browser_chrome: Option<&BrowserChromeSnapshot>,
@@ -611,6 +699,7 @@ fn render_layout(
     runtime_status: &RuntimeStatus,
     surface_drag_source: Signal<Option<DraggedSurface>>,
     surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_workspace_target: Signal<Option<WorkspaceId>>,
 ) -> Element {
     match node {
         LayoutNodeSnapshot::Split {
@@ -631,15 +720,16 @@ fn render_layout(
             rsx! {
                 div { class: "split-container", style: "flex-direction: {direction};",
                     div { class: "split-child", style: "{first_style}",
-                        {render_layout(first, overview_mode, browser_chrome, core.clone(), runtime_status, surface_drag_source, surface_drop_target)}
+                        {render_layout(workspace_id, first, overview_mode, browser_chrome, core.clone(), runtime_status, surface_drag_source, surface_drop_target, surface_workspace_target)}
                     }
                     div { class: "split-child", style: "{second_style}",
-                        {render_layout(second, overview_mode, browser_chrome, core.clone(), runtime_status, surface_drag_source, surface_drop_target)}
+                        {render_layout(workspace_id, second, overview_mode, browser_chrome, core.clone(), runtime_status, surface_drag_source, surface_drop_target, surface_workspace_target)}
                     }
                 }
             }
         }
         LayoutNodeSnapshot::Pane(pane) => render_pane(
+            workspace_id,
             pane,
             overview_mode,
             browser_chrome,
@@ -647,6 +737,7 @@ fn render_layout(
             runtime_status,
             surface_drag_source,
             surface_drop_target,
+            surface_workspace_target,
         ),
     }
 }
@@ -659,6 +750,7 @@ fn render_workspace_strip(
     runtime_status: &RuntimeStatus,
     surface_drag_source: Signal<Option<DraggedSurface>>,
     surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_workspace_target: Signal<Option<WorkspaceId>>,
     window_drag_source: Signal<Option<DraggedWindow>>,
     window_drop_target: Signal<Option<WorkspaceWindowMoveTarget>>,
 ) -> Element {
@@ -694,6 +786,18 @@ fn render_workspace_strip(
     rsx! {
         div { class: "{viewport_class}", onwheel: scroll_viewport,
             div { class: "workspace-strip-canvas", style: "{canvas_style}",
+                if surface_drag_source
+                    .read()
+                    .is_some_and(|dragged| dragged.workspace_id != workspace.id)
+                {
+                    {render_surface_workspace_fallback_drop(
+                        workspace.id,
+                        core.clone(),
+                        surface_drag_source,
+                        surface_drop_target,
+                        surface_workspace_target,
+                    )}
+                }
                 for column in &workspace.columns {
                     for window in &column.windows {
                         {render_workspace_window(
@@ -705,6 +809,7 @@ fn render_workspace_strip(
                             runtime_status,
                             surface_drag_source,
                             surface_drop_target,
+                            surface_workspace_target,
                             window_drag_source,
                             window_drop_target,
                         )}
@@ -724,6 +829,7 @@ fn render_workspace_window(
     runtime_status: &RuntimeStatus,
     mut surface_drag_source: Signal<Option<DraggedSurface>>,
     mut surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_workspace_target: Signal<Option<WorkspaceId>>,
     mut window_drag_source: Signal<Option<DraggedWindow>>,
     window_drop_target: Signal<Option<WorkspaceWindowMoveTarget>>,
 ) -> Element {
@@ -819,6 +925,7 @@ fn render_workspace_window(
             }
             div { class: "workspace-window-body",
                 {render_layout(
+                    workspace.id,
                     &window.layout,
                     overview_mode,
                     browser_chrome,
@@ -826,6 +933,7 @@ fn render_workspace_window(
                     runtime_status,
                     surface_drag_source,
                     surface_drop_target,
+                    surface_workspace_target,
                 )}
             }
         }
@@ -888,6 +996,7 @@ fn render_window_drop_zone(
 }
 
 fn render_pane(
+    workspace_id: WorkspaceId,
     pane: &PaneSnapshot,
     overview_mode: bool,
     browser_chrome: Option<&BrowserChromeSnapshot>,
@@ -895,6 +1004,7 @@ fn render_pane(
     runtime_status: &RuntimeStatus,
     surface_drag_source: Signal<Option<DraggedSurface>>,
     surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_workspace_target: Signal<Option<WorkspaceId>>,
 ) -> Element {
     let pane_id = pane.id;
     let dragged_surface = *surface_drag_source.read();
@@ -1035,12 +1145,14 @@ fn render_pane(
                 div { class: "surface-tabs",
                     for surface in &pane.surfaces {
                         {render_surface_tab(
+                            workspace_id,
                             pane.id,
                             pane.active_surface,
                             surface,
                             core.clone(),
                             surface_drag_source,
                             surface_drop_target,
+                            surface_workspace_target,
                             &ordered_surface_ids,
                         )}
                     }
@@ -1052,6 +1164,7 @@ fn render_pane(
                             core.clone(),
                             surface_drag_source,
                             surface_drop_target,
+                            surface_workspace_target,
                         )}
                     }
                 }
@@ -1077,6 +1190,7 @@ fn render_pane(
                             core.clone(),
                             surface_drag_source,
                             surface_drop_target,
+                            surface_workspace_target,
                         )}
                         if pane_allows_split {
                             {render_surface_pane_drop_target(
@@ -1089,6 +1203,7 @@ fn render_pane(
                                 core.clone(),
                                 surface_drag_source,
                                 surface_drop_target,
+                                surface_workspace_target,
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-right",
@@ -1100,6 +1215,7 @@ fn render_pane(
                                 core.clone(),
                                 surface_drag_source,
                                 surface_drop_target,
+                                surface_workspace_target,
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-top",
@@ -1111,6 +1227,7 @@ fn render_pane(
                                 core.clone(),
                                 surface_drag_source,
                                 surface_drop_target,
+                                surface_workspace_target,
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
@@ -1122,6 +1239,7 @@ fn render_pane(
                                 core.clone(),
                                 surface_drag_source,
                                 surface_drop_target,
+                                surface_workspace_target,
                             )}
                         }
                     }
@@ -1139,6 +1257,7 @@ fn render_surface_pane_drop_target(
     core: SharedCore,
     mut surface_drag_source: Signal<Option<DraggedSurface>>,
     mut surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    mut surface_workspace_target: Signal<Option<WorkspaceId>>,
 ) -> Element {
     let class = if *surface_drop_target.read() == Some(target) {
         format!("{base_class} pane-drop-target-active")
@@ -1150,6 +1269,7 @@ fn render_surface_pane_drop_target(
             return;
         }
         event.prevent_default();
+        surface_workspace_target.set(None);
         surface_drop_target.set(Some(target));
     };
     let clear_drop_target = move |_: Event<DragData>| {
@@ -1164,6 +1284,7 @@ fn render_surface_pane_drop_target(
             let dragged = *surface_drag_source.read();
             surface_drag_source.set(None);
             surface_drop_target.set(None);
+            surface_workspace_target.set(None);
             let Some(dragged) = dragged else {
                 return;
             };
@@ -1184,12 +1305,14 @@ fn render_surface_pane_drop_target(
 }
 
 fn render_surface_tab(
+    workspace_id: WorkspaceId,
     pane_id: PaneId,
     active_surface_id: SurfaceId,
     surface: &SurfaceSnapshot,
     core: SharedCore,
     mut surface_drag_source: Signal<Option<DraggedSurface>>,
     mut surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    mut surface_workspace_target: Signal<Option<WorkspaceId>>,
     ordered_surface_ids: &[SurfaceId],
 ) -> Element {
     let kind_label = match surface.kind {
@@ -1234,17 +1357,28 @@ fn render_surface_tab(
         let core = core.clone();
         move |_: Event<DragData>| {
             surface_drag_source.set(Some(DraggedSurface {
+                workspace_id,
                 pane_id,
                 surface_id,
             }));
+            surface_workspace_target.set(None);
             core.dispatch_shell_action(ShellAction::BeginSurfaceDrag);
         }
     };
     let clear_drag = {
         let core = core.clone();
         move |_: Event<DragData>| {
+            let dragged = *surface_drag_source.read();
             surface_drag_source.set(None);
             surface_drop_target.set(None);
+            surface_workspace_target.set(None);
+            if let Some(dragged) = dragged
+                && core.snapshot().current_workspace.id != dragged.workspace_id
+            {
+                core.dispatch_shell_action(ShellAction::FocusWorkspace {
+                    workspace_id: dragged.workspace_id,
+                });
+            }
             core.dispatch_shell_action(ShellAction::EndDrag);
         }
     };
@@ -1253,6 +1387,7 @@ fn render_surface_tab(
             return;
         }
         event.prevent_default();
+        surface_workspace_target.set(None);
         surface_drop_target.set(Some(SurfaceDropTarget::BeforeSurface {
             pane_id,
             surface_id,
@@ -1276,6 +1411,7 @@ fn render_surface_tab(
             let dragged = *surface_drag_source.read();
             surface_drag_source.set(None);
             surface_drop_target.set(None);
+            surface_workspace_target.set(None);
             let Some(dragged) = dragged else {
                 return;
             };

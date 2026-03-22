@@ -973,11 +973,9 @@ impl Workspace {
 
     fn mark_notification_read(&mut self, notification_id: NotificationId) -> bool {
         let now = OffsetDateTime::now_utc();
-        if let Some(notification) = self
-            .notifications
-            .iter_mut()
-            .find(|notification| notification.id == notification_id && notification.cleared_at.is_none())
-        {
+        if let Some(notification) = self.notifications.iter_mut().find(|notification| {
+            notification.id == notification_id && notification.cleared_at.is_none()
+        }) {
             if notification.read_at.is_none() {
                 notification.read_at = Some(now);
             }
@@ -2494,83 +2492,155 @@ impl AppModel {
         Ok(())
     }
 
-    pub fn transfer_surface(
+    fn take_surface_from_pane(
         &mut self,
         workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> Result<SurfaceRecord, DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let source_pane =
+            workspace
+                .panes
+                .get_mut(&pane_id)
+                .ok_or(DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id,
+                })?;
+        source_pane
+            .surfaces
+            .shift_remove(&surface_id)
+            .ok_or(DomainError::SurfaceNotInPane {
+                workspace_id,
+                pane_id,
+                surface_id,
+            })
+    }
+
+    fn should_close_source_pane(&self, workspace_id: WorkspaceId, pane_id: PaneId) -> bool {
+        self.workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .is_some_and(|pane| pane.surfaces.is_empty())
+    }
+
+    fn retarget_surface_state(
+        &mut self,
+        source_workspace_id: WorkspaceId,
+        target_workspace_id: WorkspaceId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+    ) -> Result<(), DomainError> {
+        if source_workspace_id == target_workspace_id {
+            let workspace = self
+                .workspaces
+                .get_mut(&source_workspace_id)
+                .ok_or(DomainError::MissingWorkspace(source_workspace_id))?;
+            for notification in &mut workspace.notifications {
+                if notification.surface_id == surface_id {
+                    notification.pane_id = target_pane_id;
+                }
+            }
+            return Ok(());
+        }
+
+        let (mut moved_notifications, moved_flash_token) = {
+            let source_workspace = self
+                .workspaces
+                .get_mut(&source_workspace_id)
+                .ok_or(DomainError::MissingWorkspace(source_workspace_id))?;
+            let moved_flash_token = source_workspace.surface_flash_tokens.remove(&surface_id);
+            let mut moved_notifications = Vec::new();
+            source_workspace.notifications.retain(|notification| {
+                if notification.surface_id == surface_id {
+                    moved_notifications.push(notification.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            (moved_notifications, moved_flash_token)
+        };
+
+        let target_workspace = self
+            .workspaces
+            .get_mut(&target_workspace_id)
+            .ok_or(DomainError::MissingWorkspace(target_workspace_id))?;
+        for notification in &mut moved_notifications {
+            notification.pane_id = target_pane_id;
+        }
+        target_workspace.notifications.extend(moved_notifications);
+        if let Some(token) = moved_flash_token {
+            target_workspace
+                .surface_flash_tokens
+                .insert(surface_id, token);
+        }
+        Ok(())
+    }
+
+    pub fn transfer_surface(
+        &mut self,
+        source_workspace_id: WorkspaceId,
         source_pane_id: PaneId,
         surface_id: SurfaceId,
+        target_workspace_id: WorkspaceId,
         target_pane_id: PaneId,
         to_index: usize,
     ) -> Result<(), DomainError> {
-        if source_pane_id == target_pane_id {
-            return self.move_surface(workspace_id, source_pane_id, surface_id, to_index);
+        if source_workspace_id == target_workspace_id && source_pane_id == target_pane_id {
+            return self.move_surface(source_workspace_id, source_pane_id, surface_id, to_index);
         }
 
         {
-            let workspace = self
+            let source_workspace = self
                 .workspaces
-                .get(&workspace_id)
-                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
-            if !workspace.panes.contains_key(&source_pane_id) {
+                .get(&source_workspace_id)
+                .ok_or(DomainError::MissingWorkspace(source_workspace_id))?;
+            let target_workspace = self
+                .workspaces
+                .get(&target_workspace_id)
+                .ok_or(DomainError::MissingWorkspace(target_workspace_id))?;
+            if !source_workspace.panes.contains_key(&source_pane_id) {
                 return Err(DomainError::PaneNotInWorkspace {
-                    workspace_id,
+                    workspace_id: source_workspace_id,
                     pane_id: source_pane_id,
                 });
             }
-            if !workspace.panes.contains_key(&target_pane_id) {
+            if !target_workspace.panes.contains_key(&target_pane_id) {
                 return Err(DomainError::PaneNotInWorkspace {
-                    workspace_id,
+                    workspace_id: target_workspace_id,
                     pane_id: target_pane_id,
                 });
             }
-            if !workspace
+            if !source_workspace
                 .panes
                 .get(&source_pane_id)
                 .is_some_and(|pane| pane.surfaces.contains_key(&surface_id))
             {
                 return Err(DomainError::SurfaceNotInPane {
-                    workspace_id,
+                    workspace_id: source_workspace_id,
                     pane_id: source_pane_id,
                     surface_id,
                 });
             }
         }
 
-        let moved_surface = {
-            let workspace = self
-                .workspaces
-                .get_mut(&workspace_id)
-                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
-            let source_pane = workspace.panes.get_mut(&source_pane_id).ok_or(
-                DomainError::PaneNotInWorkspace {
-                    workspace_id,
-                    pane_id: source_pane_id,
-                },
-            )?;
-            source_pane
-                .surfaces
-                .shift_remove(&surface_id)
-                .ok_or(DomainError::SurfaceNotInPane {
-                    workspace_id,
-                    pane_id: source_pane_id,
-                    surface_id,
-                })?
-        };
-
-        let should_close_source_pane = self
-            .workspaces
-            .get(&workspace_id)
-            .and_then(|workspace| workspace.panes.get(&source_pane_id))
-            .is_some_and(|pane| pane.surfaces.is_empty());
+        let moved_surface =
+            self.take_surface_from_pane(source_workspace_id, source_pane_id, surface_id)?;
+        let should_close_source_pane =
+            self.should_close_source_pane(source_workspace_id, source_pane_id);
 
         {
             let workspace = self
                 .workspaces
-                .get_mut(&workspace_id)
-                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+                .get_mut(&target_workspace_id)
+                .ok_or(DomainError::MissingWorkspace(target_workspace_id))?;
             let target_pane = workspace.panes.get_mut(&target_pane_id).ok_or(
                 DomainError::PaneNotInWorkspace {
-                    workspace_id,
+                    workspace_id: target_workspace_id,
                     pane_id: target_pane_id,
                 },
             )?;
@@ -2581,61 +2651,73 @@ impl AppModel {
                 let _ = target_pane.move_surface(surface_id, target_index);
             }
             target_pane.active_surface = surface_id;
-            for notification in &mut workspace.notifications {
-                if notification.surface_id == surface_id {
-                    notification.pane_id = target_pane_id;
-                }
-            }
             let _ = workspace.focus_surface(target_pane_id, surface_id);
         }
+        self.retarget_surface_state(
+            source_workspace_id,
+            target_workspace_id,
+            surface_id,
+            target_pane_id,
+        )?;
 
         if should_close_source_pane {
-            self.close_pane(workspace_id, source_pane_id)?;
-            let workspace = self
-                .workspaces
-                .get_mut(&workspace_id)
-                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
-            let _ = workspace.focus_surface(target_pane_id, surface_id);
+            self.close_pane(source_workspace_id, source_pane_id)?;
         }
+
+        if source_workspace_id != target_workspace_id {
+            self.switch_workspace(self.active_window, target_workspace_id)?;
+        }
+
+        let workspace = self
+            .workspaces
+            .get_mut(&target_workspace_id)
+            .ok_or(DomainError::MissingWorkspace(target_workspace_id))?;
+        let _ = workspace.focus_surface(target_pane_id, surface_id);
 
         Ok(())
     }
 
     pub fn move_surface_to_split(
         &mut self,
-        workspace_id: WorkspaceId,
+        source_workspace_id: WorkspaceId,
         source_pane_id: PaneId,
         surface_id: SurfaceId,
+        target_workspace_id: WorkspaceId,
         target_pane_id: PaneId,
         direction: Direction,
     ) -> Result<PaneId, DomainError> {
         {
-            let workspace = self
+            let source_workspace = self
                 .workspaces
-                .get(&workspace_id)
-                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
-            let source_pane =
-                workspace
-                    .panes
-                    .get(&source_pane_id)
-                    .ok_or(DomainError::PaneNotInWorkspace {
-                        workspace_id,
-                        pane_id: source_pane_id,
-                    })?;
-            if !workspace.panes.contains_key(&target_pane_id) {
+                .get(&source_workspace_id)
+                .ok_or(DomainError::MissingWorkspace(source_workspace_id))?;
+            let source_pane = source_workspace.panes.get(&source_pane_id).ok_or(
+                DomainError::PaneNotInWorkspace {
+                    workspace_id: source_workspace_id,
+                    pane_id: source_pane_id,
+                },
+            )?;
+            let target_workspace = self
+                .workspaces
+                .get(&target_workspace_id)
+                .ok_or(DomainError::MissingWorkspace(target_workspace_id))?;
+            if !target_workspace.panes.contains_key(&target_pane_id) {
                 return Err(DomainError::PaneNotInWorkspace {
-                    workspace_id,
+                    workspace_id: target_workspace_id,
                     pane_id: target_pane_id,
                 });
             }
             if !source_pane.surfaces.contains_key(&surface_id) {
                 return Err(DomainError::SurfaceNotInPane {
-                    workspace_id,
+                    workspace_id: source_workspace_id,
                     pane_id: source_pane_id,
                     surface_id,
                 });
             }
-            if source_pane_id == target_pane_id && source_pane.surfaces.len() <= 1 {
+            if source_workspace_id == target_workspace_id
+                && source_pane_id == target_pane_id
+                && source_pane.surfaces.len() <= 1
+            {
                 return Err(DomainError::InvalidOperation(
                     "cannot split a pane from its only surface",
                 ));
@@ -2644,44 +2726,23 @@ impl AppModel {
 
         let target_window_id = self
             .workspaces
-            .get(&workspace_id)
+            .get(&target_workspace_id)
             .and_then(|workspace| workspace.window_for_pane(target_pane_id))
             .ok_or(DomainError::MissingPane(target_pane_id))?;
 
-        let moved_surface = {
-            let workspace = self
-                .workspaces
-                .get_mut(&workspace_id)
-                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
-            let source_pane = workspace.panes.get_mut(&source_pane_id).ok_or(
-                DomainError::PaneNotInWorkspace {
-                    workspace_id,
-                    pane_id: source_pane_id,
-                },
-            )?;
-            source_pane
-                .surfaces
-                .shift_remove(&surface_id)
-                .ok_or(DomainError::SurfaceNotInPane {
-                    workspace_id,
-                    pane_id: source_pane_id,
-                    surface_id,
-                })?
-        };
+        let moved_surface =
+            self.take_surface_from_pane(source_workspace_id, source_pane_id, surface_id)?;
         let new_pane = PaneRecord::from_surface(moved_surface);
         let new_pane_id = new_pane.id;
 
-        let should_close_source_pane = self
-            .workspaces
-            .get(&workspace_id)
-            .and_then(|workspace| workspace.panes.get(&source_pane_id))
-            .is_some_and(|pane| pane.surfaces.is_empty());
+        let should_close_source_pane =
+            self.should_close_source_pane(source_workspace_id, source_pane_id);
 
         {
             let workspace = self
                 .workspaces
-                .get_mut(&workspace_id)
-                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+                .get_mut(&target_workspace_id)
+                .ok_or(DomainError::MissingWorkspace(target_workspace_id))?;
             workspace.panes.insert(new_pane_id, new_pane);
 
             let target_window = workspace
@@ -2695,23 +2756,29 @@ impl AppModel {
                 500,
             );
             target_window.active_pane = new_pane_id;
-            for notification in &mut workspace.notifications {
-                if notification.surface_id == surface_id {
-                    notification.pane_id = new_pane_id;
-                }
-            }
             workspace.sync_active_from_window(target_window_id);
             let _ = workspace.focus_surface(new_pane_id, surface_id);
         }
+        self.retarget_surface_state(
+            source_workspace_id,
+            target_workspace_id,
+            surface_id,
+            new_pane_id,
+        )?;
 
         if should_close_source_pane {
-            self.close_pane(workspace_id, source_pane_id)?;
-            let workspace = self
-                .workspaces
-                .get_mut(&workspace_id)
-                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
-            let _ = workspace.focus_surface(new_pane_id, surface_id);
+            self.close_pane(source_workspace_id, source_pane_id)?;
         }
+
+        if source_workspace_id != target_workspace_id {
+            self.switch_workspace(self.active_window, target_workspace_id)?;
+        }
+
+        let workspace = self
+            .workspaces
+            .get_mut(&target_workspace_id)
+            .ok_or(DomainError::MissingWorkspace(target_workspace_id))?;
+        let _ = workspace.focus_surface(new_pane_id, surface_id);
 
         Ok(new_pane_id)
     }
@@ -2752,48 +2819,11 @@ impl AppModel {
             }
         }
 
-        let moved_surface = {
-            let source_workspace = self
-                .workspaces
-                .get_mut(&source_workspace_id)
-                .ok_or(DomainError::MissingWorkspace(source_workspace_id))?;
-            let source_pane = source_workspace.panes.get_mut(&source_pane_id).ok_or(
-                DomainError::PaneNotInWorkspace {
-                    workspace_id: source_workspace_id,
-                    pane_id: source_pane_id,
-                },
-            )?;
-            source_pane
-                .surfaces
-                .shift_remove(&surface_id)
-                .ok_or(DomainError::SurfaceNotInPane {
-                    workspace_id: source_workspace_id,
-                    pane_id: source_pane_id,
-                    surface_id,
-                })?
-        };
+        let moved_surface =
+            self.take_surface_from_pane(source_workspace_id, source_pane_id, surface_id)?;
 
-        let should_close_source_pane = self
-            .workspaces
-            .get(&source_workspace_id)
-            .and_then(|workspace| workspace.panes.get(&source_pane_id))
-            .is_some_and(|pane| pane.surfaces.is_empty());
-
-        let mut moved_notifications = Vec::new();
-        {
-            let source_workspace = self
-                .workspaces
-                .get_mut(&source_workspace_id)
-                .ok_or(DomainError::MissingWorkspace(source_workspace_id))?;
-            source_workspace.notifications.retain(|notification| {
-                if notification.surface_id == surface_id {
-                    moved_notifications.push(notification.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-        }
+        let should_close_source_pane =
+            self.should_close_source_pane(source_workspace_id, source_pane_id);
 
         let new_pane = PaneRecord::from_surface(moved_surface);
         let new_pane_id = new_pane.id;
@@ -2808,13 +2838,15 @@ impl AppModel {
             target_workspace.panes.insert(new_pane_id, new_pane);
             target_workspace.windows.insert(new_window_id, new_window);
             insert_window_relative_to_active(target_workspace, new_window_id, Direction::Right)?;
-            for notification in &mut moved_notifications {
-                notification.pane_id = new_pane_id;
-            }
-            target_workspace.notifications.extend(moved_notifications);
             target_workspace.sync_active_from_window(new_window_id);
             let _ = target_workspace.focus_surface(new_pane_id, surface_id);
         }
+        self.retarget_surface_state(
+            source_workspace_id,
+            target_workspace_id,
+            surface_id,
+            new_pane_id,
+        )?;
 
         if should_close_source_pane {
             self.close_pane(source_workspace_id, source_pane_id)?;
@@ -3711,6 +3743,7 @@ mod tests {
                 workspace_id,
                 source_pane_id,
                 second_surface_id,
+                workspace_id,
                 target_pane_id,
                 0,
             )
@@ -3751,6 +3784,7 @@ mod tests {
                 workspace_id,
                 source_pane_id,
                 moved_surface_id,
+                workspace_id,
                 source_pane_id,
                 Direction::Right,
             )
@@ -3798,6 +3832,7 @@ mod tests {
                 workspace_id,
                 source_pane_id,
                 moved_surface_id,
+                workspace_id,
                 target_pane_id,
                 Direction::Left,
             )
@@ -3837,7 +3872,14 @@ mod tests {
             .expect("surface");
 
         let error = model
-            .move_surface_to_split(workspace_id, pane_id, surface_id, pane_id, Direction::Right)
+            .move_surface_to_split(
+                workspace_id,
+                pane_id,
+                surface_id,
+                workspace_id,
+                pane_id,
+                Direction::Right,
+            )
             .expect_err("reject self split of only surface");
 
         assert!(matches!(
@@ -3906,6 +3948,166 @@ mod tests {
     }
 
     #[test]
+    fn transferring_surface_to_existing_pane_in_another_workspace_moves_notifications_and_flash() {
+        let mut model = AppModel::new("Main");
+        let source_workspace_id = model.active_workspace_id().expect("workspace");
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let _first_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("first surface");
+        let moved_surface_id = model
+            .create_surface(source_workspace_id, source_pane_id, PaneKind::Browser)
+            .expect("second surface");
+        model
+            .create_agent_notification(
+                AgentTarget::Surface {
+                    workspace_id: source_workspace_id,
+                    pane_id: source_pane_id,
+                    surface_id: moved_surface_id,
+                },
+                SignalKind::Notification,
+                Some("Needs review".into()),
+                None,
+                Some("review-1".into()),
+                "Check this browser tab".into(),
+                AttentionState::WaitingInput,
+            )
+            .expect("notification");
+        model
+            .trigger_surface_flash(source_workspace_id, source_pane_id, moved_surface_id)
+            .expect("flash");
+
+        let target_workspace_id = model.create_workspace("Secondary");
+        let target_pane_id = model.active_workspace().expect("workspace").active_pane;
+
+        model
+            .transfer_surface(
+                source_workspace_id,
+                source_pane_id,
+                moved_surface_id,
+                target_workspace_id,
+                target_pane_id,
+                usize::MAX,
+            )
+            .expect("transfer");
+
+        let source_workspace = model
+            .workspaces
+            .get(&source_workspace_id)
+            .expect("source workspace");
+        let target_workspace = model
+            .workspaces
+            .get(&target_workspace_id)
+            .expect("target workspace");
+        let target_pane = target_workspace
+            .panes
+            .get(&target_pane_id)
+            .expect("target pane");
+
+        assert_eq!(model.active_workspace_id(), Some(target_workspace_id));
+        assert!(
+            !source_workspace
+                .notifications
+                .iter()
+                .any(|notification| notification.surface_id == moved_surface_id)
+        );
+        assert!(
+            source_workspace
+                .surface_flash_tokens
+                .get(&moved_surface_id)
+                .is_none()
+        );
+        assert!(
+            target_pane
+                .surface_ids()
+                .collect::<Vec<_>>()
+                .contains(&moved_surface_id)
+        );
+        assert_eq!(target_pane.active_surface, moved_surface_id);
+        assert!(target_workspace.notifications.iter().any(|notification| {
+            notification.surface_id == moved_surface_id && notification.pane_id == target_pane_id
+        }));
+        assert!(
+            target_workspace
+                .surface_flash_tokens
+                .get(&moved_surface_id)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn moving_surface_to_split_in_another_workspace_closes_empty_source_pane() {
+        let mut model = AppModel::new("Main");
+        let source_workspace_id = model.active_workspace_id().expect("workspace");
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let anchor_pane_id = model
+            .split_pane(
+                source_workspace_id,
+                Some(source_pane_id),
+                SplitAxis::Horizontal,
+            )
+            .expect("split source workspace");
+        model
+            .focus_pane(source_workspace_id, source_pane_id)
+            .expect("focus source pane");
+        let moved_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("moved surface");
+
+        let target_workspace_id = model.create_workspace("Secondary");
+        let target_pane_id = model.active_workspace().expect("workspace").active_pane;
+
+        let new_pane_id = model
+            .move_surface_to_split(
+                source_workspace_id,
+                source_pane_id,
+                moved_surface_id,
+                target_workspace_id,
+                target_pane_id,
+                Direction::Left,
+            )
+            .expect("move to split");
+
+        let source_workspace = model
+            .workspaces
+            .get(&source_workspace_id)
+            .expect("source workspace");
+        let target_workspace = model
+            .workspaces
+            .get(&target_workspace_id)
+            .expect("target workspace");
+        let target_window_id = target_workspace
+            .window_for_pane(target_pane_id)
+            .expect("target window");
+        let target_window = target_workspace
+            .windows
+            .get(&target_window_id)
+            .expect("target window record");
+
+        assert_eq!(model.active_workspace_id(), Some(target_workspace_id));
+        assert!(!source_workspace.panes.contains_key(&source_pane_id));
+        assert!(source_workspace.panes.contains_key(&anchor_pane_id));
+        assert_eq!(
+            target_window.layout.leaves(),
+            vec![new_pane_id, target_pane_id]
+        );
+        assert_eq!(target_workspace.active_pane, new_pane_id);
+        assert_eq!(
+            target_workspace
+                .panes
+                .get(&new_pane_id)
+                .expect("new pane")
+                .surface_ids()
+                .collect::<Vec<_>>(),
+            vec![moved_surface_id]
+        );
+    }
+
+    #[test]
     fn transferring_last_surface_closes_the_source_pane() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
@@ -3924,6 +4126,7 @@ mod tests {
                 workspace_id,
                 source_pane_id,
                 moved_surface_id,
+                workspace_id,
                 target_pane_id,
                 usize::MAX,
             )

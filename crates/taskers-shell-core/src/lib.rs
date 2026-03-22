@@ -2393,9 +2393,6 @@ impl TaskersCore {
         else {
             return false;
         };
-        if workspace_id != target_workspace_id {
-            return false;
-        }
         if source_pane_id == target_pane_id {
             return self.dispatch_control(ControlCommand::MoveSurface {
                 workspace_id,
@@ -2404,13 +2401,20 @@ impl TaskersCore {
                 to_index: target_index,
             });
         }
-        self.dispatch_control(ControlCommand::TransferSurface {
-            workspace_id,
-            source_pane_id,
-            surface_id,
-            target_pane_id,
-            to_index: target_index,
-        })
+        let changed = self
+            .dispatch_control_with_response(ControlCommand::TransferSurface {
+                source_workspace_id: workspace_id,
+                source_pane_id,
+                surface_id,
+                target_workspace_id,
+                target_pane_id,
+                to_index: target_index,
+            })
+            .is_some();
+        if changed && workspace_id != target_workspace_id {
+            return self.ensure_active_window_visible() || changed;
+        }
+        changed
     }
 
     fn move_surface_to_split_by_id(
@@ -2421,7 +2425,7 @@ impl TaskersCore {
         direction: Direction,
     ) -> bool {
         let model = self.app_state.snapshot_model();
-        let Some((workspace_id, located_source_pane_id)) =
+        let Some((source_workspace_id, located_source_pane_id)) =
             self.resolve_surface_location(&model, surface_id)
         else {
             return false;
@@ -2430,14 +2434,15 @@ impl TaskersCore {
         else {
             return false;
         };
-        if workspace_id != target_workspace_id || located_source_pane_id != source_pane_id {
+        if located_source_pane_id != source_pane_id {
             return false;
         }
         let Some(response) =
             self.dispatch_control_with_response(ControlCommand::MoveSurfaceToSplit {
-                workspace_id,
+                source_workspace_id,
                 source_pane_id,
                 surface_id,
+                target_workspace_id,
                 target_pane_id,
                 direction,
             })
@@ -4398,6 +4403,48 @@ mod tests {
     }
 
     #[test]
+    fn move_surface_shell_action_transfers_surface_between_workspaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_workspace_id = core.snapshot().current_workspace.id;
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core.snapshot().current_workspace.id;
+        let target_pane_id = core.snapshot().current_workspace.active_pane;
+
+        core.dispatch_shell_action(ShellAction::FocusWorkspace {
+            workspace_id: source_workspace_id,
+        });
+        core.dispatch_shell_action(ShellAction::MoveSurface {
+            surface_id: moved_surface_id,
+            target_pane_id,
+            target_index: usize::MAX,
+        });
+
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.current_workspace.id, target_workspace_id);
+        let target_pane =
+            find_pane(&snapshot.current_workspace.layout, target_pane_id).expect("target pane");
+
+        assert!(
+            target_pane
+                .surfaces
+                .iter()
+                .any(|surface| surface.id == moved_surface_id)
+        );
+        assert_eq!(target_pane.active_surface, moved_surface_id);
+        assert_eq!(snapshot.current_workspace.active_pane, target_pane_id);
+    }
+
+    #[test]
     fn move_surface_to_split_shell_action_creates_neighbor_pane() {
         let core = SharedCore::bootstrap(bootstrap());
         let source_pane_id = core.snapshot().current_workspace.active_pane;
@@ -4441,6 +4488,57 @@ mod tests {
         );
         assert_eq!(
             target_pane.surfaces.first().map(|surface| surface.id),
+            Some(moved_surface_id)
+        );
+        assert_eq!(snapshot.current_workspace.active_pane, new_pane_id);
+    }
+
+    #[test]
+    fn move_surface_to_split_shell_action_moves_surface_into_other_workspace() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_workspace_id = core.snapshot().current_workspace.id;
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core.snapshot().current_workspace.id;
+        let target_pane_id = core.snapshot().current_workspace.active_pane;
+
+        core.dispatch_shell_action(ShellAction::FocusWorkspace {
+            workspace_id: source_workspace_id,
+        });
+        core.dispatch_shell_action(ShellAction::MoveSurfaceToSplit {
+            source_pane_id,
+            surface_id: moved_surface_id,
+            target_pane_id,
+            direction: Direction::Left,
+        });
+
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.current_workspace.id, target_workspace_id);
+
+        let mut pane_ids = Vec::new();
+        collect_pane_ids(&snapshot.current_workspace.layout, &mut pane_ids);
+        let new_pane_id = pane_ids
+            .into_iter()
+            .find(|pane_id| {
+                *pane_id != target_pane_id
+                    && find_pane(&snapshot.current_workspace.layout, *pane_id)
+                        .is_some_and(|pane| pane.active_surface == moved_surface_id)
+            })
+            .expect("new pane");
+        let new_pane =
+            find_pane(&snapshot.current_workspace.layout, new_pane_id).expect("new pane");
+
+        assert_eq!(
+            new_pane.surfaces.first().map(|surface| surface.id),
             Some(moved_surface_id)
         );
         assert_eq!(snapshot.current_workspace.active_pane, new_pane_id);

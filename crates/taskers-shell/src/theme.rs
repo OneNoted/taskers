@@ -874,6 +874,36 @@ button {{
   transform-origin: top left;
 }}
 
+.workspace-surface-fallback-drop {{
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 16px;
+  border: 1px dashed transparent;
+  background: transparent;
+}}
+
+.workspace-surface-fallback-drop-active {{
+  border-color: {accent_20};
+  background: {accent_08};
+}}
+
+.workspace-surface-fallback-label {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid {border_10};
+  background: {surface};
+  color: {text_dim};
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}}
+
 .workspace-viewport-overview .workspace-strip-canvas {{
   position: relative;
   inset: auto;
