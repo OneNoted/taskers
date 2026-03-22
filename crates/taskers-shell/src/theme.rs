@@ -1106,6 +1106,18 @@ button {{
   border-color: {border_10};
 }}
 
+.surface-tab-add-button {{
+  min-width: 28px;
+  justify-content: center;
+  color: {text_subtle};
+}}
+
+.surface-tab-add-button:hover {{
+  color: {text_bright};
+  background: {overlay_16};
+  border-color: {accent_20};
+}}
+
 .surface-tab-append-target {{
   min-width: 28px;
   justify-content: center;
