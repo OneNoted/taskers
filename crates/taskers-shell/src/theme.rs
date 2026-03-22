@@ -1106,7 +1106,6 @@ input:focus-visible {{
 }}
 
 .pane-toolbar-meta,
-.surface-tab-label,
 .shortcut-label {{
   color: {text_subtle};
   font-size: 11px;
@@ -1119,18 +1118,30 @@ input:focus-visible {{
   min-width: 0;
 }}
 
-.pane-toolbar-eyebrow {{
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  font-size: 10px;
+.pane-toolbar-kind-icon {{
+  flex: 0 0 auto;
   color: {text_dim};
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }}
 
-.pane-toolbar-detail {{
-  color: {text_subtle};
-  font-size: 11px;
+.pane-toolbar-title {{
+  font-size: 12px;
+  font-weight: 500;
+  color: {text_bright};
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}}
+
+.pane-action-separator {{
+  width: 1px;
+  height: 14px;
+  background: {border_10};
+  margin: 0 2px;
+}}
+
+.pane-utility-icon {{
+  display: block;
 }}
 
 .pane-action-cluster {{
@@ -1210,6 +1221,18 @@ input:focus-visible {{
   background: {overlay_16};
   border-color: {accent_20};
   color: {text_bright};
+  position: relative;
+}}
+
+.surface-tab-active::after {{
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  background: {accent};
+  border-radius: 1px;
 }}
 
 .surface-tab-title {{
@@ -1225,11 +1248,13 @@ input:focus-visible {{
   color: {text_bright};
 }}
 
-.surface-tab-label {{
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 9px;
-  color: {text_dim};
+.surface-tab-kind-icon {{
+  flex: 0 0 auto;
+  opacity: 0.5;
+}}
+
+.surface-tab-active .surface-tab-kind-icon {{
+  opacity: 0.8;
 }}
 
 .pane-utility {{

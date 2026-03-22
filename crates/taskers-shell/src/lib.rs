@@ -1208,15 +1208,6 @@ fn render_pane(
                 .map(|url| format!("{}-{}", active_surface.id, url))
         })
         .unwrap_or_else(|| active_surface.id.to_string());
-    let pane_kind = match active_surface.kind {
-        SurfaceKind::Terminal => "terminal",
-        SurfaceKind::Browser => "browser",
-    };
-    let tab_count_label = if pane.surfaces.len() == 1 {
-        "1 tab".to_string()
-    } else {
-        format!("{} tabs", pane.surfaces.len())
-    };
     let pane_allows_split =
         pane_allows_surface_split(dragged_surface, pane_id, pane.surfaces.len());
     let surface_drag_active = dragged_surface.is_some();
@@ -1287,15 +1278,30 @@ fn render_pane(
         section { class: "{pane_class}", onclick: focus_pane,
             div { class: "pane-toolbar",
                 div { class: "pane-toolbar-meta",
-                    span { class: "pane-toolbar-eyebrow", "pane" }
-                    span { class: "pane-toolbar-detail", "{pane_kind} · {tab_count_label}" }
+                    {match active_surface.kind {
+                        SurfaceKind::Terminal => icons::terminal(14, "pane-toolbar-kind-icon"),
+                        SurfaceKind::Browser => icons::globe(14, "pane-toolbar-kind-icon"),
+                    }}
+                    span { class: "pane-toolbar-title", "{active_surface.title}" }
                 }
                 div { class: "pane-action-cluster",
-                    button { class: "pane-utility pane-utility-tab", title: "New terminal tab", onclick: add_terminal_surface, "+t" }
-                    button { class: "pane-utility pane-utility-tab", title: "New browser tab", onclick: add_browser_surface, "+w" }
-                    button { class: "pane-utility pane-utility-split", title: "Split right", onclick: split_terminal, "|r" }
-                    button { class: "pane-utility pane-utility-split", title: "Split down", onclick: split_down, "|d" }
-                    button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface, "x" }
+                    button { class: "pane-utility", title: "New terminal tab", onclick: add_terminal_surface,
+                        {icons::terminal(14, "pane-utility-icon")}
+                    }
+                    button { class: "pane-utility", title: "New browser tab", onclick: add_browser_surface,
+                        {icons::globe(14, "pane-utility-icon")}
+                    }
+                    div { class: "pane-action-separator" }
+                    button { class: "pane-utility", title: "Split right", onclick: split_terminal,
+                        {icons::split_horizontal(14, "pane-utility-icon")}
+                    }
+                    button { class: "pane-utility", title: "Split down", onclick: split_down,
+                        {icons::split_vertical(14, "pane-utility-icon")}
+                    }
+                    div { class: "pane-action-separator" }
+                    button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface,
+                        {icons::close(12, "pane-utility-icon")}
+                    }
                 }
             }
             div { class: "pane-tabs",
@@ -1469,11 +1475,8 @@ fn render_surface_tab(
     dragged_surface: Option<DraggedSurface>,
     ordered_surface_ids: &[SurfaceId],
 ) -> Element {
-    let kind_label = match surface.kind {
-        SurfaceKind::Terminal => "term",
-        SurfaceKind::Browser => "web",
-    };
     let surface_id = surface.id;
+    let surface_kind = surface.kind;
     let is_drop_target = matches!(
         *surface_drop_target.read(),
         Some(SurfaceDropTarget::BeforeSurface {
@@ -1596,7 +1599,10 @@ fn render_surface_tab(
             onpointermove: set_surface_drop_target_move,
             onpointerleave: clear_surface_drop_target,
             onpointerup: drop_surface,
-            span { class: "surface-tab-label", "{kind_label}" }
+            {match surface_kind {
+                SurfaceKind::Terminal => icons::terminal(10, "surface-tab-kind-icon"),
+                SurfaceKind::Browser => icons::globe(10, "surface-tab-kind-icon"),
+            }}
             span { class: "surface-tab-title", "{surface.title}" }
         }
     }
