@@ -273,6 +273,15 @@ input:focus-visible {{
   color: {text_bright};
 }}
 
+.sidebar-brand-wordmark {{
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: {text_muted};
+  line-height: 1;
+}}
+
 .sidebar-heading {{
   font-weight: 600;
   font-size: 11px;
@@ -312,6 +321,9 @@ input:focus-visible {{
   padding: 8px 10px;
   color: {text_subtle};
   border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }}
 
 .sidebar-nav-button:hover,
@@ -516,12 +528,40 @@ input:focus-visible {{
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }}
 
 .workspace-ports-row {{
   color: {text_dim};
   font-size: 10px;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}}
+
+.sidebar-nav-icon {{
+  flex: 0 0 auto;
+  opacity: 0.6;
+}}
+
+.sidebar-nav-button-active .sidebar-nav-icon {{
+  opacity: 1.0;
+}}
+
+.workspace-add-icon,
+.workspace-tab-close-icon,
+.workspace-branch-icon,
+.workspace-ports-icon {{
+  flex: 0 0 auto;
+  display: block;
+}}
+
+.workspace-branch-icon,
+.workspace-ports-icon {{
+  opacity: 0.5;
 }}
 
 .workspace-progress {{

@@ -326,23 +326,27 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             onpointercancel: finish_surface_drag_cancel,
             aside { class: "workspace-sidebar",
                 div { class: "sidebar-brand",
-                    h1 { "Taskers" }
+                    div { class: "sidebar-brand-wordmark", "TASKERS" }
                 }
                 div { class: "sidebar-nav",
                     button {
                         class: if matches!(snapshot.section, ShellSection::Workspace) { "sidebar-nav-button sidebar-nav-button-active" } else { "sidebar-nav-button" },
                         onclick: show_workspace_nav,
-                        "Workspaces"
+                        {icons::layers(16, "sidebar-nav-icon")}
+                        span { "Workspaces" }
                     }
                     button {
                         class: if matches!(snapshot.section, ShellSection::Settings) { "sidebar-nav-button sidebar-nav-button-active" } else { "sidebar-nav-button" },
                         onclick: show_settings_nav,
-                        "Settings"
+                        {icons::settings(16, "sidebar-nav-icon")}
+                        span { "Settings" }
                     }
                 }
                 div { class: "sidebar-section-header",
                     div { class: "sidebar-heading", "Workspaces" }
-                    button { class: "workspace-add", onclick: create_workspace, "+" }
+                    button { class: "workspace-add", onclick: create_workspace,
+                        {icons::plus(14, "workspace-add-icon")}
+                    }
                 }
                 div { class: "workspace-list",
                     for workspace in &snapshot.workspaces {
@@ -691,7 +695,7 @@ fn render_workspace_item(
                             button {
                                 class: "workspace-tab-close",
                                 onclick: close_workspace,
-                                "×"
+                                {icons::close(12, "workspace-tab-close-icon")}
                             }
                         }
                     }
@@ -701,10 +705,16 @@ fn render_workspace_item(
                         div { class: "workspace-notification", "{notification}" }
                     }
                     if let Some(branch) = &branch_row {
-                        div { class: "workspace-branch-row", "{branch}" }
+                        div { class: "workspace-branch-row",
+                            {icons::git_branch(10, "workspace-branch-icon")}
+                            span { "{branch}" }
+                        }
                     }
                     if let Some(ports) = &ports_row {
-                        div { class: "workspace-ports-row", "{ports}" }
+                        div { class: "workspace-ports-row",
+                            {icons::network(10, "workspace-ports-icon")}
+                            span { "{ports}" }
+                        }
                     }
                     {render_workspace_progress(&workspace.progress)}
                     {render_workspace_pull_requests(&workspace.pull_requests)}
