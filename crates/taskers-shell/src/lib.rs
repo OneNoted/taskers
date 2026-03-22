@@ -1,3 +1,4 @@
+mod icons;
 mod theme;
 
 use dioxus::html::{
