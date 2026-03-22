@@ -27,6 +27,19 @@ Taskers currently ships two live surface kinds:
 
 Each pane can hold one or more tabs of either kind. The active tab supplies the live content for that pane.
 
+## Embedded Ghostty Config
+
+On the GTK/Linux shell, embedded terminal panes start from the user's normal Ghostty config file and inherit most visual and terminal behavior settings from there.
+
+Taskers still pins a small set of embedded-pane invariants:
+
+- the launch command stays Taskers-owned
+- Ghostty shell integration stays disabled because Taskers provides its own shell wrapper
+- Ghostty window padding stays zero so the grid aligns with pane chrome
+- Ghostty Linux cgroup settings stay disabled for embedded panes
+
+That means Ghostty settings such as fonts, theme, colors, cursor behavior, and scrollback should carry over, while window-style and shell-launch behavior remains controlled by Taskers.
+
 ## A Typical Session
 
 Start Taskers:
