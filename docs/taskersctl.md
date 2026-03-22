@@ -148,7 +148,7 @@ taskersctl agent-hook notification --title "Codex" --message "Turn complete"
 taskersctl agent-hook stop --message "Finished"
 ```
 
-This is the best fit for wrappers around coding agents, CI helpers, and long-running scripts.
+Use `notification` for contextual agent output that should update the live pane/workspace summary without finalizing the run. Use `stop` for the final successful completion edge; non-zero shell exits still surface as error stops automatically. This is the best fit for wrappers around coding agents, CI helpers, and long-running scripts.
 
 ## Advanced Notes
 

@@ -431,6 +431,13 @@ input:focus-visible {{
   gap: 6px;
 }}
 
+.workspace-tab-title-row {{
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}}
+
 .workspace-tab-title {{
   font-weight: 600;
   font-size: 12.5px;
@@ -547,7 +554,9 @@ input:focus-visible {{
 .workspace-add-icon,
 .workspace-tab-close-icon,
 .workspace-branch-icon,
-.workspace-ports-icon {{
+.workspace-ports-icon,
+.workspace-runtime-icon,
+.workspace-window-runtime-icon {{
   flex: 0 0 auto;
   display: block;
 }}
@@ -555,6 +564,26 @@ input:focus-visible {{
 .workspace-branch-icon,
 .workspace-ports-icon {{
   opacity: 0.5;
+}}
+
+.runtime-state-idle {{
+  color: {text_dim};
+}}
+
+.runtime-state-working {{
+  color: {busy};
+}}
+
+.runtime-state-waiting {{
+  color: {waiting};
+}}
+
+.runtime-state-completed {{
+  color: {completed};
+}}
+
+.runtime-state-failed {{
+  color: {error};
 }}
 
 .workspace-progress {{
@@ -1013,6 +1042,7 @@ input:focus-visible {{
   min-height: {window_toolbar_height}px;
   border-bottom: 1px solid {border_06};
   background: linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
+  position: relative;
   padding: 0 8px;
   display: flex;
   align-items: center;
@@ -1027,6 +1057,22 @@ input:focus-visible {{
   height: 4px;
   border-radius: 999px;
   background: {border_10};
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}}
+
+.workspace-window-runtime-badge {{
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: {overlay_12};
+  border: 1px solid {border_10};
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }}
 
@@ -1144,7 +1190,7 @@ input:focus-visible {{
 
 .pane-toolbar-kind-icon {{
   flex: 0 0 auto;
-  color: {text_dim};
+  display: block;
 }}
 
 .pane-toolbar-title {{
@@ -1155,6 +1201,47 @@ input:focus-visible {{
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}}
+
+.pane-runtime-chip {{
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: {overlay_12};
+  border: 1px solid {border_10};
+}}
+
+.pane-runtime-label {{
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: {text_bright};
+}}
+
+.pane-runtime-chip.runtime-state-working {{
+  background: {busy_10};
+  border-color: {busy_12};
+}}
+
+.pane-runtime-chip.runtime-state-waiting {{
+  background: {waiting_10};
+  border-color: {waiting_14};
+}}
+
+.pane-runtime-chip.runtime-state-completed {{
+  background: {completed_10};
+  border-color: {completed_12};
+}}
+
+.pane-runtime-chip.runtime-state-failed {{
+  background: {error_10};
+  border-color: {error_12};
 }}
 
 .pane-action-separator {{
@@ -1274,11 +1361,11 @@ input:focus-visible {{
 
 .surface-tab-kind-icon {{
   flex: 0 0 auto;
-  opacity: 0.5;
+  opacity: 0.7;
 }}
 
 .surface-tab-active .surface-tab-kind-icon {{
-  opacity: 0.8;
+  opacity: 1.0;
 }}
 
 .pane-utility {{
@@ -1909,7 +1996,7 @@ input:focus-visible {{
 
 .agent-kind-icon {{
   flex: 0 0 auto;
-  color: {text_dim};
+  display: block;
 }}
 
 .notification-clear:hover {{
@@ -2029,6 +2116,7 @@ input:focus-visible {{
         elevated = p.elevated.to_hex(),
         overlay_03 = rgba(p.overlay, 0.03),
         overlay_05 = rgba(p.overlay, 0.05),
+        overlay_12 = rgba(p.overlay, 0.12),
         overlay_16 = rgba(p.overlay, 0.16),
         text = p.text.to_hex(),
         text_bright = p.text_bright.to_hex(),
@@ -2051,10 +2139,12 @@ input:focus-visible {{
         accent_22 = rgba(p.accent, 0.22),
         accent_24 = rgba(p.accent, 0.24),
         busy = p.busy.to_hex(),
+        busy_10 = rgba(p.busy, 0.10),
         busy_12 = rgba(p.busy, 0.12),
         busy_16 = rgba(p.busy, 0.16),
         busy_text = p.busy_text.to_hex(),
         completed = p.completed.to_hex(),
+        completed_10 = rgba(p.completed, 0.10),
         completed_12 = rgba(p.completed, 0.12),
         completed_16 = rgba(p.completed, 0.16),
         completed_text = p.completed_text.to_hex(),

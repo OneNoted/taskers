@@ -10,10 +10,11 @@ use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot, Direction,
     LayoutNodeSnapshot, NotificationPreferenceKey, PaneId, PaneSnapshot, ProgressSnapshot,
-    PullRequestSnapshot, RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection,
-    ShellSnapshot, ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot,
-    SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot,
-    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    PullRequestSnapshot, RuntimeIdentitySnapshot, RuntimeStateSnapshot, RuntimeStatus,
+    SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutAction,
+    ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot, SurfaceId, SurfaceKind,
+    SurfaceSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary,
+    WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
 };
 use taskers_shell_core as taskers_core;
 
@@ -50,6 +51,31 @@ enum SurfaceDropTarget {
         pane_id: PaneId,
         direction: Direction,
     },
+}
+
+fn runtime_state_class(state: RuntimeStateSnapshot) -> &'static str {
+    match state {
+        RuntimeStateSnapshot::Idle => "runtime-state-idle",
+        RuntimeStateSnapshot::Working => "runtime-state-working",
+        RuntimeStateSnapshot::Waiting => "runtime-state-waiting",
+        RuntimeStateSnapshot::Completed => "runtime-state-completed",
+        RuntimeStateSnapshot::Failed => "runtime-state-failed",
+    }
+}
+
+fn render_runtime_icon(runtime: &RuntimeIdentitySnapshot, size: u32, class: &str) -> Element {
+    render_runtime_icon_by_key(runtime.key.as_str(), size, class)
+}
+
+fn render_runtime_icon_by_key(key: &str, size: u32, class: &str) -> Element {
+    match key {
+        "codex" => icons::codex(size, class),
+        "claude" => icons::claude(size, class),
+        "opencode" => icons::opencode(size, class),
+        "aider" => icons::aider(size, class),
+        "browser" => icons::globe(size, class),
+        _ => icons::terminal(size, class),
+    }
 }
 
 fn compute_surface_drop_index(
@@ -574,6 +600,10 @@ fn render_workspace_item(
         .as_ref()
         .map(|color| format!("--workspace-accent: {color};"))
         .unwrap_or_default();
+    let runtime_icon_class = format!(
+        "workspace-runtime-icon {}",
+        runtime_state_class(workspace.runtime.state)
+    );
 
     let is_workspace_drag_target = *drag_target.read() == Some(workspace_id);
     let is_surface_drag_target =
@@ -714,7 +744,10 @@ fn render_workspace_item(
                 }
                 div { class: "workspace-tab-content",
                     div { class: "workspace-tab-header",
-                        div { class: "workspace-tab-title", "{workspace.title}" }
+                        div { class: "workspace-tab-title-row",
+                            {render_runtime_icon(&workspace.runtime, 12, &runtime_icon_class)}
+                            div { class: "workspace-tab-title", "{workspace.title}" }
+                        }
                         div { class: "workspace-tab-trailing",
                             if has_badge {
                                 span { class: "{badge_state_class}", "{badge_text}" }
@@ -1059,6 +1092,10 @@ fn render_workspace_window(
     };
     let top_target = WorkspaceWindowMoveTarget::StackAbove { window_id };
     let bottom_target = WorkspaceWindowMoveTarget::StackBelow { window_id };
+    let window_runtime_icon_class = format!(
+        "workspace-window-runtime-icon {}",
+        runtime_state_class(window.runtime.state)
+    );
 
     rsx! {
         section { class: "{window_class}", style: "{style}",
@@ -1099,6 +1136,11 @@ fn render_workspace_window(
                 onclick: focus_window,
                 ondragstart: start_window_drag,
                 ondragend: clear_window_drag,
+                div {
+                    class: "workspace-window-runtime-badge",
+                    title: "{window.runtime.label} · {window.runtime.state.label()}",
+                    {render_runtime_icon(&window.runtime, 12, &window_runtime_icon_class)}
+                }
                 div { class: "workspace-window-grip" }
             }
             div { class: "workspace-window-body",
@@ -1306,26 +1348,31 @@ fn render_pane(
     } else {
         "Close current surface"
     };
+    let pane_runtime_icon_class = format!(
+        "pane-toolbar-kind-icon {}",
+        runtime_state_class(pane.runtime.state)
+    );
+    let pane_runtime_chip_class = format!(
+        "pane-runtime-chip {}",
+        runtime_state_class(pane.runtime.state)
+    );
 
     rsx! {
         section { class: "{pane_class}", onclick: focus_pane,
             div { class: "pane-toolbar",
                 if show_tab_strip {
                     div { class: "pane-toolbar-meta",
-                        {match active_surface.kind {
-                            SurfaceKind::Terminal => icons::terminal(14, "pane-toolbar-kind-icon"),
-                            SurfaceKind::Browser => icons::globe(14, "pane-toolbar-kind-icon"),
-                        }}
+                        {render_runtime_icon(&pane.runtime, 14, &pane_runtime_icon_class)}
                     }
                 } else {
                     div {
                         class: "pane-toolbar-meta pane-toolbar-meta-draggable",
                         title: "Drag surface",
                         onpointerdown: begin_active_surface_drag_candidate,
-                        {match active_surface.kind {
-                            SurfaceKind::Terminal => icons::terminal(14, "pane-toolbar-kind-icon"),
-                            SurfaceKind::Browser => icons::globe(14, "pane-toolbar-kind-icon"),
-                        }}
+                        div { class: "{pane_runtime_chip_class}",
+                            {render_runtime_icon(&pane.runtime, 14, &pane_runtime_icon_class)}
+                            span { class: "pane-runtime-label", "{pane.runtime.label}" }
+                        }
                     }
                 }
                 div { class: "pane-action-cluster",
@@ -1522,7 +1569,6 @@ fn render_surface_tab(
     ordered_surface_ids: &[SurfaceId],
 ) -> Element {
     let surface_id = surface.id;
-    let surface_kind = surface.kind;
     let is_drop_target = matches!(
         *surface_drop_target.read(),
         Some(SurfaceDropTarget::BeforeSurface {
@@ -1628,6 +1674,10 @@ fn render_surface_tab(
             core.dispatch_shell_action(ShellAction::EndDrag);
         }
     };
+    let surface_runtime_icon_class = format!(
+        "surface-tab-kind-icon {}",
+        runtime_state_class(surface.runtime.state)
+    );
 
     rsx! {
         button {
@@ -1638,10 +1688,7 @@ fn render_surface_tab(
             onpointermove: set_surface_drop_target_move,
             onpointerleave: clear_surface_drop_target,
             onpointerup: drop_surface,
-            {match surface_kind {
-                SurfaceKind::Terminal => icons::terminal(10, "surface-tab-kind-icon"),
-                SurfaceKind::Browser => icons::globe(10, "surface-tab-kind-icon"),
-            }}
+            {render_runtime_icon(&surface.runtime, 10, &surface_runtime_icon_class)}
             span { class: "surface-tab-title", "{surface.title}" }
         }
     }
@@ -1805,6 +1852,7 @@ fn render_agent_item(
     current_workspace: &taskers_core::WorkspaceViewSnapshot,
 ) -> Element {
     let row_class = format!("activity-item activity-item-state-{}", agent.state.slug());
+    let agent_icon_class = format!("agent-kind-icon runtime-state-{}", agent.state.slug());
     let workspace_id = agent.workspace_id;
     let pane_id = agent.pane_id;
     let surface_id = agent.surface_id;
@@ -1823,7 +1871,7 @@ fn render_agent_item(
         button { class: "activity-item-button", onclick: focus_target,
             div { class: "{row_class}",
                 div { class: "activity-header",
-                    {icons::terminal(12, "agent-kind-icon")}
+                    {render_runtime_icon_by_key(agent.agent_kind.as_str(), 12, &agent_icon_class)}
                     div { class: "workspace-label", "{agent.title}" }
                     div { class: "activity-time", "{agent.state.label()}" }
                 }

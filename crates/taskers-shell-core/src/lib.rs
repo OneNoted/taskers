@@ -638,10 +638,49 @@ impl Default for LayoutMetrics {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStateSnapshot {
+    Idle,
+    Working,
+    Waiting,
+    Completed,
+    Failed,
+}
+
+impl RuntimeStateSnapshot {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Working => "Working",
+            Self::Waiting => "Waiting",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+        }
+    }
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeIdentitySnapshot {
+    pub key: String,
+    pub label: String,
+    pub state: RuntimeStateSnapshot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceSnapshot {
     pub id: SurfaceId,
     pub kind: SurfaceKind,
+    pub runtime: RuntimeIdentitySnapshot,
     pub title: String,
     pub url: Option<String>,
     pub cwd: Option<String>,
@@ -654,6 +693,7 @@ pub struct PaneSnapshot {
     pub active: bool,
     pub attention: AttentionState,
     pub active_surface: SurfaceId,
+    pub runtime: RuntimeIdentitySnapshot,
     pub surfaces: Vec<SurfaceSnapshot>,
     pub focus_flash_token: u64,
 }
@@ -721,6 +761,7 @@ pub struct WorkspaceSummary {
     pub title: String,
     pub preview: String,
     pub active: bool,
+    pub runtime: RuntimeIdentitySnapshot,
     pub pane_count: usize,
     pub surface_count: usize,
     pub agent_count: usize,
@@ -811,6 +852,7 @@ pub struct WorkspaceWindowSnapshot {
     pub column_id: WorkspaceColumnId,
     pub active: bool,
     pub attention: AttentionState,
+    pub runtime: RuntimeIdentitySnapshot,
     pub title: String,
     pub pane_count: usize,
     pub surface_count: usize,
@@ -868,7 +910,8 @@ pub struct SurfaceDragSessionSnapshot {
 pub enum AgentStateSnapshot {
     Working,
     Waiting,
-    Inactive,
+    Completed,
+    Failed,
 }
 
 impl AgentStateSnapshot {
@@ -876,7 +919,8 @@ impl AgentStateSnapshot {
         match self {
             Self::Working => "Working",
             Self::Waiting => "Waiting",
-            Self::Inactive => "Inactive",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
         }
     }
 
@@ -884,7 +928,8 @@ impl AgentStateSnapshot {
         match self {
             Self::Working => "busy",
             Self::Waiting => "waiting",
-            Self::Inactive => "completed",
+            Self::Completed => "completed",
+            Self::Failed => "error",
         }
     }
 }
@@ -894,7 +939,8 @@ impl From<taskers_domain::WorkspaceAgentState> for AgentStateSnapshot {
         match value {
             taskers_domain::WorkspaceAgentState::Working => Self::Working,
             taskers_domain::WorkspaceAgentState::Waiting => Self::Waiting,
-            taskers_domain::WorkspaceAgentState::Inactive => Self::Inactive,
+            taskers_domain::WorkspaceAgentState::Completed => Self::Completed,
+            taskers_domain::WorkspaceAgentState::Failed => Self::Failed,
         }
     }
 }
@@ -1369,6 +1415,7 @@ impl TaskersCore {
 
     fn workspace_summaries(&self, model: &AppModel) -> Vec<WorkspaceSummary> {
         let active_window = model.active_window;
+        let now = OffsetDateTime::now_utc();
         model
             .workspace_summaries(active_window)
             .unwrap_or_default()
@@ -1396,6 +1443,7 @@ impl TaskersCore {
                     title: summary.label.clone(),
                     preview: workspace_preview(&summary),
                     active: model.active_workspace_id() == Some(summary.workspace_id),
+                    runtime: workspace_runtime_identity(workspace, now),
                     pane_count: workspace.map(|ws| ws.panes.len()).unwrap_or_default(),
                     surface_count: workspace.map(workspace_surface_count).unwrap_or_default(),
                     agent_count: summary.agent_summaries.len(),
@@ -1511,6 +1559,7 @@ impl TaskersCore {
         workspace: &Workspace,
         window_frames: &BTreeMap<WorkspaceWindowId, (WorkspaceColumnId, Frame)>,
     ) -> Vec<WorkspaceColumnSnapshot> {
+        let now = OffsetDateTime::now_utc();
         let active_column_id = workspace.active_column_id();
         workspace
             .columns
@@ -1525,7 +1574,11 @@ impl TaskersCore {
                     .filter_map(|window_id| {
                         let window = workspace.windows.get(window_id)?;
                         let (_, frame) = window_frames.get(window_id)?;
-                        Some(self.workspace_window_snapshot(workspace, column.id, window, *frame))
+                        Some(
+                            self.workspace_window_snapshot(
+                                workspace, column.id, window, *frame, now,
+                            ),
+                        )
                     })
                     .collect(),
             })
@@ -1538,6 +1591,7 @@ impl TaskersCore {
         column_id: WorkspaceColumnId,
         window: &taskers_domain::WorkspaceWindowRecord,
         frame: Frame,
+        now: OffsetDateTime,
     ) -> WorkspaceWindowSnapshot {
         let pane_ids = window.layout.leaves();
         let pane_count = pane_ids.len();
@@ -1553,6 +1607,7 @@ impl TaskersCore {
             column_id,
             active: workspace.active_window == window.id,
             attention: workspace_window_attention(workspace, window),
+            runtime: workspace_window_runtime_identity(workspace, window, now),
             title,
             pane_count,
             surface_count,
@@ -1596,6 +1651,7 @@ impl TaskersCore {
         workspace: &Workspace,
         pane: &taskers_domain::PaneRecord,
     ) -> PaneSnapshot {
+        let now = OffsetDateTime::now_utc();
         let is_active = workspace.active_pane == pane.id;
         let has_unread = pane.highest_attention() != taskers_domain::AttentionState::Normal;
         let explicit_flash_token = pane
@@ -1616,12 +1672,14 @@ impl TaskersCore {
             active: is_active,
             attention: pane.highest_attention().into(),
             active_surface: pane.active_surface,
+            runtime: pane_runtime_identity(pane, now),
             surfaces: pane
                 .surfaces
                 .values()
                 .map(|surface| SurfaceSnapshot {
                     id: surface.id,
                     kind: SurfaceKind::from_domain(&surface.kind),
+                    runtime: surface_runtime_identity(surface, now),
                     title: display_surface_title(surface),
                     url: normalized_surface_url(surface),
                     cwd: normalized_cwd(&surface.metadata),
@@ -3541,6 +3599,239 @@ fn workspace_window_attention(
         .into()
 }
 
+fn surface_runtime_identity(
+    surface: &SurfaceRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    let key = runtime_key(surface);
+    RuntimeIdentitySnapshot {
+        label: runtime_label(&key),
+        state: surface_runtime_state(surface, now),
+        key,
+    }
+}
+
+fn pane_runtime_identity(
+    pane: &taskers_domain::PaneRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    pane.active_surface()
+        .map(|surface| surface_runtime_identity(surface, now))
+        .unwrap_or_else(|| fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle))
+}
+
+fn workspace_window_runtime_identity(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    dominant_runtime_identity(
+        window
+            .layout
+            .leaves()
+            .into_iter()
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .map(|pane| {
+                (
+                    pane_runtime_identity(pane, now),
+                    pane.id == window.active_pane,
+                )
+            }),
+        fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
+    )
+}
+
+fn workspace_runtime_identity(
+    workspace: Option<&Workspace>,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    workspace
+        .map(|workspace| {
+            dominant_runtime_identity(
+                workspace.windows.values().map(|window| {
+                    (
+                        workspace_window_runtime_identity(workspace, window, now),
+                        window.id == workspace.active_window,
+                    )
+                }),
+                fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
+            )
+        })
+        .unwrap_or_else(|| fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle))
+}
+
+fn fallback_runtime_identity(key: &str, state: RuntimeStateSnapshot) -> RuntimeIdentitySnapshot {
+    RuntimeIdentitySnapshot {
+        key: key.to_string(),
+        label: runtime_label(key),
+        state,
+    }
+}
+
+fn dominant_runtime_identity<I>(
+    candidates: I,
+    fallback: RuntimeIdentitySnapshot,
+) -> RuntimeIdentitySnapshot
+where
+    I: IntoIterator<Item = (RuntimeIdentitySnapshot, bool)>,
+{
+    let mut best: Option<(RuntimeIdentitySnapshot, bool)> = None;
+    for candidate in candidates {
+        let replace = best.as_ref().is_none_or(|(best_runtime, best_active)| {
+            runtime_priority(&candidate.0, candidate.1)
+                < runtime_priority(best_runtime, *best_active)
+        });
+        if replace {
+            best = Some(candidate);
+        }
+    }
+    best.map(|(runtime, _)| runtime).unwrap_or(fallback)
+}
+
+fn runtime_priority(runtime: &RuntimeIdentitySnapshot, active: bool) -> (u8, u8, u8) {
+    (
+        runtime_state_priority(runtime.state),
+        if active { 0 } else { 1 },
+        runtime_kind_priority(&runtime.key),
+    )
+}
+
+fn runtime_state_priority(state: RuntimeStateSnapshot) -> u8 {
+    match state {
+        RuntimeStateSnapshot::Failed => 0,
+        RuntimeStateSnapshot::Waiting => 1,
+        RuntimeStateSnapshot::Working => 2,
+        RuntimeStateSnapshot::Completed => 3,
+        RuntimeStateSnapshot::Idle => 4,
+    }
+}
+
+fn runtime_kind_priority(key: &str) -> u8 {
+    match key {
+        "browser" => 1,
+        "terminal" => 2,
+        _ => 0,
+    }
+}
+
+fn runtime_key(surface: &SurfaceRecord) -> String {
+    if let Some(agent_kind) = surface
+        .metadata
+        .agent_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|agent_kind| !agent_kind.is_empty() && *agent_kind != "shell")
+    {
+        return agent_kind.to_ascii_lowercase();
+    }
+
+    match surface.kind {
+        PaneKind::Browser => "browser".into(),
+        PaneKind::Terminal => "terminal".into(),
+    }
+}
+
+fn runtime_label(key: &str) -> String {
+    match key {
+        "codex" => "Codex".into(),
+        "claude" => "Claude".into(),
+        "opencode" => "OpenCode".into(),
+        "aider" => "Aider".into(),
+        "browser" => "Browser".into(),
+        "terminal" => "Terminal".into(),
+        other => other
+            .split(|ch: char| matches!(ch, '-' | '_' | ' '))
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                let Some(first) = chars.next() else {
+                    return String::new();
+                };
+                let mut label = String::new();
+                label.push(first.to_ascii_uppercase());
+                label.push_str(chars.as_str());
+                label
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn surface_runtime_state(surface: &SurfaceRecord, now: OffsetDateTime) -> RuntimeStateSnapshot {
+    surface_agent_state(surface, now)
+        .map(runtime_state_from_agent_state)
+        .unwrap_or(RuntimeStateSnapshot::Idle)
+}
+
+fn surface_agent_state(
+    surface: &SurfaceRecord,
+    now: OffsetDateTime,
+) -> Option<taskers_domain::WorkspaceAgentState> {
+    let agent_kind = surface
+        .metadata
+        .agent_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|agent_kind| !agent_kind.is_empty() && *agent_kind != "shell")?;
+    let _ = agent_kind;
+
+    let state = surface.metadata.agent_state.or_else(|| {
+        if surface.metadata.agent_active {
+            match surface.attention {
+                taskers_domain::AttentionState::Busy => {
+                    Some(taskers_domain::WorkspaceAgentState::Working)
+                }
+                taskers_domain::AttentionState::WaitingInput => {
+                    Some(taskers_domain::WorkspaceAgentState::Waiting)
+                }
+                taskers_domain::AttentionState::Completed => {
+                    Some(taskers_domain::WorkspaceAgentState::Completed)
+                }
+                taskers_domain::AttentionState::Error => {
+                    Some(taskers_domain::WorkspaceAgentState::Failed)
+                }
+                taskers_domain::AttentionState::Normal => None,
+            }
+        } else {
+            match surface.attention {
+                taskers_domain::AttentionState::Completed => {
+                    Some(taskers_domain::WorkspaceAgentState::Completed)
+                }
+                taskers_domain::AttentionState::Error => {
+                    Some(taskers_domain::WorkspaceAgentState::Failed)
+                }
+                taskers_domain::AttentionState::Busy
+                | taskers_domain::AttentionState::WaitingInput => {
+                    Some(taskers_domain::WorkspaceAgentState::Completed)
+                }
+                taskers_domain::AttentionState::Normal => None,
+            }
+        }
+    })?;
+
+    match state {
+        taskers_domain::WorkspaceAgentState::Working
+        | taskers_domain::WorkspaceAgentState::Waiting => Some(state),
+        taskers_domain::WorkspaceAgentState::Completed
+        | taskers_domain::WorkspaceAgentState::Failed => surface
+            .metadata
+            .last_signal_at
+            .filter(|timestamp| *timestamp >= now - time::Duration::minutes(15))
+            .map(|_| state),
+    }
+}
+
+fn runtime_state_from_agent_state(
+    state: taskers_domain::WorkspaceAgentState,
+) -> RuntimeStateSnapshot {
+    match state {
+        taskers_domain::WorkspaceAgentState::Working => RuntimeStateSnapshot::Working,
+        taskers_domain::WorkspaceAgentState::Waiting => RuntimeStateSnapshot::Waiting,
+        taskers_domain::WorkspaceAgentState::Completed => RuntimeStateSnapshot::Completed,
+        taskers_domain::WorkspaceAgentState::Failed => RuntimeStateSnapshot::Failed,
+    }
+}
+
 fn window_primary_title(
     workspace: &Workspace,
     window: &taskers_domain::WorkspaceWindowRecord,
@@ -4064,6 +4355,19 @@ mod tests {
         }
     }
 
+    fn bootstrap_with_model(model: AppModel, name: &str) -> BootstrapModel {
+        BootstrapModel {
+            app_state: super::AppState::new(
+                model,
+                default_session_path_for_preview(name),
+                super::BackendChoice::Mock,
+                super::ShellLaunchSpec::fallback(),
+            )
+            .expect("preview app state"),
+            ..bootstrap()
+        }
+    }
+
     fn find_pane<'a>(
         node: &'a super::LayoutNodeSnapshot,
         pane_id: taskers_domain::PaneId,
@@ -4190,6 +4494,125 @@ mod tests {
         );
 
         assert_eq!(display_surface_title(&surface), "Taskers Docs");
+    }
+
+    #[test]
+    fn surface_runtime_identity_prefers_agent_key_and_recent_state() {
+        let now = OffsetDateTime::now_utc();
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        let runtime = super::surface_runtime_identity(&surface, now);
+        assert_eq!(runtime.key, "codex");
+        assert_eq!(runtime.label, "Codex");
+        assert_eq!(runtime.state, super::RuntimeStateSnapshot::Waiting);
+    }
+
+    #[test]
+    fn workspace_runtime_identity_prioritizes_failed_agents_over_idle_surfaces() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_pane_id = model.active_workspace().expect("workspace").active_pane;
+        model
+            .split_pane(
+                workspace_id,
+                Some(first_pane_id),
+                taskers_domain::SplitAxis::Horizontal,
+            )
+            .expect("split pane");
+
+        let now = OffsetDateTime::now_utc();
+        let second_pane_id = {
+            let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+            workspace
+                .windows
+                .get(&workspace.active_window)
+                .expect("window")
+                .layout
+                .leaves()
+                .into_iter()
+                .find(|pane_id| *pane_id != first_pane_id)
+                .expect("second pane")
+        };
+
+        {
+            let workspace = model.workspaces.get_mut(&workspace_id).expect("workspace");
+            let first_surface_id = workspace
+                .panes
+                .get(&first_pane_id)
+                .map(|pane| pane.active_surface)
+                .expect("first surface");
+            let second_surface_id = workspace
+                .panes
+                .get(&second_pane_id)
+                .map(|pane| pane.active_surface)
+                .expect("second surface");
+            let first_surface = workspace
+                .panes
+                .get_mut(&first_pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&first_surface_id))
+                .expect("first surface record");
+            first_surface.metadata.agent_kind = Some("codex".into());
+            first_surface.metadata.agent_active = true;
+            first_surface.metadata.agent_state = Some(taskers_domain::WorkspaceAgentState::Working);
+            first_surface.metadata.last_signal_at = Some(now);
+            first_surface.attention = taskers_domain::AttentionState::Busy;
+
+            let second_surface = workspace
+                .panes
+                .get_mut(&second_pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&second_surface_id))
+                .expect("second surface record");
+            second_surface.metadata.agent_kind = Some("claude".into());
+            second_surface.metadata.agent_active = false;
+            second_surface.metadata.agent_state = Some(taskers_domain::WorkspaceAgentState::Failed);
+            second_surface.metadata.last_signal_at = Some(now);
+            second_surface.attention = taskers_domain::AttentionState::Error;
+        }
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-runtime-priority",
+        ));
+        let snapshot = core.snapshot();
+        let workspace_summary = snapshot.workspaces.first().expect("workspace summary");
+        assert_eq!(workspace_summary.runtime.key, "claude");
+        assert_eq!(
+            workspace_summary.runtime.state,
+            super::RuntimeStateSnapshot::Failed
+        );
+
+        let active_window = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == snapshot.current_workspace.active_window_id)
+            .expect("active window");
+        assert_eq!(active_window.runtime.key, "claude");
+
+        let first_pane =
+            find_pane(&snapshot.current_workspace.layout, first_pane_id).expect("first pane");
+        let second_pane =
+            find_pane(&snapshot.current_workspace.layout, second_pane_id).expect("second pane");
+        assert_eq!(first_pane.runtime.key, "codex");
+        assert_eq!(
+            first_pane.runtime.state,
+            super::RuntimeStateSnapshot::Working
+        );
+        assert_eq!(second_pane.runtime.key, "claude");
+        assert_eq!(
+            second_pane.runtime.state,
+            super::RuntimeStateSnapshot::Failed
+        );
     }
 
     #[test]

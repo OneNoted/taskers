@@ -106,6 +106,12 @@ taskersctl agent-hook stop --message "Finished"
 
 Use this path when you already have structured lifecycle hooks and want to translate them into Taskers attention items directly.
 
+Behavior split:
+
+- `waiting` creates the follow-up-needed alert immediately.
+- `notification` updates the agent's live context and latest message, but does not create the final completion alert by itself.
+- `stop` is the final completion/error edge. If it arrives without a message, Taskers reuses the latest agent message for the final alert.
+
 ## CMUX-Compatible Terminal Escapes
 
 Taskers understands both the Taskers-native signal frames and the CMUX-compatible notification sequences.

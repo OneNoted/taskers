@@ -332,3 +332,85 @@ pub fn network(size: u32, class: &str) -> Element {
         }
     }
 }
+
+/// Codex runtime icon
+pub fn codex(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M9 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3" }
+            path { d: "M15 5h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-3" }
+            path { d: "M10 8l4 8" }
+            path { d: "M14 8l-4 8" }
+        }
+    }
+}
+
+/// Claude runtime icon
+pub fn claude(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" }
+            circle { cx: "12", cy: "10", r: "1.5" }
+        }
+    }
+}
+
+/// OpenCode runtime icon
+pub fn opencode(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            polyline { points: "8 7 3 12 8 17" }
+            polyline { points: "16 7 21 12 16 17" }
+            line { x1: "13", y1: "5", x2: "11", y2: "19" }
+        }
+    }
+}
+
+/// Aider runtime icon
+pub fn aider(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M12 3v6" }
+            path { d: "M12 15v6" }
+            path { d: "M3 12h6" }
+            path { d: "M15 12h6" }
+            circle { cx: "12", cy: "12", r: "3" }
+        }
+    }
+}

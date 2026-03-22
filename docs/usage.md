@@ -69,6 +69,8 @@ Taskers keeps active agent state visible in three places:
 - the attention rail on the right
 - the current pane or surface when a flash or unread item targets it
 
+Workspace rows and pane/window chrome also carry runtime-aware icons, so you can tell at a glance whether a region is currently acting as a Codex, Claude, OpenCode, Aider, browser, or plain terminal surface.
+
 Use that split intentionally:
 
 - Status text is for “what this workspace is doing right now”
