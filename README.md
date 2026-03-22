@@ -15,6 +15,7 @@ is kept under `taskers-old/` for reference only.
 
 - [Daily usage](docs/usage.md)
 - [Notifications and attention](docs/notifications.md)
+- [Taskersctl operator guide](docs/taskersctl.md)
 - [Release checklist](docs/release.md)
 
 ## Install
