@@ -1558,12 +1558,14 @@ input:focus-visible {{
   gap: 6px;
 }}
 
-.surface-backdrop-eyebrow {{
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.10em;
-  text-transform: uppercase;
+.surface-backdrop-icon {{
   color: {text_dim};
+  opacity: 0.6;
+  margin-bottom: 4px;
+}}
+
+.browser-toolbar-icon {{
+  display: block;
 }}
 
 .surface-backdrop-title {{

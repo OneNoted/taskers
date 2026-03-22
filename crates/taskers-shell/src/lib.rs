@@ -1676,28 +1676,47 @@ fn BrowserToolbar(
                 class: "browser-toolbar-button",
                 disabled: !can_go_back,
                 onclick: go_back,
-                "←"
+                title: "Go back",
+                {icons::arrow_left(14, "browser-toolbar-icon")}
             }
             button {
                 r#type: "button",
                 class: "browser-toolbar-button",
                 disabled: !can_go_forward,
                 onclick: go_forward,
-                "→"
+                title: "Go forward",
+                {icons::arrow_right(14, "browser-toolbar-icon")}
             }
-            button { r#type: "button", class: "browser-toolbar-button", onclick: reload, "↻" }
+            button {
+                r#type: "button",
+                class: "browser-toolbar-button",
+                onclick: reload,
+                title: "Reload",
+                {icons::refresh(14, "browser-toolbar-icon")}
+            }
             input {
                 class: "browser-address",
                 r#type: "text",
                 value: "{address}",
+                placeholder: "Enter URL...",
                 oninput: move |event| address.set(event.value()),
             }
-            button { r#type: "submit", class: "browser-toolbar-button browser-toolbar-button-primary", "Go" }
+            button {
+                r#type: "submit",
+                class: "browser-toolbar-button browser-toolbar-button-primary",
+                title: "Navigate",
+                {icons::arrow_right_circle(14, "browser-toolbar-icon")}
+            }
             button {
                 r#type: "button",
                 class: "browser-toolbar-button",
                 onclick: toggle_devtools,
-                "{devtools_label}"
+                title: "{devtools_label}",
+                if devtools_open {
+                    {icons::eye_off(14, "browser-toolbar-icon")}
+                } else {
+                    {icons::eye(14, "browser-toolbar-icon")}
+                }
             }
         }
     }
@@ -1706,18 +1725,16 @@ fn BrowserToolbar(
 fn render_surface_backdrop(surface: &SurfaceSnapshot, runtime_status: &RuntimeStatus) -> Element {
     match surface.kind {
         SurfaceKind::Browser => {
-            let url = surface
-                .url
-                .clone()
-                .unwrap_or_else(|| taskers_core::DEFAULT_BROWSER_HOME.into());
             rsx! {
                 div { class: "surface-backdrop",
                     div { class: "surface-backdrop-copy",
-                        div { class: "surface-backdrop-eyebrow", "browser" }
+                        {icons::globe(18, "surface-backdrop-icon")}
                         div { class: "surface-backdrop-title", "{surface.title}" }
                     }
-                    div { class: "surface-meta",
-                        span { class: "surface-chip", "URL: {url}" }
+                    if let Some(url) = &surface.url {
+                        div { class: "surface-meta",
+                            span { class: "surface-chip", "{url}" }
+                        }
                     }
                 }
             }
@@ -1726,15 +1743,15 @@ fn render_surface_backdrop(surface: &SurfaceSnapshot, runtime_status: &RuntimeSt
             rsx! {
                 div { class: "surface-backdrop",
                     div { class: "surface-backdrop-copy",
-                        div { class: "surface-backdrop-eyebrow", "terminal" }
+                        {icons::terminal(18, "surface-backdrop-icon")}
                         div { class: "surface-backdrop-title", "{surface.title}" }
                         if let Some(message) = runtime_status.terminal_host.message() {
                             div { class: "surface-backdrop-note", "{message}" }
                         }
                     }
-                    div { class: "surface-meta",
-                        if let Some(cwd) = &surface.cwd {
-                            span { class: "surface-chip", "cwd: {cwd}" }
+                    if let Some(cwd) = &surface.cwd {
+                        div { class: "surface-meta",
+                            span { class: "surface-chip", "{cwd}" }
                         }
                     }
                 }
