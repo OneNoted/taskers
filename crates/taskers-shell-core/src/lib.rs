@@ -857,6 +857,14 @@ pub enum ShellDragMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceDragSessionSnapshot {
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub preview_workspace_id: WorkspaceId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStateSnapshot {
     Working,
     Waiting,
@@ -942,6 +950,7 @@ pub struct ShellSnapshot {
     pub section: ShellSection,
     pub overview_mode: bool,
     pub drag_mode: ShellDragMode,
+    pub surface_drag: Option<SurfaceDragSessionSnapshot>,
     pub attention_panel_visible: bool,
     pub workspaces: Vec<WorkspaceSummary>,
     pub current_workspace: WorkspaceViewSnapshot,
@@ -1068,7 +1077,15 @@ pub enum ShellAction {
         target_workspace_id: WorkspaceId,
     },
     BeginWindowDrag,
-    BeginSurfaceDrag,
+    BeginSurfaceDrag {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    PreviewSurfaceDragWorkspace {
+        workspace_id: WorkspaceId,
+    },
+    CancelSurfaceDrag,
     EndDrag,
     NavigateBrowser {
         surface_id: SurfaceId,
@@ -1114,6 +1131,7 @@ struct UiState {
     section: ShellSection,
     overview_mode: bool,
     drag_mode: ShellDragMode,
+    surface_drag: Option<SurfaceDragSessionSnapshot>,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     notification_preferences: NotificationPreferencesSnapshot,
@@ -1177,6 +1195,7 @@ impl TaskersCore {
                 section: ShellSection::Workspace,
                 overview_mode: false,
                 drag_mode: ShellDragMode::None,
+                surface_drag: None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 notification_preferences: bootstrap.notification_preferences,
@@ -1261,6 +1280,7 @@ impl TaskersCore {
             section: self.ui.section,
             overview_mode: self.ui.overview_mode,
             drag_mode: self.ui.drag_mode,
+            surface_drag: self.ui.surface_drag,
             attention_panel_visible,
             workspaces: self.workspace_summaries(&model),
             current_workspace: WorkspaceViewSnapshot {
@@ -1924,9 +1944,17 @@ impl TaskersCore {
                 surface_id,
                 target_workspace_id,
             ),
-            ShellAction::BeginWindowDrag => self.set_drag_mode(ShellDragMode::Window),
-            ShellAction::BeginSurfaceDrag => self.set_drag_mode(ShellDragMode::Surface),
-            ShellAction::EndDrag => self.set_drag_mode(ShellDragMode::None),
+            ShellAction::BeginWindowDrag => self.begin_window_drag(),
+            ShellAction::BeginSurfaceDrag {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => self.begin_surface_drag(workspace_id, pane_id, surface_id),
+            ShellAction::PreviewSurfaceDragWorkspace { workspace_id } => {
+                self.preview_surface_drag_workspace(workspace_id)
+            }
+            ShellAction::CancelSurfaceDrag => self.clear_surface_drag(true),
+            ShellAction::EndDrag => self.clear_surface_drag(false),
             ShellAction::NavigateBrowser { surface_id, url } => {
                 self.navigate_browser_surface(surface_id, &url)
             }
@@ -2633,6 +2661,93 @@ impl TaskersCore {
         changed
     }
 
+    fn begin_window_drag(&mut self) -> bool {
+        let mut changed = false;
+        if self.ui.surface_drag.is_some() {
+            self.ui.surface_drag = None;
+            changed = true;
+        }
+        if self.ui.drag_mode != ShellDragMode::Window {
+            self.ui.drag_mode = ShellDragMode::Window;
+            changed = true;
+        }
+        if changed {
+            self.bump_local_revision();
+        }
+        changed
+    }
+
+    fn begin_surface_drag(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        if self.resolve_surface_location(&model, surface_id) != Some((workspace_id, pane_id)) {
+            return false;
+        }
+        let next = SurfaceDragSessionSnapshot {
+            workspace_id,
+            pane_id,
+            surface_id,
+            preview_workspace_id: workspace_id,
+        };
+        if self.ui.drag_mode == ShellDragMode::Surface && self.ui.surface_drag == Some(next) {
+            return false;
+        }
+        self.ui.drag_mode = ShellDragMode::Surface;
+        self.ui.surface_drag = Some(next);
+        self.bump_local_revision();
+        true
+    }
+
+    fn preview_surface_drag_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        let Some(mut session) = self.ui.surface_drag else {
+            return false;
+        };
+        let mut changed = false;
+        if session.preview_workspace_id != workspace_id {
+            session.preview_workspace_id = workspace_id;
+            self.ui.surface_drag = Some(session);
+            self.bump_local_revision();
+            changed = true;
+        }
+        if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
+            changed |= self.dispatch_control(ControlCommand::SwitchWorkspace {
+                window_id: None,
+                workspace_id,
+            });
+        }
+        changed
+    }
+
+    fn clear_surface_drag(&mut self, restore_source_workspace: bool) -> bool {
+        let source_workspace_id = self.ui.surface_drag.map(|session| session.workspace_id);
+        let mut changed = false;
+        if self.ui.surface_drag.is_some() {
+            self.ui.surface_drag = None;
+            changed = true;
+        }
+        if self.ui.drag_mode != ShellDragMode::None {
+            self.ui.drag_mode = ShellDragMode::None;
+            changed = true;
+        }
+        if changed {
+            self.bump_local_revision();
+        }
+        if restore_source_workspace
+            && let Some(workspace_id) = source_workspace_id
+            && self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id)
+        {
+            changed |= self.dispatch_control(ControlCommand::SwitchWorkspace {
+                window_id: None,
+                workspace_id,
+            });
+        }
+        changed
+    }
+
     fn prepare_workspace_interaction(&mut self) -> Option<WorkspaceId> {
         let mut changed = false;
         if self.ui.section != ShellSection::Workspace {
@@ -2647,19 +2762,14 @@ impl TaskersCore {
             self.ui.drag_mode = ShellDragMode::None;
             changed = true;
         }
+        if self.ui.surface_drag.is_some() {
+            self.ui.surface_drag = None;
+            changed = true;
+        }
         if changed {
             self.bump_local_revision();
         }
         self.app_state.snapshot_model().active_workspace_id()
-    }
-
-    fn set_drag_mode(&mut self, drag_mode: ShellDragMode) -> bool {
-        if self.ui.drag_mode == drag_mode {
-            return false;
-        }
-        self.ui.drag_mode = drag_mode;
-        self.bump_local_revision();
-        true
     }
 
     fn ensure_active_window_visible(&mut self) -> bool {
@@ -3754,9 +3864,10 @@ mod tests {
     use super::{
         BootstrapModel, BrowserMountSpec, DEFAULT_BROWSER_HOME, Direction, HostCommand, HostEvent,
         LayoutMetrics, NotificationPreferencesSnapshot, RuntimeCapability, RuntimeStatus,
-        SharedCore, ShellAction, ShellDragMode, ShellSection, SurfaceMountSpec, WorkspaceDirection,
-        default_preview_app_state, default_session_path_for_preview, pane_body_frame,
-        resolved_browser_uri, split_frame, workspace_window_content_frame,
+        SharedCore, ShellAction, ShellDragMode, ShellSection, SurfaceDragSessionSnapshot,
+        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
+        default_session_path_for_preview, pane_body_frame, resolved_browser_uri, split_frame,
+        workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -4174,15 +4285,131 @@ mod tests {
     #[test]
     fn shell_drag_actions_update_snapshot_drag_mode() {
         let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let pane_id = snapshot.current_workspace.active_pane;
+        let surface_id = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == pane_id)
+            .map(|plan| plan.surface_id)
+            .expect("active surface");
 
-        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag);
+        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
         assert_eq!(core.snapshot().drag_mode, ShellDragMode::Surface);
+        assert_eq!(
+            core.snapshot().surface_drag,
+            Some(SurfaceDragSessionSnapshot {
+                workspace_id,
+                pane_id,
+                surface_id,
+                preview_workspace_id: workspace_id,
+            })
+        );
 
         core.dispatch_shell_action(ShellAction::BeginWindowDrag);
         assert_eq!(core.snapshot().drag_mode, ShellDragMode::Window);
+        assert_eq!(core.snapshot().surface_drag, None);
 
         core.dispatch_shell_action(ShellAction::EndDrag);
         assert_eq!(core.snapshot().drag_mode, ShellDragMode::None);
+        assert_eq!(core.snapshot().surface_drag, None);
+    }
+
+    #[test]
+    fn surface_drag_preview_switches_workspace_and_cancel_restores_source() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_snapshot = core.snapshot();
+        let source_workspace_id = source_snapshot.current_workspace.id;
+        let source_pane_id = source_snapshot.current_workspace.active_pane;
+        let source_surface_id = source_snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == source_pane_id)
+            .map(|plan| plan.surface_id)
+            .expect("active surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id != source_workspace_id)
+            .map(|workspace| workspace.id)
+            .expect("target workspace");
+
+        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag {
+            workspace_id: source_workspace_id,
+            pane_id: source_pane_id,
+            surface_id: source_surface_id,
+        });
+        core.dispatch_shell_action(ShellAction::PreviewSurfaceDragWorkspace {
+            workspace_id: target_workspace_id,
+        });
+
+        let preview_snapshot = core.snapshot();
+        assert_eq!(preview_snapshot.current_workspace.id, target_workspace_id);
+        assert_eq!(
+            preview_snapshot.surface_drag,
+            Some(SurfaceDragSessionSnapshot {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                surface_id: source_surface_id,
+                preview_workspace_id: target_workspace_id,
+            })
+        );
+
+        core.dispatch_shell_action(ShellAction::CancelSurfaceDrag);
+
+        let canceled_snapshot = core.snapshot();
+        assert_eq!(canceled_snapshot.current_workspace.id, source_workspace_id);
+        assert_eq!(canceled_snapshot.drag_mode, ShellDragMode::None);
+        assert_eq!(canceled_snapshot.surface_drag, None);
+    }
+
+    #[test]
+    fn end_drag_clears_surface_drag_without_restoring_source_workspace() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_snapshot = core.snapshot();
+        let source_workspace_id = source_snapshot.current_workspace.id;
+        let source_pane_id = source_snapshot.current_workspace.active_pane;
+        let source_surface_id = source_snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == source_pane_id)
+            .map(|plan| plan.surface_id)
+            .expect("active surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id != source_workspace_id)
+            .map(|workspace| workspace.id)
+            .expect("target workspace");
+
+        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag {
+            workspace_id: source_workspace_id,
+            pane_id: source_pane_id,
+            surface_id: source_surface_id,
+        });
+        core.dispatch_shell_action(ShellAction::PreviewSurfaceDragWorkspace {
+            workspace_id: target_workspace_id,
+        });
+        core.dispatch_shell_action(ShellAction::EndDrag);
+
+        let ended_snapshot = core.snapshot();
+        assert_eq!(ended_snapshot.current_workspace.id, target_workspace_id);
+        assert_eq!(ended_snapshot.drag_mode, ShellDragMode::None);
+        assert_eq!(ended_snapshot.surface_drag, None);
     }
 
     #[test]
