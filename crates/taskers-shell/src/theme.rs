@@ -192,7 +192,7 @@ pub fn generate_css(
     } else {
         format!("{sidebar_width}px minmax(0, 1fr)")
     };
-    let mut css = String::with_capacity(18_000);
+    let mut css = String::with_capacity(22_000);
     let _ = write!(
         css,
         r#"
@@ -212,6 +212,17 @@ html, body, #main {{
 button {{
   font: inherit;
 }}
+
+button:focus-visible,
+input:focus-visible {{
+  outline: 2px solid {accent};
+  outline-offset: 1px;
+}}
+
+::-webkit-scrollbar {{ width: 6px; }}
+::-webkit-scrollbar-track {{ background: transparent; }}
+::-webkit-scrollbar-thumb {{ background: {border_10}; border-radius: 3px; }}
+::-webkit-scrollbar-thumb:hover {{ background: {border_12}; }}
 
 .app-shell {{
   width: 100vw;
@@ -238,12 +249,14 @@ button {{
   border-right: 1px solid {border_04};
   padding: 8px;
   gap: 10px;
+  backdrop-filter: blur(12px) saturate(1.4);
 }}
 
 .attention-panel {{
   border-left: 1px solid {border_04};
   padding: 10px 12px;
   gap: 8px;
+  backdrop-filter: blur(12px) saturate(1.4);
 }}
 
 .sidebar-brand {{
@@ -298,12 +311,14 @@ button {{
 .sidebar-nav-button {{
   padding: 8px 10px;
   color: {text_subtle};
+  border-radius: 6px;
 }}
 
 .sidebar-nav-button:hover,
 .sidebar-nav-button-active {{
   background: {border_06};
   color: {text_bright};
+  border-radius: 6px;
 }}
 
 .sidebar-section-header {{
@@ -322,6 +337,10 @@ button {{
   min-height: 24px;
   padding: 0;
   font-size: 16px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }}
 
 .workspace-add:hover {{
@@ -347,6 +366,7 @@ button {{
   position: relative;
   padding: 8px 10px 8px 14px;
   border: 1px solid transparent;
+  border-radius: 6px;
   display: flex;
   align-items: stretch;
   gap: 0;
@@ -436,6 +456,7 @@ button {{
   align-items: center;
   justify-content: center;
   visibility: hidden;
+  border-radius: 4px;
   transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
 }}
 
@@ -459,6 +480,7 @@ button {{
   font-weight: 700;
   background: var(--workspace-accent, {accent});
   color: {base};
+  border-radius: 9999px;
 }}
 
 .workspace-unread-badge-error {{
@@ -512,12 +534,14 @@ button {{
   flex: 1;
   height: 3px;
   background: {border_08};
+  border-radius: 2px;
 }}
 
 .workspace-progress-fill {{
   height: 100%;
   background: var(--workspace-accent, {accent});
   transition: width 0.3s ease;
+  border-radius: 2px;
 }}
 
 .workspace-progress-label {{
@@ -593,6 +617,8 @@ button {{
   display: flex;
   flex-direction: column;
   gap: 8px;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.24), inset 0 1px 0 rgba(255,255,255,0.03);
 }}
 
 .runtime-row,
@@ -617,6 +643,7 @@ button {{
   justify-content: space-between;
   gap: 10px;
   text-align: left;
+  border-radius: 6px;
 }}
 
 .settings-toggle-row:hover {{
@@ -639,6 +666,7 @@ button {{
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  border-radius: 12px;
 }}
 
 .settings-toggle-button-active {{
@@ -662,6 +690,7 @@ button {{
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  border-radius: 4px;
 }}
 
 .status-pill-inline {{
@@ -736,6 +765,7 @@ button {{
   gap: 2px;
   background: {border_04};
   padding: 2px;
+  border-radius: 6px;
 }}
 
 .workspace-header-group .workspace-header-action {{
@@ -801,6 +831,7 @@ button {{
 .shortcut-pill {{
   border: 1px solid {border_10};
   background: transparent;
+  border-radius: 4px;
 }}
 
 .workspace-header-action,
@@ -809,12 +840,14 @@ button {{
   min-height: 28px;
   padding: 0 10px;
   color: {text_subtle};
+  border-radius: 4px;
 }}
 
 .workspace-header-action:hover,
 .pane-action:hover {{
   background: {border_06};
   color: {text_bright};
+  box-shadow: 0 1px 2px rgba(0,0,0,0.20);
 }}
 
 .activity-action-passive {{
@@ -881,13 +914,15 @@ button {{
   align-items: flex-end;
   justify-content: flex-end;
   padding: 16px;
-  border: 1px dashed transparent;
+  border: 1px solid transparent;
   background: transparent;
+  border-radius: 8px;
 }}
 
 .workspace-surface-fallback-drop-active {{
   border-color: {accent_20};
   background: {accent_08};
+  border-radius: 8px;
 }}
 
 .workspace-surface-fallback-label {{
@@ -902,6 +937,7 @@ button {{
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  border-radius: 4px;
 }}
 
 .workspace-viewport-overview .workspace-strip-canvas {{
@@ -916,10 +952,13 @@ button {{
   background: {surface};
   border: {window_border_width}px solid {border_07};
   overflow: hidden;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.32);
 }}
 
 .workspace-window-shell-active {{
   border-color: {accent_24};
+  box-shadow: 0 4px 20px rgba(0,0,0,0.40);
 }}
 
 .workspace-window-toolbar {{
@@ -934,6 +973,7 @@ button {{
   gap: 6px;
   cursor: grab;
   user-select: none;
+  border-radius: 8px 8px 0 0;
 }}
 
 .workspace-window-title {{
@@ -979,6 +1019,7 @@ button {{
   background: {elevated};
   border: {pane_border_width}px solid {border_10};
   overflow: hidden;
+  border-radius: 6px;
 }}
 
 .pane-card-active {{
@@ -1004,6 +1045,7 @@ button {{
   pointer-events: none;
   opacity: 0;
   z-index: 10;
+  border-radius: 6px;
 }}
 
 .pane-flash-ring-active {{
@@ -1020,6 +1062,7 @@ button {{
   justify-content: space-between;
   gap: 8px;
   background: {surface};
+  border-radius: 6px 6px 0 0;
 }}
 
 .pane-toolbar-meta,
@@ -1099,6 +1142,7 @@ button {{
   padding: 0 6px;
   color: {text_muted};
   white-space: nowrap;
+  border-radius: 4px;
 }}
 
 .surface-tab:hover {{
@@ -1158,11 +1202,16 @@ button {{
   font-size: 10px;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   line-height: 1;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }}
 
 .pane-utility:hover {{
   background: {border_06};
   color: {text_bright};
+  box-shadow: 0 1px 2px rgba(0,0,0,0.20);
 }}
 
 .pane-utility-split {{
@@ -1248,11 +1297,22 @@ button {{
   color: {text_subtle};
   font-size: 11px;
   font-weight: 600;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }}
 
 .browser-toolbar-button:hover {{
   background: {overlay_16};
   color: {text_bright};
+  box-shadow: 0 1px 2px rgba(0,0,0,0.20);
+}}
+
+.browser-toolbar-button:disabled {{
+  opacity: 0.35;
+  cursor: default;
+  box-shadow: none;
 }}
 
 .browser-toolbar-button-primary {{
@@ -1265,10 +1325,11 @@ button {{
   min-width: 0;
   height: 26px;
   border: 1px solid {border_10};
-  padding: 0 10px;
+  padding: 0 14px;
   background: {overlay_05};
   color: {text_bright};
   font-size: 12px;
+  border-radius: 16px;
 }}
 
 .browser-address:focus {{
@@ -1298,13 +1359,14 @@ button {{
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px dashed {accent_24};
+  border: 1px solid {accent_24};
   background: {accent_12};
   color: {text_bright};
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   pointer-events: auto;
+  border-radius: 6px;
 }}
 
 .pane-drop-target-active {{
@@ -1358,9 +1420,10 @@ button {{
   flex-direction: column;
   justify-content: space-between;
   gap: 12px;
-  border: 1px dashed {border_10};
+  border: 1px solid {border_06};
   padding: 12px;
-  background: {overlay_03};
+  background: linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
+  border-radius: 6px;
 }}
 
 .workspace-main-overview .workspace-window-shell {{
@@ -1460,6 +1523,7 @@ button {{
   padding: 4px 8px;
   color: {text_muted};
   font-size: 11px;
+  border-radius: 4px;
 }}
 
 .shortcut-pill-muted {{
@@ -1491,10 +1555,11 @@ button {{
 }}
 
 .empty-state {{
-  border: 1px dashed {border_10};
+  border: 1px solid {border_10};
   padding: 12px;
   color: {text_dim};
   font-size: 12px;
+  border-radius: 6px;
 }}
 
 .activity-item {{
@@ -1502,6 +1567,7 @@ button {{
   display: flex;
   flex-direction: column;
   gap: 3px;
+  border-radius: 6px;
 }}
 
 .activity-item-button {{
@@ -1536,6 +1602,7 @@ button {{
   color: {text_bright};
   font-size: 10px;
   padding: 3px 7px;
+  border-radius: 4px;
 }}
 
 .notification-count-pill {{
@@ -1544,6 +1611,7 @@ button {{
   color: {text_dim};
   padding: 2px 6px;
   background: {border_06};
+  border-radius: 12px;
 }}
 
 .notification-count-unread {{
@@ -1600,6 +1668,7 @@ button {{
   padding: 10px;
   background: {border_03};
   transition: background 0.14s ease-in-out;
+  border-radius: 6px;
 }}
 
 .workspace-log-list {{
@@ -1616,6 +1685,7 @@ button {{
   display: flex;
   flex-direction: column;
   gap: 4px;
+  border-radius: 6px;
 }}
 
 .workspace-log-entry-header {{
@@ -1646,6 +1716,7 @@ button {{
   width: 8px;
   height: 8px;
   margin-top: 4px;
+  border-radius: 9999px;
 }}
 
 .notification-dot-unread {{
@@ -1775,6 +1846,7 @@ button {{
 .preset-card {{
   border: 1px solid {border_08};
   padding: 10px;
+  border-radius: 6px;
 }}
 
 .theme-card:hover,
