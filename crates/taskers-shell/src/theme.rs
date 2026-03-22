@@ -929,6 +929,9 @@ input:focus-visible {{
 
 .settings-canvas {{
   padding: 16px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
 }}
 
 .workspace-viewport {{
