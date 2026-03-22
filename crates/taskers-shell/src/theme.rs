@@ -1008,23 +1008,31 @@ input:focus-visible {{
 .workspace-window-toolbar {{
   height: {window_toolbar_height}px;
   min-height: {window_toolbar_height}px;
-  border-bottom: 1px solid {border_10};
-  background: {surface};
-  padding: 0 10px;
+  border-bottom: 1px solid {border_06};
+  background: linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
+  padding: 0 8px;
   display: flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
+  justify-content: center;
   cursor: grab;
   user-select: none;
   border-radius: 8px 8px 0 0;
 }}
 
-.workspace-window-title {{
-  color: {text_bright};
-  min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
+.workspace-window-grip {{
+  width: 38px;
+  height: 4px;
+  border-radius: 999px;
+  background: {border_10};
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}}
+
+.workspace-window-toolbar:hover .workspace-window-grip {{
+  background: {text_dim};
+}}
+
+.workspace-window-shell-active .workspace-window-grip {{
+  background: {accent_24};
 }}
 
 .workspace-window-toolbar:active {{
@@ -1118,8 +1126,17 @@ input:focus-visible {{
 .pane-toolbar-meta {{
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
+}}
+
+.pane-toolbar-meta-draggable {{
+  cursor: grab;
+  padding: 0 2px;
+}}
+
+.pane-toolbar-meta-draggable:active {{
+  cursor: grabbing;
 }}
 
 .pane-toolbar-kind-icon {{
@@ -1496,9 +1513,13 @@ input:focus-visible {{
 }}
 
 .workspace-main-overview .workspace-window-toolbar {{
-  min-height: 32px;
-  padding: 0 8px;
+  min-height: {window_toolbar_height}px;
+  padding: 0 6px;
   background: {surface_85};
+}}
+
+.workspace-main-overview .workspace-window-grip {{
+  width: 28px;
 }}
 
 .workspace-main-overview .workspace-window-body {{

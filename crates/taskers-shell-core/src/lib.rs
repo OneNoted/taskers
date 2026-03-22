@@ -627,7 +627,7 @@ impl Default for LayoutMetrics {
             toolbar_height: 42,
             workspace_padding: 16,
             window_border_width: 2,
-            window_toolbar_height: 28,
+            window_toolbar_height: 20,
             window_body_padding: 0,
             split_gap: 8,
             pane_border_width: 1,
@@ -1751,7 +1751,12 @@ impl TaskersCore {
                         pane_id: pane.id,
                         surface_id: active_surface.id,
                         active: workspace.active_pane == pane.id,
-                        frame: pane_body_frame(frame, self.metrics, &active_surface.kind),
+                        frame: pane_body_frame(
+                            frame,
+                            self.metrics,
+                            &active_surface.kind,
+                            pane_shows_tab_strip_for_surface_count(pane.surfaces.len()),
+                        ),
                         mount: self.mount_spec_for_active_surface(
                             workspace_id,
                             pane,
@@ -3460,14 +3465,24 @@ fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, F
     }
 }
 
-fn pane_body_frame(frame: Frame, metrics: LayoutMetrics, kind: &PaneKind) -> Frame {
+fn pane_body_frame(
+    frame: Frame,
+    metrics: LayoutMetrics,
+    kind: &PaneKind,
+    show_tab_strip: bool,
+) -> Frame {
     let browser_toolbar_height = match kind {
         PaneKind::Terminal => 0,
         PaneKind::Browser => metrics.browser_toolbar_height,
     };
+    let tab_strip_height = if show_tab_strip {
+        metrics.surface_tab_height
+    } else {
+        0
+    };
     frame
         .inset(metrics.pane_border_width)
-        .inset_top(metrics.pane_header_height + metrics.surface_tab_height + browser_toolbar_height)
+        .inset_top(metrics.pane_header_height + tab_strip_height + browser_toolbar_height)
 }
 
 fn workspace_window_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
@@ -3539,8 +3554,46 @@ fn window_primary_title(
 }
 
 fn display_surface_title(surface: &SurfaceRecord) -> String {
-    if let Some(title) = surface
-        .metadata
+    match surface.kind {
+        PaneKind::Terminal => display_terminal_title(&surface.metadata),
+        PaneKind::Browser => display_browser_title(&surface.metadata),
+    }
+}
+
+fn display_terminal_title(metadata: &PaneMetadata) -> String {
+    let agent_title = metadata
+        .agent_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+    let context = terminal_context_label(metadata);
+
+    if let Some(agent_title) = agent_title {
+        if let Some(context) = context.as_deref() {
+            return format!("{agent_title} · {context}");
+        }
+        return agent_title.to_string();
+    }
+
+    if let Some(context) = context {
+        return context;
+    }
+
+    if let Some(title) = metadata
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .filter(|title| !is_generic_terminal_title(title))
+    {
+        return title.to_string();
+    }
+
+    "Terminal".into()
+}
+
+fn display_browser_title(metadata: &PaneMetadata) -> String {
+    if let Some(title) = metadata
         .title
         .as_deref()
         .map(str::trim)
@@ -3549,21 +3602,41 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
         return title.to_string();
     }
 
-    if matches!(surface.kind, PaneKind::Browser)
-        && let Some(url) = surface
-            .metadata
-            .url
-            .as_deref()
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
+    if let Some(url) = metadata
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
     {
         return url.to_string();
     }
 
-    match surface.kind {
-        PaneKind::Terminal => "Terminal".into(),
-        PaneKind::Browser => "Browser".into(),
+    "Browser".into()
+}
+
+fn terminal_context_label(metadata: &PaneMetadata) -> Option<String> {
+    let repo_name = metadata
+        .repo_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty());
+    let git_branch = metadata
+        .git_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
+
+    if let Some(repo_name) = repo_name {
+        return Some(match git_branch {
+            Some(git_branch) => format!("{repo_name}/{git_branch}"),
+            None => repo_name.to_string(),
+        });
     }
+
+    normalized_cwd(metadata)
+        .as_deref()
+        .and_then(path_basename)
+        .map(str::to_string)
 }
 
 fn normalized_surface_url(surface: &SurfaceRecord) -> Option<String> {
@@ -3583,6 +3656,60 @@ fn normalized_cwd(metadata: &PaneMetadata) -> Option<String> {
         .map(str::trim)
         .filter(|cwd| !cwd.is_empty())
         .map(str::to_string)
+}
+
+fn path_basename(path: &str) -> Option<&str> {
+    let trimmed = path.trim().trim_end_matches(|ch| matches!(ch, '/' | '\\'));
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    trimmed
+        .rsplit(|ch| matches!(ch, '/' | '\\'))
+        .find(|segment| !segment.is_empty())
+}
+
+fn is_generic_terminal_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    if !parts.all(|part| part.starts_with('-')) {
+        return false;
+    }
+
+    let basename = command
+        .rsplit(|ch| matches!(ch, '/' | '\\'))
+        .next()
+        .unwrap_or(command)
+        .trim()
+        .to_ascii_lowercase();
+
+    matches!(
+        basename.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "nu"
+            | "nushell"
+            | "dash"
+            | "ash"
+            | "ksh"
+            | "mksh"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+            | "cmd.exe"
+            | "xonsh"
+            | "elvish"
+    )
+}
+
+fn pane_shows_tab_strip_for_surface_count(surface_count: usize) -> bool {
+    surface_count > 1
 }
 
 fn format_relative_time(timestamp: OffsetDateTime) -> String {
@@ -3779,9 +3906,7 @@ fn mount_spec_from_descriptor(
                 .unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
         }),
         PaneKind::Terminal => SurfaceMountSpec::Terminal(TerminalMountSpec {
-            title: descriptor
-                .title
-                .unwrap_or_else(|| display_surface_title(surface)),
+            title: display_surface_title(surface),
             cwd: descriptor.cwd,
             cols: descriptor.cols,
             rows: descriptor.rows,
@@ -3866,7 +3991,8 @@ mod tests {
         LayoutMetrics, NotificationPreferencesSnapshot, RuntimeCapability, RuntimeStatus,
         SharedCore, ShellAction, ShellDragMode, ShellSection, SurfaceDragSessionSnapshot,
         SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
-        default_session_path_for_preview, pane_body_frame, resolved_browser_uri, split_frame,
+        default_session_path_for_preview, display_surface_title, pane_body_frame,
+        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
 
@@ -3985,6 +4111,87 @@ mod tests {
         }
     }
 
+    fn surface_with_metadata(
+        kind: taskers_domain::PaneKind,
+        metadata: taskers_domain::PaneMetadata,
+    ) -> taskers_domain::SurfaceRecord {
+        let mut surface = taskers_domain::SurfaceRecord::new(kind);
+        surface.metadata = metadata;
+        surface
+    }
+
+    #[test]
+    fn terminal_surface_titles_prefer_agent_and_repo_context() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("/usr/bin/zsh".into()),
+                agent_title: Some("Codex".into()),
+                repo_name: Some("taskers".into()),
+                git_branch: Some("main".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "Codex · taskers/main");
+    }
+
+    #[test]
+    fn terminal_surface_titles_prefer_repo_context_over_generic_shell_names() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("/usr/bin/zsh".into()),
+                repo_name: Some("taskers".into()),
+                git_branch: Some("main".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "taskers/main");
+    }
+
+    #[test]
+    fn terminal_surface_titles_fall_back_to_cwd_basename_before_generic_shell_names() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("zsh".into()),
+                cwd: Some("/home/notes/Projects/taskers".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "taskers");
+    }
+
+    #[test]
+    fn terminal_surface_titles_keep_non_generic_host_titles_as_fallback() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("OpenAI Codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "OpenAI Codex");
+    }
+
+    #[test]
+    fn browser_surface_titles_stay_page_title_first() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Browser,
+            taskers_domain::PaneMetadata {
+                title: Some("Taskers Docs".into()),
+                url: Some("https://example.com/docs".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "Taskers Docs");
+    }
+
     #[test]
     fn default_bootstrap_projects_browser_and_terminal_portal_plans() {
         let core = SharedCore::bootstrap(bootstrap());
@@ -4012,10 +4219,8 @@ mod tests {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
         let metrics = LayoutMetrics::default();
-        let min_content_y = snapshot.portal.content.y
-            + metrics.window_toolbar_height
-            + metrics.pane_header_height
-            + metrics.surface_tab_height;
+        let min_content_y =
+            snapshot.portal.content.y + metrics.window_toolbar_height + metrics.pane_header_height;
 
         assert!(
             snapshot
@@ -4056,11 +4261,67 @@ mod tests {
             SurfaceMountSpec::Browser(_) => taskers_domain::PaneKind::Browser,
             SurfaceMountSpec::Terminal(_) => taskers_domain::PaneKind::Terminal,
         };
+        let pane = find_pane(&workspace.layout, workspace.active_pane).expect("active pane");
 
         assert_eq!(
             active_plan.frame,
-            pane_body_frame(pane_frame, metrics, &pane_kind),
+            pane_body_frame(
+                pane_frame,
+                metrics,
+                &pane_kind,
+                pane_shows_tab_strip_for_surface_count(pane.surfaces.len()),
+            ),
             "expected native surface frame to match shell pane-body insets"
+        );
+    }
+
+    #[test]
+    fn multi_surface_pane_frames_include_tab_strip_height() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let pane_id = core.snapshot().current_workspace.active_pane;
+
+        core.dispatch_shell_action(ShellAction::AddTerminalSurface {
+            pane_id: Some(pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let workspace = &snapshot.current_workspace;
+        let metrics = LayoutMetrics::default();
+        let active_window = workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == workspace.active_window_id)
+            .expect("active window");
+        let active_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == pane_id)
+            .expect("active portal plan");
+        let pane_frame = find_pane_frame(
+            &active_window.layout,
+            pane_id,
+            workspace_window_content_frame(active_window.frame, metrics),
+            metrics.split_gap,
+        )
+        .expect("active pane frame");
+        let pane_kind = match &active_plan.mount {
+            SurfaceMountSpec::Browser(_) => taskers_domain::PaneKind::Browser,
+            SurfaceMountSpec::Terminal(_) => taskers_domain::PaneKind::Terminal,
+        };
+        let pane = find_pane(&workspace.layout, pane_id).expect("active pane");
+
+        assert_eq!(pane.surfaces.len(), 2);
+        assert_eq!(
+            active_plan.frame,
+            pane_body_frame(
+                pane_frame,
+                metrics,
+                &pane_kind,
+                pane_shows_tab_strip_for_surface_count(pane.surfaces.len()),
+            ),
+            "expected multi-surface panes to reserve tab-strip height"
         );
     }
 

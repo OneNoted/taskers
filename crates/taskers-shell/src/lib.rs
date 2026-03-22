@@ -106,6 +106,10 @@ fn pane_allows_surface_split(
     dragged.is_some_and(|dragged| dragged.pane_id != pane_id || surface_count > 1)
 }
 
+fn pane_shows_tab_strip(surface_count: usize) -> bool {
+    surface_count > 1
+}
+
 fn show_live_surface_backdrop(surface_kind: SurfaceKind, overview_mode: bool) -> bool {
     overview_mode || !matches!(surface_kind, SurfaceKind::Browser)
 }
@@ -126,6 +130,27 @@ fn mark_move_drop(event: &Event<DragData>) {
 fn pointer_client_position(event: &Event<PointerData>) -> (f64, f64) {
     let position = event.data().client_coordinates();
     (position.x, position.y)
+}
+
+fn surface_drag_candidate_from_event(
+    event: &Event<PointerData>,
+    workspace_id: WorkspaceId,
+    pane_id: PaneId,
+    surface_id: SurfaceId,
+) -> Option<SurfaceDragCandidate> {
+    if event.data().trigger_button() != Some(MouseButton::Primary) {
+        return None;
+    }
+
+    let (start_x, start_y) = pointer_client_position(event);
+    event.stop_propagation();
+    Some(SurfaceDragCandidate {
+        workspace_id,
+        pane_id,
+        surface_id,
+        start_x,
+        start_y,
+    })
 }
 
 fn surface_drag_threshold_reached(
@@ -1074,9 +1099,7 @@ fn render_workspace_window(
                 onclick: focus_window,
                 ondragstart: start_window_drag,
                 ondragend: clear_window_drag,
-                div { class: "workspace-window-title",
-                    span { class: "workspace-label", "{window.title}" }
-                }
+                div { class: "workspace-window-grip" }
             }
             div { class: "workspace-window-body",
                 {render_layout(
@@ -1158,7 +1181,7 @@ fn render_pane(
     core: SharedCore,
     runtime_status: &RuntimeStatus,
     surface_drop_target: Signal<Option<SurfaceDropTarget>>,
-    surface_drag_candidate: Signal<Option<SurfaceDragCandidate>>,
+    mut surface_drag_candidate: Signal<Option<SurfaceDragCandidate>>,
     dragged_surface: Option<DraggedSurface>,
 ) -> Element {
     let pane_id = pane.id;
@@ -1210,6 +1233,7 @@ fn render_pane(
                 .map(|url| format!("{}-{}", active_surface.id, url))
         })
         .unwrap_or_else(|| active_surface.id.to_string());
+    let show_tab_strip = pane_shows_tab_strip(pane.surfaces.len());
     let pane_allows_split =
         pane_allows_surface_split(dragged_surface, pane_id, pane.surfaces.len());
     let surface_drag_active = dragged_surface.is_some();
@@ -1263,6 +1287,13 @@ fn render_pane(
             })
         }
     };
+    let begin_active_surface_drag_candidate = move |event: Event<PointerData>| {
+        if let Some(candidate) =
+            surface_drag_candidate_from_event(&event, workspace_id, pane_id, active_surface_id)
+        {
+            surface_drag_candidate.set(Some(candidate));
+        }
+    };
 
     let flash_key = pane.focus_flash_token;
     let flash_class = if flash_key > 0 {
@@ -1279,12 +1310,23 @@ fn render_pane(
     rsx! {
         section { class: "{pane_class}", onclick: focus_pane,
             div { class: "pane-toolbar",
-                div { class: "pane-toolbar-meta",
-                    {match active_surface.kind {
-                        SurfaceKind::Terminal => icons::terminal(14, "pane-toolbar-kind-icon"),
-                        SurfaceKind::Browser => icons::globe(14, "pane-toolbar-kind-icon"),
-                    }}
-                    span { class: "pane-toolbar-title", "{active_surface.title}" }
+                if show_tab_strip {
+                    div { class: "pane-toolbar-meta",
+                        {match active_surface.kind {
+                            SurfaceKind::Terminal => icons::terminal(14, "pane-toolbar-kind-icon"),
+                            SurfaceKind::Browser => icons::globe(14, "pane-toolbar-kind-icon"),
+                        }}
+                    }
+                } else {
+                    div {
+                        class: "pane-toolbar-meta pane-toolbar-meta-draggable",
+                        title: "Drag surface",
+                        onpointerdown: begin_active_surface_drag_candidate,
+                        {match active_surface.kind {
+                            SurfaceKind::Terminal => icons::terminal(14, "pane-toolbar-kind-icon"),
+                            SurfaceKind::Browser => icons::globe(14, "pane-toolbar-kind-icon"),
+                        }}
+                    }
                 }
                 div { class: "pane-action-cluster",
                     button { class: "pane-utility", title: "New terminal tab", onclick: add_terminal_surface,
@@ -1306,29 +1348,31 @@ fn render_pane(
                     }
                 }
             }
-            div { class: "pane-tabs",
-                div { class: "surface-tabs",
-                    for surface in &pane.surfaces {
-                        {render_surface_tab(
-                            workspace_id,
-                            pane.id,
-                            pane.active_surface,
-                            surface,
-                            core.clone(),
-                            surface_drop_target,
-                            surface_drag_candidate,
-                            dragged_surface,
-                            &ordered_surface_ids,
-                        )}
-                    }
-                    if surface_drag_active {
-                        {render_surface_pane_drop_target(
-                            "surface-tab surface-tab-append-target",
-                            "+",
-                            SurfaceDropTarget::AppendToPane { pane_id },
-                            core.clone(),
-                            surface_drop_target,
-                        )}
+            if show_tab_strip {
+                div { class: "pane-tabs",
+                    div { class: "surface-tabs",
+                        for surface in &pane.surfaces {
+                            {render_surface_tab(
+                                workspace_id,
+                                pane.id,
+                                pane.active_surface,
+                                surface,
+                                core.clone(),
+                                surface_drop_target,
+                                surface_drag_candidate,
+                                dragged_surface,
+                                &ordered_surface_ids,
+                            )}
+                        }
+                        if surface_drag_active {
+                            {render_surface_pane_drop_target(
+                                "surface-tab surface-tab-append-target",
+                                "+",
+                                SurfaceDropTarget::AppendToPane { pane_id },
+                                core.clone(),
+                                surface_drop_target,
+                            )}
+                        }
                     }
                 }
             }
@@ -1514,18 +1558,11 @@ fn render_surface_tab(
         });
     };
     let begin_surface_drag_candidate = move |event: Event<PointerData>| {
-        if event.data().trigger_button() != Some(MouseButton::Primary) {
-            return;
+        if let Some(candidate) =
+            surface_drag_candidate_from_event(&event, workspace_id, pane_id, surface_id)
+        {
+            surface_drag_candidate.set(Some(candidate));
         }
-        let (start_x, start_y) = pointer_client_position(&event);
-        event.stop_propagation();
-        surface_drag_candidate.set(Some(SurfaceDragCandidate {
-            workspace_id,
-            pane_id,
-            surface_id,
-            start_x,
-            start_y,
-        }));
     };
     let set_surface_drop_target_enter = {
         let core = core.clone();
