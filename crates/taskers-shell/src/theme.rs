@@ -697,22 +697,33 @@ input:focus-visible {{
   gap: 4px;
 }}
 
-.settings-toggle-button {{
-  min-width: 42px;
-  padding: 4px 8px;
-  border: 1px solid {border_08};
-  color: {text_dim};
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  border-radius: 12px;
+.toggle-track {{
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: {border_10};
+  position: relative;
+  transition: background 0.14s ease-in-out;
+  flex: 0 0 auto;
 }}
 
-.settings-toggle-button-active {{
-  border-color: {accent_24};
-  background: {accent_12};
-  color: {text_bright};
+.toggle-track-active {{
+  background: {accent};
+}}
+
+.toggle-thumb {{
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: {text_bright};
+  transition: left 0.14s ease-in-out;
+}}
+
+.toggle-track-active .toggle-thumb {{
+  left: 18px;
 }}
 
 .runtime-status-row {{
@@ -1585,12 +1596,22 @@ input:focus-visible {{
   flex-wrap: wrap;
 }}
 
-.surface-chip,
+.surface-chip {{
+  padding: 4px 8px;
+  color: {text_muted};
+  font-size: 11px;
+  border-radius: 4px;
+}}
+
 .shortcut-pill {{
   padding: 4px 8px;
   color: {text_muted};
   font-size: 11px;
   border-radius: 4px;
+  background: {border_06};
+  border: 1px solid {border_10};
+  box-shadow: 0 1px 0 {border_08};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
 }}
 
 .shortcut-pill-muted {{
@@ -1861,7 +1882,22 @@ input:focus-visible {{
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 4px;
   transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
+}}
+
+.notification-clear-icon {{
+  display: block;
+}}
+
+.notification-empty-icon {{
+  color: {text_dim};
+  opacity: 0.4;
+}}
+
+.agent-kind-icon {{
+  flex: 0 0 auto;
+  color: {text_dim};
 }}
 
 .notification-clear:hover {{

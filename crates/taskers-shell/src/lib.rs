@@ -445,7 +445,9 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                     div { class: "notification-timeline",
                         if snapshot.activity.is_empty() && snapshot.done_activity.is_empty() {
                             div { class: "notification-empty",
+                                {icons::bell(24, "notification-empty-icon")}
                                 div { class: "notification-empty-title", "No notifications" }
+                                div { class: "notification-empty-subtitle", "Activity and alerts will appear here." }
                             }
                         } else {
                             for item in &snapshot.activity {
@@ -1784,6 +1786,7 @@ fn render_agent_item(
         button { class: "activity-item-button", onclick: focus_target,
             div { class: "{row_class}",
                 div { class: "activity-header",
+                    {icons::terminal(12, "agent-kind-icon")}
                     div { class: "workspace-label", "{agent.title}" }
                     div { class: "activity-time", "{agent.state.label()}" }
                 }
@@ -1837,7 +1840,7 @@ fn render_notification_row(
                         button {
                             class: "notification-clear",
                             onclick: dismiss,
-                            "×"
+                            {icons::close(12, "notification-clear-icon")}
                         }
                     }
                 }
@@ -2040,12 +2043,11 @@ fn render_notification_preference(
             enabled: !enabled,
         })
     };
-    let button_class = if enabled {
-        "settings-toggle-button settings-toggle-button-active"
+    let track_class = if enabled {
+        "toggle-track toggle-track-active"
     } else {
-        "settings-toggle-button"
+        "toggle-track"
     };
-    let state_label = if enabled { "On" } else { "Off" };
 
     rsx! {
         button { class: "settings-toggle-row", onclick: toggle,
@@ -2053,7 +2055,9 @@ fn render_notification_preference(
                 div { class: "workspace-label", "{label}" }
                 div { class: "settings-copy", "{detail}" }
             }
-            span { class: "{button_class}", "{state_label}" }
+            div { class: "{track_class}",
+                div { class: "toggle-thumb" }
+            }
         }
     }
 }
