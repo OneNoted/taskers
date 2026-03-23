@@ -1944,11 +1944,13 @@ input:focus-visible {{
 }}
 
 .notification-row-button {{
+  display: block;
   width: 100%;
   border: 0;
   padding: 0;
   background: transparent;
   text-align: left;
+  cursor: pointer;
 }}
 
 .notification-row {{

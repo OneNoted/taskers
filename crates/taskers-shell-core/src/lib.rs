@@ -5873,6 +5873,24 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_activity_moves_notification_into_done_history() {
+        let core = SharedCore::bootstrap(bootstrap_with_notification(false));
+        let activity_id = core
+            .snapshot()
+            .activity
+            .first()
+            .map(|item| item.id)
+            .expect("notification activity");
+
+        core.dispatch_shell_action(ShellAction::DismissActivity { activity_id });
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.activity.is_empty());
+        assert_eq!(snapshot.done_activity.len(), 1);
+        assert_eq!(snapshot.done_activity[0].id, activity_id);
+    }
+
+    #[test]
     fn surface_flash_command_updates_pane_flash_token() {
         let app_state = default_preview_app_state();
         let snapshot_model = app_state.snapshot_model();

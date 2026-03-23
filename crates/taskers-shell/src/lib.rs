@@ -1990,7 +1990,7 @@ fn render_notification_row(
     };
 
     rsx! {
-        button { class: "notification-row-button", onclick: focus_target,
+        div { class: "notification-row-button", onclick: focus_target,
             div { class: "notification-row",
                 div { class: "{dot_class}" }
                 div { class: "notification-row-content",
