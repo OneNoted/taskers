@@ -85,6 +85,10 @@ fn surface_primary_label(surface: &SurfaceSnapshot) -> &str {
         .unwrap_or(surface.title.as_str())
 }
 
+fn surface_status_text(surface: &SurfaceSnapshot) -> Option<&str> {
+    surface.status_label.as_deref()
+}
+
 fn push_surface_summary_part(parts: &mut Vec<String>, value: Option<&str>) {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return;
@@ -1398,7 +1402,7 @@ fn render_pane(
                             {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
                             div { class: "pane-runtime-copy",
                                 span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
-                                if let Some(status_label) = active_surface.status_label.as_deref() {
+                                if let Some(status_label) = surface_status_text(active_surface) {
                                     span { class: "{pane_runtime_state_class}", "{status_label}" }
                                 }
                             }
@@ -1413,7 +1417,7 @@ fn render_pane(
                             {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
                             div { class: "pane-runtime-copy",
                                 span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
-                                if let Some(status_label) = active_surface.status_label.as_deref() {
+                                if let Some(status_label) = surface_status_text(active_surface) {
                                     span { class: "{pane_runtime_state_class}", "{status_label}" }
                                 }
                             }
@@ -1742,7 +1746,7 @@ fn render_surface_tab(
             {render_runtime_icon(&surface.runtime, 10, &surface_runtime_icon_class)}
             span { class: "surface-tab-copy",
                 span { class: "surface-tab-primary", "{surface_primary_label(surface)}" }
-                if let Some(status_label) = surface.status_label.as_deref() {
+                if let Some(status_label) = surface_status_text(surface) {
                     span { class: "{surface_tab_state_class}", "{status_label}" }
                 }
             }
@@ -1994,9 +1998,36 @@ fn render_notification_row(
 mod tests {
     use super::{
         SurfaceDragCandidate, SurfaceKind, show_live_surface_backdrop,
-        surface_drag_threshold_reached,
+        surface_drag_threshold_reached, surface_primary_label, surface_status_text,
+        surface_summary_title,
     };
-    use crate::taskers_core::{PaneId, SurfaceId, WorkspaceId};
+    use crate::taskers_core::{
+        AttentionState, PaneId, RuntimeIdentitySnapshot, RuntimeStateSnapshot, SurfaceId,
+        SurfaceSnapshot, WorkspaceId,
+    };
+
+    fn sample_surface(
+        title: &str,
+        activity_label: Option<&str>,
+        status_label: Option<&str>,
+        state: RuntimeStateSnapshot,
+    ) -> SurfaceSnapshot {
+        SurfaceSnapshot {
+            id: SurfaceId::new(),
+            kind: SurfaceKind::Terminal,
+            runtime: RuntimeIdentitySnapshot {
+                key: "codex".into(),
+                label: "Codex".into(),
+                state,
+            },
+            title: title.into(),
+            activity_label: activity_label.map(str::to_owned),
+            status_label: status_label.map(str::to_owned),
+            url: None,
+            cwd: None,
+            attention: AttentionState::Normal,
+        }
+    }
 
     #[test]
     fn live_browser_panes_skip_decorative_backdrop_outside_overview() {
@@ -2017,6 +2048,43 @@ mod tests {
 
         assert!(!surface_drag_threshold_reached(candidate, 104.0, 123.0));
         assert!(surface_drag_threshold_reached(candidate, 106.0, 120.0));
+    }
+
+    #[test]
+    fn primary_label_prefers_activity_over_stable_title() {
+        let surface = sample_surface(
+            "Codex · taskers/main",
+            Some("Summarize recent commits"),
+            Some("Awaiting response"),
+            RuntimeStateSnapshot::Waiting,
+        );
+
+        assert_eq!(surface_primary_label(&surface), "Summarize recent commits");
+    }
+
+    #[test]
+    fn waiting_status_text_uses_awaiting_response_copy() {
+        let surface = sample_surface(
+            "Codex · taskers/main",
+            Some("Summarize recent commits"),
+            Some("Awaiting response"),
+            RuntimeStateSnapshot::Waiting,
+        );
+
+        assert_eq!(surface_status_text(&surface), Some("Awaiting response"));
+        assert_eq!(
+            surface_summary_title(&surface),
+            "Codex · Awaiting response · Summarize recent commits · Codex · taskers/main"
+        );
+    }
+
+    #[test]
+    fn idle_surfaces_render_without_status_badge_text() {
+        let surface = sample_surface("taskers/main", None, None, RuntimeStateSnapshot::Idle);
+
+        assert_eq!(surface_status_text(&surface), None);
+        assert_eq!(surface_primary_label(&surface), "taskers/main");
+        assert_eq!(surface_summary_title(&surface), "Codex · taskers/main");
     }
 }
 
