@@ -216,13 +216,14 @@ fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOpti
 }
 
 fn applyTaskersEmbeddedSurfaceInvariants(
-    alloc: std.mem.Allocator,
+    _: std.mem.Allocator,
     config: *configpkg.Config,
     command_argv: []const [:0]u8,
 ) !void {
+    const alloc = config.arenaAlloc();
+
     // Embedded panes inherit the user's loaded Ghostty config and only pin
     // the handful of settings Taskers must own for layout and shell startup.
-    if (config.command) |command| command.deinit(alloc);
     config.command = if (command_argv.len == 0) null else command: {
         const direct = configpkg.Command{ .direct = command_argv };
         break :command try direct.clone(alloc);
