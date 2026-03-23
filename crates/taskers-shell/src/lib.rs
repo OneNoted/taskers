@@ -78,6 +78,31 @@ fn render_runtime_icon_by_key(key: &str, size: u32, class: &str) -> Element {
     }
 }
 
+fn surface_primary_label(surface: &SurfaceSnapshot) -> &str {
+    surface
+        .activity_label
+        .as_deref()
+        .unwrap_or(surface.title.as_str())
+}
+
+fn push_surface_summary_part(parts: &mut Vec<String>, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if parts.iter().all(|existing| existing != value) {
+        parts.push(value.to_string());
+    }
+}
+
+fn surface_summary_title(surface: &SurfaceSnapshot) -> String {
+    let mut parts = Vec::new();
+    push_surface_summary_part(&mut parts, Some(surface.runtime.label.as_str()));
+    push_surface_summary_part(&mut parts, surface.status_label.as_deref());
+    push_surface_summary_part(&mut parts, surface.activity_label.as_deref());
+    push_surface_summary_part(&mut parts, Some(surface.title.as_str()));
+    parts.join(" · ")
+}
+
 fn compute_surface_drop_index(
     dragged: DraggedSurface,
     target_pane_id: PaneId,
@@ -1350,28 +1375,48 @@ fn render_pane(
     };
     let pane_runtime_icon_class = format!(
         "pane-toolbar-kind-icon {}",
-        runtime_state_class(pane.runtime.state)
+        runtime_state_class(active_surface.runtime.state)
     );
     let pane_runtime_chip_class = format!(
         "pane-runtime-chip {}",
-        runtime_state_class(pane.runtime.state)
+        runtime_state_class(active_surface.runtime.state)
     );
+    let pane_runtime_state_class = format!(
+        "pane-runtime-state {}",
+        runtime_state_class(active_surface.runtime.state)
+    );
+    let pane_surface_summary_title = surface_summary_title(active_surface);
 
     rsx! {
         section { class: "{pane_class}", onclick: focus_pane,
             div { class: "pane-toolbar",
                 if show_tab_strip {
-                    div { class: "pane-toolbar-meta",
-                        {render_runtime_icon(&pane.runtime, 14, &pane_runtime_icon_class)}
+                    div {
+                        class: "pane-toolbar-meta",
+                        title: "{pane_surface_summary_title}",
+                        div { class: "{pane_runtime_chip_class}",
+                            {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
+                            div { class: "pane-runtime-copy",
+                                span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
+                                if let Some(status_label) = active_surface.status_label.as_deref() {
+                                    span { class: "{pane_runtime_state_class}", "{status_label}" }
+                                }
+                            }
+                        }
                     }
                 } else {
                     div {
                         class: "pane-toolbar-meta pane-toolbar-meta-draggable",
-                        title: "Drag surface",
+                        title: "{pane_surface_summary_title}",
                         onpointerdown: begin_active_surface_drag_candidate,
                         div { class: "{pane_runtime_chip_class}",
-                            {render_runtime_icon(&pane.runtime, 14, &pane_runtime_icon_class)}
-                            span { class: "pane-runtime-label", "{pane.runtime.label}" }
+                            {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
+                            div { class: "pane-runtime-copy",
+                                span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
+                                if let Some(status_label) = active_surface.status_label.as_deref() {
+                                    span { class: "{pane_runtime_state_class}", "{status_label}" }
+                                }
+                            }
                         }
                     }
                 }
@@ -1678,10 +1723,16 @@ fn render_surface_tab(
         "surface-tab-kind-icon {}",
         runtime_state_class(surface.runtime.state)
     );
+    let surface_tab_state_class = format!(
+        "surface-tab-state {}",
+        runtime_state_class(surface.runtime.state)
+    );
+    let surface_tab_title = surface_summary_title(surface);
 
     rsx! {
         button {
             class: "{tab_class} surface-tab-draggable",
+            title: "{surface_tab_title}",
             onclick: focus_surface,
             onpointerdown: begin_surface_drag_candidate,
             onpointerenter: set_surface_drop_target_enter,
@@ -1689,7 +1740,12 @@ fn render_surface_tab(
             onpointerleave: clear_surface_drop_target,
             onpointerup: drop_surface,
             {render_runtime_icon(&surface.runtime, 10, &surface_runtime_icon_class)}
-            span { class: "surface-tab-title", "{surface.title}" }
+            span { class: "surface-tab-copy",
+                span { class: "surface-tab-primary", "{surface_primary_label(surface)}" }
+                if let Some(status_label) = surface.status_label.as_deref() {
+                    span { class: "{surface_tab_state_class}", "{status_label}" }
+                }
+            }
         }
     }
 }

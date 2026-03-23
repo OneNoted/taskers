@@ -1214,13 +1214,35 @@ input:focus-visible {{
   border: 1px solid {border_10};
 }}
 
-.pane-runtime-label {{
+.pane-runtime-copy {{
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+}}
+
+.pane-runtime-primary {{
   min-width: 0;
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: {text_bright};
+  flex: 1 1 auto;
+}}
+
+.pane-runtime-state {{
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: {border_08};
   color: {text_bright};
 }}
 
@@ -1242,6 +1264,22 @@ input:focus-visible {{
 .pane-runtime-chip.runtime-state-failed {{
   background: {error_10};
   border-color: {error_12};
+}}
+
+.pane-runtime-state.runtime-state-working {{
+  background: {busy_16};
+}}
+
+.pane-runtime-state.runtime-state-waiting {{
+  background: {waiting_18};
+}}
+
+.pane-runtime-state.runtime-state-completed {{
+  background: {completed_16};
+}}
+
+.pane-runtime-state.runtime-state-failed {{
+  background: {error_16};
 }}
 
 .pane-action-separator {{
@@ -1305,6 +1343,7 @@ input:focus-visible {{
   color: {text_muted};
   white-space: nowrap;
   border-radius: 4px;
+  overflow: hidden;
 }}
 
 .surface-tab:hover {{
@@ -1346,22 +1385,60 @@ input:focus-visible {{
   border-radius: 1px;
 }}
 
-.surface-tab-title {{
+.surface-tab-copy {{
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+}}
+
+.surface-tab-primary {{
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: {text_subtle};
   font-size: 12px;
+  flex: 1 1 auto;
 }}
 
-.surface-tab-active .surface-tab-title {{
+.surface-tab-active .surface-tab-primary {{
   color: {text_bright};
 }}
 
 .surface-tab-kind-icon {{
   flex: 0 0 auto;
   opacity: 0.7;
+}}
+
+.surface-tab-state {{
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: {border_08};
+  color: {text_bright};
+}}
+
+.surface-tab-state.runtime-state-working {{
+  background: {busy_16};
+}}
+
+.surface-tab-state.runtime-state-waiting {{
+  background: {waiting_18};
+}}
+
+.surface-tab-state.runtime-state-completed {{
+  background: {completed_16};
+}}
+
+.surface-tab-state.runtime-state-failed {{
+  background: {error_16};
 }}
 
 .surface-tab-active .surface-tab-kind-icon {{
@@ -1641,7 +1718,7 @@ input:focus-visible {{
   padding: 0 6px;
 }}
 
-.workspace-main-overview .surface-tab-title {{
+.workspace-main-overview .surface-tab-primary {{
   font-size: 10px;
 }}
 
