@@ -5405,6 +5405,46 @@ mod tests {
     }
 
     #[test]
+    fn move_surface_to_split_shell_action_keeps_source_pane_live() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::MoveSurfaceToSplit {
+            source_pane_id,
+            surface_id: moved_surface_id,
+            target_pane_id: source_pane_id,
+            direction: Direction::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let source_pane =
+            find_pane(&snapshot.current_workspace.layout, source_pane_id).expect("source pane");
+        let remaining_surface_id = source_pane
+            .surfaces
+            .first()
+            .map(|surface| surface.id)
+            .expect("remaining surface");
+
+        assert_eq!(source_pane.active_surface, remaining_surface_id);
+        assert!(snapshot.portal.panes.iter().any(|plan| {
+            plan.pane_id == source_pane_id && plan.surface_id == remaining_surface_id
+        }));
+        assert!(
+            snapshot.portal.panes.iter().any(|plan| {
+                plan.surface_id == moved_surface_id && plan.pane_id != source_pane_id
+            })
+        );
+    }
+
+    #[test]
     fn move_surface_to_split_shell_action_moves_surface_into_other_workspace() {
         let core = SharedCore::bootstrap(bootstrap());
         let source_workspace_id = core.snapshot().current_workspace.id;

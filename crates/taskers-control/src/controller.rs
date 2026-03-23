@@ -431,7 +431,13 @@ impl InMemoryController {
                 event,
             } => {
                 if let Some(surface_id) = surface_id {
-                    model.apply_surface_signal(workspace_id, pane_id, surface_id, event)?;
+                    let current = resolve_identify_context(model, None, None, Some(surface_id))?;
+                    model.apply_surface_signal(
+                        current.workspace_id,
+                        current.pane_id,
+                        surface_id,
+                        event,
+                    )?;
                 } else {
                     model.apply_signal(workspace_id, pane_id, event)?;
                 }
@@ -840,6 +846,91 @@ mod tests {
             .expect("emit signal");
 
         assert_eq!(controller.revision(), 1);
+    }
+
+    #[test]
+    fn surface_signals_follow_a_moved_surface_even_with_stale_pane_context() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let source_workspace = snapshot.model.active_workspace().expect("workspace");
+        let source_workspace_id = source_workspace.id;
+        let source_pane_id = source_workspace.active_pane;
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                kind: PaneKind::Browser,
+            })
+            .expect("create moved surface");
+        let moved_surface_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&source_workspace_id)
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("moved surface");
+
+        controller
+            .handle(ControlCommand::CreateWorkspace {
+                label: "Docs".into(),
+            })
+            .expect("create target workspace");
+        let target_workspace_id = controller
+            .snapshot()
+            .model
+            .active_workspace_id()
+            .expect("target workspace");
+
+        controller
+            .handle(ControlCommand::MoveSurfaceToWorkspace {
+                source_workspace_id,
+                source_pane_id,
+                surface_id: moved_surface_id,
+                target_workspace_id,
+            })
+            .expect("move surface");
+
+        controller
+            .handle(ControlCommand::EmitSignal {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                surface_id: Some(moved_surface_id),
+                event: SignalEvent::new("pty", SignalKind::Progress, Some("Running".into())),
+            })
+            .expect("emit moved surface signal");
+
+        let snapshot = controller.snapshot();
+        let target_surface = snapshot
+            .model
+            .workspaces
+            .values()
+            .flat_map(|workspace| {
+                workspace.panes.values().flat_map(move |pane| {
+                    pane.surfaces
+                        .values()
+                        .map(move |surface| (workspace, pane, surface))
+                })
+            })
+            .find(|(_, _, surface)| surface.id == moved_surface_id)
+            .expect("target surface");
+
+        assert_eq!(target_surface.0.id, target_workspace_id);
+        assert_eq!(
+            target_surface.2.attention,
+            taskers_domain::AttentionState::Busy
+        );
+        assert_eq!(
+            snapshot
+                .model
+                .workspaces
+                .get(&source_workspace_id)
+                .and_then(|workspace| workspace.panes.get(&source_pane_id))
+                .and_then(|pane| pane.active_surface())
+                .map(|surface| surface.attention),
+            Some(taskers_domain::AttentionState::Normal)
+        );
     }
 
     #[test]

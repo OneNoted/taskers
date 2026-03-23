@@ -7,8 +7,8 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{
     AttentionState, Direction, LayoutNode, NotificationId, PaneId, SessionId, SignalEvent,
-    SignalKind, SignalPaneMetadata, SplitAxis, SurfaceId, WindowId, WorkspaceColumnId,
-    WorkspaceId, WorkspaceWindowId,
+    SignalKind, SignalPaneMetadata, SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId,
+    WorkspaceWindowId,
 };
 
 pub const SESSION_SCHEMA_VERSION: u32 = 4;
@@ -321,6 +321,16 @@ impl PaneRecord {
         true
     }
 
+    fn normalize_active_surface(&mut self) {
+        if !self.surfaces.contains_key(&self.active_surface) {
+            self.active_surface = self
+                .surfaces
+                .first()
+                .map(|(surface_id, _)| *surface_id)
+                .expect("pane has at least one surface");
+        }
+    }
+
     fn normalize(&mut self) {
         if self.surfaces.is_empty() {
             let replacement = SurfaceRecord::new(PaneKind::Terminal);
@@ -329,13 +339,7 @@ impl PaneRecord {
             return;
         }
 
-        if !self.surfaces.contains_key(&self.active_surface) {
-            self.active_surface = self
-                .surfaces
-                .first()
-                .map(|(surface_id, _)| *surface_id)
-                .expect("pane has at least one surface");
-        }
+        self.normalize_active_surface();
     }
 }
 
@@ -2537,14 +2541,17 @@ impl AppModel {
                     workspace_id,
                     pane_id,
                 })?;
-        source_pane
-            .surfaces
-            .shift_remove(&surface_id)
-            .ok_or(DomainError::SurfaceNotInPane {
+        let moved_surface = source_pane.surfaces.shift_remove(&surface_id).ok_or(
+            DomainError::SurfaceNotInPane {
                 workspace_id,
                 pane_id,
                 surface_id,
-            })
+            },
+        )?;
+        if !source_pane.surfaces.is_empty() {
+            source_pane.normalize_active_surface();
+        }
+        Ok(moved_surface)
     }
 
     fn should_close_source_pane(&self, workspace_id: WorkspaceId, pane_id: PaneId) -> bool {
@@ -4134,6 +4141,48 @@ mod tests {
                 .surface_flash_tokens
                 .get(&moved_surface_id)
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn transferring_active_surface_normalizes_the_source_pane() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let remaining_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("remaining surface");
+        let moved_surface_id = model
+            .create_surface(workspace_id, source_pane_id, PaneKind::Browser)
+            .expect("second surface");
+        let target_pane_id = model
+            .split_pane(workspace_id, Some(source_pane_id), SplitAxis::Horizontal)
+            .expect("split pane");
+
+        model
+            .transfer_surface(
+                workspace_id,
+                source_pane_id,
+                moved_surface_id,
+                workspace_id,
+                target_pane_id,
+                usize::MAX,
+            )
+            .expect("transfer");
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let source_pane = workspace.panes.get(&source_pane_id).expect("source pane");
+
+        assert_eq!(source_pane.active_surface, remaining_surface_id);
+        assert_eq!(
+            source_pane.active_surface().map(|surface| surface.id),
+            Some(remaining_surface_id)
+        );
+        assert_eq!(
+            source_pane.surface_ids().collect::<Vec<_>>(),
+            vec![remaining_surface_id]
         );
     }
 
