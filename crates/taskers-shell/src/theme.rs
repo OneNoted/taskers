@@ -1233,6 +1233,19 @@ input:focus-visible {{
   flex: 1 1 auto;
 }}
 
+.pane-runtime-badge {{
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  background: {border_08};
+  color: {text_subtle};
+}}
+
 .pane-runtime-state {{
   flex: 0 0 auto;
   display: inline-flex;
@@ -1401,6 +1414,19 @@ input:focus-visible {{
   color: {text_subtle};
   font-size: 12px;
   flex: 1 1 auto;
+}}
+
+.surface-tab-runtime-badge {{
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  background: {border_08};
+  color: {text_subtle};
 }}
 
 .surface-tab-active .surface-tab-primary {{

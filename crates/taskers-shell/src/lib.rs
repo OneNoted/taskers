@@ -89,6 +89,20 @@ fn surface_status_text(surface: &SurfaceSnapshot) -> Option<&str> {
     surface.status_label.as_deref()
 }
 
+fn surface_runtime_badge_text(surface: &SurfaceSnapshot) -> Option<&str> {
+    if matches!(surface.runtime.key.as_str(), "terminal" | "browser") {
+        return None;
+    }
+
+    let primary = surface_primary_label(surface).to_ascii_lowercase();
+    let runtime = surface.runtime.label.to_ascii_lowercase();
+    if primary.contains(&runtime) {
+        None
+    } else {
+        Some(surface.runtime.label.as_str())
+    }
+}
+
 fn push_surface_summary_part(parts: &mut Vec<String>, value: Option<&str>) {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return;
@@ -1402,6 +1416,9 @@ fn render_pane(
                             {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
                             div { class: "pane-runtime-copy",
                                 span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
+                                if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
+                                    span { class: "pane-runtime-badge", "{runtime_label}" }
+                                }
                                 if let Some(status_label) = surface_status_text(active_surface) {
                                     span { class: "{pane_runtime_state_class}", "{status_label}" }
                                 }
@@ -1417,6 +1434,9 @@ fn render_pane(
                             {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
                             div { class: "pane-runtime-copy",
                                 span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
+                                if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
+                                    span { class: "pane-runtime-badge", "{runtime_label}" }
+                                }
                                 if let Some(status_label) = surface_status_text(active_surface) {
                                     span { class: "{pane_runtime_state_class}", "{status_label}" }
                                 }
@@ -1746,6 +1766,9 @@ fn render_surface_tab(
             {render_runtime_icon(&surface.runtime, 10, &surface_runtime_icon_class)}
             span { class: "surface-tab-copy",
                 span { class: "surface-tab-primary", "{surface_primary_label(surface)}" }
+                if let Some(runtime_label) = surface_runtime_badge_text(surface) {
+                    span { class: "surface-tab-runtime-badge", "{runtime_label}" }
+                }
                 if let Some(status_label) = surface_status_text(surface) {
                     span { class: "{surface_tab_state_class}", "{status_label}" }
                 }
@@ -1998,8 +2021,8 @@ fn render_notification_row(
 mod tests {
     use super::{
         SurfaceDragCandidate, SurfaceKind, show_live_surface_backdrop,
-        surface_drag_threshold_reached, surface_primary_label, surface_status_text,
-        surface_summary_title,
+        surface_drag_threshold_reached, surface_primary_label, surface_runtime_badge_text,
+        surface_status_text, surface_summary_title,
     };
     use crate::taskers_core::{
         AttentionState, PaneId, RuntimeIdentitySnapshot, RuntimeStateSnapshot, SurfaceId,
@@ -2007,6 +2030,8 @@ mod tests {
     };
 
     fn sample_surface(
+        runtime_key: &str,
+        runtime_label: &str,
         title: &str,
         activity_label: Option<&str>,
         status_label: Option<&str>,
@@ -2016,8 +2041,8 @@ mod tests {
             id: SurfaceId::new(),
             kind: SurfaceKind::Terminal,
             runtime: RuntimeIdentitySnapshot {
-                key: "codex".into(),
-                label: "Codex".into(),
+                key: runtime_key.into(),
+                label: runtime_label.into(),
                 state,
             },
             title: title.into(),
@@ -2053,6 +2078,8 @@ mod tests {
     #[test]
     fn primary_label_prefers_activity_over_stable_title() {
         let surface = sample_surface(
+            "codex",
+            "Codex",
             "Codex · taskers/main",
             Some("Summarize recent commits"),
             Some("Awaiting response"),
@@ -2065,6 +2092,8 @@ mod tests {
     #[test]
     fn waiting_status_text_uses_awaiting_response_copy() {
         let surface = sample_surface(
+            "codex",
+            "Codex",
             "Codex · taskers/main",
             Some("Summarize recent commits"),
             Some("Awaiting response"),
@@ -2080,11 +2109,60 @@ mod tests {
 
     #[test]
     fn idle_surfaces_render_without_status_badge_text() {
-        let surface = sample_surface("taskers/main", None, None, RuntimeStateSnapshot::Idle);
+        let surface = sample_surface(
+            "codex",
+            "Codex",
+            "taskers/main",
+            None,
+            None,
+            RuntimeStateSnapshot::Idle,
+        );
 
         assert_eq!(surface_status_text(&surface), None);
         assert_eq!(surface_primary_label(&surface), "taskers/main");
         assert_eq!(surface_summary_title(&surface), "Codex · taskers/main");
+    }
+
+    #[test]
+    fn runtime_badge_shows_for_agent_tabs_when_primary_label_hides_it() {
+        let surface = sample_surface(
+            "codex",
+            "Codex",
+            "taskers/main",
+            Some("Summarize recent commits"),
+            None,
+            RuntimeStateSnapshot::Working,
+        );
+
+        assert_eq!(surface_runtime_badge_text(&surface), Some("Codex"));
+    }
+
+    #[test]
+    fn runtime_badge_hides_for_generic_terminal_surfaces() {
+        let surface = sample_surface(
+            "terminal",
+            "Terminal",
+            "Terminal",
+            None,
+            None,
+            RuntimeStateSnapshot::Idle,
+        );
+
+        assert_eq!(surface_runtime_badge_text(&surface), None);
+    }
+
+    #[test]
+    fn runtime_badge_hides_when_primary_label_already_mentions_runtime() {
+        let surface = sample_surface(
+            "codex",
+            "Codex",
+            "Codex · taskers/main",
+            None,
+            None,
+            RuntimeStateSnapshot::Idle,
+        );
+
+        assert_eq!(surface_runtime_badge_text(&surface), None);
     }
 }
 
