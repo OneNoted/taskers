@@ -115,10 +115,10 @@ taskersctl debug terminal render-stats
 
 ## Desktop Launcher For Development
 
-If you are testing repo-local changes from your desktop environment, repoint the launcher to the local checkout:
+If you are testing repo-local changes from your desktop environment, install the app into Cargo's bin directory and repoint the launcher there:
 
 ```bash
 bash scripts/install-dev-desktop-entry.sh
 ```
 
-That writes a dev desktop entry that launches `cargo run` against the repo root instead of a previously installed release bundle.
+That reinstalls the local app into Cargo's install root and writes a desktop entry that launches that installed binary directly.

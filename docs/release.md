@@ -116,3 +116,5 @@ For dev-desktop testing against the local checkout after a release pass:
 ```bash
 bash scripts/install-dev-desktop-entry.sh
 ```
+
+That reinstalls the repo-local app into Cargo's bin directory and repoints the desktop entry to that installed binary.
