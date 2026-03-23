@@ -682,6 +682,8 @@ pub struct SurfaceSnapshot {
     pub kind: SurfaceKind,
     pub runtime: RuntimeIdentitySnapshot,
     pub title: String,
+    pub activity_label: Option<String>,
+    pub status_label: Option<String>,
     pub url: Option<String>,
     pub cwd: Option<String>,
     pub attention: AttentionState,
@@ -1681,6 +1683,8 @@ impl TaskersCore {
                     kind: SurfaceKind::from_domain(&surface.kind),
                     runtime: surface_runtime_identity(surface, now),
                     title: display_surface_title(surface),
+                    activity_label: surface_activity_label(surface, now),
+                    status_label: surface_status_label(surface, now),
                     url: normalized_surface_url(surface),
                     cwd: normalized_cwd(&surface.metadata),
                     attention: surface.attention.into(),
@@ -3851,6 +3855,39 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
     }
 }
 
+fn surface_activity_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Option<String> {
+    let _ = active_agent_surface_state(surface, now)?;
+    surface
+        .metadata
+        .latest_agent_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_owned)
+}
+
+fn surface_status_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Option<String> {
+    match active_agent_surface_state(surface, now)? {
+        RuntimeStateSnapshot::Waiting => Some("Awaiting response".into()),
+        RuntimeStateSnapshot::Working => Some("Working".into()),
+        RuntimeStateSnapshot::Completed => Some("Completed".into()),
+        RuntimeStateSnapshot::Failed => Some("Failed".into()),
+        RuntimeStateSnapshot::Idle => None,
+    }
+}
+
+fn active_agent_surface_state(
+    surface: &SurfaceRecord,
+    now: OffsetDateTime,
+) -> Option<RuntimeStateSnapshot> {
+    if surface.kind != PaneKind::Terminal {
+        return None;
+    }
+
+    let state = surface_runtime_state(surface, now);
+    (!matches!(state, RuntimeStateSnapshot::Idle)).then_some(state)
+}
+
 fn display_terminal_title(metadata: &PaneMetadata) -> String {
     let agent_title = metadata
         .agent_title
@@ -4514,6 +4551,171 @@ mod tests {
         assert_eq!(runtime.key, "codex");
         assert_eq!(runtime.label, "Codex");
         assert_eq!(runtime.state, super::RuntimeStateSnapshot::Waiting);
+    }
+
+    #[test]
+    fn waiting_agent_labels_prefer_latest_message_and_human_status() {
+        let now = OffsetDateTime::now_utc();
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                latest_agent_message: Some("Summarize recent commits".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            super::surface_activity_label(&surface, now).as_deref(),
+            Some("Summarize recent commits")
+        );
+        assert_eq!(
+            super::surface_status_label(&surface, now).as_deref(),
+            Some("Awaiting response")
+        );
+    }
+
+    #[test]
+    fn working_agent_labels_keep_activity_message_and_status() {
+        let now = OffsetDateTime::now_utc();
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Working),
+                latest_agent_message: Some("Updating tests".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            super::surface_activity_label(&surface, now).as_deref(),
+            Some("Updating tests")
+        );
+        assert_eq!(
+            super::surface_status_label(&surface, now).as_deref(),
+            Some("Working")
+        );
+    }
+
+    #[test]
+    fn recent_completed_and_failed_agents_keep_status_badges() {
+        let now = OffsetDateTime::now_utc();
+        let completed = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: false,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Completed),
+                latest_agent_message: Some("Finished sync".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let failed = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: false,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Failed),
+                latest_agent_message: Some("Migration failed".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            super::surface_activity_label(&completed, now).as_deref(),
+            Some("Finished sync")
+        );
+        assert_eq!(
+            super::surface_status_label(&completed, now).as_deref(),
+            Some("Completed")
+        );
+        assert_eq!(
+            super::surface_activity_label(&failed, now).as_deref(),
+            Some("Migration failed")
+        );
+        assert_eq!(
+            super::surface_status_label(&failed, now).as_deref(),
+            Some("Failed")
+        );
+    }
+
+    #[test]
+    fn stale_terminal_agents_clear_activity_and_status_labels() {
+        let now = OffsetDateTime::now_utc();
+        let stale_timestamp = now - time::Duration::minutes(16);
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: false,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Completed),
+                latest_agent_message: Some("Finished sync".into()),
+                last_signal_at: Some(stale_timestamp),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(super::surface_activity_label(&surface, now), None);
+        assert_eq!(super::surface_status_label(&surface, now), None);
+    }
+
+    #[test]
+    fn non_agent_and_browser_surfaces_do_not_emit_activity_or_status_labels() {
+        let now = OffsetDateTime::now_utc();
+        let terminal = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("zsh".into()),
+                latest_agent_message: Some("Ignored".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let browser = surface_with_metadata(
+            taskers_domain::PaneKind::Browser,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                latest_agent_message: Some("Should not surface".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(super::surface_activity_label(&terminal, now), None);
+        assert_eq!(super::surface_status_label(&terminal, now), None);
+        assert_eq!(super::surface_activity_label(&browser, now), None);
+        assert_eq!(super::surface_status_label(&browser, now), None);
+    }
+
+    #[test]
+    fn status_label_survives_when_agent_has_no_latest_message() {
+        let now = OffsetDateTime::now_utc();
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                latest_agent_message: Some("   ".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(super::surface_activity_label(&surface, now), None);
+        assert_eq!(
+            super::surface_status_label(&surface, now).as_deref(),
+            Some("Awaiting response")
+        );
     }
 
     #[test]
