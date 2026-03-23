@@ -39,6 +39,7 @@ use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 use glib::variant::ToVariant;
 
 const APP_ID: &str = taskers_paths::APP_ID;
+const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "taskers")]
@@ -1102,18 +1103,21 @@ fn run_internal_surface_probe(
         selected_shortcut_preset: ShortcutPreset::PowerUser,
         notification_preferences: NotificationPreferencesSnapshot::default(),
     });
-    core.set_window_size(PixelSize::new(1200, 800));
+    core.set_window_size(PixelSize::new(
+        GHOSTTY_PROBE_WINDOW_SIZE_PX,
+        GHOSTTY_PROBE_WINDOW_SIZE_PX,
+    ));
 
     let event_sink = Rc::new(|_| {});
     let mut taskers_host = TaskersHost::new(&shell_view, Some(host), event_sink, None);
     let host_widget = taskers_host.widget();
     let window = gtk::Window::builder()
-        .title("Taskers Ghostty Probe")
-        .default_width(1200)
-        .default_height(800)
+        .default_width(GHOSTTY_PROBE_WINDOW_SIZE_PX)
+        .default_height(GHOSTTY_PROBE_WINDOW_SIZE_PX)
         .child(&host_widget)
         .build();
-    window.present();
+    configure_probe_window(&window);
+    window.show();
 
     spin_probe_main_context(Duration::from_millis(80));
     if let Err(error) = taskers_host.sync_snapshot(&core.snapshot()) {
@@ -1140,6 +1144,17 @@ fn run_internal_surface_probe(
     // and let the parent make the real startup decision.
     let _ = window;
     std::process::exit(0);
+}
+
+fn configure_probe_window(window: &gtk::Window) {
+    // The probe still needs a mapped GTK toplevel so Ghostty can realize an
+    // embedded surface, but it should not flash a visible window at startup.
+    window.set_decorated(false);
+    window.set_deletable(false);
+    window.set_resizable(false);
+    window.set_focusable(false);
+    window.set_can_target(false);
+    window.set_opacity(0.0);
 }
 
 fn spin_probe_main_context(duration: Duration) {
@@ -1260,7 +1275,14 @@ fn sync_window(
         }
     }
 
-    let size = PixelSize::new(window.width().max(1), window.height().max(1));
+    let width = window.width();
+    let height = window.height();
+    if should_defer_initial_sync(last_size.get(), width, height) {
+        host.borrow().tick();
+        return;
+    }
+
+    let size = PixelSize::new(width.max(1), height.max(1));
     if last_size.get() != (size.width, size.height) {
         core.set_window_size(size);
         last_size.set((size.width, size.height));
@@ -1304,6 +1326,10 @@ fn sync_window(
     }
 
     host.borrow().tick();
+}
+
+fn should_defer_initial_sync(last_size: (i32, i32), width: i32, height: i32) -> bool {
+    last_size == (0, 0) && (width <= 1 || height <= 1)
 }
 
 fn install_host_bridge(
@@ -1870,5 +1896,22 @@ impl DiagnosticsWriter {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::should_defer_initial_sync;
+
+    #[test]
+    fn initial_sync_waits_for_real_allocation() {
+        assert!(should_defer_initial_sync((0, 0), 1, 1));
+        assert!(should_defer_initial_sync((0, 0), 1440, 1));
+        assert!(!should_defer_initial_sync((0, 0), 1440, 900));
+    }
+
+    #[test]
+    fn later_resizes_do_not_get_blocked() {
+        assert!(!should_defer_initial_sync((1440, 900), 1, 1));
     }
 }
