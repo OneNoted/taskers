@@ -1109,6 +1109,14 @@ input:focus-visible {{
   min-height: 0;
 }}
 
+.pane-frame {{
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}}
+
 .pane-card {{
   position: relative;
   width: 100%;
@@ -1149,32 +1157,32 @@ input:focus-visible {{
   border-radius: 6px;
 }}
 
-.pane-attention-ring {{
+.pane-frame-ring {{
   position: absolute;
-  inset: 1px;
+  inset: -2px;
   border: 2px solid transparent;
-  border-radius: 5px;
+  border-radius: 8px;
   pointer-events: none;
   opacity: 0;
   z-index: 9;
 }}
 
-.pane-attention-ring-waiting {{
+.pane-frame-ring-waiting {{
   opacity: 1;
   border-color: {waiting};
-  box-shadow: inset 0 0 0 1px {waiting_18}, 0 0 18px {waiting_18};
+  box-shadow: 0 0 0 1px {waiting_18}, 0 0 18px {waiting_18};
 }}
 
-.pane-attention-ring-error {{
+.pane-frame-ring-error {{
   opacity: 1;
   border-color: {error};
-  box-shadow: inset 0 0 0 1px {error_16}, 0 0 18px {error_16};
+  box-shadow: 0 0 0 1px {error_16}, 0 0 18px {error_16};
 }}
 
-.pane-attention-ring-completed {{
+.pane-frame-ring-completed {{
   opacity: 1;
   border-color: {completed};
-  box-shadow: inset 0 0 0 1px {completed_16}, 0 0 18px {completed_16};
+  box-shadow: 0 0 0 1px {completed_16}, 0 0 18px {completed_16};
 }}
 
 .pane-flash-ring-active {{

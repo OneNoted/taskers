@@ -1293,9 +1293,9 @@ fn render_pane(
             }
         )
     };
-    let pane_attention_ring_class = format!(
-        "pane-attention-ring{}",
-        attention_ring_class(pane.notification_ring, "pane-attention-ring")
+    let pane_frame_ring_class = format!(
+        "pane-frame-ring{}",
+        attention_ring_class(pane.notification_ring, "pane-frame-ring")
     );
     let active_surface = pane
         .surfaces
@@ -1413,160 +1413,162 @@ fn render_pane(
     let pane_surface_summary_title = surface_summary_title(active_surface);
 
     rsx! {
-        section { class: "{pane_class}", onclick: focus_pane,
-            div { class: "pane-toolbar",
+        div { class: "pane-frame",
+            section { class: "{pane_class}", onclick: focus_pane,
+                div { class: "pane-toolbar",
+                    if show_tab_strip {
+                        div {
+                            class: "pane-toolbar-meta",
+                            title: "{pane_surface_summary_title}",
+                            div { class: "{pane_runtime_chip_class}",
+                                {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
+                                div { class: "pane-runtime-copy",
+                                    span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
+                                    if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
+                                        span { class: "pane-runtime-badge", "{runtime_label}" }
+                                    }
+                                    if let Some(status_label) = surface_status_text(active_surface) {
+                                        span { class: "{pane_runtime_state_class}", "{status_label}" }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        div {
+                            class: "pane-toolbar-meta pane-toolbar-meta-draggable",
+                            title: "{pane_surface_summary_title}",
+                            onpointerdown: begin_active_surface_drag_candidate,
+                            div { class: "{pane_runtime_chip_class}",
+                                {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
+                                div { class: "pane-runtime-copy",
+                                    span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
+                                    if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
+                                        span { class: "pane-runtime-badge", "{runtime_label}" }
+                                    }
+                                    if let Some(status_label) = surface_status_text(active_surface) {
+                                        span { class: "{pane_runtime_state_class}", "{status_label}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "pane-action-cluster",
+                        button { class: "pane-utility", title: "New terminal tab", onclick: add_terminal_surface,
+                            {icons::terminal(14, "pane-utility-icon")}
+                        }
+                        button { class: "pane-utility", title: "New browser tab", onclick: add_browser_surface,
+                            {icons::globe(14, "pane-utility-icon")}
+                        }
+                        div { class: "pane-action-separator" }
+                        button { class: "pane-utility", title: "Split right", onclick: split_terminal,
+                            {icons::split_horizontal(14, "pane-utility-icon")}
+                        }
+                        button { class: "pane-utility", title: "Split down", onclick: split_down,
+                            {icons::split_vertical(14, "pane-utility-icon")}
+                        }
+                        div { class: "pane-action-separator" }
+                        button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface,
+                            {icons::close(12, "pane-utility-icon")}
+                        }
+                    }
+                }
                 if show_tab_strip {
-                    div {
-                        class: "pane-toolbar-meta",
-                        title: "{pane_surface_summary_title}",
-                        div { class: "{pane_runtime_chip_class}",
-                            {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
-                            div { class: "pane-runtime-copy",
-                                span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
-                                if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
-                                    span { class: "pane-runtime-badge", "{runtime_label}" }
-                                }
-                                if let Some(status_label) = surface_status_text(active_surface) {
-                                    span { class: "{pane_runtime_state_class}", "{status_label}" }
-                                }
+                    div { class: "pane-tabs",
+                        div { class: "surface-tabs",
+                            for surface in &pane.surfaces {
+                                {render_surface_tab(
+                                    workspace_id,
+                                    pane.id,
+                                    pane.active_surface,
+                                    surface,
+                                    core.clone(),
+                                    surface_drop_target,
+                                    surface_drag_candidate,
+                                    dragged_surface,
+                                    &ordered_surface_ids,
+                                )}
                             }
-                        }
-                    }
-                } else {
-                    div {
-                        class: "pane-toolbar-meta pane-toolbar-meta-draggable",
-                        title: "{pane_surface_summary_title}",
-                        onpointerdown: begin_active_surface_drag_candidate,
-                        div { class: "{pane_runtime_chip_class}",
-                            {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
-                            div { class: "pane-runtime-copy",
-                                span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
-                                if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
-                                    span { class: "pane-runtime-badge", "{runtime_label}" }
-                                }
-                                if let Some(status_label) = surface_status_text(active_surface) {
-                                    span { class: "{pane_runtime_state_class}", "{status_label}" }
-                                }
+                            if surface_drag_active {
+                                {render_surface_pane_drop_target(
+                                    "surface-tab surface-tab-append-target",
+                                    "+",
+                                    SurfaceDropTarget::AppendToPane { pane_id },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
                             }
                         }
                     }
                 }
-                div { class: "pane-action-cluster",
-                    button { class: "pane-utility", title: "New terminal tab", onclick: add_terminal_surface,
-                        {icons::terminal(14, "pane-utility-icon")}
-                    }
-                    button { class: "pane-utility", title: "New browser tab", onclick: add_browser_surface,
-                        {icons::globe(14, "pane-utility-icon")}
-                    }
-                    div { class: "pane-action-separator" }
-                    button { class: "pane-utility", title: "Split right", onclick: split_terminal,
-                        {icons::split_horizontal(14, "pane-utility-icon")}
-                    }
-                    button { class: "pane-utility", title: "Split down", onclick: split_down,
-                        {icons::split_vertical(14, "pane-utility-icon")}
-                    }
-                    div { class: "pane-action-separator" }
-                    button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface,
-                        {icons::close(12, "pane-utility-icon")}
+                if matches!(active_surface.kind, SurfaceKind::Browser) {
+                    BrowserToolbar {
+                        key: "{toolbar_key}",
+                        surface: active_surface.clone(),
+                        chrome: active_browser_chrome,
+                        core: core.clone(),
                     }
                 }
-            }
-            if show_tab_strip {
-                div { class: "pane-tabs",
-                    div { class: "surface-tabs",
-                        for surface in &pane.surfaces {
-                            {render_surface_tab(
-                                workspace_id,
-                                pane.id,
-                                pane.active_surface,
-                                surface,
-                                core.clone(),
-                                surface_drop_target,
-                                surface_drag_candidate,
-                                dragged_surface,
-                                &ordered_surface_ids,
-                            )}
-                        }
-                        if surface_drag_active {
+                div { class: "pane-body",
+                    if show_live_surface_backdrop(active_surface.kind, overview_mode) {
+                        {render_surface_backdrop(active_surface, runtime_status)}
+                    }
+                    if surface_drag_active {
+                        div { class: "pane-drop-overlay",
                             {render_surface_pane_drop_target(
-                                "surface-tab surface-tab-append-target",
-                                "+",
+                                "pane-drop-target pane-drop-target-center",
+                                "append",
                                 SurfaceDropTarget::AppendToPane { pane_id },
                                 core.clone(),
                                 surface_drop_target,
                             )}
+                            if pane_allows_split {
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-left",
+                                    "split left",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Left,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-right",
+                                    "split right",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Right,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-top",
+                                    "split up",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Up,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
+                                    "split down",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Down,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                            }
                         }
                     }
                 }
+                div { key: "{flash_key}", class: "{flash_class}" }
             }
-            if matches!(active_surface.kind, SurfaceKind::Browser) {
-                BrowserToolbar {
-                    key: "{toolbar_key}",
-                    surface: active_surface.clone(),
-                    chrome: active_browser_chrome,
-                    core: core.clone(),
-                }
-            }
-            div { class: "pane-body",
-                if show_live_surface_backdrop(active_surface.kind, overview_mode) {
-                    {render_surface_backdrop(active_surface, runtime_status)}
-                }
-                if surface_drag_active {
-                    div { class: "pane-drop-overlay",
-                        {render_surface_pane_drop_target(
-                            "pane-drop-target pane-drop-target-center",
-                            "append",
-                            SurfaceDropTarget::AppendToPane { pane_id },
-                            core.clone(),
-                            surface_drop_target,
-                        )}
-                        if pane_allows_split {
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-left",
-                                "split left",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Left,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-right",
-                                "split right",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Right,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-top",
-                                "split up",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Up,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
-                                "split down",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Down,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
-                        }
-                    }
-                }
-            }
-            div { class: "{pane_attention_ring_class}" }
-            div { key: "{flash_key}", class: "{flash_class}" }
+            div { class: "{pane_frame_ring_class}" }
         }
     }
 }
