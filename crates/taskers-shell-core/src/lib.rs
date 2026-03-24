@@ -639,10 +639,10 @@ pub struct LayoutMetrics {
 impl Default for LayoutMetrics {
     fn default() -> Self {
         Self {
-            sidebar_width: 248,
-            activity_width: 312,
-            toolbar_height: 42,
-            workspace_padding: 16,
+            sidebar_width: 212,
+            activity_width: 280,
+            toolbar_height: 32,
+            workspace_padding: 12,
             window_border_width: 2,
             window_toolbar_height: 20,
             window_body_padding: 0,

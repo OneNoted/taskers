@@ -310,32 +310,21 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     let snapshot = core.snapshot();
     let unread_activity = snapshot.activity.iter().filter(|item| item.unread).count();
     let stylesheet = app_css(&snapshot);
-    let show_workspace_nav = {
+    let toggle_settings = {
         let core = core.clone();
+        let section = snapshot.section;
         move |_| {
-            core.dispatch_shell_action(ShellAction::ShowSection {
-                section: ShellSection::Workspace,
-            })
-        }
-    };
-    let show_settings_nav = {
-        let core = core.clone();
-        move |_| {
-            core.dispatch_shell_action(ShellAction::ShowSection {
-                section: ShellSection::Settings,
-            })
+            let target = if matches!(section, ShellSection::Settings) {
+                ShellSection::Workspace
+            } else {
+                ShellSection::Settings
+            };
+            core.dispatch_shell_action(ShellAction::ShowSection { section: target });
         }
     };
     let create_workspace = {
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::CreateWorkspace)
-    };
-    let show_active_section_header = {
-        let core = core.clone();
-        let section = snapshot.section;
-        move |_| {
-            core.dispatch_shell_action(ShellAction::ShowSection { section });
-        }
     };
     let jump_unread = {
         let core = core.clone();
@@ -425,25 +414,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             onpointerup: finish_surface_drag_up,
             onpointercancel: finish_surface_drag_cancel,
             aside { class: "workspace-sidebar",
-                div { class: "sidebar-brand",
-                    div { class: "sidebar-brand-wordmark", "TASKERS" }
-                }
-                div { class: "sidebar-nav",
-                    button {
-                        class: if matches!(snapshot.section, ShellSection::Workspace) { "sidebar-nav-button sidebar-nav-button-active" } else { "sidebar-nav-button" },
-                        onclick: show_workspace_nav,
-                        {icons::layers(16, "sidebar-nav-icon")}
-                        span { "Workspaces" }
-                    }
-                    button {
-                        class: if matches!(snapshot.section, ShellSection::Settings) { "sidebar-nav-button sidebar-nav-button-active" } else { "sidebar-nav-button" },
-                        onclick: show_settings_nav,
-                        {icons::settings(16, "sidebar-nav-icon")}
-                        span { "Settings" }
-                    }
-                }
-                div { class: "sidebar-section-header",
-                    div { class: "sidebar-heading", "Workspaces" }
+                div { class: "sidebar-top",
                     button { class: "workspace-add", onclick: create_workspace,
                         {icons::plus(14, "workspace-add-icon")}
                     }
@@ -461,20 +432,23 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                         )}
                     }
                 }
+                div { class: "sidebar-footer",
+                    button {
+                        class: if matches!(snapshot.section, ShellSection::Settings) { "sidebar-settings-btn sidebar-settings-btn-active" } else { "sidebar-settings-btn" },
+                        onclick: toggle_settings,
+                        {icons::settings(16, "sidebar-settings-icon")}
+                    }
+                }
             }
 
             main { class: "{main_class}",
                 header { class: "workspace-header",
                     div { class: "workspace-header-main",
-                        button {
-                            class: "workspace-header-title-btn",
-                            onclick: show_active_section_header,
-                            span { class: "workspace-header-label",
-                                if matches!(snapshot.section, ShellSection::Workspace) {
-                                    "{snapshot.current_workspace.title}"
-                                } else {
-                                    "Settings"
-                                }
+                        span { class: "workspace-header-label",
+                            if matches!(snapshot.section, ShellSection::Workspace) {
+                                "{snapshot.current_workspace.title}"
+                            } else {
+                                "Settings"
                             }
                         }
                     }

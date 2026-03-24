@@ -247,8 +247,8 @@ input:focus-visible {{
 
 .workspace-sidebar {{
   border-right: 1px solid {border_04};
-  padding: 8px;
-  gap: 10px;
+  padding: 6px;
+  gap: 6px;
   backdrop-filter: blur(12px) saturate(1.4);
 }}
 
@@ -259,20 +259,11 @@ input:focus-visible {{
   backdrop-filter: blur(12px) saturate(1.4);
 }}
 
-.sidebar-brand {{
-  padding: 8px;
+.sidebar-top {{
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-}}
-
-.sidebar-brand-wordmark {{
-  margin: 0;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.18em;
-  color: {text_muted};
-  line-height: 1;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 2px 0;
 }}
 
 .sidebar-heading {{
@@ -283,7 +274,6 @@ input:focus-visible {{
   text-transform: uppercase;
 }}
 
-.sidebar-nav,
 .activity-list {{
   display: flex;
   flex-direction: column;
@@ -299,7 +289,35 @@ input:focus-visible {{
   min-height: 0;
 }}
 
-.sidebar-nav-button,
+.sidebar-footer {{
+  margin-top: auto;
+  padding-top: 6px;
+  border-top: 1px solid {border_06};
+}}
+
+.sidebar-settings-btn {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: {text_dim};
+}}
+
+.sidebar-settings-btn:hover {{
+  background: {border_06};
+  color: {text_bright};
+}}
+
+.sidebar-settings-btn-active {{
+  background: {accent_14};
+  color: {text_bright};
+}}
+
 .workspace-button,
 .theme-card,
 .preset-card {{
@@ -308,30 +326,6 @@ input:focus-visible {{
   border: 0;
   background: transparent;
   text-align: left;
-}}
-
-.sidebar-nav-button {{
-  padding: 8px 10px;
-  color: {text_subtle};
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}}
-
-.sidebar-nav-button:hover,
-.sidebar-nav-button-active {{
-  background: {border_06};
-  color: {text_bright};
-  border-radius: 6px;
-}}
-
-.sidebar-section-header {{
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 0 6px;
 }}
 
 .workspace-add {{
@@ -832,30 +826,7 @@ input:focus-visible {{
   background: {base};
 }}
 
-.workspace-header-group {{
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  background: {border_04};
-  padding: 2px;
-  border-radius: 6px;
-}}
-
-.workspace-header-group .workspace-header-action {{
-  border: 0;
-  min-height: 26px;
-  padding: 0 8px;
-}}
-
-.workspace-header-divider {{
-  width: 1px;
-  height: 16px;
-  background: {border_10};
-  margin: 0 4px;
-}}
-
 .workspace-header-main,
-.workspace-header-actions,
 .pane-header-main,
 .pane-action-cluster,
 .surface-meta,
@@ -872,33 +843,14 @@ input:focus-visible {{
   justify-content: flex-start;
 }}
 
-.workspace-header-title-btn {{
-  background: transparent;
-  border: 0;
-  color: inherit;
-  padding: 4px 0;
-  text-align: left;
-}}
-
-.workspace-header-title-btn:hover {{
-  color: {text_bright};
-}}
-
 .workspace-header-label {{
   display: block;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 12px;
   letter-spacing: 0.02em;
   color: {text_bright};
 }}
 
-.workspace-header-meta {{
-  display: block;
-  font-size: 12px;
-  color: {text_dim};
-}}
-
-.workspace-header-action,
 .pane-action,
 .activity-action,
 .shortcut-pill {{
@@ -907,7 +859,6 @@ input:focus-visible {{
   border-radius: 4px;
 }}
 
-.workspace-header-action,
 .pane-action,
 .activity-action {{
   min-height: 28px;
@@ -916,7 +867,6 @@ input:focus-visible {{
   border-radius: 4px;
 }}
 
-.workspace-header-action:hover,
 .pane-action:hover {{
   background: {border_06};
   color: {text_bright};
@@ -928,21 +878,6 @@ input:focus-visible {{
   align-items: center;
   color: {text_dim};
   background: {border_04};
-}}
-
-.workspace-header-action-active {{
-  background: {accent_14};
-  color: {text_bright};
-}}
-
-.workspace-header-action-primary {{
-  background: {accent_14};
-  color: {text_bright};
-  border-color: {accent_24};
-}}
-
-.workspace-header-action-primary:hover {{
-  background: {accent_22};
 }}
 
 .workspace-canvas,
@@ -2275,7 +2210,7 @@ input:focus-visible {{
 
 @media (max-width: 1180px) {{
   .app-shell {{
-    grid-template-columns: 228px minmax(0, 1fr);
+    grid-template-columns: 196px minmax(0, 1fr);
   }}
 
   .attention-panel {{
@@ -2309,7 +2244,6 @@ input:focus-visible {{
         accent_12 = rgba(p.accent, 0.12),
         accent_14 = rgba(p.accent, 0.14),
         accent_20 = rgba(p.accent, 0.20),
-        accent_22 = rgba(p.accent, 0.22),
         accent_24 = rgba(p.accent, 0.24),
         busy = p.busy.to_hex(),
         busy_10 = rgba(p.busy, 0.10),
