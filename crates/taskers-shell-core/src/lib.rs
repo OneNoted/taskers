@@ -3758,14 +3758,8 @@ fn dominant_attention_ring(
 }
 
 fn runtime_key(surface: &SurfaceRecord) -> String {
-    if let Some(agent_kind) = surface
-        .metadata
-        .agent_kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|agent_kind| !agent_kind.is_empty() && *agent_kind != "shell")
-    {
-        return agent_kind.to_ascii_lowercase();
+    if let Some(agent_key) = surface_agent_key(surface) {
+        return agent_key;
     }
 
     match surface.kind {
@@ -3810,13 +3804,9 @@ fn surface_agent_state(
     surface: &SurfaceRecord,
     now: OffsetDateTime,
 ) -> Option<taskers_domain::WorkspaceAgentState> {
-    let agent_kind = surface
-        .metadata
-        .agent_kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|agent_kind| !agent_kind.is_empty() && *agent_kind != "shell")?;
-    let _ = agent_kind;
+    if !surface_has_agent_identity(surface) {
+        return None;
+    }
 
     let state = surface.metadata.agent_state.or_else(|| {
         if surface.metadata.agent_active {
@@ -3932,14 +3922,7 @@ fn surface_notification_ring(surface: &SurfaceRecord) -> Option<AttentionRingSta
         return None;
     }
 
-    let is_agent_surface = surface
-        .metadata
-        .agent_kind
-        .as_deref()
-        .map(str::trim)
-        .filter(|agent_kind| !agent_kind.is_empty() && *agent_kind != "shell")
-        .is_some();
-    if !is_agent_surface {
+    if !surface_has_agent_identity(surface) {
         return None;
     }
 
@@ -3953,6 +3936,35 @@ fn surface_notification_ring(surface: &SurfaceRecord) -> Option<AttentionRingSta
 
 fn pane_notification_ring(pane: &taskers_domain::PaneRecord) -> Option<AttentionRingState> {
     dominant_attention_ring(pane.surfaces.values().filter_map(surface_notification_ring))
+}
+
+fn surface_has_agent_identity(surface: &SurfaceRecord) -> bool {
+    surface_agent_key(surface).is_some()
+        || surface.metadata.agent_state.is_some()
+        || surface
+            .metadata
+            .agent_title
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|title| !title.is_empty())
+}
+
+fn surface_agent_key(surface: &SurfaceRecord) -> Option<String> {
+    normalized_agent_key(surface.metadata.agent_kind.as_deref())
+        .or_else(|| normalized_agent_key(surface.metadata.agent_title.as_deref()))
+}
+
+fn normalized_agent_key(value: Option<&str>) -> Option<String> {
+    let normalized = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())?;
+    match normalized.as_str() {
+        "shell" => None,
+        "claude code" | "claude-code" => Some("claude".into()),
+        "codex" | "claude" | "opencode" | "aider" => Some(normalized),
+        _ => None,
+    }
 }
 
 fn display_terminal_title(metadata: &PaneMetadata) -> String {
@@ -4819,6 +4831,26 @@ mod tests {
     }
 
     #[test]
+    fn notification_rings_cover_agent_notifications_without_agent_kind_metadata() {
+        let mut waiting = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_title: Some("Codex".into()),
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                latest_agent_message: Some("Need input".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        waiting.attention = taskers_domain::AttentionState::WaitingInput;
+
+        assert_eq!(
+            super::surface_notification_ring(&waiting),
+            Some(super::AttentionRingState::Waiting)
+        );
+        assert_eq!(super::runtime_key(&waiting), "codex");
+    }
+
+    #[test]
     fn status_label_survives_when_agent_has_no_latest_message() {
         let now = OffsetDateTime::now_utc();
         let surface = surface_with_metadata(
@@ -5050,6 +5082,51 @@ mod tests {
             .expect("portal plan");
 
         assert_eq!(portal_plan.surface_id, browser_surface_id);
+        assert_eq!(
+            portal_plan.notification_ring,
+            Some(super::AttentionRingState::Waiting)
+        );
+    }
+
+    #[test]
+    fn portal_plan_carries_ring_for_agent_notifications_without_prior_agent_kind() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        model
+            .create_agent_notification(
+                taskers_domain::AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                taskers_domain::SignalKind::Notification,
+                Some("Codex".into()),
+                None,
+                None,
+                "Need input".into(),
+                taskers_domain::AttentionState::WaitingInput,
+            )
+            .expect("notification");
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-agent-notification-ring",
+        ));
+        let portal_plan = core
+            .snapshot()
+            .portal
+            .panes
+            .into_iter()
+            .find(|plan| plan.pane_id == pane_id)
+            .expect("portal plan");
+
         assert_eq!(
             portal_plan.notification_ring,
             Some(super::AttentionRingState::Waiting)

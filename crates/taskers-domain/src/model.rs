@@ -2297,11 +2297,30 @@ impl AppModel {
             .ok_or(DomainError::MissingWorkspace(workspace_id))?;
         let (_, pane_id, surface_id) = workspace.notification_target_ids(&target)?;
         let now = OffsetDateTime::now_utc();
+        let normalized_title = title
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let normalized_subtitle = subtitle
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let normalized_external_id = external_id
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
 
         if let Some(pane) = workspace.panes.get_mut(&pane_id)
             && let Some(surface) = pane.surfaces.get_mut(&surface_id)
         {
             surface.attention = state;
+            surface.metadata.last_signal_at = Some(now);
+            surface.metadata.agent_state = Some(agent_state_from_attention(state));
+            surface.metadata.agent_active = agent_active_from_attention(state);
+            surface.metadata.latest_agent_message = Some(message.clone());
+            if let Some(agent_title) = normalized_title.clone() {
+                surface.metadata.agent_title = Some(agent_title.clone());
+                if let Some(agent_kind) = normalized_agent_kind(Some(agent_title.as_str())) {
+                    surface.metadata.agent_kind = Some(agent_kind);
+                }
+            }
         }
 
         workspace.upsert_notification(NotificationItem {
@@ -2310,15 +2329,9 @@ impl AppModel {
             surface_id,
             kind,
             state,
-            title: title
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
-            subtitle: subtitle
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
-            external_id: external_id
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty()),
+            title: normalized_title,
+            subtitle: normalized_subtitle,
+            external_id: normalized_external_id,
             message,
             created_at: now,
             read_at: None,
@@ -3165,13 +3178,23 @@ fn signal_kind_creates_notification(kind: &SignalKind) -> bool {
 }
 
 fn is_agent_kind(agent_kind: Option<&str>) -> bool {
-    agent_kind
-        .map(str::trim)
-        .is_some_and(|agent| !agent.is_empty() && agent != "shell")
+    normalized_agent_kind(agent_kind).is_some()
 }
 
 fn is_agent_hook_source(source: &str) -> bool {
     source.trim().starts_with("agent-hook:")
+}
+
+fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<String> {
+    let normalized = agent_kind
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+        .map(|agent| agent.to_ascii_lowercase())?;
+    match normalized.as_str() {
+        "shell" => None,
+        "claude code" | "claude-code" => Some("claude".into()),
+        other => Some(other.to_string()),
+    }
 }
 
 fn is_agent_signal(
@@ -3346,6 +3369,22 @@ fn signal_agent_state(kind: &SignalKind) -> Option<WorkspaceAgentState> {
         SignalKind::Completed => Some(WorkspaceAgentState::Completed),
         SignalKind::Error => Some(WorkspaceAgentState::Failed),
     }
+}
+
+fn agent_state_from_attention(state: AttentionState) -> WorkspaceAgentState {
+    match state {
+        AttentionState::Normal | AttentionState::Busy => WorkspaceAgentState::Working,
+        AttentionState::WaitingInput => WorkspaceAgentState::Waiting,
+        AttentionState::Completed => WorkspaceAgentState::Completed,
+        AttentionState::Error => WorkspaceAgentState::Failed,
+    }
+}
+
+fn agent_active_from_attention(state: AttentionState) -> bool {
+    matches!(
+        state,
+        AttentionState::Normal | AttentionState::Busy | AttentionState::WaitingInput
+    )
 }
 
 #[cfg(test)]
@@ -5116,6 +5155,53 @@ mod tests {
                 .iter()
                 .all(|item| item.read_at.is_some())
         );
+    }
+
+    #[test]
+    fn agent_notifications_stamp_surface_agent_metadata() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+
+        model
+            .create_agent_notification(
+                AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                SignalKind::Notification,
+                Some("Codex".into()),
+                None,
+                None,
+                "Need input".into(),
+                AttentionState::WaitingInput,
+            )
+            .expect("notification");
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .expect("surface record");
+        assert_eq!(surface.metadata.agent_kind.as_deref(), Some("codex"));
+        assert_eq!(surface.metadata.agent_title.as_deref(), Some("Codex"));
+        assert_eq!(
+            surface.metadata.agent_state,
+            Some(WorkspaceAgentState::Waiting)
+        );
+        assert!(surface.metadata.agent_active);
+        assert_eq!(
+            surface.metadata.latest_agent_message.as_deref(),
+            Some("Need input")
+        );
+        assert_eq!(surface.attention, AttentionState::WaitingInput);
     }
 
     #[test]
