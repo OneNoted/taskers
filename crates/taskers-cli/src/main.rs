@@ -2998,6 +2998,31 @@ mod tests {
     }
 
     #[test]
+    fn codex_notify_helper_requires_embedded_surface_context() {
+        let asset = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/taskers-codex-notify.sh"
+        ));
+
+        for expected in [
+            "TASKERS_WORKSPACE_ID",
+            "TASKERS_PANE_ID",
+            "TASKERS_SURFACE_ID",
+            "TASKERS_TTY_NAME",
+            "tty 2>/dev/null",
+            "agent-hook notification",
+            "--workspace \"$TASKERS_WORKSPACE_ID\"",
+            "--pane \"$TASKERS_PANE_ID\"",
+            "--surface \"$TASKERS_SURFACE_ID\"",
+        ] {
+            assert!(
+                asset.contains(expected),
+                "expected helper asset to contain {expected:?}"
+            );
+        }
+    }
+
+    #[test]
     fn reads_runtime_context_ids_from_env() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         unsafe {
