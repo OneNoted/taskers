@@ -1263,8 +1263,7 @@ impl TaskersCore {
         let agents = self.agent_sessions_snapshot(&model);
         let activity = self.activity_snapshot(&model);
         let done_activity = self.done_activity_snapshot(&model);
-        let attention_panel_visible =
-            !agents.is_empty() || !activity.is_empty() || !done_activity.is_empty();
+        let attention_panel_visible = !agents.is_empty() || !activity.is_empty();
         let workspace_id = model
             .active_workspace_id()
             .expect("active workspace should exist");
@@ -5399,10 +5398,13 @@ mod tests {
         assert!(!unread_snapshot.activity.is_empty());
         assert!(unread_snapshot.portal.content.width < empty_snapshot.portal.content.width);
 
-        assert!(done_snapshot.attention_panel_visible);
+        assert!(!done_snapshot.attention_panel_visible);
         assert!(done_snapshot.activity.is_empty());
         assert!(!done_snapshot.done_activity.is_empty());
-        assert!(done_snapshot.portal.content.width < empty_snapshot.portal.content.width);
+        assert_eq!(
+            done_snapshot.portal.content.width,
+            empty_snapshot.portal.content.width
+        );
     }
 
     #[test]
@@ -5888,6 +5890,7 @@ mod tests {
         assert!(snapshot.activity.is_empty());
         assert_eq!(snapshot.done_activity.len(), 1);
         assert_eq!(snapshot.done_activity[0].id, activity_id);
+        assert!(!snapshot.attention_panel_visible);
     }
 
     #[test]

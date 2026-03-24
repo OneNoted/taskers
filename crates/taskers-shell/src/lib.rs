@@ -537,7 +537,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                         }
                     }
                     div { class: "notification-timeline",
-                        if snapshot.activity.is_empty() && snapshot.done_activity.is_empty() {
+                        if snapshot.activity.is_empty() {
                             div { class: "notification-empty",
                                 {icons::bell(24, "notification-empty-icon")}
                                 div { class: "notification-empty-title", "No notifications" }
@@ -545,9 +545,6 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             }
                         } else {
                             for item in &snapshot.activity {
-                                {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
-                            }
-                            for item in snapshot.done_activity.iter().take(8) {
                                 {render_notification_row(item, core.clone(), &snapshot.current_workspace)}
                             }
                         }
