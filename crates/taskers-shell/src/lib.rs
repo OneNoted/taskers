@@ -1762,6 +1762,7 @@ fn render_surface_tab(
 
     rsx! {
         button {
+            key: "{surface_id}",
             class: "{tab_class} surface-tab-draggable",
             title: "{surface_tab_title}",
             onclick: focus_surface,
@@ -1771,13 +1772,17 @@ fn render_surface_tab(
             onpointerleave: clear_surface_drop_target,
             onpointerup: drop_surface,
             {render_runtime_icon(&surface.runtime, 10, &surface_runtime_icon_class)}
-            span { class: "surface-tab-copy",
+            span { key: "{surface_id}-copy", class: "surface-tab-copy",
                 span { class: "surface-tab-primary", "{surface_primary_label(surface)}" }
                 if let Some(runtime_label) = surface_runtime_badge_text(surface) {
-                    span { class: "surface-tab-runtime-badge", "{runtime_label}" }
+                    span { key: "{surface_id}-runtime-badge", class: "surface-tab-runtime-badge", "{runtime_label}" }
                 }
                 if let Some(status_label) = surface_status_text(surface) {
-                    span { class: "{surface_tab_state_class}", "{status_label}" }
+                    span {
+                        key: "{surface_id}-status-{status_label}",
+                        class: "{surface_tab_state_class}",
+                        "{status_label}"
+                    }
                 }
             }
         }
