@@ -1784,7 +1784,10 @@ impl TaskersCore {
                     if surface.kind != PaneKind::Terminal {
                         continue;
                     }
-                    let descriptor = fallback_surface_descriptor(surface);
+                    let descriptor = self
+                        .app_state
+                        .surface_descriptor_for_surface(*workspace_id, pane.id, surface.id)
+                        .unwrap_or_else(|_| fallback_surface_descriptor(surface));
                     let mount = mount_spec_from_descriptor(surface, descriptor);
                     let SurfaceMountSpec::Terminal(spec) = mount else {
                         continue;
@@ -5421,6 +5424,53 @@ mod tests {
         );
         assert!(catalog.iter().all(|entry| entry.spec.cols > 0));
         assert!(catalog.iter().all(|entry| entry.spec.rows > 0));
+    }
+
+    #[test]
+    fn terminal_catalog_preserves_per_surface_env_for_inactive_tabs() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let pane_id = snapshot.current_workspace.active_pane;
+        let first_surface_id = find_pane(&snapshot.current_workspace.layout, pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("first surface");
+
+        core.dispatch_shell_action(ShellAction::AddTerminalSurface {
+            pane_id: Some(pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let second_surface_id = find_pane(&snapshot.current_workspace.layout, pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("second surface");
+        assert_ne!(first_surface_id, second_surface_id);
+
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id,
+            surface_id: first_surface_id,
+        });
+
+        let catalog = core.snapshot().terminal_catalog;
+        let background_entry = catalog
+            .iter()
+            .find(|entry| entry.surface_id == second_surface_id)
+            .expect("background terminal entry");
+
+        assert_eq!(background_entry.workspace_id, workspace_id);
+        assert_eq!(background_entry.pane_id, pane_id);
+        assert_eq!(
+            background_entry.spec.env.get("TASKERS_WORKSPACE_ID"),
+            Some(&workspace_id.to_string())
+        );
+        assert_eq!(
+            background_entry.spec.env.get("TASKERS_PANE_ID"),
+            Some(&pane_id.to_string())
+        );
+        assert_eq!(
+            background_entry.spec.env.get("TASKERS_SURFACE_ID"),
+            Some(&second_surface_id.to_string())
+        );
     }
 
     #[test]
