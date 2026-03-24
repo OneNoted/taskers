@@ -1274,11 +1274,9 @@ fn render_pane(
 ) -> Element {
     let pane_id = pane.id;
     let pane_is_drop_target = pane_has_surface_drop_target(*surface_drop_target.read(), pane_id);
-    let pane_ring_class = attention_ring_class(pane.notification_ring, "pane-card-attention");
     let pane_class = if pane.active {
         format!(
-            "pane-card pane-card-active{}{}",
-            pane_ring_class,
+            "pane-card pane-card-active{}",
             if pane_is_drop_target {
                 " pane-card-drop-target"
             } else {
@@ -1287,8 +1285,7 @@ fn render_pane(
         )
     } else {
         format!(
-            "pane-card{}{}",
-            pane_ring_class,
+            "pane-card{}",
             if pane_is_drop_target {
                 " pane-card-drop-target"
             } else {
@@ -1296,6 +1293,10 @@ fn render_pane(
             }
         )
     };
+    let pane_attention_ring_class = format!(
+        "pane-attention-ring{}",
+        attention_ring_class(pane.notification_ring, "pane-attention-ring")
+    );
     let active_surface = pane
         .surfaces
         .iter()
@@ -1564,6 +1565,7 @@ fn render_pane(
                     }
                 }
             }
+            div { class: "{pane_attention_ring_class}" }
             div { key: "{flash_key}", class: "{flash_class}" }
         }
     }

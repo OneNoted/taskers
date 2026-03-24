@@ -1127,30 +1127,6 @@ input:focus-visible {{
   border-color: {accent_24};
 }}
 
-.pane-card-attention-waiting {{
-  border-color: {waiting};
-  box-shadow:
-    inset 0 0 0 1px {waiting},
-    0 0 0 1px {waiting_18},
-    0 0 18px {waiting_18};
-}}
-
-.pane-card-attention-error {{
-  border-color: {error};
-  box-shadow:
-    inset 0 0 0 1px {error},
-    0 0 0 1px {error_16},
-    0 0 18px {error_16};
-}}
-
-.pane-card-attention-completed {{
-  border-color: {completed};
-  box-shadow:
-    inset 0 0 0 1px {completed},
-    0 0 0 1px {completed_16},
-    0 0 18px {completed_16};
-}}
-
 .pane-card-drop-target {{
   border-color: {accent_24};
 }}
@@ -1171,6 +1147,34 @@ input:focus-visible {{
   opacity: 0;
   z-index: 10;
   border-radius: 6px;
+}}
+
+.pane-attention-ring {{
+  position: absolute;
+  inset: 1px;
+  border: 2px solid transparent;
+  border-radius: 5px;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 9;
+}}
+
+.pane-attention-ring-waiting {{
+  opacity: 1;
+  border-color: {waiting};
+  box-shadow: inset 0 0 0 1px {waiting_18}, 0 0 18px {waiting_18};
+}}
+
+.pane-attention-ring-error {{
+  opacity: 1;
+  border-color: {error};
+  box-shadow: inset 0 0 0 1px {error_16}, 0 0 18px {error_16};
+}}
+
+.pane-attention-ring-completed {{
+  opacity: 1;
+  border-color: {completed};
+  box-shadow: inset 0 0 0 1px {completed_16}, 0 0 18px {completed_16};
 }}
 
 .pane-flash-ring-active {{
