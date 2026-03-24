@@ -24,5 +24,12 @@ if [ -z "$taskers_ctl" ] && command -v taskersctl >/dev/null 2>&1; then
 fi
 
 if [ -n "$taskers_ctl" ] && [ -x "$taskers_ctl" ]; then
-  "$taskers_ctl" notify --title Taskers --body "$message" >/dev/null 2>&1 || true
+  if [ -n "${TASKERS_WORKSPACE_ID:-}" ] && [ -n "${TASKERS_PANE_ID:-}" ] && [ -n "${TASKERS_SURFACE_ID:-}" ]; then
+    "$taskers_ctl" notify --title Taskers --body "$message" >/dev/null 2>&1 || true
+    exit 0
+  fi
+fi
+
+if command -v notify-send >/dev/null 2>&1; then
+  notify-send "Taskers" "$message" >/dev/null 2>&1 || true
 fi

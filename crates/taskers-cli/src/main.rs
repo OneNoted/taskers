@@ -1164,6 +1164,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let client = ControlClient::new(resolve_socket_path(socket));
             let model = query_model(&client).await?;
+            ensure_implicit_notify_target_context(workspace, pane, surface)?;
             let target = resolve_agent_target(
                 &model,
                 workspace,
@@ -1922,6 +1923,28 @@ fn env_surface_id() -> Option<SurfaceId> {
     env::var("TASKERS_SURFACE_ID")
         .ok()
         .and_then(|value| value.parse().ok())
+}
+
+fn has_implicit_notify_target_context() -> bool {
+    env_workspace_id().is_some() && env_pane_id().is_some() && env_surface_id().is_some()
+}
+
+fn ensure_implicit_notify_target_context(
+    workspace: Option<WorkspaceId>,
+    pane: Option<PaneId>,
+    surface: Option<SurfaceId>,
+) -> anyhow::Result<()> {
+    if workspace.is_some()
+        || pane.is_some()
+        || surface.is_some()
+        || has_implicit_notify_target_context()
+    {
+        return Ok(());
+    }
+
+    bail!(
+        "notify requires embedded Taskers pane context; pass --workspace/--pane/--surface when running outside Taskers"
+    )
 }
 
 fn resolve_socket_path(socket: Option<PathBuf>) -> PathBuf {
@@ -2917,8 +2940,8 @@ mod tests {
     use taskers_control::{BrowserTarget, BrowserWaitCondition};
 
     use super::{
-        CliBrowserLoadState, env_pane_id, env_surface_id, env_workspace_id, infer_agent_kind,
-        resolve_browser_target, resolve_wait_condition,
+        CliBrowserLoadState, ensure_implicit_notify_target_context, env_pane_id, env_surface_id,
+        env_workspace_id, infer_agent_kind, resolve_browser_target, resolve_wait_condition,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -2952,6 +2975,45 @@ mod tests {
             std::env::remove_var("TASKERS_PANE_ID");
             std::env::remove_var("TASKERS_SURFACE_ID");
         }
+    }
+
+    #[test]
+    fn implicit_notify_requires_embedded_taskers_context() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::remove_var("TASKERS_WORKSPACE_ID");
+            std::env::remove_var("TASKERS_PANE_ID");
+            std::env::remove_var("TASKERS_SURFACE_ID");
+        }
+
+        assert!(ensure_implicit_notify_target_context(None, None, None).is_err());
+        assert!(ensure_implicit_notify_target_context(env_workspace_id(), None, None).is_err());
+    }
+
+    #[test]
+    fn implicit_notify_accepts_embedded_context_or_explicit_target() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::set_var(
+                "TASKERS_WORKSPACE_ID",
+                "019cede5-2843-7da1-a281-dd6b5d1cfbe6",
+            );
+            std::env::set_var("TASKERS_PANE_ID", "019cede5-2843-7da1-a281-dd4f2de73c9c");
+            std::env::set_var("TASKERS_SURFACE_ID", "019cede5-2843-7da1-a281-dd2119ae9b83");
+        }
+
+        assert!(ensure_implicit_notify_target_context(None, None, None).is_ok());
+
+        unsafe {
+            std::env::remove_var("TASKERS_WORKSPACE_ID");
+            std::env::remove_var("TASKERS_PANE_ID");
+            std::env::remove_var("TASKERS_SURFACE_ID");
+        }
+
+        let workspace = "019cede5-2843-7da1-a281-dd6b5d1cfbe6"
+            .parse()
+            .expect("workspace id");
+        assert!(ensure_implicit_notify_target_context(Some(workspace), None, None).is_ok());
     }
 
     #[test]
