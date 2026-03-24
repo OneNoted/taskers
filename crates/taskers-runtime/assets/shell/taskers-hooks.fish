@@ -103,12 +103,21 @@ function taskers__agent_active_for_kind --argument kind
     end
 end
 
+function taskers__context_tty_matches
+    set -q TASKERS_TTY_NAME; or return 1
+    set -l current_tty (tty 2>/dev/null)
+    string match -qr '^/dev/' -- "$current_tty"; or return 1
+    test "$current_tty" = "$TASKERS_TTY_NAME"
+end
+
 function taskers__emit_with_metadata --argument kind message
     taskers__collect_metadata
     set -l agent_active (taskers__agent_active_for_kind "$kind")
     test -x "$TASKERS_CTL_PATH"; or return 0
     test -n "$TASKERS_WORKSPACE_ID"; or return 0
     test -n "$TASKERS_PANE_ID"; or return 0
+    test -n "$TASKERS_SURFACE_ID"; or return 0
+    taskers__context_tty_matches; or return 0
 
     set -l argv \
         "$TASKERS_CTL_PATH" \
@@ -205,4 +214,10 @@ set -gx TASKERS_LAST_META_BRANCH ''
 set -gx TASKERS_LAST_META_AGENT ''
 set -gx TASKERS_LAST_META_TITLE ''
 set -gx TASKERS_LAST_META_AGENT_ACTIVE ''
+if not set -q TASKERS_TTY_NAME
+    set -l current_tty (tty 2>/dev/null)
+    if string match -qr '^/dev/' -- "$current_tty"
+        set -gx TASKERS_TTY_NAME "$current_tty"
+    end
+end
 taskers__emit_metadata_if_changed

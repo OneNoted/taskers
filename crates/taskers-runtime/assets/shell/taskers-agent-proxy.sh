@@ -42,6 +42,20 @@ if [ -z "$real_binary" ]; then
   exit 127
 fi
 
+can_emit_signal() {
+  [ -x "${TASKERS_CTL_PATH:-}" ] || return 1
+  [ -n "${TASKERS_WORKSPACE_ID:-}" ] || return 1
+  [ -n "${TASKERS_PANE_ID:-}" ] || return 1
+  [ -n "${TASKERS_SURFACE_ID:-}" ] || return 1
+  [ -n "${TASKERS_TTY_NAME:-}" ] || return 1
+  current_tty=$(tty 2>/dev/null || true)
+  case "$current_tty" in
+    /dev/*) ;;
+    *) return 1 ;;
+  esac
+  [ "$current_tty" = "$TASKERS_TTY_NAME" ] || return 1
+}
+
 emit_signal() {
   kind=$1
   message=${2-}
@@ -54,9 +68,7 @@ emit_signal() {
       git_branch=$(git -C "$PWD" branch --show-current 2>/dev/null || true)
     fi
   fi
-  [ -x "${TASKERS_CTL_PATH:-}" ] || return 0
-  [ -n "${TASKERS_WORKSPACE_ID:-}" ] || return 0
-  [ -n "${TASKERS_PANE_ID:-}" ] || return 0
+  can_emit_signal || return 0
 
   set -- signal --source shell --kind "$kind" --agent "$agent_kind" --title "$agent_title"
   if [ -n "${PWD:-}" ]; then

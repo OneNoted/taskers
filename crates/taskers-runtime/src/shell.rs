@@ -161,7 +161,11 @@ impl ShellIntegration {
                 env: self.base_env(),
             },
             ShellKind::Fish if !integration_disabled => {
-                let env = self.base_env();
+                let mut env = self.base_env();
+                env.insert(
+                    "TASKERS_REAL_SHELL".into(),
+                    self.real_shell.display().to_string(),
+                );
 
                 let mut args = Vec::new();
                 if profile == "clean" {
@@ -172,7 +176,7 @@ impl ShellIntegration {
                 args.push(fish_source_command());
 
                 ShellLaunchSpec {
-                    program: self.real_shell.clone(),
+                    program: self.wrapper_path.clone(),
                     args,
                     env,
                 }
@@ -183,6 +187,11 @@ impl ShellIntegration {
                 env: self.base_env(),
             },
             ShellKind::Zsh => {
+                let mut env = self.base_env();
+                env.insert(
+                    "TASKERS_REAL_SHELL".into(),
+                    self.real_shell.display().to_string(),
+                );
                 let args = if profile == "clean" || integration_disabled {
                     vec!["-d".into(), "-f".into(), "-i".into()]
                 } else {
@@ -190,16 +199,23 @@ impl ShellIntegration {
                 };
 
                 ShellLaunchSpec {
-                    program: self.real_shell.clone(),
+                    program: self.wrapper_path.clone(),
                     args,
-                    env: self.base_env(),
+                    env,
                 }
             }
-            ShellKind::Other => ShellLaunchSpec {
-                program: self.real_shell.clone(),
-                args: Vec::new(),
-                env: self.base_env(),
-            },
+            ShellKind::Other => {
+                let mut env = self.base_env();
+                env.insert(
+                    "TASKERS_REAL_SHELL".into(),
+                    self.real_shell.display().to_string(),
+                );
+                ShellLaunchSpec {
+                    program: self.wrapper_path.clone(),
+                    args: Vec::new(),
+                    env,
+                }
+            }
         }
     }
 
@@ -522,6 +538,49 @@ mod tests {
             assert!(
                 INHERITED_TERMINAL_ENV_KEYS.contains(&key),
                 "expected {key} to be scrubbed from inherited terminal env"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_wrapper_exports_taskers_tty_name() {
+        let wrapper = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-shell-wrapper.sh"
+        ));
+        assert!(
+            wrapper.contains("TASKERS_TTY_NAME"),
+            "expected wrapper to export TASKERS_TTY_NAME"
+        );
+    }
+
+    #[test]
+    fn shell_hooks_and_proxy_require_surface_tty_identity() {
+        let bash_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.bash"
+        ));
+        let zsh_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        ));
+        let fish_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.fish"
+        ));
+        let agent_proxy = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-agent-proxy.sh"
+        ));
+
+        for asset in [bash_hooks, zsh_hooks, fish_hooks, agent_proxy] {
+            assert!(
+                asset.contains("TASKERS_SURFACE_ID"),
+                "expected asset to require TASKERS_SURFACE_ID"
+            );
+            assert!(
+                asset.contains("TASKERS_TTY_NAME"),
+                "expected asset to require TASKERS_TTY_NAME"
             );
         }
     }

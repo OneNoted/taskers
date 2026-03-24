@@ -107,6 +107,18 @@ taskers__agent_active_for_kind() {
   esac
 }
 
+taskers__context_tty_matches() {
+  local expected_tty=${TASKERS_TTY_NAME:-}
+  local current_tty
+  [ -n "$expected_tty" ] || return 1
+  current_tty=$(tty 2>/dev/null || true)
+  case "$current_tty" in
+    /dev/*) ;;
+    *) return 1 ;;
+  esac
+  [ "$current_tty" = "$expected_tty" ]
+}
+
 taskers__emit_with_metadata() {
   local kind=$1
   local message=${2:-}
@@ -119,6 +131,8 @@ taskers__emit_with_metadata() {
   [ -x "${TASKERS_CTL_PATH:-}" ] || return 0
   [ -n "${TASKERS_WORKSPACE_ID:-}" ] || return 0
   [ -n "${TASKERS_PANE_ID:-}" ] || return 0
+  [ -n "${TASKERS_SURFACE_ID:-}" ] || return 0
+  taskers__context_tty_matches || return 0
 
   if [ "$kind" = "metadata" ]; then
     argv=(
@@ -259,4 +273,11 @@ taskers__preexec_invoke_exec() {
 TASKERS_AT_PROMPT=1
 trap 'taskers__preexec_invoke_exec' DEBUG
 PROMPT_COMMAND="taskers__prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+if [ -z "${TASKERS_TTY_NAME:-}" ]; then
+  TASKERS_TTY_NAME=$(tty 2>/dev/null || true)
+  case "$TASKERS_TTY_NAME" in
+    /dev/*) export TASKERS_TTY_NAME ;;
+    *) unset TASKERS_TTY_NAME ;;
+  esac
+fi
 taskers__emit_metadata_if_changed

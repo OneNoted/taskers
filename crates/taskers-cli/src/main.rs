@@ -1,4 +1,4 @@
-use std::{env, future::pending, path::PathBuf};
+use std::{env, future::pending, path::PathBuf, process::Command as ProcessCommand};
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -1908,21 +1908,64 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn env_workspace_id() -> Option<WorkspaceId> {
+    if !taskers_env_context_matches_current_tty() {
+        return None;
+    }
     env::var("TASKERS_WORKSPACE_ID")
         .ok()
         .and_then(|value| value.parse().ok())
 }
 
 fn env_pane_id() -> Option<PaneId> {
+    if !taskers_env_context_matches_current_tty() {
+        return None;
+    }
     env::var("TASKERS_PANE_ID")
         .ok()
         .and_then(|value| value.parse().ok())
 }
 
 fn env_surface_id() -> Option<SurfaceId> {
+    if !taskers_env_context_matches_current_tty() {
+        return None;
+    }
     env::var("TASKERS_SURFACE_ID")
         .ok()
         .and_then(|value| value.parse().ok())
+}
+
+fn env_tty_name() -> Option<String> {
+    env::var("TASKERS_TTY_NAME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn current_process_tty_name() -> Option<String> {
+    let output = ProcessCommand::new("ps")
+        .args(["-o", "tty=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() || raw == "?" {
+        return None;
+    }
+    if raw.starts_with('/') {
+        Some(raw)
+    } else {
+        Some(format!("/dev/{raw}"))
+    }
+}
+
+fn taskers_env_context_matches_current_tty() -> bool {
+    match env_tty_name() {
+        Some(expected) => current_process_tty_name().is_some_and(|current| current == expected),
+        None => true,
+    }
 }
 
 fn has_implicit_notify_target_context() -> bool {
@@ -3000,6 +3043,7 @@ mod tests {
             );
             std::env::set_var("TASKERS_PANE_ID", "019cede5-2843-7da1-a281-dd4f2de73c9c");
             std::env::set_var("TASKERS_SURFACE_ID", "019cede5-2843-7da1-a281-dd2119ae9b83");
+            std::env::remove_var("TASKERS_TTY_NAME");
         }
 
         assert!(ensure_implicit_notify_target_context(None, None, None).is_ok());
@@ -3014,6 +3058,31 @@ mod tests {
             .parse()
             .expect("workspace id");
         assert!(ensure_implicit_notify_target_context(Some(workspace), None, None).is_ok());
+    }
+
+    #[test]
+    fn runtime_context_ids_are_ignored_when_tty_mismatches() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        unsafe {
+            std::env::set_var(
+                "TASKERS_WORKSPACE_ID",
+                "019cede5-2843-7da1-a281-dd6b5d1cfbe6",
+            );
+            std::env::set_var("TASKERS_PANE_ID", "019cede5-2843-7da1-a281-dd4f2de73c9c");
+            std::env::set_var("TASKERS_SURFACE_ID", "019cede5-2843-7da1-a281-dd2119ae9b83");
+            std::env::set_var("TASKERS_TTY_NAME", "/dev/pts/taskers-mismatch");
+        }
+
+        assert!(env_workspace_id().is_none());
+        assert!(env_pane_id().is_none());
+        assert!(env_surface_id().is_none());
+
+        unsafe {
+            std::env::remove_var("TASKERS_WORKSPACE_ID");
+            std::env::remove_var("TASKERS_PANE_ID");
+            std::env::remove_var("TASKERS_SURFACE_ID");
+            std::env::remove_var("TASKERS_TTY_NAME");
+        }
     }
 
     #[test]

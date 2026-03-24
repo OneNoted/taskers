@@ -101,6 +101,15 @@ taskers__agent_active_for_kind() {
   esac
 }
 
+taskers__context_tty_matches() {
+  local expected_tty=${TASKERS_TTY_NAME:-}
+  local current_tty
+  [[ -n "$expected_tty" ]] || return 1
+  current_tty=$(tty 2>/dev/null || true)
+  [[ "$current_tty" = /dev/* ]] || return 1
+  [[ "$current_tty" = "$expected_tty" ]]
+}
+
 taskers__emit_with_metadata() {
   local kind=$1
   local message=${2:-}
@@ -113,6 +122,8 @@ taskers__emit_with_metadata() {
   [[ -x "${TASKERS_CTL_PATH:-}" ]] || return 0
   [[ -n "${TASKERS_WORKSPACE_ID:-}" ]] || return 0
   [[ -n "${TASKERS_PANE_ID:-}" ]] || return 0
+  [[ -n "${TASKERS_SURFACE_ID:-}" ]] || return 0
+  taskers__context_tty_matches || return 0
 
   if [[ "$kind" = "metadata" ]]; then
     argv=(
@@ -244,4 +255,9 @@ typeset -ga precmd_functions
 preexec_functions+=(taskers__preexec)
 precmd_functions+=(taskers__precmd)
 taskers__normalize_backspace
+if [[ -z "${TASKERS_TTY_NAME:-}" ]]; then
+  TASKERS_TTY_NAME=$(tty 2>/dev/null || true)
+  [[ "$TASKERS_TTY_NAME" = /dev/* ]] || unset TASKERS_TTY_NAME
+  [[ -n "${TASKERS_TTY_NAME:-}" ]] && export TASKERS_TTY_NAME
+fi
 taskers__emit_metadata_if_changed

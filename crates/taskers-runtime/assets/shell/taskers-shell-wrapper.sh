@@ -22,6 +22,10 @@ SHELL_NAME=${REAL_SHELL##*/}
 SHELL_NAME=${SHELL_NAME#-}
 export TASKERS_EMBEDDED=1
 export TERM_PROGRAM=taskers
+current_tty=$(tty 2>/dev/null || true)
+case "$current_tty" in
+  /dev/*) export TASKERS_TTY_NAME="$current_tty" ;;
+esac
 
 # Taskers owns shell integration for embedded Ghostty panes. Scrub Ghostty's
 # shell-integration environment so user shell config doesn't double-load it.
