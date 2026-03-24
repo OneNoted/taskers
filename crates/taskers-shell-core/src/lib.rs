@@ -121,6 +121,23 @@ impl AttentionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AttentionRingState {
+    Waiting,
+    Error,
+    Completed,
+}
+
+impl AttentionRingState {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Error => "error",
+            Self::Completed => "completed",
+        }
+    }
+}
+
 impl From<taskers_domain::AttentionState> for AttentionState {
     fn from(value: taskers_domain::AttentionState) -> Self {
         match value {
@@ -687,6 +704,7 @@ pub struct SurfaceSnapshot {
     pub url: Option<String>,
     pub cwd: Option<String>,
     pub attention: AttentionState,
+    pub notification_ring: Option<AttentionRingState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -694,6 +712,7 @@ pub struct PaneSnapshot {
     pub id: PaneId,
     pub active: bool,
     pub attention: AttentionState,
+    pub notification_ring: Option<AttentionRingState>,
     pub active_surface: SurfaceId,
     pub runtime: RuntimeIdentitySnapshot,
     pub surfaces: Vec<SurfaceSnapshot>,
@@ -1668,27 +1687,34 @@ impl TaskersCore {
             0
         };
         let flash_token = focus_flash_token.max(explicit_flash_token);
+        let surfaces = pane
+            .surfaces
+            .values()
+            .map(|surface| SurfaceSnapshot {
+                id: surface.id,
+                kind: SurfaceKind::from_domain(&surface.kind),
+                runtime: surface_runtime_identity(surface, now),
+                title: display_surface_title(surface),
+                activity_label: surface_activity_label(surface, now),
+                status_label: surface_status_label(surface, now),
+                url: normalized_surface_url(surface),
+                cwd: normalized_cwd(&surface.metadata),
+                attention: surface.attention.into(),
+                notification_ring: surface_notification_ring(surface),
+            })
+            .collect::<Vec<_>>();
         PaneSnapshot {
             id: pane.id,
             active: is_active,
             attention: pane.highest_attention().into(),
+            notification_ring: dominant_attention_ring(
+                surfaces
+                    .iter()
+                    .filter_map(|surface| surface.notification_ring),
+            ),
             active_surface: pane.active_surface,
             runtime: pane_runtime_identity(pane, now),
-            surfaces: pane
-                .surfaces
-                .values()
-                .map(|surface| SurfaceSnapshot {
-                    id: surface.id,
-                    kind: SurfaceKind::from_domain(&surface.kind),
-                    runtime: surface_runtime_identity(surface, now),
-                    title: display_surface_title(surface),
-                    activity_label: surface_activity_label(surface, now),
-                    status_label: surface_status_label(surface, now),
-                    url: normalized_surface_url(surface),
-                    cwd: normalized_cwd(&surface.metadata),
-                    attention: surface.attention.into(),
-                })
-                .collect(),
+            surfaces,
             focus_flash_token: flash_token,
         }
     }
@@ -3717,6 +3743,16 @@ fn runtime_kind_priority(key: &str) -> u8 {
     }
 }
 
+fn dominant_attention_ring(
+    rings: impl IntoIterator<Item = AttentionRingState>,
+) -> Option<AttentionRingState> {
+    rings.into_iter().min_by_key(|ring| match ring {
+        AttentionRingState::Error => 0,
+        AttentionRingState::Waiting => 1,
+        AttentionRingState::Completed => 2,
+    })
+}
+
 fn runtime_key(surface: &SurfaceRecord) -> String {
     if let Some(agent_kind) = surface
         .metadata
@@ -3885,6 +3921,30 @@ fn active_agent_surface_state(
 
     let state = surface_runtime_state(surface, now);
     (!matches!(state, RuntimeStateSnapshot::Idle)).then_some(state)
+}
+
+fn surface_notification_ring(surface: &SurfaceRecord) -> Option<AttentionRingState> {
+    if surface.kind != PaneKind::Terminal {
+        return None;
+    }
+
+    let is_agent_surface = surface
+        .metadata
+        .agent_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|agent_kind| !agent_kind.is_empty() && *agent_kind != "shell")
+        .is_some();
+    if !is_agent_surface {
+        return None;
+    }
+
+    match surface.attention {
+        taskers_domain::AttentionState::WaitingInput => Some(AttentionRingState::Waiting),
+        taskers_domain::AttentionState::Error => Some(AttentionRingState::Error),
+        taskers_domain::AttentionState::Completed => Some(AttentionRingState::Completed),
+        taskers_domain::AttentionState::Normal | taskers_domain::AttentionState::Busy => None,
+    }
 }
 
 fn display_terminal_title(metadata: &PaneMetadata) -> String {
@@ -4696,6 +4756,61 @@ mod tests {
     }
 
     #[test]
+    fn notification_rings_only_cover_agent_terminal_attention_states() {
+        let waiting = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let completed = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let busy = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let non_agent = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata::default(),
+        );
+        let browser = surface_with_metadata(
+            taskers_domain::PaneKind::Browser,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        let mut waiting = waiting;
+        waiting.attention = taskers_domain::AttentionState::WaitingInput;
+        let mut completed = completed;
+        completed.attention = taskers_domain::AttentionState::Completed;
+        let mut busy = busy;
+        busy.attention = taskers_domain::AttentionState::Busy;
+
+        assert_eq!(
+            super::surface_notification_ring(&waiting),
+            Some(super::AttentionRingState::Waiting)
+        );
+        assert_eq!(
+            super::surface_notification_ring(&completed),
+            Some(super::AttentionRingState::Completed)
+        );
+        assert_eq!(super::surface_notification_ring(&busy), None);
+        assert_eq!(super::surface_notification_ring(&non_agent), None);
+        assert_eq!(super::surface_notification_ring(&browser), None);
+    }
+
+    #[test]
     fn status_label_survives_when_agent_has_no_latest_message() {
         let now = OffsetDateTime::now_utc();
         let surface = surface_with_metadata(
@@ -4813,6 +4928,71 @@ mod tests {
         assert_eq!(
             second_pane.runtime.state,
             super::RuntimeStateSnapshot::Failed
+        );
+    }
+
+    #[test]
+    fn pane_notification_ring_prioritizes_inactive_agent_tabs() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let inactive_surface_id = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("inactive surface");
+        let active_surface_id = model
+            .create_surface(workspace_id, pane_id, taskers_domain::PaneKind::Terminal)
+            .expect("create active terminal");
+
+        {
+            let workspace = model.workspaces.get_mut(&workspace_id).expect("workspace");
+            let active_surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&active_surface_id))
+                .expect("active surface record");
+            active_surface.metadata.agent_kind = Some("codex".into());
+            active_surface.attention = taskers_domain::AttentionState::Completed;
+
+            let inactive_surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&inactive_surface_id))
+                .expect("inactive surface record");
+            inactive_surface.metadata.agent_kind = Some("claude".into());
+            inactive_surface.attention = taskers_domain::AttentionState::Error;
+        }
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-pane-notification-ring",
+        ));
+        let snapshot = core.snapshot();
+        let pane = find_pane(&snapshot.current_workspace.layout, pane_id).expect("pane");
+        let active_surface = pane
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == active_surface_id)
+            .expect("active surface snapshot");
+        let inactive_surface = pane
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == inactive_surface_id)
+            .expect("inactive surface snapshot");
+
+        assert_eq!(
+            active_surface.notification_ring,
+            Some(super::AttentionRingState::Completed)
+        );
+        assert_eq!(
+            inactive_surface.notification_ring,
+            Some(super::AttentionRingState::Error)
+        );
+        assert_eq!(
+            pane.notification_ring,
+            Some(super::AttentionRingState::Error)
         );
     }
 
