@@ -1127,6 +1127,18 @@ input:focus-visible {{
   border-color: {accent_24};
 }}
 
+.pane-card-attention-waiting {{
+  box-shadow: inset 0 0 0 1px {waiting}, 0 0 0 1px {waiting_18};
+}}
+
+.pane-card-attention-error {{
+  box-shadow: inset 0 0 0 1px {error}, 0 0 0 1px {error_16};
+}}
+
+.pane-card-attention-completed {{
+  box-shadow: inset 0 0 0 1px {completed}, 0 0 0 1px {completed_16};
+}}
+
 .pane-card-drop-target {{
   border-color: {accent_24};
 }}
@@ -1375,6 +1387,42 @@ input:focus-visible {{
   cursor: grab;
 }}
 
+.surface-tab-attention-waiting {{
+  border-color: {waiting_18};
+  background: {waiting_18};
+  color: {waiting_text};
+}}
+
+.surface-tab-attention-waiting .surface-tab-primary,
+.surface-tab-attention-waiting .surface-tab-kind-icon {{
+  color: {waiting_text};
+  opacity: 1.0;
+}}
+
+.surface-tab-attention-error {{
+  border-color: {error_16};
+  background: {error_16};
+  color: {error_text};
+}}
+
+.surface-tab-attention-error .surface-tab-primary,
+.surface-tab-attention-error .surface-tab-kind-icon {{
+  color: {error_text};
+  opacity: 1.0;
+}}
+
+.surface-tab-attention-completed {{
+  border-color: {completed_16};
+  background: {completed_16};
+  color: {completed_text};
+}}
+
+.surface-tab-attention-completed .surface-tab-primary,
+.surface-tab-attention-completed .surface-tab-kind-icon {{
+  color: {completed_text};
+  opacity: 1.0;
+}}
+
 .surface-tab-drop-target {{
   border-color: {accent_24};
   background: {accent_12};
@@ -1396,6 +1444,30 @@ input:focus-visible {{
   height: 2px;
   background: {accent};
   border-radius: 1px;
+}}
+
+.surface-tab-attention-waiting.surface-tab-active {{
+  border-color: {waiting};
+}}
+
+.surface-tab-attention-waiting.surface-tab-active::after {{
+  background: {waiting};
+}}
+
+.surface-tab-attention-error.surface-tab-active {{
+  border-color: {error};
+}}
+
+.surface-tab-attention-error.surface-tab-active::after {{
+  background: {error};
+}}
+
+.surface-tab-attention-completed.surface-tab-active {{
+  border-color: {completed};
+}}
+
+.surface-tab-attention-completed.surface-tab-active::after {{
+  background: {completed};
 }}
 
 .surface-tab-copy {{

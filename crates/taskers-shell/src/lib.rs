@@ -8,13 +8,13 @@ use dioxus::html::{
 };
 use dioxus::prelude::*;
 use taskers_core::{
-    ActivityItemSnapshot, AgentSessionSnapshot, AttentionState, BrowserChromeSnapshot, Direction,
-    LayoutNodeSnapshot, NotificationPreferenceKey, PaneId, PaneSnapshot, ProgressSnapshot,
-    PullRequestSnapshot, RuntimeIdentitySnapshot, RuntimeStateSnapshot, RuntimeStatus,
-    SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot, ShortcutAction,
-    ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot, SurfaceId, SurfaceKind,
-    SurfaceSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary,
-    WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    ActivityItemSnapshot, AgentSessionSnapshot, AttentionRingState, AttentionState,
+    BrowserChromeSnapshot, Direction, LayoutNodeSnapshot, NotificationPreferenceKey, PaneId,
+    PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot,
+    RuntimeStateSnapshot, RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection,
+    ShellSnapshot, ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot,
+    SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot,
+    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
 };
 use taskers_shell_core as taskers_core;
 
@@ -61,6 +61,12 @@ fn runtime_state_class(state: RuntimeStateSnapshot) -> &'static str {
         RuntimeStateSnapshot::Completed => "runtime-state-completed",
         RuntimeStateSnapshot::Failed => "runtime-state-failed",
     }
+}
+
+fn attention_ring_class(state: Option<AttentionRingState>, prefix: &str) -> String {
+    state
+        .map(|state| format!(" {prefix}-{}", state.slug()))
+        .unwrap_or_default()
 }
 
 fn render_runtime_icon(runtime: &RuntimeIdentitySnapshot, size: u32, class: &str) -> Element {
@@ -1268,9 +1274,11 @@ fn render_pane(
 ) -> Element {
     let pane_id = pane.id;
     let pane_is_drop_target = pane_has_surface_drop_target(*surface_drop_target.read(), pane_id);
+    let pane_ring_class = attention_ring_class(pane.notification_ring, "pane-card-attention");
     let pane_class = if pane.active {
         format!(
-            "pane-card pane-card-active{}",
+            "pane-card pane-card-active{}{}",
+            pane_ring_class,
             if pane_is_drop_target {
                 " pane-card-drop-target"
             } else {
@@ -1279,7 +1287,8 @@ fn render_pane(
         )
     } else {
         format!(
-            "pane-card{}",
+            "pane-card{}{}",
+            pane_ring_class,
             if pane_is_drop_target {
                 " pane-card-drop-target"
             } else {
@@ -1644,7 +1653,8 @@ fn render_surface_tab(
     );
     let tab_class = if surface.id == active_surface_id {
         format!(
-            "surface-tab surface-tab-active{}",
+            "surface-tab surface-tab-active{}{}",
+            attention_ring_class(surface.notification_ring, "surface-tab-attention"),
             if is_drop_target {
                 " surface-tab-drop-target"
             } else {
@@ -1653,7 +1663,8 @@ fn render_surface_tab(
         )
     } else {
         format!(
-            "surface-tab{}",
+            "surface-tab{}{}",
+            attention_ring_class(surface.notification_ring, "surface-tab-attention"),
             if is_drop_target {
                 " surface-tab-drop-target"
             } else {
@@ -2017,13 +2028,13 @@ fn render_notification_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        SurfaceDragCandidate, SurfaceKind, show_live_surface_backdrop,
+        SurfaceDragCandidate, SurfaceKind, attention_ring_class, show_live_surface_backdrop,
         surface_drag_threshold_reached, surface_primary_label, surface_runtime_badge_text,
         surface_status_text, surface_summary_title,
     };
     use crate::taskers_core::{
-        AttentionState, PaneId, RuntimeIdentitySnapshot, RuntimeStateSnapshot, SurfaceId,
-        SurfaceSnapshot, WorkspaceId,
+        AttentionRingState, AttentionState, PaneId, RuntimeIdentitySnapshot, RuntimeStateSnapshot,
+        SurfaceId, SurfaceSnapshot, WorkspaceId,
     };
 
     fn sample_surface(
@@ -2048,7 +2059,17 @@ mod tests {
             url: None,
             cwd: None,
             attention: AttentionState::Normal,
+            notification_ring: None,
         }
+    }
+
+    #[test]
+    fn attention_ring_class_uses_expected_state_slug() {
+        assert_eq!(
+            attention_ring_class(Some(AttentionRingState::Error), "pane-card-attention"),
+            " pane-card-attention-error"
+        );
+        assert_eq!(attention_ring_class(None, "surface-tab-attention"), "");
     }
 
     #[test]
