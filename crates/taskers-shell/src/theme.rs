@@ -1128,15 +1128,27 @@ input:focus-visible {{
 }}
 
 .pane-card-attention-waiting {{
-  box-shadow: inset 0 0 0 1px {waiting}, 0 0 0 1px {waiting_18};
+  border-color: {waiting};
+  box-shadow:
+    inset 0 0 0 1px {waiting},
+    0 0 0 1px {waiting_18},
+    0 0 18px {waiting_18};
 }}
 
 .pane-card-attention-error {{
-  box-shadow: inset 0 0 0 1px {error}, 0 0 0 1px {error_16};
+  border-color: {error};
+  box-shadow:
+    inset 0 0 0 1px {error},
+    0 0 0 1px {error_16},
+    0 0 18px {error_16};
 }}
 
 .pane-card-attention-completed {{
-  box-shadow: inset 0 0 0 1px {completed}, 0 0 0 1px {completed_16};
+  border-color: {completed};
+  box-shadow:
+    inset 0 0 0 1px {completed},
+    0 0 0 1px {completed_16},
+    0 0 18px {completed_16};
 }}
 
 .pane-card-drop-target {{
