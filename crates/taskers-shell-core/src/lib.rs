@@ -765,6 +765,8 @@ pub struct PortalSurfacePlan {
     pub pane_id: PaneId,
     pub surface_id: SurfaceId,
     pub active: bool,
+    pub notification_ring: Option<AttentionRingState>,
+    pub pane_frame: Frame,
     pub frame: Frame,
     pub mount: SurfaceMountSpec,
 }
@@ -1838,6 +1840,8 @@ impl TaskersCore {
                         pane_id: pane.id,
                         surface_id: active_surface.id,
                         active: workspace.active_pane == pane.id,
+                        notification_ring: pane_notification_ring(pane),
+                        pane_frame: frame,
                         frame: pane_body_frame(
                             frame,
                             self.metrics,
@@ -3947,6 +3951,10 @@ fn surface_notification_ring(surface: &SurfaceRecord) -> Option<AttentionRingSta
     }
 }
 
+fn pane_notification_ring(pane: &taskers_domain::PaneRecord) -> Option<AttentionRingState> {
+    dominant_attention_ring(pane.surfaces.values().filter_map(surface_notification_ring))
+}
+
 fn display_terminal_title(metadata: &PaneMetadata) -> String {
     let agent_title = metadata
         .agent_title
@@ -4993,6 +5001,58 @@ mod tests {
         assert_eq!(
             pane.notification_ring,
             Some(super::AttentionRingState::Error)
+        );
+    }
+
+    #[test]
+    fn portal_plan_carries_pane_notification_ring_for_active_surface_host() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let agent_surface_id = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("agent surface");
+        let browser_surface_id = model
+            .create_surface(workspace_id, pane_id, taskers_domain::PaneKind::Browser)
+            .expect("create browser");
+
+        {
+            let workspace = model.workspaces.get_mut(&workspace_id).expect("workspace");
+            let browser_surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&browser_surface_id))
+                .expect("browser surface record");
+            browser_surface.attention = taskers_domain::AttentionState::Normal;
+
+            let agent_surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&agent_surface_id))
+                .expect("agent surface record");
+            agent_surface.metadata.agent_kind = Some("codex".into());
+            agent_surface.attention = taskers_domain::AttentionState::WaitingInput;
+        }
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-portal-notification-ring",
+        ));
+        let portal_plan = core
+            .snapshot()
+            .portal
+            .panes
+            .into_iter()
+            .find(|plan| plan.pane_id == pane_id)
+            .expect("portal plan");
+
+        assert_eq!(portal_plan.surface_id, browser_surface_id);
+        assert_eq!(
+            portal_plan.notification_ring,
+            Some(super::AttentionRingState::Waiting)
         );
     }
 

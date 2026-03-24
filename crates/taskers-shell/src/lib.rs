@@ -1293,10 +1293,6 @@ fn render_pane(
             }
         )
     };
-    let pane_frame_ring_class = format!(
-        "pane-frame-ring{}",
-        attention_ring_class(pane.notification_ring, "pane-frame-ring")
-    );
     let active_surface = pane
         .surfaces
         .iter()
@@ -1568,7 +1564,6 @@ fn render_pane(
                 }
                 div { key: "{flash_key}", class: "{flash_class}" }
             }
-            div { class: "{pane_frame_ring_class}" }
         }
     }
 }
