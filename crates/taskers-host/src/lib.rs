@@ -412,6 +412,7 @@ impl TaskersHost {
         for surface_id in stale {
             if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
                 surface.shell.detach(&self.root);
+                surface.attention_ring.detach(&self.root);
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -484,6 +485,7 @@ impl TaskersHost {
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
                 surface.shell.detach(&self.root);
+                surface.attention_ring.detach(&self.root);
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -536,6 +538,7 @@ impl TaskersHost {
 
 struct BrowserSurface {
     shell: NativeSurfaceShell,
+    attention_ring: AttentionRingOverlay,
     surface_id: SurfaceId,
     workspace_id: Rc<Cell<WorkspaceId>>,
     pane_id: Rc<Cell<PaneId>>,
@@ -583,14 +586,17 @@ impl BrowserSurface {
             url: url.clone(),
         });
         let shell = NativeSurfaceShell::new(shell_class, visible_plan.is_some() && interactive);
+        let attention_ring = AttentionRingOverlay::new();
         shell.mount_child(webview.upcast_ref());
-        shell.set_attention_ring(
-            visible_plan.and_then(|plan| plan.notification_ring),
-            theme_id,
-        );
         match visible_plan {
-            Some(plan) => shell.show_at(overlay, plan.pane_frame, plan.frame),
-            None => shell.park_hidden(overlay),
+            Some(plan) => {
+                shell.show_at(overlay, plan.frame);
+                attention_ring.show_at(overlay, plan.pane_frame, plan.notification_ring, theme_id);
+            }
+            None => {
+                shell.park_hidden(overlay);
+                attention_ring.park_hidden(overlay);
+            }
         }
         let devtools_open = Rc::new(Cell::new(false));
         let workspace_id = Rc::new(Cell::new(entry.workspace_id));
@@ -750,6 +756,7 @@ impl BrowserSurface {
 
         Ok(Self {
             shell,
+            attention_ring,
             surface_id: entry.surface_id,
             workspace_id,
             pane_id,
@@ -780,14 +787,21 @@ impl BrowserSurface {
         let visible = visible_plan.is_some();
         let effective_interactive = visible && interactive;
         self.shell.set_interactive(effective_interactive);
-        self.shell.set_attention_ring(
-            visible_plan.and_then(|plan| plan.notification_ring),
-            theme_id,
-        );
         self.webview.set_can_target(effective_interactive);
         match visible_plan {
-            Some(plan) => self.shell.show_at(overlay, plan.pane_frame, plan.frame),
-            None => self.shell.park_hidden(overlay),
+            Some(plan) => {
+                self.shell.show_at(overlay, plan.frame);
+                self.attention_ring.show_at(
+                    overlay,
+                    plan.pane_frame,
+                    plan.notification_ring,
+                    theme_id,
+                );
+            }
+            None => {
+                self.shell.park_hidden(overlay);
+                self.attention_ring.park_hidden(overlay);
+            }
         }
 
         if self.url != entry.url {
@@ -888,6 +902,7 @@ struct TerminalSurface {
     pane_id: Rc<Cell<PaneId>>,
     spec: TerminalMountSpec,
     shell: NativeSurfaceShell,
+    attention_ring: AttentionRingOverlay,
     widget: Widget,
     focus_state: Rc<Cell<bool>>,
     active: bool,
@@ -926,14 +941,17 @@ impl TerminalSurface {
         let effective_interactive = visible_plan.is_some() && interactive;
         widget.set_can_target(effective_interactive);
         let shell = NativeSurfaceShell::new(shell_class, effective_interactive);
+        let attention_ring = AttentionRingOverlay::new();
         shell.mount_child(&widget);
-        shell.set_attention_ring(
-            visible_plan.and_then(|plan| plan.notification_ring),
-            theme_id,
-        );
         match visible_plan {
-            Some(plan) => shell.show_at(overlay, plan.pane_frame, plan.frame),
-            None => shell.park_hidden(overlay),
+            Some(plan) => {
+                shell.show_at(overlay, plan.frame);
+                attention_ring.show_at(overlay, plan.pane_frame, plan.notification_ring, theme_id);
+            }
+            None => {
+                shell.park_hidden(overlay);
+                attention_ring.park_hidden(overlay);
+            }
         }
 
         let workspace_id = Rc::new(Cell::new(entry.workspace_id));
@@ -970,6 +988,7 @@ impl TerminalSurface {
             pane_id,
             spec,
             shell,
+            attention_ring,
             widget,
             focus_state,
             active: visible_plan.is_some_and(|plan| plan.active),
@@ -998,13 +1017,20 @@ impl TerminalSurface {
         let effective_interactive = visible && interactive;
         self.widget.set_can_target(effective_interactive);
         self.shell.set_interactive(effective_interactive);
-        self.shell.set_attention_ring(
-            visible_plan.and_then(|plan| plan.notification_ring),
-            theme_id,
-        );
         match visible_plan {
-            Some(plan) => self.shell.show_at(overlay, plan.pane_frame, plan.frame),
-            None => self.shell.park_hidden(overlay),
+            Some(plan) => {
+                self.shell.show_at(overlay, plan.frame);
+                self.attention_ring.show_at(
+                    overlay,
+                    plan.pane_frame,
+                    plan.notification_ring,
+                    theme_id,
+                );
+            }
+            None => {
+                self.shell.park_hidden(overlay);
+                self.attention_ring.park_hidden(overlay);
+            }
         }
         if visible_plan.is_some_and(|plan| plan.active)
             && effective_interactive
@@ -1039,43 +1065,22 @@ impl TerminalSurface {
 }
 
 struct NativeSurfaceShell {
-    root: Overlay,
-    content: GtkBox,
-    attention_ring: AttentionRingOverlay,
+    root: GtkBox,
 }
 
 impl NativeSurfaceShell {
     fn new(kind_class: &'static str, interactive: bool) -> Self {
-        let root = Overlay::new();
+        let root = GtkBox::new(Orientation::Vertical, 0);
         root.set_hexpand(false);
         root.set_vexpand(false);
         root.set_halign(Align::Start);
         root.set_valign(Align::Start);
         root.set_overflow(Overflow::Hidden);
         root.set_focusable(false);
-        root.set_can_target(false);
+        root.set_can_target(interactive);
         root.add_css_class("native-surface-host");
         root.add_css_class(kind_class);
-
-        let content = GtkBox::new(Orientation::Vertical, 0);
-        content.set_hexpand(false);
-        content.set_vexpand(false);
-        content.set_halign(Align::Start);
-        content.set_valign(Align::Start);
-        content.set_overflow(Overflow::Hidden);
-        content.set_can_target(interactive);
-        root.set_child(Some(&content));
-
-        let attention_ring = AttentionRingOverlay::new();
-        root.add_overlay(attention_ring.widget());
-        root.set_measure_overlay(attention_ring.widget(), false);
-        root.set_clip_overlay(attention_ring.widget(), true);
-
-        Self {
-            root,
-            content,
-            attention_ring,
-        }
+        Self { root }
     }
 
     fn mount_child(&self, child: &Widget) {
@@ -1084,7 +1089,7 @@ impl NativeSurfaceShell {
         child.set_halign(Align::Fill);
         child.set_valign(Align::Fill);
         if child.parent().is_none() {
-            self.content.append(child);
+            self.root.append(child);
         }
     }
 
@@ -1092,29 +1097,18 @@ impl NativeSurfaceShell {
         position_widget(overlay, self.root.upcast_ref(), frame);
     }
 
-    fn show_at(
-        &self,
-        overlay: &Overlay,
-        pane_frame: taskers_core::Frame,
-        content_frame: taskers_core::Frame,
-    ) {
+    fn show_at(&self, overlay: &Overlay, frame: taskers_core::Frame) {
         self.root.set_opacity(1.0);
-        self.layout_content(pane_frame, content_frame);
-        self.position(overlay, pane_frame);
+        self.position(overlay, frame);
     }
 
     fn park_hidden(&self, overlay: &Overlay) {
         self.root.set_opacity(0.0);
-        self.layout_content(self.hidden_frame(), self.hidden_frame());
         self.position(overlay, self.hidden_frame());
     }
 
     fn set_interactive(&self, interactive: bool) {
-        self.content.set_can_target(interactive);
-    }
-
-    fn set_attention_ring(&self, state: Option<taskers_core::AttentionRingState>, theme_id: &str) {
-        self.attention_ring.set(state, theme_id);
+        self.root.set_can_target(interactive);
     }
 
     fn detach(&self, overlay: &Overlay) {
@@ -1122,16 +1116,7 @@ impl NativeSurfaceShell {
     }
 
     fn hidden_frame(&self) -> taskers_core::Frame {
-        taskers_core::Frame::new(100_000, 100_000, 1, 1)
-    }
-
-    fn layout_content(&self, pane_frame: taskers_core::Frame, content_frame: taskers_core::Frame) {
-        let relative_x = (content_frame.x - pane_frame.x).max(0);
-        let relative_y = (content_frame.y - pane_frame.y).max(0);
-        self.content
-            .set_size_request(content_frame.width.max(1), content_frame.height.max(1));
-        self.content.set_margin_start(relative_x);
-        self.content.set_margin_top(relative_y);
+        hidden_frame()
     }
 }
 
@@ -1201,15 +1186,33 @@ impl AttentionRingOverlay {
         }
     }
 
-    fn widget(&self) -> &DrawingArea {
-        &self.widget
-    }
-
-    fn set(&self, state: Option<taskers_core::AttentionRingState>, theme_id: &str) {
+    fn show_at(
+        &self,
+        overlay: &Overlay,
+        frame: taskers_core::Frame,
+        state: Option<taskers_core::AttentionRingState>,
+        theme_id: &str,
+    ) {
         self.state.set(state);
         *self.palette.borrow_mut() = host_attention_palette(theme_id);
         self.widget.set_visible(state.is_some());
+        if state.is_some() {
+            self.widget.set_opacity(1.0);
+            position_widget(overlay, self.widget.upcast_ref(), frame);
+        } else {
+            self.park_hidden(overlay);
+        }
         self.widget.queue_draw();
+    }
+
+    fn park_hidden(&self, overlay: &Overlay) {
+        self.widget.set_visible(false);
+        self.widget.set_opacity(0.0);
+        position_widget(overlay, self.widget.upcast_ref(), hidden_frame());
+    }
+
+    fn detach(&self, overlay: &Overlay) {
+        detach_from_overlay(overlay, self.widget.upcast_ref());
     }
 }
 
@@ -1689,6 +1692,10 @@ fn current_timestamp_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
+}
+
+fn hidden_frame() -> taskers_core::Frame {
+    taskers_core::Frame::new(100_000, 100_000, 1, 1)
 }
 
 #[cfg(test)]
