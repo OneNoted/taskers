@@ -536,12 +536,13 @@ input:focus-visible {{
   gap: 4px;
 }}
 
-.sidebar-nav-icon {{
+.sidebar-settings-icon {{
   flex: 0 0 auto;
-  opacity: 0.6;
+  opacity: 0.7;
 }}
 
-.sidebar-nav-button-active .sidebar-nav-icon {{
+.sidebar-settings-btn:hover .sidebar-settings-icon,
+.sidebar-settings-btn-active .sidebar-settings-icon {{
   opacity: 1.0;
 }}
 
