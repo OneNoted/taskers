@@ -1575,7 +1575,7 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
         rows: spec.rows,
         kind: PaneKind::Terminal,
         cwd: spec.cwd.clone(),
-        title: None,
+        title: Some(spec.title.clone()),
         url: None,
         // The current Ghostty bridge is more stable when it controls shell
         // selection itself, so keep command overrides empty until that path is
@@ -1586,13 +1586,15 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
 }
 
 fn position_widget(overlay: &Overlay, widget: &Widget, frame: taskers_core::Frame) {
+    let clamped_margin_start = frame.x.clamp(0, i32::from(i16::MAX));
+    let clamped_margin_top = frame.y.clamp(0, i32::from(i16::MAX));
     widget.set_size_request(frame.width.max(1), frame.height.max(1));
     widget.set_hexpand(false);
     widget.set_vexpand(false);
     widget.set_halign(Align::Start);
     widget.set_valign(Align::Start);
-    widget.set_margin_start(frame.x.max(0));
-    widget.set_margin_top(frame.y.max(0));
+    widget.set_margin_start(clamped_margin_start);
+    widget.set_margin_top(clamped_margin_top);
     if widget.parent().is_some() {
         widget.queue_allocate();
     } else {

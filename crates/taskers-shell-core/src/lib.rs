@@ -618,6 +618,16 @@ impl Frame {
             height: (self.height - clamped * 2).max(1),
         }
     }
+
+    pub fn inset_horizontal(self, amount: i32) -> Self {
+        let clamped = amount.clamp(0, self.width.saturating_sub(1) / 2);
+        Self {
+            x: self.x + clamped,
+            y: self.y,
+            width: (self.width - clamped * 2).max(1),
+            height: self.height,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -634,6 +644,7 @@ pub struct LayoutMetrics {
     pub pane_header_height: i32,
     pub browser_toolbar_height: i32,
     pub surface_tab_height: i32,
+    pub terminal_gutter_x: i32,
 }
 
 impl Default for LayoutMetrics {
@@ -651,6 +662,7 @@ impl Default for LayoutMetrics {
             pane_header_height: 26,
             browser_toolbar_height: 34,
             surface_tab_height: 28,
+            terminal_gutter_x: 6,
         }
     }
 }
@@ -1224,6 +1236,11 @@ pub enum ShellAction {
     },
     DismissActivity {
         activity_id: ActivityId,
+    },
+    DismissSurfaceAlert {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
     },
     SelectTheme {
         theme_id: String,
@@ -2169,6 +2186,11 @@ impl TaskersCore {
             } => self.close_surface_by_id(pane_id, surface_id),
             ShellAction::OpenActivity { activity_id } => self.open_activity(activity_id),
             ShellAction::DismissActivity { activity_id } => self.dismiss_activity(activity_id),
+            ShellAction::DismissSurfaceAlert {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => self.dismiss_surface_alert(workspace_id, pane_id, surface_id),
             ShellAction::SelectTheme { theme_id } => {
                 if self.ui.selected_theme_id == theme_id {
                     return false;
@@ -2837,6 +2859,19 @@ impl TaskersCore {
     fn dismiss_activity(&mut self, activity_id: ActivityId) -> bool {
         self.dispatch_control(ControlCommand::ClearNotification {
             notification_id: activity_id.notification_id,
+        })
+    }
+
+    fn dismiss_surface_alert(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> bool {
+        self.dispatch_control(ControlCommand::DismissSurfaceAlert {
+            workspace_id,
+            pane_id,
+            surface_id,
         })
     }
 
@@ -3783,6 +3818,10 @@ fn pane_body_frame(
         PaneKind::Terminal => 0,
         PaneKind::Browser => metrics.browser_toolbar_height,
     };
+    let terminal_gutter_x = match kind {
+        PaneKind::Terminal => metrics.terminal_gutter_x,
+        PaneKind::Browser => 0,
+    };
     let tab_strip_height = if show_tab_strip {
         metrics.surface_tab_height
     } else {
@@ -3790,6 +3829,7 @@ fn pane_body_frame(
     };
     frame
         .inset(metrics.pane_border_width)
+        .inset_horizontal(terminal_gutter_x)
         .inset_top(metrics.pane_header_height + tab_strip_height + browser_toolbar_height)
 }
 
@@ -4006,53 +4046,14 @@ fn surface_agent_state(
     surface: &SurfaceRecord,
     now: OffsetDateTime,
 ) -> Option<taskers_domain::WorkspaceAgentState> {
-    if !surface_has_agent_identity(surface) {
-        return None;
-    }
-
-    let state = surface.metadata.agent_state.or_else(|| {
-        if surface.metadata.agent_active {
-            match surface.attention {
-                taskers_domain::AttentionState::Busy => {
-                    Some(taskers_domain::WorkspaceAgentState::Working)
-                }
-                taskers_domain::AttentionState::WaitingInput => {
-                    Some(taskers_domain::WorkspaceAgentState::Waiting)
-                }
-                taskers_domain::AttentionState::Completed => {
-                    Some(taskers_domain::WorkspaceAgentState::Completed)
-                }
-                taskers_domain::AttentionState::Error => {
-                    Some(taskers_domain::WorkspaceAgentState::Failed)
-                }
-                taskers_domain::AttentionState::Normal => None,
-            }
-        } else {
-            match surface.attention {
-                taskers_domain::AttentionState::Completed => {
-                    Some(taskers_domain::WorkspaceAgentState::Completed)
-                }
-                taskers_domain::AttentionState::Error => {
-                    Some(taskers_domain::WorkspaceAgentState::Failed)
-                }
-                taskers_domain::AttentionState::Busy
-                | taskers_domain::AttentionState::WaitingInput => {
-                    Some(taskers_domain::WorkspaceAgentState::Completed)
-                }
-                taskers_domain::AttentionState::Normal => None,
-            }
-        }
-    })?;
-
-    match state {
+    let session = surface.agent_session.as_ref()?;
+    match session.state {
         taskers_domain::WorkspaceAgentState::Working
-        | taskers_domain::WorkspaceAgentState::Waiting => Some(state),
+        | taskers_domain::WorkspaceAgentState::Waiting => Some(session.state),
         taskers_domain::WorkspaceAgentState::Completed
-        | taskers_domain::WorkspaceAgentState::Failed => surface
-            .metadata
-            .last_signal_at
-            .filter(|timestamp| *timestamp >= now - time::Duration::minutes(15))
-            .map(|_| state),
+        | taskers_domain::WorkspaceAgentState::Failed => {
+            (session.updated_at >= now - time::Duration::minutes(15)).then_some(session.state)
+        }
     }
 }
 
@@ -4141,7 +4142,7 @@ fn window_tab_primary_title(workspace: &Workspace, tab: &WorkspaceWindowTabRecor
 
 fn display_surface_title(surface: &SurfaceRecord) -> String {
     match surface.kind {
-        PaneKind::Terminal => display_terminal_title(&surface.metadata),
+        PaneKind::Terminal => display_terminal_title(surface),
         PaneKind::Browser => display_browser_title(&surface.metadata),
     }
 }
@@ -4149,8 +4150,9 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
 fn surface_activity_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Option<String> {
     let _ = active_agent_surface_state(surface, now)?;
     surface
-        .metadata
-        .latest_agent_message
+        .agent_session
+        .as_ref()
+        .and_then(|session| session.latest_message.as_deref())
         .as_deref()
         .map(str::trim)
         .filter(|message| !message.is_empty())
@@ -4184,10 +4186,6 @@ fn surface_notification_ring(surface: &SurfaceRecord) -> Option<AttentionRingSta
         return None;
     }
 
-    if !surface_has_agent_identity(surface) {
-        return None;
-    }
-
     match surface.attention {
         taskers_domain::AttentionState::WaitingInput => Some(AttentionRingState::Waiting),
         taskers_domain::AttentionState::Error => Some(AttentionRingState::Error),
@@ -4200,22 +4198,20 @@ fn pane_notification_ring(pane: &taskers_domain::PaneRecord) -> Option<Attention
     dominant_attention_ring(pane.surfaces.values().filter_map(surface_notification_ring))
 }
 
-fn surface_has_agent_identity(surface: &SurfaceRecord) -> bool {
-    surface_agent_key(surface).is_some()
-        || surface.metadata.agent_state.is_some()
-        || surface
-            .metadata
-            .agent_title
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|title| !title.is_empty())
-}
-
 fn surface_agent_key(surface: &SurfaceRecord) -> Option<String> {
-    normalized_agent_key(surface.metadata.agent_kind.as_deref())
-        .or_else(|| normalized_agent_key(surface.metadata.agent_title.as_deref()))
+    surface
+        .agent_session
+        .as_ref()
+        .map(|session| session.kind.clone())
+        .or_else(|| {
+            surface
+                .agent_process
+                .as_ref()
+                .map(|process| process.kind.clone())
+        })
 }
 
+#[cfg(test)]
 fn normalized_agent_key(value: Option<&str>) -> Option<String> {
     let normalized = value
         .map(str::trim)
@@ -4229,26 +4225,29 @@ fn normalized_agent_key(value: Option<&str>) -> Option<String> {
     }
 }
 
-fn display_terminal_title(metadata: &PaneMetadata) -> String {
-    let agent_title = metadata
-        .agent_title
-        .as_deref()
-        .map(str::trim)
-        .filter(|title| !title.is_empty());
-    let context = terminal_context_label(metadata);
+fn display_terminal_title(surface: &SurfaceRecord) -> String {
+    let context = terminal_context_label(&surface.metadata);
 
-    if let Some(agent_title) = agent_title {
+    if let Some(session) = surface.agent_session.as_ref() {
         if let Some(context) = context.as_deref() {
-            return format!("{agent_title} · {context}");
+            return format!("{} · {context}", session.title);
         }
-        return agent_title.to_string();
+        return session.title.clone();
+    }
+
+    if let Some(process) = surface.agent_process.as_ref() {
+        if let Some(context) = context.as_deref() {
+            return format!("{} · {context}", process.title);
+        }
+        return process.title.clone();
     }
 
     if let Some(context) = context {
         return context;
     }
 
-    if let Some(title) = metadata
+    if let Some(title) = surface
+        .metadata
         .title
         .as_deref()
         .map(str::trim)
@@ -4356,6 +4355,13 @@ fn is_generic_terminal_title(title: &str) -> bool {
         .unwrap_or(command)
         .trim()
         .to_ascii_lowercase();
+
+    if matches!(
+        basename.as_str(),
+        "taskers-shell-wrapper.sh" | "taskers-agent-proxy.sh"
+    ) {
+        return true;
+    }
 
     matches!(
         basename.as_str(),
@@ -4797,8 +4803,50 @@ mod tests {
         kind: taskers_domain::PaneKind,
         metadata: taskers_domain::PaneMetadata,
     ) -> taskers_domain::SurfaceRecord {
+        let agent_kind = metadata
+            .agent_kind
+            .as_deref()
+            .and_then(|kind| super::normalized_agent_key(Some(kind)))
+            .or_else(|| {
+                metadata
+                    .agent_title
+                    .as_deref()
+                    .and_then(|title| super::normalized_agent_key(Some(title)))
+            });
+        let process = agent_kind
+            .clone()
+            .map(|kind| taskers_domain::SurfaceAgentProcess {
+                id: taskers_domain::SessionId::new(),
+                kind: kind.clone(),
+                title: metadata
+                    .agent_title
+                    .clone()
+                    .unwrap_or_else(|| super::runtime_label(&kind)),
+                started_at: metadata
+                    .last_signal_at
+                    .unwrap_or_else(OffsetDateTime::now_utc),
+            });
+        let session = agent_kind.clone().and_then(|kind| {
+            metadata
+                .agent_state
+                .map(|state| taskers_domain::SurfaceAgentSession {
+                    id: taskers_domain::SessionId::new(),
+                    kind: kind.clone(),
+                    title: metadata
+                        .agent_title
+                        .clone()
+                        .unwrap_or_else(|| super::runtime_label(&kind)),
+                    state,
+                    latest_message: metadata.latest_agent_message.clone(),
+                    updated_at: metadata
+                        .last_signal_at
+                        .unwrap_or_else(OffsetDateTime::now_utc),
+                })
+        });
         let mut surface = taskers_domain::SurfaceRecord::new(kind);
         surface.metadata = metadata;
+        surface.agent_process = process;
+        surface.agent_session = session;
         surface
     }
 
@@ -4839,6 +4887,20 @@ mod tests {
             taskers_domain::PaneKind::Terminal,
             taskers_domain::PaneMetadata {
                 title: Some("zsh".into()),
+                cwd: Some("/home/notes/Projects/taskers".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "taskers");
+    }
+
+    #[test]
+    fn terminal_surface_titles_treat_taskers_shell_wrapper_as_generic() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("/run/user/1000/taskers/shell/taskers-shell-wrapper.sh".into()),
                 cwd: Some("/home/notes/Projects/taskers".into()),
                 ..taskers_domain::PaneMetadata::default()
             },
@@ -5154,7 +5216,8 @@ mod tests {
                 .windows
                 .get(&workspace.active_window)
                 .expect("window")
-                .layout
+                .active_layout()
+                .expect("layout")
                 .leaves()
                 .into_iter()
                 .find(|pane_id| *pane_id != first_pane_id)
@@ -5182,6 +5245,14 @@ mod tests {
             first_surface.metadata.agent_active = true;
             first_surface.metadata.agent_state = Some(taskers_domain::WorkspaceAgentState::Working);
             first_surface.metadata.last_signal_at = Some(now);
+            first_surface.agent_session = Some(taskers_domain::SurfaceAgentSession {
+                id: taskers_domain::SessionId::new(),
+                kind: "codex".into(),
+                title: "Codex".into(),
+                state: taskers_domain::WorkspaceAgentState::Working,
+                latest_message: None,
+                updated_at: now,
+            });
             first_surface.attention = taskers_domain::AttentionState::Busy;
 
             let second_surface = workspace
@@ -5193,6 +5264,14 @@ mod tests {
             second_surface.metadata.agent_active = false;
             second_surface.metadata.agent_state = Some(taskers_domain::WorkspaceAgentState::Failed);
             second_surface.metadata.last_signal_at = Some(now);
+            second_surface.agent_session = Some(taskers_domain::SurfaceAgentSession {
+                id: taskers_domain::SessionId::new(),
+                kind: "claude".into(),
+                title: "Claude".into(),
+                state: taskers_domain::WorkspaceAgentState::Failed,
+                latest_message: None,
+                updated_at: now,
+            });
             second_surface.attention = taskers_domain::AttentionState::Error;
         }
 
@@ -5432,6 +5511,49 @@ mod tests {
                 .iter()
                 .all(|plan| plan.frame.y >= min_content_y),
             "expected native surfaces to stay below window chrome"
+        );
+    }
+
+    #[test]
+    fn workspace_window_snapshots_expose_window_tabs() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab { window_id });
+
+        let snapshot = core.snapshot();
+        let active_window = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == window_id)
+            .expect("active window");
+
+        assert_eq!(active_window.tabs.len(), 2);
+        assert_eq!(active_window.active_tab, active_window.tabs[1].id);
+        assert!(active_window.tabs[1].active);
+        assert_eq!(
+            active_window.active_pane,
+            snapshot.current_workspace.active_pane
+        );
+    }
+
+    #[test]
+    fn terminal_portal_frames_include_horizontal_gutter() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let metrics = LayoutMetrics::default();
+        let terminal_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
+            .expect("terminal plan");
+
+        assert_eq!(
+            terminal_plan.frame.x,
+            terminal_plan.pane_frame.x + metrics.pane_border_width + metrics.terminal_gutter_x
         );
     }
 
@@ -6517,6 +6639,132 @@ mod tests {
         assert_eq!(snapshot.done_activity.len(), 1);
         assert_eq!(snapshot.done_activity[0].id, activity_id);
         assert!(!snapshot.attention_panel_visible);
+    }
+
+    #[test]
+    fn dismiss_activity_clears_notification_ring_outline_state() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        model
+            .create_agent_notification(
+                taskers_domain::AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                taskers_domain::SignalKind::Notification,
+                Some("Codex".into()),
+                None,
+                None,
+                "Need input".into(),
+                taskers_domain::AttentionState::WaitingInput,
+            )
+            .expect("notification");
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-dismiss-activity-ring",
+        ));
+
+        let before = core.snapshot();
+        let pane = find_pane(
+            &before.current_workspace.layout,
+            before.current_workspace.active_pane,
+        )
+        .expect("pane before dismiss");
+        assert_eq!(
+            pane.notification_ring,
+            Some(super::AttentionRingState::Waiting)
+        );
+
+        let activity_id = before
+            .activity
+            .first()
+            .map(|item| item.id)
+            .expect("notification activity");
+
+        core.dispatch_shell_action(ShellAction::DismissActivity { activity_id });
+
+        let after = core.snapshot();
+        let pane = find_pane(
+            &after.current_workspace.layout,
+            after.current_workspace.active_pane,
+        )
+        .expect("pane after dismiss");
+        assert_eq!(pane.notification_ring, None);
+        assert!(
+            pane.surfaces
+                .iter()
+                .all(|surface| surface.notification_ring.is_none())
+        );
+    }
+
+    #[test]
+    fn dismiss_surface_alert_removes_working_agent_session_and_status() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        model
+            .start_surface_agent_session(workspace_id, pane_id, surface_id, "codex".into())
+            .expect("working session");
+        model
+            .apply_surface_signal(
+                workspace_id,
+                pane_id,
+                surface_id,
+                taskers_domain::SignalEvent::with_metadata(
+                    "agent-hook:codex",
+                    taskers_domain::SignalKind::Started,
+                    Some("Working".into()),
+                    Some(taskers_domain::SignalPaneMetadata {
+                        title: None,
+                        agent_title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                    }),
+                ),
+            )
+            .expect("started signal");
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-dismiss-surface-alert",
+        ));
+        assert_eq!(core.snapshot().agents.len(), 1);
+
+        core.dispatch_shell_action(ShellAction::DismissSurfaceAlert {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.agents.is_empty());
+        let pane = find_pane(&snapshot.current_workspace.layout, pane_id).expect("pane");
+        let surface = pane
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == surface_id)
+            .expect("surface");
+        assert_eq!(surface.status_label, None);
+        assert_eq!(surface.notification_ring, None);
     }
 
     #[test]

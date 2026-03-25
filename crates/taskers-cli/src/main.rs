@@ -885,6 +885,40 @@ enum SurfaceCommand {
         #[arg(long)]
         surface: SurfaceId,
     },
+    AgentStart {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long)]
+        pane: PaneId,
+        #[arg(long)]
+        surface: SurfaceId,
+        #[arg(long)]
+        agent: String,
+    },
+    AgentStop {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long)]
+        pane: PaneId,
+        #[arg(long)]
+        surface: SurfaceId,
+        #[arg(long = "exit-status")]
+        exit_status: i32,
+    },
+    DismissAlert {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        workspace: WorkspaceId,
+        #[arg(long)]
+        pane: PaneId,
+        #[arg(long)]
+        surface: SurfaceId,
+    },
     Close {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -1878,6 +1912,58 @@ async fn main() -> anyhow::Result<()> {
                 let client = ControlClient::new(resolve_socket_path(socket));
                 let response = client
                     .send(ControlCommand::MarkSurfaceCompleted {
+                        workspace_id: workspace,
+                        pane_id: pane,
+                        surface_id: surface,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            SurfaceCommand::AgentStart {
+                socket,
+                workspace,
+                pane,
+                surface,
+                agent,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = client
+                    .send(ControlCommand::StartSurfaceAgentSession {
+                        workspace_id: workspace,
+                        pane_id: pane,
+                        surface_id: surface,
+                        agent_kind: agent,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            SurfaceCommand::AgentStop {
+                socket,
+                workspace,
+                pane,
+                surface,
+                exit_status,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = client
+                    .send(ControlCommand::StopSurfaceAgentSession {
+                        workspace_id: workspace,
+                        pane_id: pane,
+                        surface_id: surface,
+                        exit_status,
+                    })
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            SurfaceCommand::DismissAlert {
+                socket,
+                workspace,
+                pane,
+                surface,
+            } => {
+                let client = ControlClient::new(resolve_socket_path(socket));
+                let response = client
+                    .send(ControlCommand::DismissSurfaceAlert {
                         workspace_id: workspace,
                         pane_id: pane,
                         surface_id: surface,
@@ -3010,7 +3096,7 @@ mod tests {
             "TASKERS_SURFACE_ID",
             "TASKERS_TTY_NAME",
             "tty 2>/dev/null",
-            "agent-hook notification",
+            "agent-hook stop",
             "--workspace \"$TASKERS_WORKSPACE_ID\"",
             "--pane \"$TASKERS_PANE_ID\"",
             "--surface \"$TASKERS_SURFACE_ID\"",

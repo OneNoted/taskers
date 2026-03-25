@@ -9,14 +9,12 @@ if [ -z "$taskers_ctl" ] && command -v taskersctl >/dev/null 2>&1; then
   taskers_ctl=$(command -v taskersctl)
 fi
 
-if [ -n "$payload" ]; then
-  if command -v jq >/dev/null 2>&1; then
-    message=$(
-      printf '%s' "$payload" \
-        | jq -r '."last-assistant-message" // .message // .title // empty' 2>/dev/null \
-        | head -c 160
-    )
-  fi
+if [ -n "$payload" ] && command -v jq >/dev/null 2>&1; then
+  message=$(
+    printf '%s' "$payload" \
+      | jq -r '."last-assistant-message" // .message // .title // empty' 2>/dev/null \
+      | head -c 160
+  )
 fi
 
 if [ -z "$message" ]; then

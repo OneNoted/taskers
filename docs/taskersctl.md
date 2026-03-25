@@ -144,7 +144,7 @@ If your tool already emits lifecycle events, use `agent-hook` instead of rebuild
 
 ```bash
 taskersctl agent-hook waiting --title "Codex" --message "Need review"
-taskersctl agent-hook notification --title "Codex" --message "Turn complete"
+taskersctl agent-hook stop --title "Codex" --message "Turn complete"
 taskersctl agent-hook stop --message "Finished"
 ```
 

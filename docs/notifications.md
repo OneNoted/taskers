@@ -100,7 +100,7 @@ For tool or wrapper integrations, Taskers also supports explicit hook-style comm
 
 ```bash
 taskersctl agent-hook waiting --message "Need review"
-taskersctl agent-hook notification --title "Codex" --message "Turn complete"
+taskersctl agent-hook stop --title "Codex" --message "Turn complete"
 taskersctl agent-hook stop --message "Finished"
 ```
 

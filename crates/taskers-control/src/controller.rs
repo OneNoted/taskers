@@ -381,6 +381,34 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::StartSurfaceAgentSession {
+                workspace_id,
+                pane_id,
+                surface_id,
+                agent_kind,
+            } => {
+                model.start_surface_agent_session(workspace_id, pane_id, surface_id, agent_kind)?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface agent session started".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::StopSurfaceAgentSession {
+                workspace_id,
+                pane_id,
+                surface_id,
+                exit_status,
+            } => {
+                model.stop_surface_agent_session(workspace_id, pane_id, surface_id, exit_status)?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface agent session stopped".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::MarkSurfaceCompleted {
                 workspace_id,
                 pane_id,
@@ -679,6 +707,19 @@ impl InMemoryController {
                 (
                     ControlResponse::Ack {
                         message: "agent notifications cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::DismissSurfaceAlert {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                model.dismiss_surface_alert(workspace_id, pane_id, surface_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface alert dismissed".into(),
                     },
                     true,
                 )

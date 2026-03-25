@@ -131,6 +131,18 @@ pub enum ControlCommand {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    StartSurfaceAgentSession {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        agent_kind: String,
+    },
+    StopSurfaceAgentSession {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        exit_status: i32,
+    },
     MarkSurfaceCompleted {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
@@ -233,6 +245,11 @@ pub enum ControlCommand {
     },
     AgentClearNotifications {
         target: AgentTarget,
+    },
+    DismissSurfaceAlert {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
     },
     AgentTriggerFlash {
         workspace_id: WorkspaceId,

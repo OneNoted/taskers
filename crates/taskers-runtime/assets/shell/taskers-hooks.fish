@@ -69,8 +69,6 @@ function taskers__collect_metadata
 
     if set -q TASKERS_ACTIVE_AGENT_KIND
         set -g TASKERS_META_AGENT "$TASKERS_ACTIVE_AGENT_KIND"
-    else if set -q TASKERS_PANE_AGENT_KIND
-        set -g TASKERS_META_AGENT "$TASKERS_PANE_AGENT_KIND"
     else
         set -g TASKERS_META_AGENT shell
     end
@@ -158,24 +156,28 @@ function taskers__emit_metadata_if_changed
     taskers__emit_with_metadata metadata
 end
 
+function taskers__invalidate_metadata_cache
+    set -e TASKERS_LAST_META_CWD
+    set -e TASKERS_LAST_META_REPO_NAME
+    set -e TASKERS_LAST_META_BRANCH
+    set -e TASKERS_LAST_META_AGENT
+    set -e TASKERS_LAST_META_TITLE
+    set -e TASKERS_LAST_META_AGENT_ACTIVE
+end
+
 function taskers__on_preexec --on-event fish_preexec
     set -l agent (taskers__classify_command "$argv[1]" 2>/dev/null)
     if test -n "$agent"
-        set -gx TASKERS_PANE_AGENT_KIND "$agent"
         set -gx TASKERS_ACTIVE_AGENT_KIND "$agent"
-        taskers__emit_with_metadata started
+        taskers__invalidate_metadata_cache
+        taskers__emit_metadata_if_changed
     end
 end
 
 function taskers__on_postexec --on-event fish_postexec
-    set -l exit_status $status
     if set -q TASKERS_ACTIVE_AGENT_KIND
-        if test "$exit_status" -eq 0
-            taskers__emit_with_metadata completed
-        else
-            taskers__emit_with_metadata error "Exited with status $exit_status"
-        end
         set -e TASKERS_ACTIVE_AGENT_KIND
+        taskers__invalidate_metadata_cache
     end
 
     taskers__emit_metadata_if_changed

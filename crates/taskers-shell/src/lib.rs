@@ -15,6 +15,7 @@ use taskers_core::{
     ShellSnapshot, ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot,
     SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot,
     WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
 };
 use taskers_shell_core as taskers_core;
 
@@ -22,11 +23,29 @@ type DraggedSurface = SurfaceDragSessionSnapshot;
 
 const WORKSPACE_DRAG_MIME: &str = "application/x-taskers-workspace";
 const WINDOW_DRAG_MIME: &str = "application/x-taskers-window";
+const WINDOW_TAB_DRAG_MIME: &str = "application/x-taskers-window-tab";
 const SURFACE_DRAG_THRESHOLD_PX: f64 = 6.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DraggedWindow {
     window_id: taskers_core::WorkspaceWindowId,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DraggedWindowTab {
+    window_id: taskers_core::WorkspaceWindowId,
+    tab_id: WorkspaceWindowTabId,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowTabDropTarget {
+    BeforeTab {
+        window_id: taskers_core::WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    },
+    AppendToWindow {
+        window_id: taskers_core::WorkspaceWindowId,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -148,6 +167,35 @@ fn compute_surface_drop_index(
         && let Some(source_index) = ordered_surface_ids
             .iter()
             .position(|surface_id| *surface_id == dragged.surface_id)
+        && source_index < target_index
+    {
+        target_index = target_index.saturating_sub(1);
+    }
+
+    target_index
+}
+
+fn compute_window_tab_drop_index(
+    dragged: DraggedWindowTab,
+    target_window_id: taskers_core::WorkspaceWindowId,
+    ordered_tab_ids: &[WorkspaceWindowTabId],
+    before_tab_id: Option<WorkspaceWindowTabId>,
+) -> usize {
+    let Some(before_tab_id) = before_tab_id else {
+        return usize::MAX;
+    };
+
+    let Some(mut target_index) = ordered_tab_ids
+        .iter()
+        .position(|tab_id| *tab_id == before_tab_id)
+    else {
+        return usize::MAX;
+    };
+
+    if dragged.window_id == target_window_id
+        && let Some(source_index) = ordered_tab_ids
+            .iter()
+            .position(|tab_id| *tab_id == dragged.tab_id)
         && source_index < target_index
     {
         target_index = target_index.saturating_sub(1);
@@ -336,6 +384,8 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     let mut surface_drag_candidate = use_signal(|| None::<SurfaceDragCandidate>);
     let window_drag_source = use_signal(|| None::<DraggedWindow>);
     let window_drop_target = use_signal(|| None::<WorkspaceWindowMoveTarget>);
+    let dragged_window_tab = use_signal(|| None::<DraggedWindowTab>);
+    let window_tab_drop_target = use_signal(|| None::<WindowTabDropTarget>);
     let workspace_ids: Vec<WorkspaceId> = snapshot.workspaces.iter().map(|ws| ws.id).collect();
     let dragged_surface = snapshot.surface_drag;
     let track_surface_drag = {
@@ -467,6 +517,8 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             dragged_surface,
                             window_drag_source,
                             window_drop_target,
+                            dragged_window_tab,
+                            window_tab_drop_target,
                         )}
                     }
                 } else {
@@ -989,6 +1041,8 @@ fn render_workspace_strip(
     dragged_surface: Option<DraggedSurface>,
     window_drag_source: Signal<Option<DraggedWindow>>,
     window_drop_target: Signal<Option<WorkspaceWindowMoveTarget>>,
+    dragged_window_tab: Signal<Option<DraggedWindowTab>>,
+    window_tab_drop_target: Signal<Option<WindowTabDropTarget>>,
 ) -> Element {
     let viewport_class = if workspace.overview_scale < 1.0 {
         "workspace-viewport workspace-viewport-overview"
@@ -1045,6 +1099,8 @@ fn render_workspace_strip(
                             dragged_surface,
                             window_drag_source,
                             window_drop_target,
+                            dragged_window_tab,
+                            window_tab_drop_target,
                         )}
                     }
                 }
@@ -1065,6 +1121,8 @@ fn render_workspace_window(
     dragged_surface: Option<DraggedSurface>,
     mut window_drag_source: Signal<Option<DraggedWindow>>,
     window_drop_target: Signal<Option<WorkspaceWindowMoveTarget>>,
+    mut dragged_window_tab: Signal<Option<DraggedWindowTab>>,
+    mut window_tab_drop_target: Signal<Option<WindowTabDropTarget>>,
 ) -> Element {
     let local_x = window.frame.x - workspace.viewport_origin_x;
     let local_y = window.frame.y - workspace.viewport_origin_y;
@@ -1096,14 +1154,18 @@ fn render_workspace_window(
         let mut window_drag_source = window_drag_source;
         let mut window_drop_target = window_drop_target;
         let mut surface_drop_target = surface_drop_target;
+        let mut dragged_window_tab = dragged_window_tab;
+        let mut window_tab_drop_target = window_tab_drop_target;
         move |_: Event<DragData>| {
             window_drag_source.set(None);
             window_drop_target.set(None);
             surface_drop_target.set(None);
+            dragged_window_tab.set(None);
+            window_tab_drop_target.set(None);
             core.dispatch_shell_action(ShellAction::EndDrag);
         }
     };
-    let drag_active = window_drag_source.read().is_some();
+    let drag_active = window_drag_source.read().is_some() || dragged_window_tab.read().is_some();
     let left_target = WorkspaceWindowMoveTarget::ColumnBefore {
         column_id: window.column_id,
     };
@@ -1112,10 +1174,21 @@ fn render_workspace_window(
     };
     let top_target = WorkspaceWindowMoveTarget::StackAbove { window_id };
     let bottom_target = WorkspaceWindowMoveTarget::StackBelow { window_id };
-    let window_runtime_icon_class = format!(
-        "workspace-window-runtime-icon {}",
-        runtime_state_class(window.runtime.state)
-    );
+    let ordered_window_tab_ids = window.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+    let add_window_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab { window_id });
+        }
+    };
+    let window_tab_add_class = if *window_tab_drop_target.read()
+        == Some(WindowTabDropTarget::AppendToWindow { window_id })
+    {
+        "workspace-window-tab-add workspace-window-tab-add-active"
+    } else {
+        "workspace-window-tab-add"
+    };
 
     rsx! {
         section { class: "{window_class}", style: "{style}",
@@ -1125,6 +1198,7 @@ fn render_workspace_window(
                 drag_active,
                 window_drag_source,
                 window_drop_target,
+                dragged_window_tab,
                 core.clone(),
             )}
             {render_window_drop_zone(
@@ -1133,6 +1207,7 @@ fn render_workspace_window(
                 drag_active,
                 window_drag_source,
                 window_drop_target,
+                dragged_window_tab,
                 core.clone(),
             )}
             {render_window_drop_zone(
@@ -1141,6 +1216,7 @@ fn render_workspace_window(
                 drag_active,
                 window_drag_source,
                 window_drop_target,
+                dragged_window_tab,
                 core.clone(),
             )}
             {render_window_drop_zone(
@@ -1149,19 +1225,76 @@ fn render_workspace_window(
                 drag_active,
                 window_drag_source,
                 window_drop_target,
+                dragged_window_tab,
                 core.clone(),
             )}
             div { class: "workspace-window-toolbar",
-                draggable: "true",
-                onclick: focus_window,
-                ondragstart: start_window_drag,
-                ondragend: clear_window_drag,
-                div {
-                    class: "workspace-window-runtime-badge",
-                    title: "{window.runtime.label} · {window.runtime.state.label()}",
-                    {render_runtime_icon(&window.runtime, 12, &window_runtime_icon_class)}
+                div { class: "workspace-window-toolbar-tabs",
+                    for tab in &window.tabs {
+                        {render_workspace_window_tab(
+                            window.id,
+                            tab,
+                            &ordered_window_tab_ids,
+                            core.clone(),
+                            dragged_window_tab,
+                            window_tab_drop_target,
+                        )}
+                    }
+                    button {
+                        class: "{window_tab_add_class}",
+                        title: "New window tab",
+                        onclick: add_window_tab,
+                        ondragover: move |event: Event<DragData>| {
+                            if dragged_window_tab.read().is_none() {
+                                return;
+                            }
+                            mark_move_drop(&event);
+                            window_tab_drop_target.set(Some(WindowTabDropTarget::AppendToWindow {
+                                window_id,
+                            }));
+                        },
+                        ondragleave: move |_: Event<DragData>| {
+                            if *window_tab_drop_target.read()
+                                == Some(WindowTabDropTarget::AppendToWindow { window_id })
+                            {
+                                window_tab_drop_target.set(None);
+                            }
+                        },
+                        ondrop: move |event: Event<DragData>| {
+                            let dragged = *dragged_window_tab.read();
+                            dragged_window_tab.set(None);
+                            window_tab_drop_target.set(None);
+                            let Some(dragged) = dragged else {
+                                return;
+                            };
+                            event.prevent_default();
+                            if dragged.window_id == window_id {
+                                core.dispatch_shell_action(ShellAction::MoveWorkspaceWindowTab {
+                                    window_id,
+                                    tab_id: dragged.tab_id,
+                                    target_index: usize::MAX,
+                                });
+                            } else {
+                                core.dispatch_shell_action(ShellAction::TransferWorkspaceWindowTab {
+                                    source_window_id: dragged.window_id,
+                                    tab_id: dragged.tab_id,
+                                    target_window_id: window_id,
+                                    target_index: usize::MAX,
+                                });
+                            }
+                            core.dispatch_shell_action(ShellAction::EndDrag);
+                        },
+                        {icons::plus(12, "workspace-window-tab-add-icon")}
+                    }
                 }
-                div { class: "workspace-window-grip" }
+                div {
+                    class: "workspace-window-toolbar-spacer",
+                    title: "Drag window",
+                    draggable: "true",
+                    onclick: focus_window,
+                    ondragstart: start_window_drag,
+                    ondragend: clear_window_drag,
+                }
             }
             div { class: "workspace-window-body",
                 {render_layout(
@@ -1186,6 +1319,7 @@ fn render_window_drop_zone(
     visible: bool,
     mut window_drag_source: Signal<Option<DraggedWindow>>,
     mut window_drop_target: Signal<Option<WorkspaceWindowMoveTarget>>,
+    mut dragged_window_tab: Signal<Option<DraggedWindowTab>>,
     core: SharedCore,
 ) -> Element {
     let class = if *window_drop_target.read() == Some(target) {
@@ -1196,7 +1330,7 @@ fn render_window_drop_zone(
         base_class.to_string()
     };
     let set_drop_target = move |event: Event<DragData>| {
-        if window_drag_source.read().is_none() {
+        if window_drag_source.read().is_none() && dragged_window_tab.read().is_none() {
             return;
         }
         mark_move_drop(&event);
@@ -1208,18 +1342,29 @@ fn render_window_drop_zone(
         }
     };
     let drop_window = move |event: Event<DragData>| {
-        if window_drag_source.read().is_none() {
+        let dragged_window = *window_drag_source.read();
+        let dragged_tab = *dragged_window_tab.read();
+        if dragged_window.is_none() && dragged_tab.is_none() {
             return;
         }
         event.prevent_default();
-        let dragged = *window_drag_source.read();
         window_drag_source.set(None);
         window_drop_target.set(None);
-        let Some(dragged) = dragged else {
+        dragged_window_tab.set(None);
+        if let Some(dragged) = dragged_window {
+            core.dispatch_shell_action(ShellAction::MoveWorkspaceWindow {
+                window_id: dragged.window_id,
+                target,
+            });
+            core.dispatch_shell_action(ShellAction::EndDrag);
+            return;
+        }
+        let Some(dragged_tab) = dragged_tab else {
             return;
         };
-        core.dispatch_shell_action(ShellAction::MoveWorkspaceWindow {
-            window_id: dragged.window_id,
+        core.dispatch_shell_action(ShellAction::ExtractWorkspaceWindowTab {
+            source_window_id: dragged_tab.window_id,
+            tab_id: dragged_tab.tab_id,
             target,
         });
         core.dispatch_shell_action(ShellAction::EndDrag);
@@ -1231,6 +1376,157 @@ fn render_window_drop_zone(
             ondragover: set_drop_target,
             ondragleave: clear_drop_target,
             ondrop: drop_window,
+        }
+    }
+}
+
+fn render_workspace_window_tab(
+    window_id: taskers_core::WorkspaceWindowId,
+    tab: &WorkspaceWindowTabSnapshot,
+    ordered_tab_ids: &[WorkspaceWindowTabId],
+    core: SharedCore,
+    mut dragged_window_tab: Signal<Option<DraggedWindowTab>>,
+    mut window_tab_drop_target: Signal<Option<WindowTabDropTarget>>,
+) -> Element {
+    let tab_id = tab.id;
+    let is_drop_target = matches!(
+        *window_tab_drop_target.read(),
+        Some(WindowTabDropTarget::BeforeTab {
+            window_id: target_window_id,
+            tab_id: target_tab_id,
+        }) if target_window_id == window_id && target_tab_id == tab_id
+    );
+    let attention_class = match tab.attention {
+        AttentionState::Completed | AttentionState::WaitingInput | AttentionState::Error => {
+            format!(" workspace-window-tab-attention-{}", tab.attention.slug())
+        }
+        AttentionState::Normal | AttentionState::Busy => String::new(),
+    };
+    let tab_class = if tab.active {
+        format!(
+            "workspace-window-tab workspace-window-tab-active{}{}",
+            attention_class,
+            if is_drop_target {
+                " workspace-window-tab-drop-target"
+            } else {
+                ""
+            }
+        )
+    } else {
+        format!(
+            "workspace-window-tab{}{}",
+            attention_class,
+            if is_drop_target {
+                " workspace-window-tab-drop-target"
+            } else {
+                ""
+            }
+        )
+    };
+    let runtime_icon_class = format!(
+        "workspace-window-tab-kind-icon {}",
+        runtime_state_class(tab.runtime.state)
+    );
+    let tab_title = format!("{} · {}", tab.runtime.label, tab.title);
+    let focus_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindowTab { window_id, tab_id });
+        }
+    };
+    let close_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CloseWorkspaceWindowTab { window_id, tab_id });
+        }
+    };
+    let start_tab_drag = {
+        let core = core.clone();
+        move |event: Event<DragData>| {
+            prime_drag_transfer(
+                &event,
+                WINDOW_TAB_DRAG_MIME,
+                &format!("{window_id}:{tab_id}"),
+            );
+            dragged_window_tab.set(Some(DraggedWindowTab { window_id, tab_id }));
+            window_tab_drop_target.set(None);
+            core.dispatch_shell_action(ShellAction::BeginWindowTabDrag);
+        }
+    };
+    let end_tab_drag = {
+        let core = core.clone();
+        move |_: Event<DragData>| {
+            dragged_window_tab.set(None);
+            window_tab_drop_target.set(None);
+            core.dispatch_shell_action(ShellAction::EndDrag);
+        }
+    };
+    let set_drop_target = move |event: Event<DragData>| {
+        if dragged_window_tab.read().is_none() {
+            return;
+        }
+        mark_move_drop(&event);
+        window_tab_drop_target.set(Some(WindowTabDropTarget::BeforeTab { window_id, tab_id }));
+    };
+    let clear_drop_target = move |_: Event<DragData>| {
+        if *window_tab_drop_target.read()
+            == Some(WindowTabDropTarget::BeforeTab { window_id, tab_id })
+        {
+            window_tab_drop_target.set(None);
+        }
+    };
+    let drop_tab = {
+        let core = core.clone();
+        let ordered_tab_ids = ordered_tab_ids.to_vec();
+        move |event: Event<DragData>| {
+            let dragged = *dragged_window_tab.read();
+            dragged_window_tab.set(None);
+            window_tab_drop_target.set(None);
+            let Some(dragged) = dragged else {
+                return;
+            };
+            event.prevent_default();
+            let target_index =
+                compute_window_tab_drop_index(dragged, window_id, &ordered_tab_ids, Some(tab_id));
+            if dragged.window_id == window_id {
+                core.dispatch_shell_action(ShellAction::MoveWorkspaceWindowTab {
+                    window_id,
+                    tab_id: dragged.tab_id,
+                    target_index,
+                });
+            } else {
+                core.dispatch_shell_action(ShellAction::TransferWorkspaceWindowTab {
+                    source_window_id: dragged.window_id,
+                    tab_id: dragged.tab_id,
+                    target_window_id: window_id,
+                    target_index,
+                });
+            }
+            core.dispatch_shell_action(ShellAction::EndDrag);
+        }
+    };
+
+    rsx! {
+        div {
+            class: "{tab_class}",
+            title: "{tab_title}",
+            draggable: "true",
+            ondragstart: start_tab_drag,
+            ondragend: end_tab_drag,
+            ondragover: set_drop_target,
+            ondragleave: clear_drop_target,
+            ondrop: drop_tab,
+            button { class: "workspace-window-tab-button", onclick: focus_tab,
+                {render_runtime_icon(&tab.runtime, 11, &runtime_icon_class)}
+                span { class: "workspace-window-tab-copy",
+                    span { class: "workspace-window-tab-title", "{tab.title}" }
+                }
+            }
+            button { class: "workspace-window-tab-close", title: "Close window tab", onclick: close_tab,
+                {icons::close(10, "workspace-window-tab-close-icon")}
+            }
         }
     }
 }
@@ -1381,6 +1677,20 @@ fn render_pane(
         runtime_state_class(active_surface.runtime.state)
     );
     let pane_surface_summary_title = surface_summary_title(active_surface);
+    let dismiss_surface_alert = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::DismissSurfaceAlert {
+                workspace_id,
+                pane_id,
+                surface_id: active_surface_id,
+            });
+        }
+    };
+    let swallow_runtime_state_pointer = move |event: Event<PointerData>| {
+        event.stop_propagation();
+    };
 
     rsx! {
         div { class: "pane-frame",
@@ -1398,7 +1708,15 @@ fn render_pane(
                                         span { class: "pane-runtime-badge", "{runtime_label}" }
                                     }
                                     if let Some(status_label) = surface_status_text(active_surface) {
-                                        span { class: "{pane_runtime_state_class}", "{status_label}" }
+                                        button {
+                                            r#type: "button",
+                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
+                                            title: "Dismiss alert",
+                                            onpointerdown: swallow_runtime_state_pointer,
+                                            onpointerup: swallow_runtime_state_pointer,
+                                            onclick: dismiss_surface_alert,
+                                            "{status_label}"
+                                        }
                                     }
                                 }
                             }
@@ -1416,7 +1734,15 @@ fn render_pane(
                                         span { class: "pane-runtime-badge", "{runtime_label}" }
                                     }
                                     if let Some(status_label) = surface_status_text(active_surface) {
-                                        span { class: "{pane_runtime_state_class}", "{status_label}" }
+                                        button {
+                                            r#type: "button",
+                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
+                                            title: "Dismiss alert",
+                                            onpointerdown: swallow_runtime_state_pointer,
+                                            onpointerup: swallow_runtime_state_pointer,
+                                            onclick: dismiss_surface_alert,
+                                            "{status_label}"
+                                        }
                                     }
                                 }
                             }
@@ -1733,25 +2059,56 @@ fn render_surface_tab(
         runtime_state_class(surface.runtime.state)
     );
     let surface_tab_title = surface_summary_title(surface);
+    let dismissible_status = surface_status_text(surface).is_some();
+    let dismiss_surface_alert = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::DismissSurfaceAlert {
+                workspace_id,
+                pane_id,
+                surface_id,
+            });
+        }
+    };
+    let swallow_pointer = move |event: Event<PointerData>| {
+        event.stop_propagation();
+    };
 
     rsx! {
-        button {
+        div {
             key: "{surface_id}",
             class: "{tab_class} surface-tab-draggable",
             title: "{surface_tab_title}",
-            onclick: focus_surface,
-            onpointerdown: begin_surface_drag_candidate,
-            onpointerenter: set_surface_drop_target_enter,
-            onpointermove: set_surface_drop_target_move,
-            onpointerleave: clear_surface_drop_target,
-            onpointerup: drop_surface,
-            {render_runtime_icon(&surface.runtime, 10, &surface_runtime_icon_class)}
-            span { key: "{surface_id}-copy", class: "surface-tab-copy",
-                span { class: "surface-tab-primary", "{surface_primary_label(surface)}" }
-                if let Some(runtime_label) = surface_runtime_badge_text(surface) {
-                    span { key: "{surface_id}-runtime-badge", class: "surface-tab-runtime-badge", "{runtime_label}" }
+            button {
+                class: "surface-tab-focus",
+                onclick: focus_surface,
+                onpointerdown: begin_surface_drag_candidate,
+                onpointerenter: set_surface_drop_target_enter,
+                onpointermove: set_surface_drop_target_move,
+                onpointerleave: clear_surface_drop_target,
+                onpointerup: drop_surface,
+                {render_runtime_icon(&surface.runtime, 10, &surface_runtime_icon_class)}
+                span { key: "{surface_id}-copy", class: "surface-tab-copy",
+                    span { class: "surface-tab-primary", "{surface_primary_label(surface)}" }
+                    if let Some(runtime_label) = surface_runtime_badge_text(surface) {
+                        span { key: "{surface_id}-runtime-badge", class: "surface-tab-runtime-badge", "{runtime_label}" }
+                    }
                 }
-                if let Some(status_label) = surface_status_text(surface) {
+            }
+            if let Some(status_label) = surface_status_text(surface) {
+                if dismissible_status {
+                    button {
+                        r#type: "button",
+                        key: "{surface_id}-status-{status_label}",
+                        class: "{surface_tab_state_class} surface-tab-dismiss",
+                        title: "Dismiss alert",
+                        onpointerdown: swallow_pointer,
+                        onpointerup: swallow_pointer,
+                        onclick: dismiss_surface_alert,
+                        "{status_label}"
+                    }
+                } else {
                     span {
                         key: "{surface_id}-status-{status_label}",
                         class: "{surface_tab_state_class}",
@@ -1926,25 +2283,50 @@ fn render_agent_item(
     let pane_id = agent.pane_id;
     let surface_id = agent.surface_id;
     let current_workspace_id = current_workspace.id;
+    let focus_core = core.clone();
     let focus_target = move |_| {
         if workspace_id != current_workspace_id {
-            core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
+            focus_core.dispatch_shell_action(ShellAction::FocusWorkspace { workspace_id });
         }
-        core.dispatch_shell_action(ShellAction::FocusSurface {
+        focus_core.dispatch_shell_action(ShellAction::FocusSurface {
             pane_id,
             surface_id,
         });
     };
+    let dismissible = true;
+    let dismiss = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::DismissSurfaceAlert {
+                workspace_id,
+                pane_id,
+                surface_id,
+            });
+        }
+    };
 
     rsx! {
-        button { class: "activity-item-button", onclick: focus_target,
-            div { class: "{row_class}",
-                div { class: "activity-header",
-                    {render_runtime_icon_by_key(agent.agent_kind.as_str(), 12, &agent_icon_class)}
-                    div { class: "workspace-label", "{agent.title}" }
-                    div { class: "activity-time", "{agent.state.label()}" }
+        div { class: "activity-item-row",
+            button { class: "activity-item-button", onclick: focus_target,
+                div { class: "{row_class}",
+                    div { class: "activity-header",
+                        {render_runtime_icon_by_key(agent.agent_kind.as_str(), 12, &agent_icon_class)}
+                        div { class: "workspace-label", "{agent.title}" }
+                        if !dismissible {
+                            div { class: "activity-time", "{agent.state.label()}" }
+                        }
+                    }
+                    div { class: "activity-meta", "{agent.workspace_title} · {agent.agent_kind}" }
                 }
-                div { class: "activity-meta", "{agent.workspace_title} · {agent.agent_kind}" }
+            }
+            if dismissible {
+                button {
+                    class: "activity-time activity-item-dismiss activity-item-dismiss-label",
+                    title: "Dismiss alert",
+                    onclick: dismiss,
+                    "{agent.state.label()}"
+                }
             }
         }
     }

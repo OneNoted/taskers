@@ -4,17 +4,19 @@ This guide is the quickest way to get oriented in the active Taskers app.
 
 ## Mental Model
 
-Taskers has three layers of layout:
+Taskers has four layers of layout:
 
 - A workspace contains top-level workspace windows.
-- A workspace window contains panes.
-- A pane contains tabs.
+- A workspace window contains window tabs.
+- A window tab contains panes.
+- A pane contains surface tabs.
 
 That distinction matters:
 
 - Workspace navigation and panning operate on top-level windows.
-- Pane splits stay local to the current workspace window.
-- Tabs stay local to the current pane until you move them.
+- Window tabs stay local to the current workspace window until you merge or extract them.
+- Pane splits stay local to the current window tab.
+- Surface tabs stay local to the current pane until you move them.
 
 If something feels like “Niri behavior,” it should usually happen at the workspace-window layer, not at the pane or tab layer.
 
@@ -25,7 +27,7 @@ Taskers currently ships two live surface kinds:
 - Terminal surfaces backed by embedded Ghostty
 - Browser surfaces backed by embedded WebKit
 
-Each pane can hold one or more tabs of either kind. The active tab supplies the live content for that pane.
+Each pane can hold one or more surface tabs of either kind. The active surface tab supplies the live content for that pane.
 
 ## Embedded Ghostty Config
 
@@ -35,7 +37,7 @@ Taskers still pins a small set of embedded-pane invariants:
 
 - the launch command stays Taskers-owned
 - Ghostty shell integration stays disabled because Taskers provides its own shell wrapper
-- Ghostty window padding stays zero so the grid aligns with pane chrome
+- Ghostty window padding stays zero and Taskers adds its own host-side terminal gutter
 - Ghostty Linux cgroup settings stay disabled for embedded panes
 
 That means Ghostty settings such as fonts, theme, colors, cursor behavior, and scrollback should carry over, while window-style and shell-launch behavior remains controlled by Taskers.
@@ -52,12 +54,14 @@ Build out the workspace:
 
 - Create or switch to a workspace from the sidebar.
 - Use the pane controls to add a new terminal tab or browser tab.
+- Use the window top bar to add or rearrange whole window tabs when you want another local pane layout in the same top-level window.
 - Split the active pane when you want another local work area inside the current workspace window.
 - Create or move top-level workspace windows when you want side-by-side tiled regions.
 
 The important boundary is:
 
 - New split inside the current window: pane operation
+- New tab inside the current top-level window: window-tab operation
 - New top-level tile in the scrolling workspace: workspace-window operation
 
 ## Working Inside A Taskers Terminal

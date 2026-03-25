@@ -13,6 +13,10 @@ publish = false
 name = "taskers-gtk"
 path = "src/main.rs"
 
+[[bin]]
+name = "taskersctl"
+path = "src/bin/taskersctl.rs"
+
 [dependencies]
 adw.workspace = true
 anyhow.workspace = true

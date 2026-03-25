@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
-use time::{Duration, OffsetDateTime};
+use time::OffsetDateTime;
 
 use crate::{
     AttentionState, Direction, LayoutNode, NotificationId, PaneId, SessionId, SignalEvent,
@@ -11,7 +11,7 @@ use crate::{
     WorkspaceWindowId, WorkspaceWindowTabId,
 };
 
-pub const SESSION_SCHEMA_VERSION: u32 = 5;
+pub const SESSION_SCHEMA_VERSION: u32 = 6;
 pub const DEFAULT_WORKSPACE_WINDOW_WIDTH: i32 = 1280;
 pub const DEFAULT_WORKSPACE_WINDOW_HEIGHT: i32 = 860;
 pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 10;
@@ -200,10 +200,32 @@ pub struct PaneMetadataPatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceAgentSession {
+    pub id: SessionId,
+    pub kind: String,
+    pub title: String,
+    pub state: WorkspaceAgentState,
+    pub latest_message: Option<String>,
+    pub updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceAgentProcess {
+    pub id: SessionId,
+    pub kind: String,
+    pub title: String,
+    pub started_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceRecord {
     pub id: SurfaceId,
     pub kind: PaneKind,
     pub metadata: PaneMetadata,
+    #[serde(default)]
+    pub agent_process: Option<SurfaceAgentProcess>,
+    #[serde(default)]
+    pub agent_session: Option<SurfaceAgentSession>,
     pub attention: AttentionState,
     pub session_id: SessionId,
     pub command: Option<Vec<String>>,
@@ -215,6 +237,8 @@ impl SurfaceRecord {
             id: SurfaceId::new(),
             kind,
             metadata: PaneMetadata::default(),
+            agent_process: None,
+            agent_session: None,
             attention: AttentionState::Normal,
             session_id: SessionId::new(),
             command: None,
@@ -641,9 +665,7 @@ impl WorkspaceWindowRecord {
     }
 
     pub fn contains_pane(&self, pane_id: PaneId) -> bool {
-        self.tabs
-            .values()
-            .any(|tab| tab.layout.contains(pane_id))
+        self.tabs.values().any(|tab| tab.layout.contains(pane_id))
     }
 
     pub fn tab_for_pane(&self, pane_id: PaneId) -> Option<WorkspaceWindowTabId> {
@@ -704,13 +726,6 @@ impl WorkspaceWindowRecord {
             self.active_tab = *next_tab_id;
         }
         Some(removed)
-    }
-
-    fn all_panes(&self) -> Vec<PaneId> {
-        self.tabs
-            .values()
-            .flat_map(|tab| tab.layout.leaves())
-            .collect()
     }
 
     fn normalize(&mut self, panes: &IndexMap<PaneId, PaneRecord>, fallback_pane: PaneId) {
@@ -1036,6 +1051,7 @@ impl Workspace {
 
     fn clear_notifications_matching(&mut self, target: &AgentTarget) -> Result<(), DomainError> {
         let now = OffsetDateTime::now_utc();
+        let mut cleared_surfaces = Vec::new();
         match *target {
             AgentTarget::Workspace { workspace_id } => {
                 if workspace_id != self.id {
@@ -1043,6 +1059,10 @@ impl Workspace {
                 }
                 for notification in &mut self.notifications {
                     if notification.cleared_at.is_none() {
+                        let target = (notification.pane_id, notification.surface_id);
+                        if !cleared_surfaces.contains(&target) {
+                            cleared_surfaces.push(target);
+                        }
                         if notification.read_at.is_none() {
                             notification.read_at = Some(now);
                         }
@@ -1065,6 +1085,10 @@ impl Workspace {
                 }
                 for notification in &mut self.notifications {
                     if notification.pane_id == pane_id && notification.cleared_at.is_none() {
+                        let target = (notification.pane_id, notification.surface_id);
+                        if !cleared_surfaces.contains(&target) {
+                            cleared_surfaces.push(target);
+                        }
                         if notification.read_at.is_none() {
                             notification.read_at = Some(now);
                         }
@@ -1096,6 +1120,10 @@ impl Workspace {
                         && notification.surface_id == surface_id
                         && notification.cleared_at.is_none()
                     {
+                        let target = (notification.pane_id, notification.surface_id);
+                        if !cleared_surfaces.contains(&target) {
+                            cleared_surfaces.push(target);
+                        }
                         if notification.read_at.is_none() {
                             notification.read_at = Some(now);
                         }
@@ -1103,6 +1131,9 @@ impl Workspace {
                     }
                 }
             }
+        }
+        for (pane_id, surface_id) in cleared_surfaces {
+            self.sync_surface_attention_with_active_notifications(pane_id, surface_id);
         }
         Ok(())
     }
@@ -1112,13 +1143,53 @@ impl Workspace {
         if let Some(notification) = self.notifications.iter_mut().find(|notification| {
             notification.id == notification_id && notification.cleared_at.is_none()
         }) {
+            let pane_id = notification.pane_id;
+            let surface_id = notification.surface_id;
             if notification.read_at.is_none() {
                 notification.read_at = Some(now);
             }
             notification.cleared_at = Some(now);
+            self.sync_surface_attention_with_active_notifications(pane_id, surface_id);
             return true;
         }
         false
+    }
+
+    fn sync_surface_attention_with_active_notifications(
+        &mut self,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) {
+        let next_attention = self
+            .notifications
+            .iter()
+            .filter(|notification| {
+                notification.pane_id == pane_id
+                    && notification.surface_id == surface_id
+                    && notification.active()
+            })
+            .map(|notification| notification.state)
+            .max_by_key(|state| state.rank());
+
+        let Some(surface) = self
+            .panes
+            .get_mut(&pane_id)
+            .and_then(|pane| pane.surfaces.get_mut(&surface_id))
+        else {
+            return;
+        };
+
+        if let Some(attention) = next_attention {
+            surface.attention = attention;
+            return;
+        }
+
+        if matches!(
+            surface.attention,
+            AttentionState::Completed | AttentionState::WaitingInput | AttentionState::Error
+        ) {
+            surface.attention = AttentionState::Normal;
+        }
     }
 
     fn notification_target(&self, notification_id: NotificationId) -> Option<(PaneId, SurfaceId)> {
@@ -1387,7 +1458,7 @@ impl Workspace {
             .map(|pane| pane.active_surface)
     }
 
-    pub fn agent_summaries(&self, now: OffsetDateTime) -> Vec<WorkspaceAgentSummary> {
+    pub fn agent_summaries(&self, _now: OffsetDateTime) -> Vec<WorkspaceAgentSummary> {
         let mut summaries = self
             .panes
             .iter()
@@ -1395,23 +1466,15 @@ impl Workspace {
                 let workspace_window_id = self.window_for_pane(*pane_id);
                 pane.surfaces.values().filter_map(move |surface| {
                     let workspace_window_id = workspace_window_id?;
-                    let state = workspace_agent_state(surface, now)?;
-                    let agent_kind = surface.metadata.agent_kind.clone()?;
+                    let session = surface.agent_session.as_ref()?;
                     Some(WorkspaceAgentSummary {
                         workspace_window_id,
                         pane_id: *pane_id,
                         surface_id: surface.id,
-                        agent_kind,
-                        title: surface
-                            .metadata
-                            .agent_title
-                            .as_deref()
-                            .or(surface.metadata.title.as_deref())
-                            .map(str::trim)
-                            .filter(|title| !title.is_empty())
-                            .map(str::to_owned),
-                        state,
-                        last_signal_at: surface.metadata.last_signal_at,
+                        agent_kind: session.kind.clone(),
+                        title: Some(session.title.clone()),
+                        state: session.state,
+                        last_signal_at: Some(session.updated_at),
                     })
                 })
             })
@@ -1785,15 +1848,13 @@ impl AppModel {
                 .workspaces
                 .get(&workspace_id)
                 .ok_or(DomainError::MissingWorkspace(workspace_id))?;
-            let source_window = workspace
-                .windows
-                .get(&source_workspace_window_id)
-                .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?;
-            if !workspace
-                .windows
-                .contains_key(&target_workspace_window_id)
-            {
-                return Err(DomainError::MissingWorkspaceWindow(target_workspace_window_id));
+            let source_window = workspace.windows.get(&source_workspace_window_id).ok_or(
+                DomainError::MissingWorkspaceWindow(source_workspace_window_id),
+            )?;
+            if !workspace.windows.contains_key(&target_workspace_window_id) {
+                return Err(DomainError::MissingWorkspaceWindow(
+                    target_workspace_window_id,
+                ));
             }
             if !source_window.tabs.contains_key(&workspace_window_tab_id) {
                 return Err(DomainError::MissingWorkspaceWindowTab(
@@ -1802,7 +1863,9 @@ impl AppModel {
             }
             let (source_column_id, source_column_index, source_window_index) = workspace
                 .position_for_window(source_workspace_window_id)
-                .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?;
+                .ok_or(DomainError::MissingWorkspaceWindow(
+                    source_workspace_window_id,
+                ))?;
             (
                 source_column_id,
                 source_column_index,
@@ -1819,12 +1882,12 @@ impl AppModel {
             let source_window = workspace
                 .windows
                 .get_mut(&source_workspace_window_id)
-                .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?;
-            source_window
-                .remove_tab(workspace_window_tab_id)
-                .ok_or(DomainError::MissingWorkspaceWindowTab(
-                    workspace_window_tab_id,
-                ))?
+                .ok_or(DomainError::MissingWorkspaceWindow(
+                    source_workspace_window_id,
+                ))?;
+            source_window.remove_tab(workspace_window_tab_id).ok_or(
+                DomainError::MissingWorkspaceWindowTab(workspace_window_tab_id),
+            )?
         };
 
         if remove_source_window {
@@ -1842,7 +1905,8 @@ impl AppModel {
                     false
                 } else {
                     if !column.window_order.contains(&column.active_window) {
-                        let replacement_index = source_window_index.min(column.window_order.len() - 1);
+                        let replacement_index =
+                            source_window_index.min(column.window_order.len() - 1);
                         column.active_window = column.window_order[replacement_index];
                     }
                     true
@@ -1862,7 +1926,9 @@ impl AppModel {
             let target_window = workspace
                 .windows
                 .get_mut(&target_workspace_window_id)
-                .ok_or(DomainError::MissingWorkspaceWindow(target_workspace_window_id))?;
+                .ok_or(DomainError::MissingWorkspaceWindow(
+                    target_workspace_window_id,
+                ))?;
             target_window.insert_tab(moved_tab, to_index);
             workspace.sync_active_from_window(target_workspace_window_id);
         }
@@ -1883,7 +1949,9 @@ impl AppModel {
             .ok_or(DomainError::MissingWorkspace(workspace_id))?
             .windows
             .get(&source_workspace_window_id)
-            .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?
+            .ok_or(DomainError::MissingWorkspaceWindow(
+                source_workspace_window_id,
+            ))?
             .tabs
             .len();
 
@@ -1900,12 +1968,12 @@ impl AppModel {
             let source_window = workspace
                 .windows
                 .get_mut(&source_workspace_window_id)
-                .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?;
-            source_window
-                .remove_tab(workspace_window_tab_id)
-                .ok_or(DomainError::MissingWorkspaceWindowTab(
-                    workspace_window_tab_id,
-                ))?
+                .ok_or(DomainError::MissingWorkspaceWindow(
+                    source_workspace_window_id,
+                ))?;
+            source_window.remove_tab(workspace_window_tab_id).ok_or(
+                DomainError::MissingWorkspaceWindowTab(workspace_window_tab_id),
+            )?
         };
 
         let new_window_id = {
@@ -1948,12 +2016,9 @@ impl AppModel {
                 .windows
                 .get(&workspace_window_id)
                 .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
-            let tab = window
-                .tabs
-                .get(&workspace_window_tab_id)
-                .ok_or(DomainError::MissingWorkspaceWindowTab(
-                    workspace_window_tab_id,
-                ))?;
+            let tab = window.tabs.get(&workspace_window_tab_id).ok_or(
+                DomainError::MissingWorkspaceWindowTab(workspace_window_tab_id),
+            )?;
             (tab.layout.leaves(), window.tabs.len() == 1)
         };
 
@@ -1989,9 +2054,11 @@ impl AppModel {
             }
             workspace.windows.shift_remove(&workspace_window_id);
             remove_panes_from_workspace(workspace, &tab_panes);
-            if let Some(next_window_id) =
-                workspace.fallback_window_after_close(column_index, window_index, same_column_survived)
-            {
+            if let Some(next_window_id) = workspace.fallback_window_after_close(
+                column_index,
+                window_index,
+                same_column_survived,
+            ) {
                 workspace.sync_active_from_window(next_window_id);
             }
             return Ok(());
@@ -2005,11 +2072,9 @@ impl AppModel {
             .windows
             .get_mut(&workspace_window_id)
             .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
-        let _ = window
-            .remove_tab(workspace_window_tab_id)
-            .ok_or(DomainError::MissingWorkspaceWindowTab(
-                workspace_window_tab_id,
-            ))?;
+        let _ = window.remove_tab(workspace_window_tab_id).ok_or(
+            DomainError::MissingWorkspaceWindowTab(workspace_window_tab_id),
+        )?;
         remove_panes_from_workspace(workspace, &tab_panes);
         if workspace.active_window == workspace_window_id {
             workspace.sync_active_from_window(workspace_window_id);
@@ -2153,10 +2218,15 @@ impl AppModel {
                 surface_id,
             })?;
 
-        surface.attention = AttentionState::Completed;
+        surface.agent_process = None;
+        surface.agent_session = None;
+        surface.attention = AttentionState::Normal;
         surface.metadata.agent_active = false;
-        surface.metadata.agent_state = Some(WorkspaceAgentState::Completed);
-        surface.metadata.last_signal_at = Some(OffsetDateTime::now_utc());
+        surface.metadata.agent_state = None;
+        surface.metadata.last_signal_at = None;
+        surface.metadata.agent_title = None;
+        surface.metadata.agent_kind = None;
+        surface.metadata.latest_agent_message = None;
         workspace.complete_surface_notifications(pane_id, surface_id);
         Ok(())
     }
@@ -2172,14 +2242,11 @@ impl AppModel {
             .ok_or(DomainError::MissingWorkspace(workspace_id))?;
         let active_window_id = workspace.active_window;
 
-        let next_pane = workspace
-            .windows
-            .get(&active_window_id)
-            .and_then(|window| {
-                let active_pane = window.active_pane()?;
-                let layout = window.active_layout()?;
-                layout.focus_neighbor(active_pane, direction)
-            });
+        let next_pane = workspace.windows.get(&active_window_id).and_then(|window| {
+            let active_pane = window.active_pane()?;
+            let layout = window.active_layout()?;
+            layout.focus_neighbor(active_pane, direction)
+        });
         if let Some(next_pane) = next_pane {
             if let Some(window) = workspace.windows.get_mut(&active_window_id) {
                 let _ = window.focus_pane(next_pane);
@@ -2569,28 +2636,87 @@ impl AppModel {
             .as_ref()
             .and_then(|metadata| metadata.agent_active)
             .is_some_and(|active| !active);
+        let metadata_clears_agent_identity =
+            matches!(kind, SignalKind::Metadata) && metadata_reported_inactive;
         let (surface_attention, should_acknowledge_surface_notifications) = {
             let mut acknowledged_inactive_resolution = false;
             if agent_signal && matches!(kind, SignalKind::Started) {
                 surface.metadata.latest_agent_message = None;
             }
-            if let Some(metadata) = metadata {
-                surface.metadata.title = metadata.title;
-                if metadata.agent_title.is_some() {
-                    surface.metadata.agent_title = metadata.agent_title;
-                }
-                surface.metadata.cwd = metadata.cwd;
-                surface.metadata.repo_name = metadata.repo_name;
-                surface.metadata.git_branch = metadata.git_branch;
-                surface.metadata.ports = metadata.ports;
-                surface.metadata.agent_kind = metadata.agent_kind;
+            if let Some(metadata) = metadata.as_ref() {
+                surface.metadata.title = metadata.title.clone();
+                surface.metadata.agent_title = metadata.agent_title.clone();
+                surface.metadata.cwd = metadata.cwd.clone();
+                surface.metadata.repo_name = metadata.repo_name.clone();
+                surface.metadata.git_branch = metadata.git_branch.clone();
+                surface.metadata.ports = metadata.ports.clone();
+                surface.metadata.agent_kind = normalized_agent_kind(metadata.agent_kind.as_deref());
                 if let Some(agent_active) = metadata.agent_active {
                     surface.metadata.agent_active = agent_active;
                 }
+                if metadata_clears_agent_identity {
+                    surface.agent_process = None;
+                    surface.agent_session = None;
+                    surface.metadata.agent_state = None;
+                    surface.metadata.latest_agent_message = None;
+                    surface.metadata.last_signal_at = None;
+                    surface.attention = AttentionState::Normal;
+                    acknowledged_inactive_resolution = true;
+                }
             }
             if agent_signal {
+                let agent_identity = agent_identity_for_surface(surface, metadata.as_ref());
                 if let Some(agent_state) = signal_agent_state(&kind) {
                     surface.metadata.agent_state = Some(agent_state);
+                    match kind {
+                        SignalKind::Started | SignalKind::Progress => {
+                            if let Some((agent_kind, title)) = agent_identity.clone() {
+                                set_agent_turn(
+                                    surface,
+                                    agent_kind,
+                                    title,
+                                    WorkspaceAgentState::Working,
+                                    normalized_message.clone(),
+                                    timestamp,
+                                );
+                            }
+                        }
+                        SignalKind::WaitingInput | SignalKind::Notification => {
+                            if (surface.agent_process.is_some() || surface.agent_session.is_some())
+                                && let Some((agent_kind, title)) = agent_identity.clone()
+                            {
+                                set_agent_turn(
+                                    surface,
+                                    agent_kind,
+                                    title,
+                                    WorkspaceAgentState::Waiting,
+                                    normalized_message.clone(),
+                                    timestamp,
+                                );
+                            }
+                        }
+                        SignalKind::Completed | SignalKind::Error => {
+                            let session_state = match kind {
+                                SignalKind::Completed => WorkspaceAgentState::Completed,
+                                SignalKind::Error => WorkspaceAgentState::Failed,
+                                _ => unreachable!("only completed/error reach this branch"),
+                            };
+                            let session_message = normalized_message
+                                .clone()
+                                .or_else(|| surface.metadata.latest_agent_message.clone());
+                            if let Some((agent_kind, title)) = agent_identity.clone() {
+                                set_agent_turn(
+                                    surface,
+                                    agent_kind,
+                                    title,
+                                    session_state,
+                                    session_message,
+                                    timestamp,
+                                );
+                            }
+                        }
+                        SignalKind::Metadata => {}
+                    }
                 }
                 if let Some(message) = normalized_message.as_ref() {
                     surface.metadata.latest_agent_message = Some(message.clone());
@@ -2603,14 +2729,14 @@ impl AppModel {
                     surface.metadata.agent_active = agent_active;
                 }
             } else if metadata_reported_inactive
-                && matches!(
-                    surface.metadata.agent_state,
-                    Some(WorkspaceAgentState::Working | WorkspaceAgentState::Waiting)
-                )
+                && (surface.agent_process.is_some() || surface.agent_session.is_some())
             {
-                surface.attention = AttentionState::Completed;
-                surface.metadata.agent_state = Some(WorkspaceAgentState::Completed);
-                surface.metadata.last_signal_at = Some(timestamp);
+                surface.agent_process = None;
+                surface.agent_session = None;
+                surface.attention = AttentionState::Normal;
+                surface.metadata.agent_state = None;
+                surface.metadata.latest_agent_message = None;
+                surface.metadata.last_signal_at = None;
                 acknowledged_inactive_resolution = true;
             }
 
@@ -2800,14 +2926,25 @@ impl AppModel {
         if let Some(pane) = workspace.panes.get_mut(&pane_id)
             && let Some(surface) = pane.surfaces.get_mut(&surface_id)
         {
-            surface.attention = state;
+            let normalized_kind = normalized_title
+                .as_deref()
+                .and_then(|title| normalized_agent_kind(Some(title)));
+            match state {
+                AttentionState::Busy | AttentionState::WaitingInput => {
+                    surface.attention = state;
+                }
+                AttentionState::Normal | AttentionState::Completed | AttentionState::Error => {
+                    surface.attention = state;
+                }
+            }
             surface.metadata.last_signal_at = Some(now);
-            surface.metadata.agent_state = Some(agent_state_from_attention(state));
-            surface.metadata.agent_active = agent_active_from_attention(state);
+            surface.metadata.agent_state =
+                surface.agent_session.as_ref().map(|session| session.state);
+            surface.metadata.agent_active = surface.agent_process.is_some();
             surface.metadata.latest_agent_message = Some(message.clone());
             if let Some(agent_title) = normalized_title.clone() {
                 surface.metadata.agent_title = Some(agent_title.clone());
-                if let Some(agent_kind) = normalized_agent_kind(Some(agent_title.as_str())) {
+                if let Some(agent_kind) = normalized_kind {
                     surface.metadata.agent_kind = Some(agent_kind);
                 }
             }
@@ -2842,6 +2979,178 @@ impl AppModel {
             .get_mut(&workspace_id)
             .ok_or(DomainError::MissingWorkspace(workspace_id))?;
         workspace.clear_notifications_matching(&target)
+    }
+
+    pub fn start_surface_agent_session(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        agent_kind: String,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let surface = workspace
+            .panes
+            .get_mut(&pane_id)
+            .ok_or(DomainError::PaneNotInWorkspace {
+                workspace_id,
+                pane_id,
+            })?
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or(DomainError::SurfaceNotInPane {
+                workspace_id,
+                pane_id,
+                surface_id,
+            })?;
+
+        let normalized_kind = normalized_agent_kind(Some(agent_kind.as_str()))
+            .ok_or(DomainError::InvalidOperation("invalid agent kind"))?;
+        let now = OffsetDateTime::now_utc();
+        surface.agent_process = Some(SurfaceAgentProcess {
+            id: SessionId::new(),
+            kind: normalized_kind.clone(),
+            title: agent_display_title(&normalized_kind),
+            started_at: now,
+        });
+        surface.agent_session = None;
+        surface.attention = AttentionState::Normal;
+        surface.metadata.agent_kind = Some(normalized_kind);
+        surface.metadata.agent_title = surface
+            .agent_process
+            .as_ref()
+            .map(|process| process.title.clone());
+        surface.metadata.agent_active = true;
+        surface.metadata.agent_state = None;
+        surface.metadata.latest_agent_message = None;
+        surface.metadata.last_signal_at = None;
+
+        Ok(())
+    }
+
+    pub fn stop_surface_agent_session(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        exit_status: i32,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let title = {
+            let surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .ok_or(DomainError::PaneNotInWorkspace {
+                    workspace_id,
+                    pane_id,
+                })?
+                .surfaces
+                .get_mut(&surface_id)
+                .ok_or(DomainError::SurfaceNotInPane {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                })?;
+
+            let title = surface
+                .agent_process
+                .as_ref()
+                .map(|process| process.title.clone())
+                .or_else(|| {
+                    surface
+                        .agent_session
+                        .as_ref()
+                        .map(|session| session.title.clone())
+                });
+            surface.agent_process = None;
+            surface.agent_session = None;
+            surface.attention = AttentionState::Normal;
+            surface.metadata.agent_active = false;
+            surface.metadata.agent_state = None;
+            surface.metadata.agent_title = None;
+            surface.metadata.agent_kind = None;
+            surface.metadata.latest_agent_message = None;
+            surface.metadata.last_signal_at = None;
+            title
+        };
+
+        if exit_status != 0 && exit_status != 130 {
+            workspace.upsert_notification(NotificationItem {
+                id: NotificationId::new(),
+                pane_id,
+                surface_id,
+                kind: SignalKind::Error,
+                state: AttentionState::Error,
+                title,
+                subtitle: None,
+                external_id: None,
+                message: format!("Exited with status {exit_status}"),
+                created_at: OffsetDateTime::now_utc(),
+                read_at: None,
+                cleared_at: None,
+                desktop_delivery: NotificationDeliveryState::Pending,
+            });
+            if let Some(surface) = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&surface_id))
+            {
+                surface.attention = AttentionState::Error;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn dismiss_surface_alert(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        workspace.clear_notifications_matching(&AgentTarget::Surface {
+            workspace_id,
+            pane_id,
+            surface_id,
+        })?;
+
+        let surface = workspace
+            .panes
+            .get_mut(&pane_id)
+            .ok_or(DomainError::PaneNotInWorkspace {
+                workspace_id,
+                pane_id,
+            })?
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or(DomainError::SurfaceNotInPane {
+                workspace_id,
+                pane_id,
+                surface_id,
+            })?;
+
+        surface.agent_session = None;
+        surface.attention = AttentionState::Normal;
+        surface.metadata.agent_active = surface.agent_process.is_some();
+        surface.metadata.agent_state = None;
+        if surface.agent_process.is_none() {
+            surface.metadata.agent_title = None;
+            surface.metadata.agent_kind = None;
+        }
+        surface.metadata.latest_agent_message = None;
+        surface.metadata.last_signal_at = None;
+
+        Ok(())
     }
 
     pub fn clear_notification(
@@ -3675,8 +3984,6 @@ impl CurrentWorkspaceSerde {
     }
 }
 
-const RECENT_INACTIVE_AGENT_RETENTION: Duration = Duration::minutes(15);
-
 fn signal_kind_creates_notification(kind: &SignalKind) -> bool {
     matches!(
         kind,
@@ -3704,6 +4011,65 @@ fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<String> {
     }
 }
 
+fn agent_display_title(agent_kind: &str) -> String {
+    match agent_kind {
+        "codex" => "Codex".into(),
+        "claude" => "Claude".into(),
+        "opencode" => "OpenCode".into(),
+        "aider" => "Aider".into(),
+        other => other.to_string(),
+    }
+}
+
+fn agent_identity_for_surface(
+    surface: &SurfaceRecord,
+    metadata: Option<&SignalPaneMetadata>,
+) -> Option<(String, String)> {
+    if let Some(process) = surface.agent_process.as_ref() {
+        return Some((process.kind.clone(), process.title.clone()));
+    }
+
+    let kind = surface.metadata.agent_kind.clone().or_else(|| {
+        metadata.and_then(|metadata| normalized_agent_kind(metadata.agent_kind.as_deref()))
+    })?;
+    let title = surface
+        .metadata
+        .agent_title
+        .clone()
+        .or_else(|| metadata.and_then(|metadata| metadata.agent_title.clone()))
+        .unwrap_or_else(|| agent_display_title(&kind));
+    Some((kind, title))
+}
+
+fn set_agent_turn(
+    surface: &mut SurfaceRecord,
+    kind: String,
+    title: String,
+    state: WorkspaceAgentState,
+    latest_message: Option<String>,
+    updated_at: OffsetDateTime,
+) {
+    match surface.agent_session.as_mut() {
+        Some(session) => {
+            session.kind = kind;
+            session.title = title;
+            session.state = state;
+            session.latest_message = latest_message;
+            session.updated_at = updated_at;
+        }
+        None => {
+            surface.agent_session = Some(SurfaceAgentSession {
+                id: SessionId::new(),
+                kind,
+                title,
+                state,
+                latest_message,
+                updated_at,
+            });
+        }
+    }
+}
+
 fn is_agent_signal(
     surface: &SurfaceRecord,
     source: &str,
@@ -3711,7 +4077,8 @@ fn is_agent_signal(
 ) -> bool {
     is_agent_hook_source(source)
         || is_agent_kind(metadata.and_then(|metadata| metadata.agent_kind.as_deref()))
-        || is_agent_kind(surface.metadata.agent_kind.as_deref())
+        || surface.agent_process.is_some()
+        || surface.agent_session.is_some()
 }
 
 fn normalized_signal_message(message: Option<&str>) -> Option<String> {
@@ -3722,6 +4089,14 @@ fn normalized_signal_message(message: Option<&str>) -> Option<String> {
 }
 
 fn surface_notification_title(surface: &SurfaceRecord) -> Option<String> {
+    if let Some(session) = surface.agent_session.as_ref() {
+        return Some(session.title.clone());
+    }
+
+    if let Some(process) = surface.agent_process.as_ref() {
+        return Some(process.title.clone());
+    }
+
     surface
         .metadata
         .agent_title
@@ -3752,49 +4127,6 @@ fn signal_creates_notification(source: &str, kind: &SignalKind) -> bool {
     match kind {
         SignalKind::Notification => !is_agent_hook_source(source),
         _ => signal_kind_creates_notification(kind),
-    }
-}
-
-fn recent_inactive_cutoff(now: OffsetDateTime) -> OffsetDateTime {
-    now - RECENT_INACTIVE_AGENT_RETENTION
-}
-
-fn workspace_agent_state(
-    surface: &SurfaceRecord,
-    now: OffsetDateTime,
-) -> Option<WorkspaceAgentState> {
-    if !is_agent_kind(surface.metadata.agent_kind.as_deref()) {
-        return None;
-    }
-
-    let state = surface.metadata.agent_state.or_else(|| {
-        if surface.metadata.agent_active {
-            match surface.attention {
-                AttentionState::Busy => Some(WorkspaceAgentState::Working),
-                AttentionState::WaitingInput => Some(WorkspaceAgentState::Waiting),
-                AttentionState::Completed => Some(WorkspaceAgentState::Completed),
-                AttentionState::Error => Some(WorkspaceAgentState::Failed),
-                AttentionState::Normal => None,
-            }
-        } else {
-            match surface.attention {
-                AttentionState::Completed => Some(WorkspaceAgentState::Completed),
-                AttentionState::Error => Some(WorkspaceAgentState::Failed),
-                AttentionState::Busy | AttentionState::WaitingInput => {
-                    Some(WorkspaceAgentState::Completed)
-                }
-                AttentionState::Normal => None,
-            }
-        }
-    })?;
-
-    match state {
-        WorkspaceAgentState::Working | WorkspaceAgentState::Waiting => Some(state),
-        WorkspaceAgentState::Completed | WorkspaceAgentState::Failed => surface
-            .metadata
-            .last_signal_at
-            .filter(|timestamp| *timestamp >= recent_inactive_cutoff(now))
-            .map(|_| state),
     }
 }
 
@@ -3856,8 +4188,7 @@ fn close_layout_pane(tab: &mut WorkspaceWindowTabRecord, pane_id: PaneId) -> Opt
     .into_iter()
     .find_map(|direction| tab.layout.focus_neighbor(pane_id, direction))
     .or_else(|| {
-        tab
-            .layout
+        tab.layout
             .leaves()
             .into_iter()
             .find(|candidate| *candidate != pane_id)
@@ -3896,25 +4227,10 @@ fn signal_agent_state(kind: &SignalKind) -> Option<WorkspaceAgentState> {
     }
 }
 
-fn agent_state_from_attention(state: AttentionState) -> WorkspaceAgentState {
-    match state {
-        AttentionState::Normal | AttentionState::Busy => WorkspaceAgentState::Working,
-        AttentionState::WaitingInput => WorkspaceAgentState::Waiting,
-        AttentionState::Completed => WorkspaceAgentState::Completed,
-        AttentionState::Error => WorkspaceAgentState::Failed,
-    }
-}
-
-fn agent_active_from_attention(state: AttentionState) -> bool {
-    matches!(
-        state,
-        AttentionState::Normal | AttentionState::Busy | AttentionState::WaitingInput
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use time::Duration;
 
     use super::*;
     use crate::SignalPaneMetadata;
@@ -3957,7 +4273,8 @@ mod tests {
                 .windows
                 .get(&upper_window_id)
                 .expect("window")
-                .active_pane,
+                .active_pane()
+                .expect("active pane"),
             right_pane
         );
         assert_eq!(
@@ -4048,7 +4365,10 @@ mod tests {
         let active_window = workspace.active_window_record().expect("window");
 
         assert_eq!(workspace.active_pane, new_pane);
-        assert_eq!(active_window.layout.leaves(), vec![first_pane, new_pane]);
+        assert_eq!(
+            active_window.active_layout().expect("layout").leaves(),
+            vec![first_pane, new_pane]
+        );
     }
 
     #[test]
@@ -4072,7 +4392,7 @@ mod tests {
 
         assert_eq!(workspace.active_pane, upper_pane);
         assert_eq!(
-            active_window.layout.leaves(),
+            active_window.active_layout().expect("layout").leaves(),
             vec![left_pane, upper_pane, first_pane]
         );
     }
@@ -4466,7 +4786,10 @@ mod tests {
         let source_pane = workspace.panes.get(&source_pane_id).expect("source pane");
         let target_pane = workspace.panes.get(&new_pane_id).expect("new pane");
 
-        assert_eq!(window.layout.leaves(), vec![source_pane_id, new_pane_id]);
+        assert_eq!(
+            window.active_layout().expect("layout").leaves(),
+            vec![source_pane_id, new_pane_id]
+        );
         assert_eq!(
             source_pane.surface_ids().collect::<Vec<_>>(),
             vec![first_surface_id]
@@ -4517,7 +4840,7 @@ mod tests {
         assert_eq!(workspace.active_window, target_window_id);
         assert_eq!(workspace.active_pane, new_pane_id);
         assert_eq!(
-            target_window.layout.leaves(),
+            target_window.active_layout().expect("layout").leaves(),
             vec![new_pane_id, target_pane_id]
         );
         assert_eq!(
@@ -4805,7 +5128,7 @@ mod tests {
         assert!(!source_workspace.panes.contains_key(&source_pane_id));
         assert!(source_workspace.panes.contains_key(&anchor_pane_id));
         assert_eq!(
-            target_window.layout.leaves(),
+            target_window.active_layout().expect("layout").leaves(),
             vec![new_pane_id, target_pane_id]
         );
         assert_eq!(target_workspace.active_pane, new_pane_id);
@@ -4922,7 +5245,7 @@ mod tests {
             .active_column_id()
             .and_then(|column_id| workspace.columns.get(&column_id))
             .expect("column");
-        let LayoutNode::Split { ratio, .. } = &window.layout else {
+        let LayoutNode::Split { ratio, .. } = window.active_layout().expect("layout") else {
             panic!("expected split layout");
         };
         assert_eq!(*ratio, 440);
@@ -5161,11 +5484,17 @@ mod tests {
             .get(&pane_id)
             .and_then(PaneRecord::active_surface)
             .expect("surface");
+        let session = surface
+            .agent_session
+            .as_ref()
+            .expect("completed signal should preserve recent agent session");
         assert_eq!(
             surface.metadata.agent_state,
             Some(WorkspaceAgentState::Completed)
         );
         assert!(!surface.metadata.agent_active);
+        assert_eq!(session.state, WorkspaceAgentState::Completed);
+        assert_eq!(session.latest_message.as_deref(), Some("Turn complete"));
     }
 
     #[test]
@@ -5245,7 +5574,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_signals_do_not_keep_recent_inactive_agents_alive() {
+    fn metadata_signals_for_shell_prompt_clear_stale_agent_identity() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
         let pane_id = model.active_workspace().expect("workspace").active_pane;
@@ -5283,13 +5612,13 @@ mod tests {
                     SignalKind::Metadata,
                     None,
                     Some(SignalPaneMetadata {
-                        title: Some("codex :: taskers".into()),
+                        title: Some("taskers".into()),
                         agent_title: None,
                         cwd: Some("/tmp".into()),
                         repo_name: Some("taskers".into()),
                         git_branch: Some("main".into()),
                         ports: Vec::new(),
-                        agent_kind: Some("codex".into()),
+                        agent_kind: Some("shell".into()),
                         agent_active: Some(false),
                     }),
                 ),
@@ -5312,7 +5641,12 @@ mod tests {
             .and_then(|workspace| workspace.panes.get(&pane_id))
             .and_then(PaneRecord::active_surface)
             .expect("surface");
-        assert_eq!(surface.metadata.last_signal_at, Some(stale_timestamp));
+        assert_eq!(surface.metadata.agent_kind, None);
+        assert_eq!(surface.metadata.agent_title, None);
+        assert_eq!(surface.metadata.agent_state, None);
+        assert_eq!(surface.metadata.latest_agent_message, None);
+        assert_eq!(surface.attention, AttentionState::Normal);
+        assert_eq!(surface.metadata.last_signal_at, None);
     }
 
     #[test]
@@ -5359,7 +5693,7 @@ mod tests {
             .and_then(|workspace| workspace.panes.get(&pane_id))
             .and_then(PaneRecord::active_surface)
             .expect("surface");
-        assert_eq!(surface.attention, AttentionState::Completed);
+        assert_eq!(surface.attention, AttentionState::Normal);
         assert!(model.activity_items().is_empty());
 
         let summaries = model
@@ -5370,7 +5704,7 @@ mod tests {
                 .first()
                 .and_then(|summary| summary.agent_summaries.first())
                 .map(|summary| summary.state),
-            Some(WorkspaceAgentState::Completed)
+            None
         );
     }
 
@@ -5430,8 +5764,12 @@ mod tests {
             .get(&pane_id)
             .and_then(PaneRecord::active_surface)
             .expect("surface");
-        assert_eq!(surface.attention, AttentionState::Completed);
+        assert_eq!(surface.attention, AttentionState::Normal);
+        assert!(surface.agent_session.is_none());
         assert!(!surface.metadata.agent_active);
+        assert_eq!(surface.metadata.agent_state, None);
+        assert_eq!(surface.metadata.latest_agent_message, None);
+        assert_eq!(surface.metadata.last_signal_at, None);
         assert!(
             workspace
                 .notifications
@@ -5447,7 +5785,7 @@ mod tests {
                 .first()
                 .and_then(|summary| summary.agent_summaries.first())
                 .map(|summary| summary.state),
-            Some(WorkspaceAgentState::Completed)
+            None
         );
     }
 
@@ -5683,7 +6021,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_notifications_stamp_surface_agent_metadata() {
+    fn agent_notifications_do_not_create_live_agent_sessions() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
         let pane_id = model.active_workspace().expect("workspace").active_pane;
@@ -5715,13 +6053,11 @@ mod tests {
             .and_then(|workspace| workspace.panes.get(&pane_id))
             .and_then(|pane| pane.surfaces.get(&surface_id))
             .expect("surface record");
+        assert!(surface.agent_session.is_none());
         assert_eq!(surface.metadata.agent_kind.as_deref(), Some("codex"));
         assert_eq!(surface.metadata.agent_title.as_deref(), Some("Codex"));
-        assert_eq!(
-            surface.metadata.agent_state,
-            Some(WorkspaceAgentState::Waiting)
-        );
-        assert!(surface.metadata.agent_active);
+        assert_eq!(surface.metadata.agent_state, None);
+        assert!(!surface.metadata.agent_active);
         assert_eq!(
             surface.metadata.latest_agent_message.as_deref(),
             Some("Need input")
@@ -5779,6 +6115,228 @@ mod tests {
             .expect("notification");
         assert!(notification.read_at.is_some());
         assert!(notification.cleared_at.is_some());
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .expect("surface");
+        assert_eq!(surface.attention, AttentionState::Normal);
+    }
+
+    #[test]
+    fn clearing_notification_keeps_surface_attention_when_another_alert_is_still_active() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+
+        model
+            .create_agent_notification(
+                AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                SignalKind::Notification,
+                Some("Heads up".into()),
+                None,
+                None,
+                "Review needed".into(),
+                AttentionState::WaitingInput,
+            )
+            .expect("waiting notification");
+        model
+            .create_agent_notification(
+                AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                SignalKind::Error,
+                Some("Heads up".into()),
+                None,
+                None,
+                "Build failed".into(),
+                AttentionState::Error,
+            )
+            .expect("error notification");
+
+        let first_notification_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.notifications.first())
+            .map(|notification| notification.id)
+            .expect("notification id");
+
+        model
+            .clear_notification(first_notification_id)
+            .expect("clear notification");
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .expect("surface");
+        assert_eq!(surface.attention, AttentionState::Error);
+    }
+
+    #[test]
+    fn dismiss_surface_alert_clears_completed_agent_presentation() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+
+        model
+            .create_agent_notification(
+                AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                SignalKind::Completed,
+                Some("Codex".into()),
+                None,
+                None,
+                "Finished".into(),
+                AttentionState::Completed,
+            )
+            .expect("completed notification");
+
+        model
+            .dismiss_surface_alert(workspace_id, pane_id, surface_id)
+            .expect("dismiss alert");
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .expect("surface");
+        assert_eq!(surface.attention, AttentionState::Normal);
+        assert_eq!(surface.metadata.agent_active, false);
+        assert_eq!(surface.metadata.agent_state, None);
+        assert_eq!(surface.metadata.agent_title, None);
+        assert_eq!(surface.metadata.agent_kind, None);
+        assert_eq!(surface.metadata.last_signal_at, None);
+        assert_eq!(surface.metadata.latest_agent_message, None);
+    }
+
+    #[test]
+    fn dismiss_surface_alert_clears_working_agent_presentation() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+
+        model
+            .start_surface_agent_session(workspace_id, pane_id, surface_id, "codex".into())
+            .expect("working session");
+        model
+            .apply_surface_signal(
+                workspace_id,
+                pane_id,
+                surface_id,
+                SignalEvent::with_metadata(
+                    "agent-hook:codex",
+                    SignalKind::Started,
+                    Some("Working".into()),
+                    Some(SignalPaneMetadata {
+                        title: None,
+                        agent_title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                    }),
+                ),
+            )
+            .expect("started signal applied");
+
+        model
+            .dismiss_surface_alert(workspace_id, pane_id, surface_id)
+            .expect("dismiss alert");
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .expect("surface");
+        assert_eq!(surface.attention, AttentionState::Normal);
+        assert!(surface.agent_process.is_some());
+        assert!(surface.agent_session.is_none());
+        assert_eq!(surface.metadata.agent_active, true);
+        assert_eq!(surface.metadata.agent_state, None);
+        assert_eq!(surface.metadata.agent_title.as_deref(), Some("Codex"));
+        assert_eq!(surface.metadata.agent_kind.as_deref(), Some("codex"));
+        assert_eq!(surface.metadata.last_signal_at, None);
+        assert_eq!(surface.metadata.latest_agent_message, None);
+    }
+
+    #[test]
+    fn late_agent_notification_does_not_recreate_live_session_after_stop() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+
+        model
+            .start_surface_agent_session(workspace_id, pane_id, surface_id, "codex".into())
+            .expect("start agent");
+        model
+            .stop_surface_agent_session(workspace_id, pane_id, surface_id, 0)
+            .expect("stop agent");
+        model
+            .apply_surface_signal(
+                workspace_id,
+                pane_id,
+                surface_id,
+                SignalEvent {
+                    source: "agent-hook:codex".into(),
+                    kind: SignalKind::Notification,
+                    message: Some("Turn complete".into()),
+                    metadata: Some(SignalPaneMetadata {
+                        title: None,
+                        agent_title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                    }),
+                    timestamp: OffsetDateTime::now_utc(),
+                },
+            )
+            .expect("late notification");
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .expect("surface record");
+        assert!(surface.agent_session.is_none());
+        assert_eq!(surface.attention, AttentionState::WaitingInput);
     }
 
     #[test]
@@ -5812,5 +6370,136 @@ mod tests {
             .expect("second flash token");
 
         assert!(second_token > first_token);
+    }
+
+    #[test]
+    fn creating_workspace_window_tab_adds_blank_terminal_tab_and_focuses_it() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let window_id = model.active_workspace().expect("workspace").active_window;
+
+        let (tab_id, pane_id) = model
+            .create_workspace_window_tab(workspace_id, window_id)
+            .expect("create window tab");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let window = workspace.windows.get(&window_id).expect("window");
+        let pane = workspace.panes.get(&pane_id).expect("new pane");
+
+        assert_eq!(window.tabs.len(), 2);
+        assert_eq!(window.active_tab, tab_id);
+        assert_eq!(workspace.active_window, window_id);
+        assert_eq!(workspace.active_pane, pane_id);
+        assert_eq!(pane.surfaces.len(), 1);
+        assert_eq!(
+            pane.active_surface().map(|surface| surface.kind.clone()),
+            Some(PaneKind::Terminal)
+        );
+    }
+
+    #[test]
+    fn closing_last_window_tab_closes_workspace_window() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_window_id = model.active_workspace().expect("workspace").active_window;
+
+        model
+            .create_workspace_window(workspace_id, Direction::Right)
+            .expect("create second window");
+
+        let closing_tab_id = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.windows.get(&first_window_id))
+            .map(|window| window.active_tab)
+            .expect("window tab");
+
+        model
+            .close_workspace_window_tab(workspace_id, first_window_id, closing_tab_id)
+            .expect("close last tab");
+
+        let workspace = model.active_workspace().expect("workspace");
+        assert!(!workspace.windows.contains_key(&first_window_id));
+        assert_eq!(workspace.windows.len(), 1);
+    }
+
+    #[test]
+    fn transferring_window_tab_merges_into_target_window() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_window_id = model.active_workspace().expect("workspace").active_window;
+        let (tab_id, _) = model
+            .create_workspace_window_tab(workspace_id, source_window_id)
+            .expect("create second tab");
+        let target_pane_id = model
+            .create_workspace_window(workspace_id, Direction::Right)
+            .expect("create second window");
+        let target_window_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.window_for_pane(target_pane_id))
+            .expect("target window");
+
+        model
+            .transfer_workspace_window_tab(
+                workspace_id,
+                source_window_id,
+                tab_id,
+                target_window_id,
+                usize::MAX,
+            )
+            .expect("transfer window tab");
+
+        let workspace = model.active_workspace().expect("workspace");
+        assert_eq!(
+            workspace
+                .windows
+                .get(&source_window_id)
+                .map(|window| window.tabs.len()),
+            Some(1)
+        );
+        assert_eq!(
+            workspace
+                .windows
+                .get(&target_window_id)
+                .map(|window| window.tabs.len()),
+            Some(2)
+        );
+        assert_eq!(workspace.active_window, target_window_id);
+    }
+
+    #[test]
+    fn extracting_window_tab_creates_new_workspace_window() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_window_id = model.active_workspace().expect("workspace").active_window;
+        let (tab_id, pane_id) = model
+            .create_workspace_window_tab(workspace_id, source_window_id)
+            .expect("create second tab");
+
+        let extracted_window_id = model
+            .extract_workspace_window_tab(
+                workspace_id,
+                source_window_id,
+                tab_id,
+                WorkspaceWindowMoveTarget::StackBelow {
+                    window_id: source_window_id,
+                },
+            )
+            .expect("extract tab");
+
+        let workspace = model.active_workspace().expect("workspace");
+        assert_eq!(workspace.windows.len(), 2);
+        assert_eq!(
+            workspace
+                .windows
+                .get(&source_window_id)
+                .map(|window| window.tabs.len()),
+            Some(1)
+        );
+        assert_eq!(
+            workspace.window_for_pane(pane_id),
+            Some(extracted_window_id)
+        );
+        assert_eq!(workspace.active_window, extracted_window_id);
     }
 }

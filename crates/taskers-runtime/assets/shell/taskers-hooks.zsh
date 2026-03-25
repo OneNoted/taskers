@@ -69,7 +69,7 @@ taskers__collect_metadata() {
     TASKERS_META_BRANCH=
   fi
 
-  TASKERS_META_AGENT=${TASKERS_ACTIVE_AGENT_KIND:-${TASKERS_PANE_AGENT_KIND:-shell}}
+  TASKERS_META_AGENT=${TASKERS_ACTIVE_AGENT_KIND:-shell}
   TASKERS_META_LABEL=$TASKERS_META_REPO_NAME
   if [[ -z "$TASKERS_META_LABEL" ]]; then
     TASKERS_META_LABEL=${PWD:t}
@@ -189,25 +189,29 @@ taskers__emit_metadata_if_changed() {
   taskers__emit_with_metadata metadata
 }
 
+taskers__invalidate_metadata_cache() {
+  unset TASKERS_LAST_META_CWD
+  unset TASKERS_LAST_META_REPO_NAME
+  unset TASKERS_LAST_META_BRANCH
+  unset TASKERS_LAST_META_AGENT
+  unset TASKERS_LAST_META_TITLE
+  unset TASKERS_LAST_META_AGENT_ACTIVE
+}
+
 taskers__preexec() {
   local agent
   agent=$(taskers__classify_command "$1" || true)
   if [[ -n "$agent" ]]; then
-    export TASKERS_PANE_AGENT_KIND=$agent
     export TASKERS_ACTIVE_AGENT_KIND=$agent
-    taskers__emit_with_metadata started
+    taskers__invalidate_metadata_cache
+    taskers__emit_metadata_if_changed
   fi
 }
 
 taskers__precmd() {
-  local exit_status=$?
   if [[ -n "${TASKERS_ACTIVE_AGENT_KIND:-}" ]]; then
-    if (( exit_status == 0 )); then
-      taskers__emit_with_metadata completed
-    else
-      taskers__emit_with_metadata error "Exited with status ${exit_status}"
-    fi
     unset TASKERS_ACTIVE_AGENT_KIND
+    taskers__invalidate_metadata_cache
   fi
 
   taskers__emit_metadata_if_changed

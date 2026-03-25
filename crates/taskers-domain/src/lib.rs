@@ -16,9 +16,9 @@ pub use model::{
     KEYBOARD_RESIZE_STEP, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH,
     NotificationDeliveryState, NotificationItem, PaneKind, PaneMetadata, PaneMetadataPatch,
     PaneRecord, PersistedSession, PrStatus, ProgressState, PullRequestState,
-    SESSION_SCHEMA_VERSION, SurfaceRecord, WindowFrame, WindowRecord, Workspace,
-    WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord, WorkspaceLogEntry,
-    WorkspaceSummary, WorkspaceViewport, WorkspaceWindowMoveTarget, WorkspaceWindowRecord,
-    WorkspaceWindowTabRecord,
+    SESSION_SCHEMA_VERSION, SurfaceAgentProcess, SurfaceAgentSession, SurfaceRecord, WindowFrame,
+    WindowRecord, Workspace, WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord,
+    WorkspaceLogEntry, WorkspaceSummary, WorkspaceViewport, WorkspaceWindowMoveTarget,
+    WorkspaceWindowRecord, WorkspaceWindowTabRecord,
 };
 pub use signal::{SignalEvent, SignalKind, SignalPaneMetadata};

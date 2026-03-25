@@ -979,49 +979,174 @@ input:focus-visible {{
   border-bottom: 1px solid {border_06};
   background: linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
   position: relative;
-  padding: 0 8px;
+  padding: 0 6px 0 8px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  cursor: grab;
+  gap: 8px;
   user-select: none;
   border-radius: 8px 8px 0 0;
 }}
 
-.workspace-window-grip {{
-  width: 38px;
-  height: 4px;
-  border-radius: 999px;
-  background: {border_10};
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
-}}
-
-.workspace-window-runtime-badge {{
-  position: absolute;
-  left: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 20px;
-  height: 20px;
-  border-radius: 999px;
+.workspace-window-toolbar-tabs {{
+  min-width: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
-  background: {overlay_12};
-  border: 1px solid {border_10};
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}}
+
+.workspace-window-toolbar-tabs::-webkit-scrollbar {{
+  display: none;
+}}
+
+.workspace-window-toolbar-spacer {{
+  flex: 1 1 auto;
+  min-width: 24px;
+  align-self: stretch;
+  cursor: grab;
+}}
+
+.workspace-window-toolbar-spacer:active {{
+  cursor: grabbing;
+}}
+
+.workspace-window-tab {{
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 280px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 3px 0 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: {text_subtle};
+  overflow: hidden;
+}}
+
+.workspace-window-tab:hover {{
+  background: {border_06};
+  border-color: {border_10};
+}}
+
+.workspace-window-tab-active {{
+  background: {overlay_16};
+  border-color: {accent_20};
+  color: {text_bright};
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }}
 
-.workspace-window-toolbar:hover .workspace-window-grip {{
-  background: {text_dim};
+.workspace-window-tab-drop-target {{
+  border-color: {accent_24};
+  background: {accent_12};
 }}
 
-.workspace-window-shell-active .workspace-window-grip {{
-  background: {accent_24};
+.workspace-window-tab-button {{
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
 }}
 
-.workspace-window-toolbar:active {{
-  cursor: grabbing;
+.workspace-window-tab-copy {{
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+}}
+
+.workspace-window-tab-title {{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+}}
+
+.workspace-window-tab-kind-icon {{
+  flex: 0 0 auto;
+  opacity: 0.8;
+}}
+
+.workspace-window-tab-active .workspace-window-tab-kind-icon {{
+  opacity: 1.0;
+}}
+
+.workspace-window-tab-close {{
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: {text_dim};
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}}
+
+.workspace-window-tab-close:hover {{
+  background: {border_08};
+  color: {text_bright};
+}}
+
+.workspace-window-tab-add {{
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 1px solid {border_10};
+  border-radius: 5px;
+  background: {overlay_05};
+  color: {text_dim};
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}}
+
+.workspace-window-tab-add:hover {{
+  background: {overlay_16};
+  color: {text_bright};
+}}
+
+.workspace-window-tab-add-active {{
+  border-color: {accent_24};
+  background: {accent_12};
+  color: {text_bright};
+}}
+
+.workspace-window-tab-attention-waiting {{
+  border-color: {waiting_18};
+  background: {waiting_18};
+  color: {waiting_text};
+}}
+
+.workspace-window-tab-attention-error {{
+  border-color: {error_16};
+  background: {error_16};
+  color: {error_text};
+}}
+
+.workspace-window-tab-attention-completed {{
+  border-color: {completed_16};
+  background: {completed_16};
+  color: {completed_text};
+}}
+
+.workspace-window-tab-attention-waiting .workspace-window-tab-kind-icon,
+.workspace-window-tab-attention-error .workspace-window-tab-kind-icon,
+.workspace-window-tab-attention-completed .workspace-window-tab-kind-icon {{
+  opacity: 1.0;
 }}
 
 .workspace-window-body {{
@@ -1203,6 +1328,12 @@ input:focus-visible {{
   color: {text_bright};
 }}
 
+.pane-runtime-state-dismiss {{
+  border: 0;
+  cursor: pointer;
+  pointer-events: auto;
+}}
+
 .pane-runtime-chip.runtime-state-working {{
   background: {busy_10};
   border-color: {busy_12};
@@ -1301,6 +1432,20 @@ input:focus-visible {{
   white-space: nowrap;
   border-radius: 4px;
   overflow: hidden;
+}}
+
+.surface-tab-focus {{
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }}
 
 .surface-tab:hover {{
@@ -1453,6 +1598,16 @@ input:focus-visible {{
   letter-spacing: 0.01em;
   background: {border_08};
   color: {text_bright};
+}}
+
+.surface-tab-dismiss {{
+  border: 0;
+  cursor: pointer;
+  transition: filter 0.14s ease-in-out;
+}}
+
+.surface-tab-dismiss:hover {{
+  filter: brightness(1.08);
 }}
 
 .surface-tab-state.runtime-state-working {{
@@ -1865,15 +2020,48 @@ input:focus-visible {{
 }}
 
 .activity-item-button {{
+  flex: 1 1 auto;
   width: 100%;
   border: 0;
   padding: 0;
   background: transparent;
   text-align: left;
+  cursor: pointer;
+}}
+
+.activity-item-row {{
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
 }}
 
 .activity-item-button:hover .activity-item {{
   background: {border_04};
+}}
+
+.activity-item-dismiss {{
+  min-width: 0;
+  height: 18px;
+  border: 0;
+  margin-top: 4px;
+  background: transparent;
+  color: {text_dim};
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
+}}
+
+.activity-item-dismiss:hover {{
+  background: {border_08};
+  color: {text_bright};
+}}
+
+.activity-item-dismiss-label {{
+  font-weight: 700;
 }}
 
 .notification-header {{
