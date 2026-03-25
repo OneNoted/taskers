@@ -7,7 +7,7 @@ pub mod signal;
 pub use attention::AttentionState;
 pub use ids::{
     NotificationId, PaneId, SessionId, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId,
-    WorkspaceWindowId,
+    WorkspaceWindowId, WorkspaceWindowTabId,
 };
 pub use layout::{Direction, LayoutNode, SplitAxis};
 pub use model::{
@@ -19,5 +19,6 @@ pub use model::{
     SESSION_SCHEMA_VERSION, SurfaceRecord, WindowFrame, WindowRecord, Workspace,
     WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord, WorkspaceLogEntry,
     WorkspaceSummary, WorkspaceViewport, WorkspaceWindowMoveTarget, WorkspaceWindowRecord,
+    WorkspaceWindowTabRecord,
 };
 pub use signal::{SignalEvent, SignalKind, SignalPaneMetadata};

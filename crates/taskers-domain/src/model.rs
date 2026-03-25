@@ -8,10 +8,10 @@ use time::{Duration, OffsetDateTime};
 use crate::{
     AttentionState, Direction, LayoutNode, NotificationId, PaneId, SessionId, SignalEvent,
     SignalKind, SignalPaneMetadata, SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId,
-    WorkspaceWindowId,
+    WorkspaceWindowId, WorkspaceWindowTabId,
 };
 
-pub const SESSION_SCHEMA_VERSION: u32 = 4;
+pub const SESSION_SCHEMA_VERSION: u32 = 5;
 pub const DEFAULT_WORKSPACE_WINDOW_WIDTH: i32 = 1280;
 pub const DEFAULT_WORKSPACE_WINDOW_HEIGHT: i32 = 860;
 pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 10;
@@ -112,6 +112,8 @@ pub enum DomainError {
     MissingWorkspaceColumn(WorkspaceColumnId),
     #[error("workspace window {0} was not found")]
     MissingWorkspaceWindow(WorkspaceWindowId),
+    #[error("workspace window tab {0} was not found")]
+    MissingWorkspaceWindowTab(WorkspaceWindowTabId),
     #[error("pane {0} was not found")]
     MissingPane(PaneId),
     #[error("surface {0} was not found")]
@@ -569,20 +571,163 @@ impl WindowFrame {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceWindowRecord {
-    pub id: WorkspaceWindowId,
-    pub height: i32,
+pub struct WorkspaceWindowTabRecord {
+    pub id: WorkspaceWindowTabId,
     pub layout: LayoutNode,
     pub active_pane: PaneId,
 }
 
+impl WorkspaceWindowTabRecord {
+    fn new(pane_id: PaneId) -> Self {
+        Self {
+            id: WorkspaceWindowTabId::new(),
+            layout: LayoutNode::leaf(pane_id),
+            active_pane: pane_id,
+        }
+    }
+
+    fn normalize(&mut self, panes: &IndexMap<PaneId, PaneRecord>, fallback_pane: PaneId) {
+        if !self.layout.contains(self.active_pane) {
+            self.active_pane = self
+                .layout
+                .leaves()
+                .into_iter()
+                .find(|pane_id| panes.contains_key(pane_id))
+                .unwrap_or(fallback_pane);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWindowRecord {
+    pub id: WorkspaceWindowId,
+    pub height: i32,
+    pub tabs: IndexMap<WorkspaceWindowTabId, WorkspaceWindowTabRecord>,
+    pub active_tab: WorkspaceWindowTabId,
+}
+
 impl WorkspaceWindowRecord {
     fn new(pane_id: PaneId) -> Self {
+        let first_tab = WorkspaceWindowTabRecord::new(pane_id);
+        let active_tab = first_tab.id;
+        let mut tabs = IndexMap::new();
+        tabs.insert(active_tab, first_tab);
         Self {
             id: WorkspaceWindowId::new(),
             height: DEFAULT_WORKSPACE_WINDOW_HEIGHT,
-            layout: LayoutNode::leaf(pane_id),
-            active_pane: pane_id,
+            tabs,
+            active_tab,
+        }
+    }
+
+    pub fn active_tab_record(&self) -> Option<&WorkspaceWindowTabRecord> {
+        self.tabs.get(&self.active_tab)
+    }
+
+    pub fn active_tab_record_mut(&mut self) -> Option<&mut WorkspaceWindowTabRecord> {
+        self.tabs.get_mut(&self.active_tab)
+    }
+
+    pub fn active_pane(&self) -> Option<PaneId> {
+        self.active_tab_record().map(|tab| tab.active_pane)
+    }
+
+    pub fn active_layout(&self) -> Option<&LayoutNode> {
+        self.active_tab_record().map(|tab| &tab.layout)
+    }
+
+    pub fn active_layout_mut(&mut self) -> Option<&mut LayoutNode> {
+        self.active_tab_record_mut().map(|tab| &mut tab.layout)
+    }
+
+    pub fn contains_pane(&self, pane_id: PaneId) -> bool {
+        self.tabs
+            .values()
+            .any(|tab| tab.layout.contains(pane_id))
+    }
+
+    pub fn tab_for_pane(&self, pane_id: PaneId) -> Option<WorkspaceWindowTabId> {
+        self.tabs
+            .values()
+            .find_map(|tab| tab.layout.contains(pane_id).then_some(tab.id))
+    }
+
+    pub fn focus_tab(&mut self, tab_id: WorkspaceWindowTabId) -> bool {
+        if self.tabs.contains_key(&tab_id) {
+            self.active_tab = tab_id;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn focus_pane(&mut self, pane_id: PaneId) -> bool {
+        let Some(tab_id) = self.tab_for_pane(pane_id) else {
+            return false;
+        };
+        self.active_tab = tab_id;
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.active_pane = pane_id;
+        }
+        true
+    }
+
+    fn insert_tab(&mut self, tab: WorkspaceWindowTabRecord, to_index: usize) {
+        let tab_id = tab.id;
+        self.tabs.insert(tab_id, tab);
+        if self.tabs.len() > 1 {
+            let last_index = self.tabs.len() - 1;
+            let target_index = to_index.min(last_index);
+            self.tabs.move_index(last_index, target_index);
+        }
+        self.active_tab = tab_id;
+    }
+
+    fn move_tab(&mut self, tab_id: WorkspaceWindowTabId, to_index: usize) -> bool {
+        let Some(from_index) = self.tabs.get_index_of(&tab_id) else {
+            return false;
+        };
+        let last_index = self.tabs.len().saturating_sub(1);
+        let target_index = to_index.min(last_index);
+        if from_index == target_index {
+            return true;
+        }
+        self.tabs.move_index(from_index, target_index);
+        true
+    }
+
+    fn remove_tab(&mut self, tab_id: WorkspaceWindowTabId) -> Option<WorkspaceWindowTabRecord> {
+        let removed = self.tabs.shift_remove(&tab_id)?;
+        if !self.tabs.contains_key(&self.active_tab)
+            && let Some((next_tab_id, _)) = self.tabs.first()
+        {
+            self.active_tab = *next_tab_id;
+        }
+        Some(removed)
+    }
+
+    fn all_panes(&self) -> Vec<PaneId> {
+        self.tabs
+            .values()
+            .flat_map(|tab| tab.layout.leaves())
+            .collect()
+    }
+
+    fn normalize(&mut self, panes: &IndexMap<PaneId, PaneRecord>, fallback_pane: PaneId) {
+        if self.tabs.is_empty() {
+            let fallback_tab = WorkspaceWindowTabRecord::new(fallback_pane);
+            self.active_tab = fallback_tab.id;
+            self.tabs.insert(fallback_tab.id, fallback_tab);
+        }
+
+        for tab in self.tabs.values_mut() {
+            tab.normalize(panes, fallback_pane);
+        }
+
+        if !self.tabs.contains_key(&self.active_tab)
+            && let Some((tab_id, _)) = self.tabs.first()
+        {
+            self.active_tab = *tab_id;
         }
     }
 }
@@ -725,13 +870,13 @@ impl Workspace {
     pub fn window_for_pane(&self, pane_id: PaneId) -> Option<WorkspaceWindowId> {
         self.windows
             .iter()
-            .find_map(|(window_id, window)| window.layout.contains(pane_id).then_some(*window_id))
+            .find_map(|(window_id, window)| window.contains_pane(pane_id).then_some(*window_id))
     }
 
     fn sync_active_from_window(&mut self, window_id: WorkspaceWindowId) {
         if let Some(window) = self.windows.get(&window_id) {
             self.active_window = window_id;
-            self.active_pane = window.active_pane;
+            self.active_pane = window.active_pane().unwrap_or(self.active_pane);
             if let Some(column_id) = self.column_for_window(window_id)
                 && let Some(column) = self.columns.get_mut(&column_id)
             {
@@ -749,7 +894,7 @@ impl Workspace {
             return false;
         };
         if let Some(window) = self.windows.get_mut(&window_id) {
-            window.active_pane = pane_id;
+            let _ = window.focus_pane(pane_id);
         }
         self.sync_active_from_window(window_id);
         true
@@ -1161,15 +1306,12 @@ impl Workspace {
 
         for window in self.windows.values_mut() {
             window.height = window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
-            if !window.layout.contains(window.active_pane) {
-                window.active_pane = window
-                    .layout
-                    .leaves()
-                    .into_iter()
-                    .find(|pane_id| self.panes.contains_key(pane_id))
-                    .or_else(|| self.panes.first().map(|(pane_id, _)| *pane_id))
-                    .expect("workspace has at least one pane");
-            }
+            let fallback_pane = self
+                .panes
+                .first()
+                .map(|(pane_id, _)| *pane_id)
+                .expect("workspace has at least one pane");
+            window.normalize(&self.panes, fallback_pane);
         }
 
         for column in self.columns.values_mut() {
@@ -1211,12 +1353,12 @@ impl Workspace {
         if !self
             .windows
             .get(&self.active_window)
-            .is_some_and(|window| window.layout.contains(self.active_pane))
+            .is_some_and(|window| window.contains_pane(self.active_pane))
         {
             self.active_pane = self
                 .windows
                 .get(&self.active_window)
-                .map(|window| window.active_pane)
+                .and_then(WorkspaceWindowRecord::active_pane)
                 .expect("active window exists");
         }
         self.sync_active_from_window(self.active_window);
@@ -1540,6 +1682,343 @@ impl AppModel {
         Ok(new_pane_id)
     }
 
+    pub fn create_workspace_window_tab(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+    ) -> Result<(WorkspaceWindowTabId, PaneId), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        if !workspace.windows.contains_key(&workspace_window_id) {
+            return Err(DomainError::MissingWorkspaceWindow(workspace_window_id));
+        }
+
+        let new_pane = PaneRecord::new(PaneKind::Terminal);
+        let new_pane_id = new_pane.id;
+        workspace.panes.insert(new_pane_id, new_pane);
+
+        let window = workspace
+            .windows
+            .get_mut(&workspace_window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        let insert_index = window
+            .tabs
+            .get_index_of(&window.active_tab)
+            .map(|index| index + 1)
+            .unwrap_or(window.tabs.len());
+        let new_tab = WorkspaceWindowTabRecord::new(new_pane_id);
+        let new_tab_id = new_tab.id;
+        window.insert_tab(new_tab, insert_index);
+        workspace.sync_active_from_window(workspace_window_id);
+
+        Ok((new_tab_id, new_pane_id))
+    }
+
+    pub fn focus_workspace_window_tab(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let window = workspace
+            .windows
+            .get_mut(&workspace_window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        if !window.focus_tab(workspace_window_tab_id) {
+            return Err(DomainError::MissingWorkspaceWindowTab(
+                workspace_window_tab_id,
+            ));
+        }
+        workspace.sync_active_from_window(workspace_window_id);
+        Ok(())
+    }
+
+    pub fn move_workspace_window_tab(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        to_index: usize,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let window = workspace
+            .windows
+            .get_mut(&workspace_window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        if !window.move_tab(workspace_window_tab_id, to_index) {
+            return Err(DomainError::MissingWorkspaceWindowTab(
+                workspace_window_tab_id,
+            ));
+        }
+        workspace.sync_active_from_window(workspace_window_id);
+        Ok(())
+    }
+
+    pub fn transfer_workspace_window_tab(
+        &mut self,
+        workspace_id: WorkspaceId,
+        source_workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        target_workspace_window_id: WorkspaceWindowId,
+        to_index: usize,
+    ) -> Result<(), DomainError> {
+        if source_workspace_window_id == target_workspace_window_id {
+            return self.move_workspace_window_tab(
+                workspace_id,
+                source_workspace_window_id,
+                workspace_window_tab_id,
+                to_index,
+            );
+        }
+
+        let (source_column_id, _source_column_index, source_window_index, remove_source_window) = {
+            let workspace = self
+                .workspaces
+                .get(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let source_window = workspace
+                .windows
+                .get(&source_workspace_window_id)
+                .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?;
+            if !workspace
+                .windows
+                .contains_key(&target_workspace_window_id)
+            {
+                return Err(DomainError::MissingWorkspaceWindow(target_workspace_window_id));
+            }
+            if !source_window.tabs.contains_key(&workspace_window_tab_id) {
+                return Err(DomainError::MissingWorkspaceWindowTab(
+                    workspace_window_tab_id,
+                ));
+            }
+            let (source_column_id, source_column_index, source_window_index) = workspace
+                .position_for_window(source_workspace_window_id)
+                .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?;
+            (
+                source_column_id,
+                source_column_index,
+                source_window_index,
+                source_window.tabs.len() == 1,
+            )
+        };
+
+        let moved_tab = {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let source_window = workspace
+                .windows
+                .get_mut(&source_workspace_window_id)
+                .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?;
+            source_window
+                .remove_tab(workspace_window_tab_id)
+                .ok_or(DomainError::MissingWorkspaceWindowTab(
+                    workspace_window_tab_id,
+                ))?
+        };
+
+        if remove_source_window {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let same_column_survived = {
+                let column = workspace
+                    .columns
+                    .get_mut(&source_column_id)
+                    .ok_or(DomainError::MissingWorkspaceColumn(source_column_id))?;
+                column.window_order.remove(source_window_index);
+                if column.window_order.is_empty() {
+                    false
+                } else {
+                    if !column.window_order.contains(&column.active_window) {
+                        let replacement_index = source_window_index.min(column.window_order.len() - 1);
+                        column.active_window = column.window_order[replacement_index];
+                    }
+                    true
+                }
+            };
+            if !same_column_survived {
+                workspace.columns.shift_remove(&source_column_id);
+            }
+            workspace.windows.shift_remove(&source_workspace_window_id);
+        }
+
+        {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let target_window = workspace
+                .windows
+                .get_mut(&target_workspace_window_id)
+                .ok_or(DomainError::MissingWorkspaceWindow(target_workspace_window_id))?;
+            target_window.insert_tab(moved_tab, to_index);
+            workspace.sync_active_from_window(target_workspace_window_id);
+        }
+
+        Ok(())
+    }
+
+    pub fn extract_workspace_window_tab(
+        &mut self,
+        workspace_id: WorkspaceId,
+        source_workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        target: WorkspaceWindowMoveTarget,
+    ) -> Result<WorkspaceWindowId, DomainError> {
+        let source_tab_count = self
+            .workspaces
+            .get(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?
+            .windows
+            .get(&source_workspace_window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?
+            .tabs
+            .len();
+
+        if source_tab_count <= 1 {
+            self.move_workspace_window(workspace_id, source_workspace_window_id, target)?;
+            return Ok(source_workspace_window_id);
+        }
+
+        let moved_tab = {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let source_window = workspace
+                .windows
+                .get_mut(&source_workspace_window_id)
+                .ok_or(DomainError::MissingWorkspaceWindow(source_workspace_window_id))?;
+            source_window
+                .remove_tab(workspace_window_tab_id)
+                .ok_or(DomainError::MissingWorkspaceWindowTab(
+                    workspace_window_tab_id,
+                ))?
+        };
+
+        let new_window_id = {
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let mut new_window = WorkspaceWindowRecord::new(moved_tab.active_pane);
+            new_window.tabs.clear();
+            new_window.active_tab = moved_tab.id;
+            new_window.tabs.insert(moved_tab.id, moved_tab);
+            let new_window_id = new_window.id;
+            workspace.windows.insert(new_window_id, new_window);
+            insert_window_relative_to_active(workspace, new_window_id, Direction::Right)?;
+            workspace.sync_active_from_window(new_window_id);
+            new_window_id
+        };
+
+        self.move_workspace_window(workspace_id, new_window_id, target)?;
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        workspace.sync_active_from_window(new_window_id);
+        Ok(new_window_id)
+    }
+
+    pub fn close_workspace_window_tab(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+    ) -> Result<(), DomainError> {
+        let (tab_panes, close_entire_window) = {
+            let workspace = self
+                .workspaces
+                .get(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let window = workspace
+                .windows
+                .get(&workspace_window_id)
+                .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+            let tab = window
+                .tabs
+                .get(&workspace_window_tab_id)
+                .ok_or(DomainError::MissingWorkspaceWindowTab(
+                    workspace_window_tab_id,
+                ))?;
+            (tab.layout.leaves(), window.tabs.len() == 1)
+        };
+
+        if close_entire_window {
+            if self
+                .workspaces
+                .get(&workspace_id)
+                .is_some_and(|workspace| workspace.windows.len() <= 1)
+            {
+                return self.close_workspace(workspace_id);
+            }
+
+            let workspace = self
+                .workspaces
+                .get_mut(&workspace_id)
+                .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+            let (column_id, column_index, window_index) = workspace
+                .position_for_window(workspace_window_id)
+                .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+            let column = workspace
+                .columns
+                .get_mut(&column_id)
+                .expect("window column should exist");
+            column.window_order.remove(window_index);
+            let same_column_survived = !column.window_order.is_empty();
+            if same_column_survived {
+                if !column.window_order.contains(&column.active_window) {
+                    let replacement_index = window_index.min(column.window_order.len() - 1);
+                    column.active_window = column.window_order[replacement_index];
+                }
+            } else {
+                workspace.columns.shift_remove(&column_id);
+            }
+            workspace.windows.shift_remove(&workspace_window_id);
+            remove_panes_from_workspace(workspace, &tab_panes);
+            if let Some(next_window_id) =
+                workspace.fallback_window_after_close(column_index, window_index, same_column_survived)
+            {
+                workspace.sync_active_from_window(next_window_id);
+            }
+            return Ok(());
+        }
+
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let window = workspace
+            .windows
+            .get_mut(&workspace_window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        let _ = window
+            .remove_tab(workspace_window_tab_id)
+            .ok_or(DomainError::MissingWorkspaceWindowTab(
+                workspace_window_tab_id,
+            ))?;
+        remove_panes_from_workspace(workspace, &tab_panes);
+        if workspace.active_window == workspace_window_id {
+            workspace.sync_active_from_window(workspace_window_id);
+        } else if tab_panes.contains(&workspace.active_pane) {
+            workspace.sync_active_from_window(workspace.active_window);
+        }
+        Ok(())
+    }
+
     pub fn split_pane(
         &mut self,
         workspace_id: WorkspaceId,
@@ -1580,10 +2059,11 @@ impl AppModel {
         workspace.panes.insert(new_pane_id, new_pane);
 
         if let Some(window) = workspace.windows.get_mut(&window_id) {
-            window
-                .layout
-                .split_leaf_with_direction(target, direction, new_pane_id, 500);
-            window.active_pane = new_pane_id;
+            let Some(layout) = window.active_layout_mut() else {
+                return Err(DomainError::MissingWorkspaceWindow(window_id));
+            };
+            layout.split_leaf_with_direction(target, direction, new_pane_id, 500);
+            let _ = window.focus_pane(new_pane_id);
         }
         workspace.sync_active_from_window(window_id);
 
@@ -1695,10 +2175,14 @@ impl AppModel {
         let next_pane = workspace
             .windows
             .get(&active_window_id)
-            .and_then(|window| window.layout.focus_neighbor(window.active_pane, direction));
+            .and_then(|window| {
+                let active_pane = window.active_pane()?;
+                let layout = window.active_layout()?;
+                layout.focus_neighbor(active_pane, direction)
+            });
         if let Some(next_pane) = next_pane {
             if let Some(window) = workspace.windows.get_mut(&active_window_id) {
-                window.active_pane = next_pane;
+                let _ = window.focus_pane(next_pane);
             }
             workspace.sync_active_from_window(active_window_id);
             return Ok(());
@@ -1886,7 +2370,10 @@ impl AppModel {
             .windows
             .get_mut(&active_window_id)
             .ok_or(DomainError::MissingWorkspaceWindow(active_window_id))?;
-        window.layout.resize_leaf(active_pane, direction, amount);
+        let layout = window
+            .active_layout_mut()
+            .ok_or(DomainError::MissingWorkspaceWindow(active_window_id))?;
+        layout.resize_leaf(active_pane, direction, amount);
         Ok(())
     }
 
@@ -1941,7 +2428,10 @@ impl AppModel {
             .windows
             .get_mut(&workspace_window_id)
             .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
-        window.layout.set_ratio_at_path(path, ratio);
+        let layout = window
+            .active_layout_mut()
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        layout.set_ratio_at_path(path, ratio);
         Ok(())
     }
 
@@ -2796,13 +3286,15 @@ impl AppModel {
                 .windows
                 .get_mut(&target_window_id)
                 .ok_or(DomainError::MissingPane(target_pane_id))?;
-            target_window.layout.split_leaf_with_direction(
-                target_pane_id,
-                direction,
-                new_pane_id,
-                500,
-            );
-            target_window.active_pane = new_pane_id;
+            let Some(target_tab_id) = target_window.tab_for_pane(target_pane_id) else {
+                return Err(DomainError::MissingPane(target_pane_id));
+            };
+            let _ = target_window.focus_tab(target_tab_id);
+            let layout = target_window
+                .active_layout_mut()
+                .ok_or(DomainError::MissingPane(target_pane_id))?;
+            layout.split_leaf_with_direction(target_pane_id, direction, new_pane_id, 500);
+            let _ = target_window.focus_pane(new_pane_id);
             workspace.sync_active_from_window(target_window_id);
             let _ = workspace.focus_surface(new_pane_id, surface_id);
         }
@@ -2943,52 +3435,67 @@ impl AppModel {
             .position_for_window(window_id)
             .ok_or(DomainError::MissingWorkspaceWindow(window_id))?;
 
-        let window_leaf_count = workspace
+        let (tab_id, tab_leaf_count, window_tab_count) = workspace
             .windows
             .get(&window_id)
-            .map(|window| window.layout.leaves().len())
-            .unwrap_or_default();
-        if window_leaf_count <= 1 && workspace.windows.len() > 1 {
-            let column = workspace
-                .columns
-                .get_mut(&column_id)
-                .expect("window column should exist");
-            column.window_order.remove(window_index);
-            let same_column_survived = !column.window_order.is_empty();
-            if same_column_survived {
-                if !column.window_order.contains(&column.active_window) {
-                    let replacement_index = window_index.min(column.window_order.len() - 1);
-                    column.active_window = column.window_order[replacement_index];
-                }
-            } else {
-                workspace.columns.shift_remove(&column_id);
-            }
+            .and_then(|window| {
+                let tab_id = window.tab_for_pane(pane_id)?;
+                let tab = window.tabs.get(&tab_id)?;
+                Some((tab_id, tab.layout.leaves().len(), window.tabs.len()))
+            })
+            .ok_or(DomainError::MissingPane(pane_id))?;
 
-            workspace.windows.shift_remove(&window_id);
-            workspace.panes.shift_remove(&pane_id);
-            workspace
-                .notifications
-                .retain(|item| item.pane_id != pane_id);
-            if let Some(next_window_id) = workspace.fallback_window_after_close(
-                column_index,
-                window_index,
-                same_column_survived,
-            ) {
-                workspace.sync_active_from_window(next_window_id);
+        if tab_leaf_count <= 1 {
+            if window_tab_count > 1 {
+                return self.close_workspace_window_tab(workspace_id, window_id, tab_id);
             }
-            return Ok(());
+            if workspace.windows.len() > 1 {
+                let tab_panes = workspace
+                    .windows
+                    .get(&window_id)
+                    .and_then(|window| window.tabs.get(&tab_id))
+                    .map(|tab| tab.layout.leaves())
+                    .unwrap_or_else(|| vec![pane_id]);
+                let column = workspace
+                    .columns
+                    .get_mut(&column_id)
+                    .expect("window column should exist");
+                column.window_order.remove(window_index);
+                let same_column_survived = !column.window_order.is_empty();
+                if same_column_survived {
+                    if !column.window_order.contains(&column.active_window) {
+                        let replacement_index = window_index.min(column.window_order.len() - 1);
+                        column.active_window = column.window_order[replacement_index];
+                    }
+                } else {
+                    workspace.columns.shift_remove(&column_id);
+                }
+
+                workspace.windows.shift_remove(&window_id);
+                remove_panes_from_workspace(workspace, &tab_panes);
+                if let Some(next_window_id) = workspace.fallback_window_after_close(
+                    column_index,
+                    window_index,
+                    same_column_survived,
+                ) {
+                    workspace.sync_active_from_window(next_window_id);
+                }
+                return Ok(());
+            }
         }
 
         if let Some(window) = workspace.windows.get_mut(&window_id) {
-            let fallback_focus = close_layout_pane(window, pane_id)
-                .or_else(|| window.layout.leaves().into_iter().next())
-                .expect("window should retain at least one pane");
-            window.active_pane = fallback_focus;
+            let tab = window
+                .tabs
+                .get_mut(&tab_id)
+                .ok_or(DomainError::MissingWorkspaceWindowTab(tab_id))?;
+            let fallback_focus = close_layout_pane(tab, pane_id)
+                .or_else(|| tab.layout.leaves().into_iter().next())
+                .expect("tab should retain at least one pane");
+            tab.active_pane = fallback_focus;
+            let _ = window.focus_tab(tab_id);
         }
-        workspace.panes.shift_remove(&pane_id);
-        workspace
-            .notifications
-            .retain(|item| item.pane_id != pane_id);
+        remove_panes_from_workspace(workspace, &[pane_id]);
 
         if workspace.active_window == window_id {
             workspace.sync_active_from_window(window_id);
@@ -3321,7 +3828,25 @@ fn remove_window_from_column(
     Ok(())
 }
 
-fn close_layout_pane(window: &mut WorkspaceWindowRecord, pane_id: PaneId) -> Option<PaneId> {
+fn remove_panes_from_workspace(workspace: &mut Workspace, pane_ids: &[PaneId]) {
+    let pane_set = pane_ids.iter().copied().collect::<BTreeSet<_>>();
+    let surface_set = pane_set
+        .iter()
+        .filter_map(|pane_id| workspace.panes.get(pane_id))
+        .flat_map(|pane| pane.surface_ids())
+        .collect::<BTreeSet<_>>();
+    for pane_id in &pane_set {
+        workspace.panes.shift_remove(pane_id);
+    }
+    workspace
+        .notifications
+        .retain(|item| !pane_set.contains(&item.pane_id));
+    workspace
+        .surface_flash_tokens
+        .retain(|surface_id, _| !surface_set.contains(surface_id));
+}
+
+fn close_layout_pane(tab: &mut WorkspaceWindowTabRecord, pane_id: PaneId) -> Option<PaneId> {
     let fallback = [
         Direction::Right,
         Direction::Down,
@@ -3329,15 +3854,15 @@ fn close_layout_pane(window: &mut WorkspaceWindowRecord, pane_id: PaneId) -> Opt
         Direction::Up,
     ]
     .into_iter()
-    .find_map(|direction| window.layout.focus_neighbor(pane_id, direction))
+    .find_map(|direction| tab.layout.focus_neighbor(pane_id, direction))
     .or_else(|| {
-        window
+        tab
             .layout
             .leaves()
             .into_iter()
             .find(|candidate| *candidate != pane_id)
     });
-    let removed = window.layout.remove_leaf(pane_id);
+    let removed = tab.layout.remove_leaf(pane_id);
     removed.then_some(fallback).flatten()
 }
 

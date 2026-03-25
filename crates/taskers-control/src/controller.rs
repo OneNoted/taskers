@@ -145,6 +145,113 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::CreateWorkspaceWindowTab {
+                workspace_id,
+                workspace_window_id,
+            } => {
+                let (workspace_window_tab_id, pane_id) =
+                    model.create_workspace_window_tab(workspace_id, workspace_window_id)?;
+                (
+                    ControlResponse::WorkspaceWindowTabCreated {
+                        pane_id,
+                        workspace_window_tab_id,
+                    },
+                    true,
+                )
+            }
+            ControlCommand::FocusWorkspaceWindowTab {
+                workspace_id,
+                workspace_window_id,
+                workspace_window_tab_id,
+            } => {
+                model.focus_workspace_window_tab(
+                    workspace_id,
+                    workspace_window_id,
+                    workspace_window_tab_id,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab focused".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MoveWorkspaceWindowTab {
+                workspace_id,
+                workspace_window_id,
+                workspace_window_tab_id,
+                to_index,
+            } => {
+                model.move_workspace_window_tab(
+                    workspace_id,
+                    workspace_window_id,
+                    workspace_window_tab_id,
+                    to_index,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab moved".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::TransferWorkspaceWindowTab {
+                workspace_id,
+                source_workspace_window_id,
+                workspace_window_tab_id,
+                target_workspace_window_id,
+                to_index,
+            } => {
+                model.transfer_workspace_window_tab(
+                    workspace_id,
+                    source_workspace_window_id,
+                    workspace_window_tab_id,
+                    target_workspace_window_id,
+                    to_index,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab transferred".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::ExtractWorkspaceWindowTab {
+                workspace_id,
+                source_workspace_window_id,
+                workspace_window_tab_id,
+                target,
+            } => {
+                model.extract_workspace_window_tab(
+                    workspace_id,
+                    source_workspace_window_id,
+                    workspace_window_tab_id,
+                    target,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab extracted".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::CloseWorkspaceWindowTab {
+                workspace_id,
+                workspace_window_id,
+                workspace_window_tab_id,
+            } => {
+                model.close_workspace_window_tab(
+                    workspace_id,
+                    workspace_window_id,
+                    workspace_window_tab_id,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab closed".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::FocusPane {
                 workspace_id,
                 pane_id,

@@ -11,7 +11,7 @@ use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
     MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, NotificationId, PaneKind,
     PaneMetadata, PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame,
-    Workspace, WorkspaceSummary as DomainWorkspaceSummary,
+    Workspace, WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
@@ -20,7 +20,7 @@ use tokio::sync::watch;
 
 pub use taskers_domain::{
     Direction, PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
-    WorkspaceWindowMoveTarget,
+    WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -879,9 +879,22 @@ pub struct WorkspaceWindowSnapshot {
     pub title: String,
     pub pane_count: usize,
     pub surface_count: usize,
+    pub active_tab: WorkspaceWindowTabId,
     pub active_pane: PaneId,
     pub frame: Frame,
+    pub tabs: Vec<WorkspaceWindowTabSnapshot>,
     pub layout: LayoutNodeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceWindowTabSnapshot {
+    pub id: WorkspaceWindowTabId,
+    pub active: bool,
+    pub attention: AttentionState,
+    pub runtime: RuntimeIdentitySnapshot,
+    pub title: String,
+    pub pane_count: usize,
+    pub surface_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -918,6 +931,7 @@ pub enum ShellDragMode {
     #[default]
     None,
     Window,
+    WindowTab,
     Surface,
 }
 
@@ -1106,6 +1120,33 @@ pub enum ShellAction {
         window_id: WorkspaceWindowId,
         target: WorkspaceWindowMoveTarget,
     },
+    CreateWorkspaceWindowTab {
+        window_id: WorkspaceWindowId,
+    },
+    FocusWorkspaceWindowTab {
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    },
+    MoveWorkspaceWindowTab {
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target_index: usize,
+    },
+    TransferWorkspaceWindowTab {
+        source_window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target_window_id: WorkspaceWindowId,
+        target_index: usize,
+    },
+    ExtractWorkspaceWindowTab {
+        source_window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target: WorkspaceWindowMoveTarget,
+    },
+    CloseWorkspaceWindowTab {
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    },
     ScrollViewport {
         dx: i32,
         dy: i32,
@@ -1146,6 +1187,7 @@ pub enum ShellAction {
         target_workspace_id: WorkspaceId,
     },
     BeginWindowDrag,
+    BeginWindowTabDrag,
     BeginSurfaceDrag {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
@@ -1373,7 +1415,12 @@ impl TaskersCore {
                 canvas_offset_x: canvas_metrics.offset_x,
                 canvas_offset_y: canvas_metrics.offset_y,
                 columns: self.workspace_columns_snapshot(workspace, &window_frames),
-                layout: self.snapshot_layout(workspace, &active_window.layout),
+                layout: self.snapshot_layout(
+                    workspace,
+                    active_window
+                        .active_layout()
+                        .expect("active workspace window tab should exist"),
+                ),
             },
             browser_chrome: self.browser_chrome_snapshot(workspace),
             agents,
@@ -1615,7 +1662,10 @@ impl TaskersCore {
         frame: Frame,
         now: OffsetDateTime,
     ) -> WorkspaceWindowSnapshot {
-        let pane_ids = window.layout.leaves();
+        let active_tab = window
+            .active_tab_record()
+            .expect("workspace window should have an active tab");
+        let pane_ids = active_tab.layout.leaves();
         let pane_count = pane_ids.len();
         let surface_count = pane_ids
             .iter()
@@ -1623,6 +1673,11 @@ impl TaskersCore {
             .map(|pane| pane.surfaces.len())
             .sum();
         let title = window_primary_title(workspace, window);
+        let tabs = window
+            .tabs
+            .values()
+            .map(|tab| workspace_window_tab_snapshot(workspace, tab, window.active_tab, now))
+            .collect();
 
         WorkspaceWindowSnapshot {
             id: window.id,
@@ -1633,9 +1688,13 @@ impl TaskersCore {
             title,
             pane_count,
             surface_count,
-            active_pane: window.active_pane,
+            active_tab: window.active_tab,
+            active_pane: window
+                .active_pane()
+                .expect("workspace window should have an active pane"),
             frame,
-            layout: self.snapshot_layout(workspace, &window.layout),
+            tabs,
+            layout: self.snapshot_layout(workspace, &active_tab.layout),
         }
     }
 
@@ -1815,10 +1874,11 @@ impl TaskersCore {
             .values()
             .filter_map(|window| {
                 let (_, frame) = window_frames.get(&window.id)?;
+                let layout = window.active_layout()?;
                 Some(self.collect_surface_plans(
                     workspace_id,
                     workspace,
-                    &window.layout,
+                    layout,
                     workspace_window_content_frame(*frame, self.metrics),
                 ))
             })
@@ -2000,6 +2060,36 @@ impl TaskersCore {
             ShellAction::MoveWorkspaceWindow { window_id, target } => {
                 self.move_workspace_window_by_id(window_id, target)
             }
+            ShellAction::CreateWorkspaceWindowTab { window_id } => {
+                self.create_workspace_window_tab(window_id)
+            }
+            ShellAction::FocusWorkspaceWindowTab { window_id, tab_id } => {
+                self.focus_workspace_window_tab(window_id, tab_id)
+            }
+            ShellAction::MoveWorkspaceWindowTab {
+                window_id,
+                tab_id,
+                target_index,
+            } => self.move_workspace_window_tab(window_id, tab_id, target_index),
+            ShellAction::TransferWorkspaceWindowTab {
+                source_window_id,
+                tab_id,
+                target_window_id,
+                target_index,
+            } => self.transfer_workspace_window_tab(
+                source_window_id,
+                tab_id,
+                target_window_id,
+                target_index,
+            ),
+            ShellAction::ExtractWorkspaceWindowTab {
+                source_window_id,
+                tab_id,
+                target,
+            } => self.extract_workspace_window_tab(source_window_id, tab_id, target),
+            ShellAction::CloseWorkspaceWindowTab { window_id, tab_id } => {
+                self.close_workspace_window_tab(window_id, tab_id)
+            }
             ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
             ShellAction::SplitBrowser { pane_id } => {
                 self.split_with_kind_axis(pane_id, PaneKind::Browser, DomainSplitAxis::Horizontal)
@@ -2044,6 +2134,7 @@ impl TaskersCore {
                 target_workspace_id,
             ),
             ShellAction::BeginWindowDrag => self.begin_window_drag(),
+            ShellAction::BeginWindowTabDrag => self.begin_window_tab_drag(),
             ShellAction::BeginSurfaceDrag {
                 workspace_id,
                 pane_id,
@@ -2350,6 +2441,113 @@ impl TaskersCore {
             workspace_id,
             workspace_window_id: window_id,
             target,
+        })
+    }
+
+    fn create_workspace_window_tab(&mut self, window_id: WorkspaceWindowId) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CreateWorkspaceWindowTab {
+            workspace_id,
+            workspace_window_id: window_id,
+        })
+    }
+
+    fn focus_workspace_window_tab(
+        &mut self,
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::FocusWorkspaceWindowTab {
+            workspace_id,
+            workspace_window_id: window_id,
+            workspace_window_tab_id: tab_id,
+        })
+    }
+
+    fn move_workspace_window_tab(
+        &mut self,
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target_index: usize,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::MoveWorkspaceWindowTab {
+            workspace_id,
+            workspace_window_id: window_id,
+            workspace_window_tab_id: tab_id,
+            to_index: target_index,
+        })
+    }
+
+    fn transfer_workspace_window_tab(
+        &mut self,
+        source_window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target_window_id: WorkspaceWindowId,
+        target_index: usize,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let changed = self.dispatch_control(ControlCommand::TransferWorkspaceWindowTab {
+            workspace_id,
+            source_workspace_window_id: source_window_id,
+            workspace_window_tab_id: tab_id,
+            target_workspace_window_id: target_window_id,
+            to_index: target_index,
+        });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
+    }
+
+    fn extract_workspace_window_tab(
+        &mut self,
+        source_window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target: WorkspaceWindowMoveTarget,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let changed = self.dispatch_control(ControlCommand::ExtractWorkspaceWindowTab {
+            workspace_id,
+            source_workspace_window_id: source_window_id,
+            workspace_window_tab_id: tab_id,
+            target,
+        });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
+    }
+
+    fn close_workspace_window_tab(
+        &mut self,
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CloseWorkspaceWindowTab {
+            workspace_id,
+            workspace_window_id: window_id,
+            workspace_window_tab_id: tab_id,
         })
     }
 
@@ -2768,6 +2966,22 @@ impl TaskersCore {
         }
         if self.ui.drag_mode != ShellDragMode::Window {
             self.ui.drag_mode = ShellDragMode::Window;
+            changed = true;
+        }
+        if changed {
+            self.bump_local_revision();
+        }
+        changed
+    }
+
+    fn begin_window_tab_drag(&mut self) -> bool {
+        let mut changed = false;
+        if self.ui.surface_drag.is_some() {
+            self.ui.surface_drag = None;
+            changed = true;
+        }
+        if self.ui.drag_mode != ShellDragMode::WindowTab {
+            self.ui.drag_mode = ShellDragMode::WindowTab;
             changed = true;
         }
         if changed {
@@ -3625,14 +3839,9 @@ fn workspace_window_attention(
     window: &taskers_domain::WorkspaceWindowRecord,
 ) -> AttentionState {
     window
-        .layout
-        .leaves()
-        .into_iter()
-        .filter_map(|pane_id| workspace.panes.get(&pane_id))
-        .map(|pane| pane.highest_attention())
-        .max_by_key(|attention| attention.rank())
-        .unwrap_or(taskers_domain::AttentionState::Normal)
-        .into()
+        .active_tab_record()
+        .map(|tab| workspace_window_tab_attention(workspace, tab))
+        .unwrap_or(AttentionState::Normal)
 }
 
 fn surface_runtime_identity(
@@ -3661,20 +3870,10 @@ fn workspace_window_runtime_identity(
     window: &taskers_domain::WorkspaceWindowRecord,
     now: OffsetDateTime,
 ) -> RuntimeIdentitySnapshot {
-    dominant_runtime_identity(
-        window
-            .layout
-            .leaves()
-            .into_iter()
-            .filter_map(|pane_id| workspace.panes.get(&pane_id))
-            .map(|pane| {
-                (
-                    pane_runtime_identity(pane, now),
-                    pane.id == window.active_pane,
-                )
-            }),
-        fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
-    )
+    window
+        .active_tab_record()
+        .map(|tab| workspace_window_tab_runtime_identity(workspace, tab, now))
+        .unwrap_or_else(|| fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle))
 }
 
 fn workspace_runtime_identity(
@@ -3872,9 +4071,69 @@ fn window_primary_title(
     workspace: &Workspace,
     window: &taskers_domain::WorkspaceWindowRecord,
 ) -> String {
+    window
+        .active_tab_record()
+        .map(|tab| window_tab_primary_title(workspace, tab))
+        .unwrap_or_else(|| "Workspace window".into())
+}
+
+fn workspace_window_tab_snapshot(
+    workspace: &Workspace,
+    tab: &WorkspaceWindowTabRecord,
+    active_tab_id: WorkspaceWindowTabId,
+    now: OffsetDateTime,
+) -> WorkspaceWindowTabSnapshot {
+    let pane_ids = tab.layout.leaves();
+    let pane_count = pane_ids.len();
+    let surface_count = pane_ids
+        .iter()
+        .filter_map(|pane_id| workspace.panes.get(pane_id))
+        .map(|pane| pane.surfaces.len())
+        .sum();
+    WorkspaceWindowTabSnapshot {
+        id: tab.id,
+        active: tab.id == active_tab_id,
+        attention: workspace_window_tab_attention(workspace, tab),
+        runtime: workspace_window_tab_runtime_identity(workspace, tab, now),
+        title: window_tab_primary_title(workspace, tab),
+        pane_count,
+        surface_count,
+    }
+}
+
+fn workspace_window_tab_attention(
+    workspace: &Workspace,
+    tab: &WorkspaceWindowTabRecord,
+) -> AttentionState {
+    tab.layout
+        .leaves()
+        .into_iter()
+        .filter_map(|pane_id| workspace.panes.get(&pane_id))
+        .map(|pane| pane.highest_attention())
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(taskers_domain::AttentionState::Normal)
+        .into()
+}
+
+fn workspace_window_tab_runtime_identity(
+    workspace: &Workspace,
+    tab: &WorkspaceWindowTabRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    dominant_runtime_identity(
+        tab.layout
+            .leaves()
+            .into_iter()
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .map(|pane| (pane_runtime_identity(pane, now), pane.id == tab.active_pane)),
+        fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
+    )
+}
+
+fn window_tab_primary_title(workspace: &Workspace, tab: &WorkspaceWindowTabRecord) -> String {
     workspace
         .panes
-        .get(&window.active_pane)
+        .get(&tab.active_pane)
         .and_then(|pane| pane.active_surface())
         .map(display_surface_title)
         .unwrap_or_else(|| "Workspace window".into())

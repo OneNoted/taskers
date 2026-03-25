@@ -6,7 +6,7 @@ use taskers_domain::{
     AgentTarget, AppModel, AttentionState, Direction, NotificationDeliveryState, NotificationId,
     PaneId, PaneKind, PaneMetadataPatch, PersistedSession, ProgressState, SignalEvent, SignalKind,
     SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceLogEntry,
-    WorkspaceViewport, WorkspaceWindowId, WorkspaceWindowMoveTarget,
+    WorkspaceViewport, WorkspaceWindowId, WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +45,39 @@ pub enum ControlCommand {
         workspace_id: WorkspaceId,
         workspace_window_id: WorkspaceWindowId,
         target: WorkspaceWindowMoveTarget,
+    },
+    CreateWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+    },
+    FocusWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+    },
+    MoveWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        to_index: usize,
+    },
+    TransferWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        source_workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        target_workspace_window_id: WorkspaceWindowId,
+        to_index: usize,
+    },
+    ExtractWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        source_workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        target: WorkspaceWindowMoveTarget,
+    },
+    CloseWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
     },
     FocusPane {
         workspace_id: WorkspaceId,
@@ -572,6 +605,10 @@ pub enum ControlResponse {
     },
     WorkspaceWindowCreated {
         pane_id: PaneId,
+    },
+    WorkspaceWindowTabCreated {
+        pane_id: PaneId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
     },
     Status {
         session: PersistedSession,
