@@ -25,6 +25,7 @@ targets:
       - sdk: Carbon.framework
       - sdk: libc++.tbd
       - sdk: liblzma.tbd
+      - sdk: WebKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.taskers.app

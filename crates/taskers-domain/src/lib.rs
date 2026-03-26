@@ -13,8 +13,9 @@ pub use model::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, DEFAULT_WORKSPACE_WINDOW_HEIGHT,
     DEFAULT_WORKSPACE_WINDOW_WIDTH, DomainError, KEYBOARD_RESIZE_STEP, MIN_WORKSPACE_WINDOW_HEIGHT,
     MIN_WORKSPACE_WINDOW_WIDTH, NotificationItem, PaneKind, PaneMetadata, PaneMetadataPatch,
-    PaneRecord, PersistedSession, SESSION_SCHEMA_VERSION, SurfaceRecord, WindowFrame, WindowRecord,
-    Workspace, WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord, WorkspaceSummary,
-    WorkspaceViewport, WorkspaceWindowRecord,
+    PaneRecord, PersistedSession, PrStatus, ProgressState, PullRequestState,
+    SESSION_SCHEMA_VERSION, SurfaceRecord, WindowFrame, WindowRecord, Workspace,
+    WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord, WorkspaceSummary,
+    WorkspaceViewport, WorkspaceWindowMoveTarget, WorkspaceWindowRecord,
 };
 pub use signal::{SignalEvent, SignalKind, SignalPaneMetadata};

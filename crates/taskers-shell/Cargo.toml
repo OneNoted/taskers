@@ -1,0 +1,14 @@
+[package]
+name = "taskers-shell"
+description = "Dioxus UI shell for the mainline Taskers workspace app."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+dioxus.workspace = true
+taskers-shell-core.workspace = true

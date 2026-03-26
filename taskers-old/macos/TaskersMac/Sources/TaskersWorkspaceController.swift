@@ -109,6 +109,23 @@ final class WeightedSplitView: NSSplitView {
     }
 }
 
+enum TaskersWorkspaceControllerError: LocalizedError {
+    case missingActiveWorkspace
+    case missingWorkspace(String)
+    case missingPane(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingActiveWorkspace:
+            return "no active workspace is available"
+        case .missingWorkspace(let workspaceID):
+            return "workspace \(workspaceID) is not present"
+        case .missingPane(let paneID):
+            return "pane \(paneID) is not present"
+        }
+    }
+}
+
 final class TaskersWorkspaceController: NSWindowController {
     private let core: TaskersCoreBridge
     private let surfaceHost: any TaskersSurfaceHosting
@@ -125,9 +142,9 @@ final class TaskersWorkspaceController: NSWindowController {
         Set(surfaceRegistry.keys)
     }
 
-    init(core: TaskersCoreBridge, ghosttyHost: any TaskersSurfaceHosting) {
+    init(core: TaskersCoreBridge, surfaceHost: any TaskersSurfaceHosting) {
         self.core = core
-        self.surfaceHost = ghosttyHost
+        self.surfaceHost = surfaceHost
         let window = NSWindow(
             contentRect: NSRect(x: 80, y: 80, width: 1380, height: 900),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -162,6 +179,38 @@ final class TaskersWorkspaceController: NSWindowController {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             try? self?.refresh(force: false)
         }
+    }
+
+    func openBrowserSplit(url: String? = nil) throws {
+        let snapshot = try core.snapshot()
+        guard let workspace = snapshot.activeWorkspace else {
+            throw TaskersWorkspaceControllerError.missingActiveWorkspace
+        }
+
+        let newPaneID = try core.splitPane(
+            workspaceId: workspace.id,
+            paneId: workspace.activePane,
+            axis: "horizontal"
+        )
+        let placeholderSurfaceID = try activeSurfaceID(
+            workspaceID: workspace.id,
+            paneID: newPaneID
+        )
+        let browserSurfaceID = try core.createSurface(
+            workspaceId: workspace.id,
+            paneId: newPaneID,
+            kind: .browser
+        )
+        if let url = url?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !url.isEmpty {
+            try core.updateSurfaceMetadata(surfaceId: browserSurfaceID, url: url)
+        }
+        try core.closeSurface(
+            workspaceID: workspace.id,
+            paneID: newPaneID,
+            surfaceID: placeholderSurfaceID
+        )
+        try refresh(force: true)
     }
 
     func refresh(force: Bool) throws {
@@ -300,12 +349,18 @@ final class TaskersWorkspaceController: NSWindowController {
 
     private func closeSurface(workspaceID: String, paneID: String, surfaceID: String) {
         taskersMacDebugLog("close surface command workspace=\(workspaceID) pane=\(paneID) surface=\(surfaceID)")
-        _ = try? core.dispatch(command: [
-            "command": "close_surface",
-            "workspace_id": workspaceID,
-            "pane_id": paneID,
-            "surface_id": surfaceID
-        ])
+        try? core.closeSurface(workspaceID: workspaceID, paneID: paneID, surfaceID: surfaceID)
+    }
+
+    private func activeSurfaceID(workspaceID: String, paneID: String) throws -> String {
+        let snapshot = try core.snapshot()
+        guard let workspace = snapshot.workspaces[workspaceID] else {
+            throw TaskersWorkspaceControllerError.missingWorkspace(workspaceID)
+        }
+        guard let pane = workspace.panes[paneID] else {
+            throw TaskersWorkspaceControllerError.missingPane(paneID)
+        }
+        return pane.activeSurface
     }
 
     private func makeMessageView(_ message: String) -> NSView {

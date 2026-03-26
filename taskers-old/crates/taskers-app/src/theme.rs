@@ -1259,10 +1259,25 @@ pub fn generate_css(p: &ThemePalette) -> String {
             min-height: 18px;
         }}
 
-        .surface-tab-close:hover,
-        .surface-tab-add:hover {{
+        .surface-tab-close:hover {{
             background: {border_06};
             color: {text_subtle};
+        }}
+
+        .surface-tab-add {{
+            color: {text_bright};
+            background: {accent_14};
+            border: 1px solid {accent_35};
+            min-width: 22px;
+            min-height: 20px;
+            font-size: 0.82rem;
+            font-weight: 700;
+        }}
+
+        .surface-tab-add:hover {{
+            background: {accent_22};
+            border-color: {accent_48};
+            color: {text_bright};
         }}
         ",
         border_03 = rgba(p.border, 0.03),
@@ -1276,7 +1291,9 @@ pub fn generate_css(p: &ThemePalette) -> String {
         text_dim = p.text_dim.to_hex(),
         text_subtle = p.text_subtle.to_hex(),
         accent_14 = rgba(p.accent, 0.14),
+        accent_22 = rgba(p.accent, 0.22),
         accent_35 = rgba(p.accent, 0.35),
+        accent_48 = rgba(p.accent, 0.48),
         busy_08 = rgba(p.busy, 0.08),
         busy_22 = rgba(p.busy, 0.22),
         completed_08 = rgba(p.completed, 0.08),
@@ -1353,18 +1370,21 @@ pub fn generate_css(p: &ThemePalette) -> String {
         }}
 
         .inline-tab-add {{
-            min-width: 20px;
+            min-width: 22px;
             min-height: 20px;
             padding: 0;
-            font-size: 0.74rem;
-            color: {text_faint};
-            background: transparent;
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: {text_bright};
+            background: {inline_add_bg};
+            border: 1px solid {inline_add_border};
             border-radius: 4px;
         }}
 
         .inline-tab-add:hover {{
-            background: {inline_close_hover};
-            color: {text_subtle};
+            background: {inline_add_hover};
+            border-color: {inline_add_hover_border};
+            color: {text_bright};
         }}
         ",
         inline_bg = rgba(p.border, 0.03),
@@ -1372,6 +1392,10 @@ pub fn generate_css(p: &ThemePalette) -> String {
         inline_hover = rgba(p.border, 0.06),
         inline_active_bg = rgba(p.accent, 0.14),
         inline_active_border = rgba(p.accent, 0.35),
+        inline_add_bg = rgba(p.accent, 0.14),
+        inline_add_border = rgba(p.accent, 0.35),
+        inline_add_hover = rgba(p.accent, 0.22),
+        inline_add_hover_border = rgba(p.accent, 0.48),
         inline_close_hover = rgba(p.border, 0.06),
         text_bright = p.text_bright.to_hex(),
         text_dim = p.text_dim.to_hex(),

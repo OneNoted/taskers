@@ -530,6 +530,7 @@ pub extern "C" fn taskers_macos_string_free(value: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+    use taskers_control::ControlCommand;
     use tempfile::tempdir;
 
     use super::{CoreOptions, TaskersMacosCore};
@@ -539,7 +540,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let session_path = temp.path().join("session.json");
         let socket_path = temp.path().join("taskers.sock");
-        let mut core = TaskersMacosCore::new(
+        let core = TaskersMacosCore::new(
             Some(session_path),
             Some(socket_path),
             Some("/bin/sh"),
@@ -614,6 +615,69 @@ mod tests {
                     .to_str()
                     .expect("utf-8 socket path")
             )
+        );
+    }
+
+    #[test]
+    fn surface_descriptor_json_includes_browser_kind_and_url() {
+        let temp = tempdir().expect("tempdir");
+        let session_path = temp.path().join("session.json");
+        let socket_path = temp.path().join("taskers.sock");
+        let mut core = TaskersMacosCore::new(
+            Some(session_path),
+            Some(socket_path),
+            Some("/bin/sh"),
+            false,
+        )
+        .expect("core");
+
+        let model = core.app_state.snapshot_model();
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = core
+            .app_state
+            .dispatch(ControlCommand::CreateSurface {
+                workspace_id,
+                pane_id,
+                kind: taskers_domain::PaneKind::Browser,
+            })
+            .expect("create browser surface");
+        let surface_id = match surface_id {
+            taskers_control::ControlResponse::SurfaceCreated { surface_id } => surface_id,
+            other => panic!("unexpected response: {other:?}"),
+        };
+        core.app_state
+            .dispatch(ControlCommand::UpdateSurfaceMetadata {
+                surface_id,
+                patch: taskers_domain::PaneMetadataPatch {
+                    title: None,
+                    cwd: None,
+                    url: Some("https://example.com".into()),
+                    repo_name: None,
+                    git_branch: None,
+                    ports: None,
+                    agent_kind: None,
+                },
+            })
+            .expect("set browser url");
+
+        let descriptor = core
+            .surface_descriptor_json(&workspace_id.to_string(), &pane_id.to_string())
+            .expect("descriptor");
+        let descriptor: Value = serde_json::from_str(&descriptor).expect("descriptor json");
+        assert_eq!(
+            descriptor.get("kind").and_then(Value::as_str),
+            Some("browser")
+        );
+        assert_eq!(
+            descriptor.get("url").and_then(Value::as_str),
+            Some("https://example.com")
+        );
+        assert!(
+            descriptor
+                .get("command_argv")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
         );
     }
 

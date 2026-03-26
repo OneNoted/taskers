@@ -4,6 +4,8 @@ use time::OffsetDateTime;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalPaneMetadata {
     pub title: Option<String>,
+    #[serde(default)]
+    pub agent_title: Option<String>,
     pub cwd: Option<String>,
     pub repo_name: Option<String>,
     pub git_branch: Option<String>,

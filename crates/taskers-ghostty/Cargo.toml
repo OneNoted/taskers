@@ -15,6 +15,7 @@ serde.workspace = true
 tar = "0.4"
 taskers-domain = { version = "0.3.0", path = "../taskers-domain" }
 taskers-paths.workspace = true
+taskers-runtime = { version = "0.3.0", path = "../taskers-runtime" }
 thiserror.workspace = true
 ureq = "2.12"
 xz2 = "0.1"

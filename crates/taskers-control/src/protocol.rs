@@ -4,7 +4,7 @@ use uuid::Uuid;
 use taskers_domain::{
     AppModel, Direction, PaneId, PaneKind, PaneMetadataPatch, PersistedSession, SignalEvent,
     SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceViewport,
-    WorkspaceWindowId,
+    WorkspaceWindowId, WorkspaceWindowMoveTarget,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +26,11 @@ pub enum ControlCommand {
         pane_id: Option<PaneId>,
         axis: SplitAxis,
     },
+    SplitPaneDirection {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        direction: Direction,
+    },
     CreateWorkspaceWindow {
         workspace_id: WorkspaceId,
         direction: Direction,
@@ -33,6 +38,11 @@ pub enum ControlCommand {
     FocusWorkspaceWindow {
         workspace_id: WorkspaceId,
         workspace_window_id: WorkspaceWindowId,
+    },
+    MoveWorkspaceWindow {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        target: WorkspaceWindowMoveTarget,
     },
     FocusPane {
         workspace_id: WorkspaceId,
@@ -102,6 +112,26 @@ pub enum ControlCommand {
         surface_id: SurfaceId,
         to_index: usize,
     },
+    TransferSurface {
+        workspace_id: WorkspaceId,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        to_index: usize,
+    },
+    MoveSurfaceToSplit {
+        workspace_id: WorkspaceId,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_pane_id: PaneId,
+        direction: Direction,
+    },
+    MoveSurfaceToWorkspace {
+        source_workspace_id: WorkspaceId,
+        source_pane_id: PaneId,
+        surface_id: SurfaceId,
+        target_workspace_id: WorkspaceId,
+    },
     SetWorkspaceViewport {
         workspace_id: WorkspaceId,
         viewport: WorkspaceViewport,
@@ -112,6 +142,10 @@ pub enum ControlCommand {
     },
     CloseWorkspace {
         workspace_id: WorkspaceId,
+    },
+    ReorderWorkspaces {
+        window_id: WindowId,
+        workspace_ids: Vec<WorkspaceId>,
     },
     EmitSignal {
         workspace_id: WorkspaceId,
@@ -143,6 +177,12 @@ pub enum ControlResponse {
         workspace_id: WorkspaceId,
     },
     PaneSplit {
+        pane_id: PaneId,
+    },
+    SurfaceMovedToSplit {
+        pane_id: PaneId,
+    },
+    SurfaceMovedToWorkspace {
         pane_id: PaneId,
     },
     SurfaceCreated {

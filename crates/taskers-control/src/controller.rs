@@ -90,6 +90,20 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::SplitPaneDirection {
+                workspace_id,
+                pane_id,
+                direction,
+            } => {
+                let new_pane_id =
+                    model.split_pane_direction(workspace_id, Some(pane_id), direction)?;
+                (
+                    ControlResponse::PaneSplit {
+                        pane_id: new_pane_id,
+                    },
+                    true,
+                )
+            }
             ControlCommand::CreateWorkspaceWindow {
                 workspace_id,
                 direction,
@@ -110,6 +124,19 @@ impl InMemoryController {
                 (
                     ControlResponse::Ack {
                         message: "workspace window focused".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MoveWorkspaceWindow {
+                workspace_id,
+                workspace_window_id,
+                target,
+            } => {
+                model.move_workspace_window(workspace_id, workspace_window_id, target)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window moved".into(),
                     },
                     true,
                 )
@@ -283,6 +310,67 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::TransferSurface {
+                workspace_id,
+                source_pane_id,
+                surface_id,
+                target_pane_id,
+                to_index,
+            } => {
+                model.transfer_surface(
+                    workspace_id,
+                    source_pane_id,
+                    surface_id,
+                    target_pane_id,
+                    to_index,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface transferred".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MoveSurfaceToSplit {
+                workspace_id,
+                source_pane_id,
+                surface_id,
+                target_pane_id,
+                direction,
+            } => {
+                let new_pane_id = model.move_surface_to_split(
+                    workspace_id,
+                    source_pane_id,
+                    surface_id,
+                    target_pane_id,
+                    direction,
+                )?;
+                (
+                    ControlResponse::SurfaceMovedToSplit {
+                        pane_id: new_pane_id,
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MoveSurfaceToWorkspace {
+                source_workspace_id,
+                source_pane_id,
+                surface_id,
+                target_workspace_id,
+            } => {
+                let new_pane_id = model.move_surface_to_workspace(
+                    source_workspace_id,
+                    source_pane_id,
+                    surface_id,
+                    target_workspace_id,
+                )?;
+                (
+                    ControlResponse::SurfaceMovedToWorkspace {
+                        pane_id: new_pane_id,
+                    },
+                    true,
+                )
+            }
             ControlCommand::SetWorkspaceViewport {
                 workspace_id,
                 viewport,
@@ -312,6 +400,18 @@ impl InMemoryController {
                 (
                     ControlResponse::Ack {
                         message: "workspace closed".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::ReorderWorkspaces {
+                window_id,
+                workspace_ids,
+            } => {
+                model.reorder_workspaces(window_id, workspace_ids)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspaces reordered".into(),
                     },
                     true,
                 )

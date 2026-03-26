@@ -40,7 +40,13 @@ final class TaskersMockSurfaceHost: TaskersSurfaceHosting {
         _ = workspaceID
         _ = paneID
         _ = surfaceID
-        return TaskersMockSurfaceView(title: descriptor.title)
+        let title = switch descriptor.kind {
+        case .terminal:
+            descriptor.title
+        case .browser:
+            descriptor.title ?? descriptor.url ?? "Taskers Mock Browser"
+        }
+        return TaskersMockSurfaceView(title: title)
     }
 
     func setFocused(_ focused: Bool) {

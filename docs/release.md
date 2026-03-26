@@ -1,6 +1,6 @@
 # Release Prep
 
-Use this checklist before publishing a new `taskers` release.
+Use this checklist before publishing a new `taskers` Linux release.
 
 ## 1. Finalize The Repo State
 
@@ -8,35 +8,34 @@ Use this checklist before publishing a new `taskers` release.
 - Describe the current change with `jj desc -m "<type>: <summary>"` if needed.
 - Split unrelated work into separate changes before publishing.
 - Bump the workspace version in `Cargo.toml` and update any internal dependency version pins that still reference the previous release.
-- Do not run the publish dry-runs until the version bump is done everywhere. Re-running `cargo publish --dry-run` against an already-published version will verify packaged siblings against crates.io's existing releases instead of your local unpublished changes.
 
-## 2. Refresh Release Assets
+## 2. Run Local Verification
 
-- Regenerate the README screenshots:
+- On Ubuntu 24.04, install the Linux UI dependencies first:
 
 ```bash
-bash scripts/capture_demo_screenshots.sh
+sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev xvfb
 ```
 
-- Review the updated files in `docs/screenshots/`.
-- Update `README.md` if the screenshots or release notes no longer match the current UI.
-
-## 3. Run Local Verification
-
-- Run the full test suite:
+- Run the full active workspace test suite:
 
 ```bash
 cargo test
 ```
 
-- Run the GTK smoke checks:
+- Build the mainline app and run the headless smoke:
 
 ```bash
-bash scripts/smoke_taskers_ui.sh
-bash scripts/smoke_taskers_focus_churn.sh
+cargo build -p taskers-gtk --bin taskers-gtk
+TASKERS_TERMINAL_BACKEND=mock \
+  bash scripts/headless-smoke.sh \
+  ./target/debug/taskers-gtk \
+  --smoke-script baseline \
+  --diagnostic-log stderr \
+  --quit-after-ms 5000
 ```
 
-- Build the Linux app bundle that the published launcher expects:
+- Build the Linux bundle and verify the published launcher path:
 
 ```bash
 bash scripts/build_linux_bundle.sh
@@ -48,34 +47,6 @@ The output asset name must match:
 ```text
 taskers-linux-bundle-v<version>-<target>.tar.xz
 ```
-
-- Build the macOS release assets on macOS:
-
-```bash
-bash scripts/install_macos_codesign_certificate.sh
-bash scripts/generate_macos_project.sh
-xcodebuild build \
-  -project macos/Taskers.xcodeproj \
-  -scheme TaskersMac \
-  -configuration Release \
-  -derivedDataPath build/macos/DerivedData \
-  ARCHS="arm64 x86_64" \
-  ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO
-bash scripts/sign_macos_app.sh
-bash scripts/build_macos_dmg.sh
-bash scripts/notarize_macos_dmg.sh dist/Taskers-v<version>-universal2.dmg
-```
-
-- Set these env vars before importing the certificate or notarizing:
-  - `TASKERS_MACOS_CERTIFICATE_P12_BASE64`
-  - `TASKERS_MACOS_CERTIFICATE_PASSWORD`
-  - `TASKERS_MACOS_CODESIGN_IDENTITY`
-  - `TASKERS_MACOS_NOTARY_APPLE_ID`
-  - `TASKERS_MACOS_NOTARY_TEAM_ID`
-  - `TASKERS_MACOS_NOTARY_PASSWORD`
-- `scripts/sign_macos_app.sh` still falls back to ad hoc signing when `TASKERS_MACOS_CODESIGN_IDENTITY` is unset, but public release builds should always use a Developer ID Application identity and notarize the DMG.
 
 - Build the release manifest from the generated assets:
 
@@ -96,15 +67,13 @@ cargo publish --dry-run -p taskers-paths
   - `taskers-ghostty`
   - `taskers-cli`
   - `taskers`
-- Use the full local test/smoke suite as the pre-publish validation for those dependent crates, then publish them in order once the earlier versions are live on crates.io.
 
-## 4. Publish
+## 3. Publish
 
 - Push the release tag so GitHub Actions can assemble the assets and attach them to a draft GitHub release.
 - Confirm the draft release tagged `v<version>` contains:
   - `taskers-manifest-v<version>.json`
   - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
-  - `Taskers-v<version>-universal2.dmg`
 - Publish the GitHub release so the launcher assets are publicly downloadable before publishing the crates.
 - Publish the crates to crates.io in dependency order:
 
@@ -118,18 +87,15 @@ cargo publish -p taskers-cli
 cargo publish -p taskers
 ```
 
-- Wait for crates.io to index each published version before publishing the next dependent crate, or Cargo will reject the dependency resolution for the later package.
-
-## 5. Post-Publish Check
+## 4. Post-Publish Check
 
 - Verify the Linux launcher install:
 
 ```bash
 cargo install taskers --locked
-taskers --demo
+taskers
 ```
 
 - Confirm the published Linux launcher downloads the exact version-matched bundle on first launch.
-- Confirm macOS installs from the published DMG and launches correctly after dragging `Taskers.app` into `Applications`.
-- Confirm `cargo install taskers --locked` fails on macOS with guidance to use the GitHub Releases DMG.
 - Confirm `cargo install taskers-cli --bin taskersctl --locked` still works as the standalone helper path.
+- Confirm `cargo install taskers --locked` on macOS fails with the Linux-only guidance from the launcher crate.

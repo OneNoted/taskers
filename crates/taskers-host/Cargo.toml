@@ -1,0 +1,18 @@
+[package]
+name = "taskers-host"
+description = "GTK-native surface host for the mainline Taskers shell."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+gtk.workspace = true
+taskers-domain.workspace = true
+taskers-ghostty.workspace = true
+taskers-shell-core.workspace = true
+webkit6.workspace = true

@@ -19,5 +19,5 @@ if [ -z "$message" ]; then
 fi
 
 if command -v taskersctl >/dev/null 2>&1; then
-  taskersctl notify --title Codex --body "$message" --agent codex >/dev/null 2>&1 || true
+  taskersctl agent-hook notification --agent codex --title Codex --message "$message" >/dev/null 2>&1 || true
 fi

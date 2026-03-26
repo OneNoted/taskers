@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 pub enum ShortcutAction {
     ToggleOverview,
     CloseTerminal,
+    OpenBrowserSplit,
+    FocusBrowserAddress,
+    ReloadBrowserPage,
+    ToggleBrowserDevtools,
     FocusLeft,
     FocusRight,
     FocusUp,
@@ -32,9 +36,13 @@ pub enum ShortcutAction {
 }
 
 impl ShortcutAction {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 24] = [
         Self::ToggleOverview,
         Self::CloseTerminal,
+        Self::OpenBrowserSplit,
+        Self::FocusBrowserAddress,
+        Self::ReloadBrowserPage,
+        Self::ToggleBrowserDevtools,
         Self::FocusLeft,
         Self::FocusRight,
         Self::FocusUp,
@@ -59,6 +67,10 @@ impl ShortcutAction {
         match self {
             Self::ToggleOverview => "toggle_overview",
             Self::CloseTerminal => "close_terminal",
+            Self::OpenBrowserSplit => "open_browser_split",
+            Self::FocusBrowserAddress => "focus_browser_address",
+            Self::ReloadBrowserPage => "reload_browser_page",
+            Self::ToggleBrowserDevtools => "toggle_browser_devtools",
             Self::FocusLeft => "focus_left",
             Self::FocusRight => "focus_right",
             Self::FocusUp => "focus_up",
@@ -84,6 +96,10 @@ impl ShortcutAction {
         match self {
             Self::ToggleOverview => "Toggle overview",
             Self::CloseTerminal => "Close terminal",
+            Self::OpenBrowserSplit => "Open browser in split",
+            Self::FocusBrowserAddress => "Focus browser address bar",
+            Self::ReloadBrowserPage => "Reload browser page",
+            Self::ToggleBrowserDevtools => "Toggle browser devtools",
             Self::FocusLeft => "Focus left",
             Self::FocusRight => "Focus right",
             Self::FocusUp => "Focus up",
@@ -109,6 +125,12 @@ impl ShortcutAction {
         match self {
             Self::ToggleOverview => "Zoom the current workspace out to fit the full column strip.",
             Self::CloseTerminal => "Close the active pane or active top-level window.",
+            Self::OpenBrowserSplit => {
+                "Split the active pane to the right and open a browser surface."
+            }
+            Self::FocusBrowserAddress => "Focus the address bar for the active browser surface.",
+            Self::ReloadBrowserPage => "Reload the active browser surface.",
+            Self::ToggleBrowserDevtools => "Show or hide devtools for the active browser surface.",
             Self::FocusLeft => {
                 "Move focus to the column on the left, then fall back to pane focus."
             }
@@ -141,6 +163,10 @@ impl ShortcutAction {
     pub fn category(self) -> &'static str {
         match self {
             Self::ToggleOverview | Self::CloseTerminal => "General",
+            Self::OpenBrowserSplit
+            | Self::FocusBrowserAddress
+            | Self::ReloadBrowserPage
+            | Self::ToggleBrowserDevtools => "Browser",
             Self::FocusLeft | Self::FocusRight | Self::FocusUp | Self::FocusDown => "Focus",
             Self::NewWindowLeft
             | Self::NewWindowRight
@@ -162,6 +188,10 @@ impl ShortcutAction {
         match self {
             Self::ToggleOverview => &["<Control><Alt>o"],
             Self::CloseTerminal => &["<Control><Alt>x"],
+            Self::OpenBrowserSplit => &["<Control><Alt><Shift>l"],
+            Self::FocusBrowserAddress => &["<Control>l"],
+            Self::ReloadBrowserPage => &["<Control>r"],
+            Self::ToggleBrowserDevtools => &["<Control><Shift>i"],
             Self::FocusLeft => &["<Control><Alt>h", "<Control><Alt>Left"],
             Self::FocusRight => &["<Control><Alt>l", "<Control><Alt>Right"],
             Self::FocusUp => &["<Control><Alt>k", "<Control><Alt>Up"],
@@ -217,6 +247,10 @@ impl ShortcutPreset {
             Self::PowerUser => match action {
                 ShortcutAction::ToggleOverview => &["<Control><Alt>o"],
                 ShortcutAction::CloseTerminal => &["<Control><Alt>x"],
+                ShortcutAction::OpenBrowserSplit => &["<Control><Alt><Shift>l"],
+                ShortcutAction::FocusBrowserAddress => &["<Control>l"],
+                ShortcutAction::ReloadBrowserPage => &["<Control>r"],
+                ShortcutAction::ToggleBrowserDevtools => &["<Control><Shift>i"],
                 ShortcutAction::FocusLeft => &["<Control><Alt>h", "<Control><Alt>Left"],
                 ShortcutAction::FocusRight => &["<Control><Alt>l", "<Control><Alt>Right"],
                 ShortcutAction::FocusUp => &["<Control><Alt>k", "<Control><Alt>Up"],

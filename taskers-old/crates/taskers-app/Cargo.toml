@@ -1,0 +1,36 @@
+[package]
+name = "taskers-gtk"
+description = "Agent-first terminal workspace app with a Niri-like tiling model."
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+version.workspace = true
+publish = false
+
+[[bin]]
+name = "taskers-gtk"
+path = "src/main.rs"
+
+[dependencies]
+adw.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+gtk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+svgtypes.workspace = true
+taskers-core.workspace = true
+taskers-paths.workspace = true
+taskers-runtime = { version = "0.3.0", path = "../taskers-runtime" }
+tokio.workspace = true
+taskers-control = { version = "0.3.0", path = "../taskers-control" }
+taskers-domain = { version = "0.3.0", path = "../taskers-domain" }
+taskers-ghostty = { version = "0.3.0", path = "../taskers-ghostty" }
+time.workspace = true
+toml.workspace = true
+webkit6.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

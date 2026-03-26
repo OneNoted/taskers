@@ -1,6 +1,8 @@
 use crate::runtime::{runtime_bridge_path, runtime_resources_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use taskers_domain::PaneKind;
+use taskers_runtime::ShellLaunchSpec;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,12 +34,33 @@ pub struct BackendProbe {
 pub struct SurfaceDescriptor {
     pub cols: u16,
     pub rows: u16,
+    pub kind: PaneKind,
     pub cwd: Option<String>,
     pub title: Option<String>,
+    pub url: Option<String>,
     #[serde(default)]
     pub command_argv: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhosttyHostOptions {
+    #[serde(default)]
+    pub command_argv: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+impl GhosttyHostOptions {
+    pub fn from_shell_launch(shell_launch: &ShellLaunchSpec) -> Self {
+        let mut env = BTreeMap::new();
+        env.extend(shell_launch.env.clone());
+        Self {
+            command_argv: shell_launch.program_and_args(),
+            env,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -156,10 +179,18 @@ fn embedded_ghostty_notes() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendAvailability, BackendChoice, DefaultBackend, TerminalBackend};
+    use super::{
+        BackendAvailability, BackendChoice, DefaultBackend, GhosttyHostOptions, TerminalBackend,
+    };
+    use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
+    use taskers_runtime::ShellLaunchSpec;
+
+    static BACKEND_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn auto_probe_matches_runtime_availability() {
+        let _guard = BACKEND_ENV_LOCK.lock().expect("env lock");
+        unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
         let probe = DefaultBackend::probe(BackendChoice::Auto);
         match probe.availability {
             BackendAvailability::Ready => assert_eq!(probe.selected, BackendChoice::Ghostty),
@@ -183,9 +214,29 @@ mod tests {
 
     #[test]
     fn env_override_accepts_hyphenated_embedded_backend() {
+        let _guard = BACKEND_ENV_LOCK.lock().expect("env lock");
         unsafe { std::env::set_var("TASKERS_TERMINAL_BACKEND", "ghostty-embedded") };
         let probe = DefaultBackend::probe(BackendChoice::Mock);
         unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
         assert_eq!(probe.selected, BackendChoice::GhosttyEmbedded);
+    }
+
+    #[test]
+    fn host_options_follow_shell_launch_contract() {
+        let mut env = BTreeMap::new();
+        env.insert("TASKERS_SOCKET".into(), "/tmp/taskers.sock".into());
+        let shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/bin/zsh"),
+            args: vec!["-i".into()],
+            env,
+        };
+
+        let options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+
+        assert_eq!(options.command_argv, vec!["/bin/zsh", "-i"]);
+        assert_eq!(
+            options.env.get("TASKERS_SOCKET").map(String::as_str),
+            Some("/tmp/taskers.sock")
+        );
     }
 }

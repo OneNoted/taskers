@@ -1,0 +1,1743 @@
+use std::fmt::Write as _;
+use taskers_shell_core as taskers_core;
+use taskers_core::LayoutMetrics;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Color {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    pub fn to_hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemePalette {
+    pub base: Color,
+    pub surface: Color,
+    pub elevated: Color,
+    pub overlay: Color,
+    pub text: Color,
+    pub text_bright: Color,
+    pub text_muted: Color,
+    pub text_subtle: Color,
+    pub text_dim: Color,
+    pub text_faint: Color,
+    pub border: Color,
+    pub accent: Color,
+    pub busy: Color,
+    pub completed: Color,
+    pub waiting: Color,
+    pub error: Color,
+    pub busy_text: Color,
+    pub completed_text: Color,
+    pub waiting_text: Color,
+    pub error_text: Color,
+    pub action_window: Color,
+    pub action_split: Color,
+    pub action_teal: Color,
+}
+
+pub fn resolve_palette(theme_id: &str) -> ThemePalette {
+    match theme_id {
+        "catppuccin-mocha" => catppuccin_mocha(),
+        "tokyo-night" => tokyo_night(),
+        "gruvbox-dark" => gruvbox_dark(),
+        _ => default_dark(),
+    }
+}
+
+pub fn default_dark() -> ThemePalette {
+    ThemePalette {
+        base: Color::new(0x0f, 0x11, 0x17),
+        surface: Color::new(0x0d, 0x0f, 0x15),
+        elevated: Color::new(0x12, 0x14, 0x1c),
+        overlay: Color::new(0x1a, 0x1d, 0x28),
+        text: Color::new(0xe2, 0xe4, 0xea),
+        text_bright: Color::new(0xf0, 0xf2, 0xf8),
+        text_muted: Color::new(0x8b, 0x8f, 0xa3),
+        text_subtle: Color::new(0xb0, 0xb4, 0xc4),
+        text_dim: Color::new(0x5c, 0x61, 0x78),
+        text_faint: Color::new(0x3d, 0x42, 0x59),
+        border: Color::new(0xff, 0xff, 0xff),
+        accent: Color::new(0x7c, 0x8a, 0xff),
+        busy: Color::new(0x7c, 0x8a, 0xff),
+        completed: Color::new(0x34, 0xd3, 0x99),
+        waiting: Color::new(0x60, 0xa5, 0xfa),
+        error: Color::new(0xf8, 0x71, 0x71),
+        busy_text: Color::new(0xc7, 0xd2, 0xfe),
+        completed_text: Color::new(0xa7, 0xf3, 0xd0),
+        waiting_text: Color::new(0xdb, 0xea, 0xfe),
+        error_text: Color::new(0xfe, 0xca, 0xca),
+        action_window: Color::new(0x7d, 0xd3, 0xfc),
+        action_split: Color::new(0x5e, 0xea, 0xd4),
+        action_teal: Color::new(0x2d, 0xd4, 0xbf),
+    }
+}
+
+fn catppuccin_mocha() -> ThemePalette {
+    ThemePalette {
+        base: Color::new(0x1e, 0x1e, 0x2e),
+        surface: Color::new(0x18, 0x18, 0x25),
+        elevated: Color::new(0x31, 0x32, 0x44),
+        overlay: Color::new(0x45, 0x47, 0x5a),
+        text: Color::new(0xcd, 0xd6, 0xf4),
+        text_bright: Color::new(0xe4, 0xe8, 0xfb),
+        text_muted: Color::new(0xa6, 0xad, 0xc8),
+        text_subtle: Color::new(0x93, 0x99, 0xb2),
+        text_dim: Color::new(0x7f, 0x84, 0x9c),
+        text_faint: Color::new(0x6c, 0x70, 0x86),
+        border: Color::new(0xff, 0xff, 0xff),
+        accent: Color::new(0xb4, 0xbe, 0xfe),
+        busy: Color::new(0x89, 0xb4, 0xfa),
+        completed: Color::new(0xa6, 0xe3, 0xa1),
+        waiting: Color::new(0x94, 0xe2, 0xd5),
+        error: Color::new(0xf3, 0x8b, 0xa8),
+        busy_text: Color::new(0xbc, 0xd3, 0xfc),
+        completed_text: Color::new(0xc3, 0xed, 0xbe),
+        waiting_text: Color::new(0xb8, 0xed, 0xe6),
+        error_text: Color::new(0xf7, 0xb8, 0xc8),
+        action_window: Color::new(0xcb, 0xa6, 0xf7),
+        action_split: Color::new(0x89, 0xdc, 0xeb),
+        action_teal: Color::new(0x94, 0xe2, 0xd5),
+    }
+}
+
+fn tokyo_night() -> ThemePalette {
+    ThemePalette {
+        base: Color::new(0x1a, 0x1b, 0x26),
+        surface: Color::new(0x16, 0x16, 0x1e),
+        elevated: Color::new(0x29, 0x2e, 0x42),
+        overlay: Color::new(0x41, 0x48, 0x68),
+        text: Color::new(0xc0, 0xca, 0xf5),
+        text_bright: Color::new(0xdc, 0xe0, 0xf8),
+        text_muted: Color::new(0xa9, 0xb1, 0xd6),
+        text_subtle: Color::new(0x73, 0x7a, 0xa2),
+        text_dim: Color::new(0x56, 0x5f, 0x89),
+        text_faint: Color::new(0x3b, 0x42, 0x61),
+        border: Color::new(0xff, 0xff, 0xff),
+        accent: Color::new(0x7d, 0xcf, 0xff),
+        busy: Color::new(0x7a, 0xa2, 0xf7),
+        completed: Color::new(0x9e, 0xce, 0x6a),
+        waiting: Color::new(0x7d, 0xcf, 0xff),
+        error: Color::new(0xf7, 0x76, 0x8e),
+        busy_text: Color::new(0xb0, 0xc8, 0xfa),
+        completed_text: Color::new(0xc4, 0xe4, 0xa6),
+        waiting_text: Color::new(0xb0, 0xe3, 0xff),
+        error_text: Color::new(0xfa, 0xb0, 0xbc),
+        action_window: Color::new(0xbb, 0x9a, 0xf7),
+        action_split: Color::new(0x2a, 0xc3, 0xde),
+        action_teal: Color::new(0x1a, 0xbc, 0x9c),
+    }
+}
+
+fn gruvbox_dark() -> ThemePalette {
+    ThemePalette {
+        base: Color::new(0x28, 0x28, 0x28),
+        surface: Color::new(0x1d, 0x20, 0x21),
+        elevated: Color::new(0x3c, 0x38, 0x36),
+        overlay: Color::new(0x50, 0x49, 0x45),
+        text: Color::new(0xeb, 0xdb, 0xb2),
+        text_bright: Color::new(0xfb, 0xf1, 0xc7),
+        text_muted: Color::new(0xd5, 0xc4, 0xa1),
+        text_subtle: Color::new(0xbd, 0xae, 0x93),
+        text_dim: Color::new(0xa8, 0x99, 0x84),
+        text_faint: Color::new(0x92, 0x83, 0x74),
+        border: Color::new(0xff, 0xff, 0xff),
+        accent: Color::new(0x83, 0xa5, 0x98),
+        busy: Color::new(0x83, 0xa5, 0x98),
+        completed: Color::new(0xb8, 0xbb, 0x26),
+        waiting: Color::new(0x8e, 0xc0, 0x7c),
+        error: Color::new(0xfb, 0x49, 0x34),
+        busy_text: Color::new(0xb4, 0xcf, 0xc5),
+        completed_text: Color::new(0xd5, 0xd7, 0x8a),
+        waiting_text: Color::new(0xbc, 0xdb, 0xac),
+        error_text: Color::new(0xfc, 0xa0, 0x9a),
+        action_window: Color::new(0xd3, 0x86, 0x9b),
+        action_split: Color::new(0x8e, 0xc0, 0x7c),
+        action_teal: Color::new(0x68, 0x9d, 0x6a),
+    }
+}
+
+fn rgba(color: Color, alpha: f32) -> String {
+    format!("rgba({},{},{},{alpha:.2})", color.r, color.g, color.b)
+}
+
+pub fn generate_css(
+    p: &ThemePalette,
+    metrics: LayoutMetrics,
+    attention_panel_visible: bool,
+) -> String {
+    let sidebar_width = metrics.sidebar_width;
+    let activity_width = metrics.activity_width;
+    let workspace_toolbar_height = metrics.toolbar_height;
+    let window_border_width = metrics.window_border_width;
+    let window_toolbar_height = metrics.window_toolbar_height;
+    let window_body_padding = metrics.window_body_padding;
+    let pane_border_width = metrics.pane_border_width;
+    let pane_header_height = metrics.pane_header_height;
+    let surface_tab_height = metrics.surface_tab_height;
+    let browser_toolbar_height = metrics.browser_toolbar_height;
+    let split_gap = metrics.split_gap;
+    let app_shell_columns = if attention_panel_visible {
+        format!("{sidebar_width}px minmax(0, 1fr) {activity_width}px")
+    } else {
+        format!("{sidebar_width}px minmax(0, 1fr)")
+    };
+    let mut css = String::with_capacity(18_000);
+    let _ = write!(
+        css,
+        r#"
+html, body, #main {{
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: {base};
+  color: {text};
+  font-family: "IBM Plex Sans", "SF Pro Text", system-ui, sans-serif;
+}}
+
+* {{
+  box-sizing: border-box;
+}}
+
+button {{
+  font: inherit;
+}}
+
+.app-shell {{
+  width: 100vw;
+  height: 100vh;
+  background: {base};
+  display: grid;
+  grid-template-columns: {app_shell_columns};
+  overflow: hidden;
+}}
+
+.workspace-sidebar,
+.attention-panel {{
+  background: {surface_85};
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  contain: paint;
+}}
+
+.workspace-sidebar {{
+  border-right: 1px solid {border_04};
+  padding: 8px;
+  gap: 10px;
+}}
+
+.attention-panel {{
+  border-left: 1px solid {border_04};
+  padding: 10px 12px;
+  gap: 8px;
+}}
+
+.sidebar-brand {{
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
+.sidebar-brand h1 {{
+  margin: 0;
+  font-size: 24px;
+  line-height: 1;
+  color: {text_bright};
+}}
+
+.sidebar-heading {{
+  font-weight: 600;
+  font-size: 11px;
+  color: {text_dim};
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}}
+
+.sidebar-nav,
+.activity-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+
+.workspace-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}}
+
+.sidebar-nav-button,
+.workspace-button,
+.theme-card,
+.preset-card {{
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}}
+
+.sidebar-nav-button {{
+  padding: 8px 10px;
+  color: {text_subtle};
+}}
+
+.sidebar-nav-button:hover,
+.sidebar-nav-button-active {{
+  background: {border_06};
+  color: {text_bright};
+}}
+
+.sidebar-section-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px;
+}}
+
+.workspace-add {{
+  background: transparent;
+  color: {text_dim};
+  border: 1px solid {border_10};
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  font-size: 16px;
+}}
+
+.workspace-add:hover {{
+  background: {waiting_10};
+  color: {waiting_text};
+  border-color: {waiting_18};
+}}
+
+.workspace-button[draggable] {{
+  cursor: grab;
+}}
+
+.workspace-button-drag-over .workspace-tab {{
+  border-top: 2px solid var(--workspace-accent, {accent});
+}}
+
+.workspace-button-surface-drop .workspace-tab {{
+  background: {accent_12};
+  border-color: {accent_24};
+}}
+
+.workspace-tab {{
+  position: relative;
+  padding: 8px 10px 8px 14px;
+  border: 1px solid transparent;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  transition: background 0.14s ease-in-out, border-color 0.14s ease-in-out;
+}}
+
+.workspace-button:hover .workspace-tab {{
+  background: {border_04};
+  border-color: {border_08};
+}}
+
+.workspace-tab-active {{
+  background: {accent_08};
+}}
+
+.workspace-button:hover .workspace-tab-active {{
+  background: {accent_12};
+}}
+
+.workspace-tab-state-busy {{
+  border-color: {busy_12};
+}}
+
+.workspace-tab-state-completed {{
+  border-color: {completed_12};
+}}
+
+.workspace-tab-state-waiting {{
+  border-color: {waiting_14};
+}}
+
+.workspace-tab-state-error {{
+  border-color: {error_12};
+}}
+
+.workspace-tab-rail {{
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--workspace-accent, {accent});
+}}
+
+.workspace-tab-content {{
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}}
+
+.workspace-tab-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}}
+
+.workspace-tab-title {{
+  font-weight: 600;
+  font-size: 12.5px;
+  color: {text_bright};
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}}
+
+.workspace-tab-trailing {{
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}}
+
+.workspace-tab-close {{
+  width: 16px;
+  height: 16px;
+  border: 0;
+  background: transparent;
+  color: {text_dim};
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+  transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
+}}
+
+.workspace-button:hover .workspace-tab-close {{
+  visibility: visible;
+}}
+
+.workspace-tab-close:hover {{
+  background: {error_16};
+  color: {error};
+}}
+
+.workspace-unread-badge {{
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  background: var(--workspace-accent, {accent});
+  color: {base};
+}}
+
+.workspace-unread-badge-error {{
+  background: {error};
+}}
+
+.workspace-unread-badge-waiting {{
+  background: {waiting};
+}}
+
+.workspace-unread-badge-completed {{
+  background: {completed};
+}}
+
+.workspace-notification {{
+  color: {text_subtle};
+  font-size: 10px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}}
+
+.workspace-branch-row {{
+  color: {text_muted};
+  font-size: 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.workspace-ports-row {{
+  color: {text_dim};
+  font-size: 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+
+.workspace-progress {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}}
+
+.workspace-progress-track {{
+  flex: 1;
+  height: 3px;
+  background: {border_08};
+}}
+
+.workspace-progress-fill {{
+  height: 100%;
+  background: var(--workspace-accent, {accent});
+  transition: width 0.3s ease;
+}}
+
+.workspace-progress-label {{
+  font-size: 10px;
+  color: {text_dim};
+  white-space: nowrap;
+}}
+
+.workspace-pr-row {{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+}}
+
+.workspace-pr-icon {{
+  font-size: 10px;
+}}
+
+.workspace-pr-status-Open {{
+  color: {completed};
+}}
+
+.workspace-pr-status-Draft {{
+  color: {waiting};
+}}
+
+.workspace-pr-status-Merged {{
+  color: {accent};
+}}
+
+.workspace-pr-status-Closed {{
+  color: {error};
+}}
+
+.workspace-pr-number {{
+  color: {text_muted};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+
+.workspace-pr-title {{
+  color: {text_dim};
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}}
+
+.workspace-label {{
+  font-weight: 600;
+  font-size: 12.5px;
+  color: {text_bright};
+}}
+
+.workspace-preview {{
+  color: {text_subtle};
+  font-size: 12px;
+  line-height: 1.35;
+}}
+
+.workspace-meta,
+.activity-meta,
+.activity-time {{
+  color: {text_dim};
+  font-size: 11px;
+}}
+
+.runtime-card,
+.settings-card {{
+  background: transparent;
+  border: 1px solid {border_06};
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}}
+
+.runtime-row,
+.attention-summary {{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
+.runtime-status-row {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}}
+
+.status-pill {{
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}}
+
+.status-pill-inline {{
+  letter-spacing: normal;
+  text-transform: none;
+  font-size: 11px;
+}}
+
+.status-pill-ready,
+.status-pill-completed {{
+  background: {completed_16};
+  color: {completed_text};
+}}
+
+.status-pill-fallback,
+.status-pill-waiting {{
+  background: {waiting_18};
+  color: {waiting_text};
+}}
+
+.status-pill-unavailable,
+.status-pill-error {{
+  background: {error_16};
+  color: {error_text};
+}}
+
+.status-pill-busy {{
+  background: {busy_16};
+  color: {busy_text};
+}}
+
+.status-copy,
+.settings-copy,
+.activity-preview {{
+  color: {text_subtle};
+  font-size: 12px;
+  line-height: 1.4;
+}}
+
+.workspace-main {{
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: {base};
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  contain: paint;
+}}
+
+.workspace-main-overview .workspace-canvas {{
+  background:
+    radial-gradient(circle at top left, {accent_08} 0%, transparent 32%),
+    linear-gradient(180deg, {border_04} 0%, {base} 100%);
+}}
+
+.workspace-header {{
+  height: {workspace_toolbar_height}px;
+  min-height: {workspace_toolbar_height}px;
+  border-bottom: 1px solid {border_07};
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  background: {base};
+}}
+
+.workspace-header-group {{
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: {border_04};
+  padding: 2px;
+}}
+
+.workspace-header-group .workspace-header-action {{
+  border: 0;
+  min-height: 26px;
+  padding: 0 8px;
+}}
+
+.workspace-header-divider {{
+  width: 1px;
+  height: 16px;
+  background: {border_10};
+  margin: 0 4px;
+}}
+
+.workspace-header-main,
+.workspace-header-actions,
+.pane-header-main,
+.pane-action-cluster,
+.surface-meta,
+.activity-header,
+.activity-item-shell,
+.shortcut-row {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}}
+
+.workspace-header-main,
+.shortcut-row {{
+  justify-content: flex-start;
+}}
+
+.workspace-header-title-btn {{
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 4px 0;
+  text-align: left;
+}}
+
+.workspace-header-title-btn:hover {{
+  color: {text_bright};
+}}
+
+.workspace-header-label {{
+  display: block;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: {text_bright};
+}}
+
+.workspace-header-meta {{
+  display: block;
+  font-size: 12px;
+  color: {text_dim};
+}}
+
+.workspace-header-action,
+.pane-action,
+.activity-action,
+.shortcut-pill {{
+  border: 1px solid {border_10};
+  background: transparent;
+}}
+
+.workspace-header-action,
+.pane-action,
+.activity-action {{
+  min-height: 28px;
+  padding: 0 10px;
+  color: {text_subtle};
+}}
+
+.workspace-header-action:hover,
+.pane-action:hover {{
+  background: {border_06};
+  color: {text_bright};
+}}
+
+.activity-action-passive {{
+  display: inline-flex;
+  align-items: center;
+  color: {text_dim};
+  background: {border_04};
+}}
+
+.workspace-header-action-active {{
+  background: {accent_14};
+  color: {text_bright};
+}}
+
+.workspace-header-action-primary {{
+  background: {accent_14};
+  color: {text_bright};
+  border-color: {accent_24};
+}}
+
+.workspace-header-action-primary:hover {{
+  background: {accent_22};
+}}
+
+.workspace-canvas,
+.settings-canvas {{
+  flex: 1;
+  min-height: 0;
+}}
+
+.workspace-canvas {{
+  position: relative;
+  overflow: hidden;
+}}
+
+.settings-canvas {{
+  padding: 16px;
+}}
+
+.workspace-viewport {{
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}}
+
+.workspace-viewport-overview {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}}
+
+.workspace-strip-canvas {{
+  position: absolute;
+  inset: 0 auto auto 0;
+  transform-origin: top left;
+}}
+
+.workspace-viewport-overview .workspace-strip-canvas {{
+  position: relative;
+  inset: auto;
+}}
+
+.workspace-window-shell {{
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  background: {surface};
+  border: {window_border_width}px solid {border_07};
+  overflow: hidden;
+}}
+
+.workspace-window-shell-active {{
+  border-color: {accent_24};
+}}
+
+.workspace-window-toolbar {{
+  height: {window_toolbar_height}px;
+  min-height: {window_toolbar_height}px;
+  border-bottom: 1px solid {border_10};
+  background: {surface};
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  cursor: grab;
+  user-select: none;
+}}
+
+.workspace-window-title {{
+  color: {text_bright};
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+}}
+
+.workspace-window-toolbar:active {{
+  cursor: grabbing;
+}}
+
+.workspace-window-body {{
+  flex: 1;
+  min-height: 0;
+  padding: {window_body_padding}px;
+  background: {surface};
+}}
+
+.split-container {{
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  gap: {split_gap}px;
+}}
+
+.split-child {{
+  min-width: 0;
+  min-height: 0;
+}}
+
+.pane-card {{
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: {elevated};
+  border: {pane_border_width}px solid {border_10};
+  overflow: hidden;
+}}
+
+.pane-card-active {{
+  border-color: {accent_24};
+}}
+
+.pane-card-drop-target {{
+  border-color: {accent_24};
+}}
+
+@keyframes focus-flash {{
+  0%   {{ opacity: 0; }}
+  25%  {{ opacity: 1; }}
+  50%  {{ opacity: 0; }}
+  75%  {{ opacity: 1; }}
+  100% {{ opacity: 0; }}
+}}
+
+.pane-flash-ring {{
+  position: absolute;
+  inset: 0;
+  border: 1px solid {accent};
+  pointer-events: none;
+  opacity: 0;
+  z-index: 10;
+}}
+
+.pane-flash-ring-active {{
+  animation: focus-flash 0.9s ease-in-out;
+}}
+
+.pane-toolbar {{
+  height: {pane_header_height}px;
+  min-height: {pane_header_height}px;
+  border-bottom: 1px solid {border_10};
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: {surface};
+}}
+
+.pane-toolbar-meta,
+.surface-tab-label,
+.shortcut-label {{
+  color: {text_subtle};
+  font-size: 11px;
+}}
+
+.pane-toolbar-meta {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}}
+
+.pane-toolbar-eyebrow {{
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+  color: {text_dim};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+
+.pane-toolbar-detail {{
+  color: {text_subtle};
+  font-size: 11px;
+  white-space: nowrap;
+}}
+
+.pane-action-cluster {{
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease-in-out;
+}}
+
+.pane-card-active .pane-action-cluster {{
+  opacity: 1;
+  pointer-events: auto;
+}}
+
+.pane-tabs {{
+  height: {surface_tab_height}px;
+  min-height: {surface_tab_height}px;
+  border-bottom: 1px solid {border_10};
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  background: {overlay_05};
+}}
+
+.surface-tabs {{
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0;
+  overflow-x: auto;
+  background: transparent;
+}}
+
+.surface-tab {{
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 320px;
+  height: 22px;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 0 6px;
+  color: {text_muted};
+  white-space: nowrap;
+}}
+
+.surface-tab:hover {{
+  background: {border_06};
+  border-color: {border_10};
+}}
+
+.surface-tab-append-target {{
+  min-width: 28px;
+  justify-content: center;
+  border-style: dashed;
+  color: {text_dim};
+}}
+
+.surface-tab[draggable] {{
+  cursor: grab;
+}}
+
+.surface-tab-drop-target {{
+  border-color: {accent_24};
+  background: {accent_12};
+}}
+
+.surface-tab-active {{
+  background: {overlay_16};
+  border-color: {accent_20};
+  color: {text_bright};
+}}
+
+.surface-tab-title {{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: {text_subtle};
+  font-size: 12px;
+}}
+
+.surface-tab-active .surface-tab-title {{
+  color: {text_bright};
+}}
+
+.surface-tab-label {{
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+  color: {text_dim};
+}}
+
+.pane-utility {{
+  min-width: 22px;
+  height: 20px;
+  border: 0;
+  padding: 0 5px;
+  background: transparent;
+  color: {text_dim};
+  font-size: 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  line-height: 1;
+}}
+
+.pane-utility:hover {{
+  background: {border_06};
+  color: {text_bright};
+}}
+
+.pane-utility-split {{
+  color: {text_subtle};
+}}
+
+.workspace-window-drop-zone {{
+  position: absolute;
+  z-index: 12;
+  opacity: 0;
+  pointer-events: none;
+  background: transparent;
+  transition: opacity 0.12s ease-in-out, background 0.12s ease-in-out;
+}}
+
+.workspace-window-drop-zone-visible {{
+  opacity: 0.45;
+  pointer-events: auto;
+  background: {accent_12};
+}}
+
+.workspace-window-drop-zone-active {{
+  opacity: 1;
+  pointer-events: auto;
+  background: {accent_24};
+}}
+
+.workspace-window-drop-zone-left,
+.workspace-window-drop-zone-right {{
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+}}
+
+.workspace-window-drop-zone-left {{
+  left: 0;
+}}
+
+.workspace-window-drop-zone-right {{
+  right: 0;
+}}
+
+.workspace-window-drop-zone-top,
+.workspace-window-drop-zone-bottom {{
+  left: 12px;
+  right: 12px;
+  height: 6px;
+}}
+
+.workspace-window-drop-zone-top {{
+  top: 0;
+}}
+
+.workspace-window-drop-zone-bottom {{
+  bottom: 0;
+}}
+
+.pane-utility-close {{
+  color: {error_text};
+}}
+
+.pane-utility-close:hover {{
+  background: {error_10};
+  color: {error};
+}}
+
+.browser-toolbar {{
+  height: {browser_toolbar_height}px;
+  min-height: {browser_toolbar_height}px;
+  border-bottom: 1px solid {border_06};
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: {surface};
+}}
+
+.browser-toolbar-button {{
+  min-width: 30px;
+  height: 26px;
+  border: 1px solid {border_10};
+  background: {overlay_05};
+  color: {text_subtle};
+  font-size: 11px;
+  font-weight: 600;
+}}
+
+.browser-toolbar-button:hover {{
+  background: {overlay_16};
+  color: {text_bright};
+}}
+
+.browser-toolbar-button-primary {{
+  border-color: {accent_24};
+  color: {text_bright};
+}}
+
+.browser-address {{
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid {border_10};
+  padding: 0 10px;
+  background: {overlay_05};
+  color: {text_bright};
+  font-size: 12px;
+}}
+
+.browser-address:focus {{
+  outline: none;
+  border-color: {accent_24};
+  box-shadow: 0 0 0 1px {accent_20};
+}}
+
+.pane-body {{
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  background: {border_02};
+  position: relative;
+  overflow: hidden;
+}}
+
+.pane-drop-overlay {{
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}}
+
+.pane-drop-target {{
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed {accent_24};
+  background: {accent_12};
+  color: {text_bright};
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: auto;
+}}
+
+.pane-drop-target-active {{
+  background: {accent_20};
+  border-style: solid;
+}}
+
+.pane-drop-target-center {{
+  inset: 18%;
+}}
+
+.pane-drop-target-edge {{
+  z-index: 1;
+}}
+
+.pane-drop-target-left,
+.pane-drop-target-right {{
+  top: 10px;
+  bottom: 10px;
+  width: 56px;
+}}
+
+.pane-drop-target-left {{
+  left: 10px;
+}}
+
+.pane-drop-target-right {{
+  right: 10px;
+}}
+
+.pane-drop-target-top,
+.pane-drop-target-bottom {{
+  left: 10px;
+  right: 10px;
+  height: 48px;
+}}
+
+.pane-drop-target-top {{
+  top: 10px;
+}}
+
+.pane-drop-target-bottom {{
+  bottom: 10px;
+}}
+
+.surface-backdrop {{
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px dashed {border_10};
+  padding: 12px;
+  background: {overlay_03};
+}}
+
+.workspace-main-overview .workspace-window-shell {{
+  box-shadow: none;
+}}
+
+.workspace-main-overview .workspace-window-toolbar {{
+  min-height: 32px;
+  padding: 0 8px;
+  background: {surface_85};
+}}
+
+.workspace-main-overview .workspace-window-body {{
+  padding: 8px;
+  background: {border_03};
+}}
+
+.workspace-main-overview .workspace-window-flags,
+.workspace-main-overview .pane-action-cluster,
+.workspace-main-overview .browser-toolbar,
+.workspace-main-overview .surface-backdrop-note,
+.workspace-main-overview .surface-chip {{
+  display: none;
+}}
+
+.workspace-main-overview .split-container {{
+  gap: 8px;
+}}
+
+.workspace-main-overview .pane-toolbar,
+.workspace-main-overview .pane-tabs {{
+  min-height: 28px;
+  padding: 0 8px;
+}}
+
+.workspace-main-overview .surface-tab {{
+  height: 22px;
+  max-width: 180px;
+  padding: 0 6px;
+}}
+
+.workspace-main-overview .surface-tab-title,
+.workspace-main-overview .surface-tab-label {{
+  font-size: 10px;
+}}
+
+.workspace-main-overview .pane-body {{
+  padding: 10px;
+}}
+
+.workspace-main-overview .pane-drop-overlay {{
+  display: none;
+}}
+
+.workspace-main-overview .surface-backdrop {{
+  gap: 8px;
+  padding: 10px;
+  border-style: solid;
+  background:
+    linear-gradient(180deg, {overlay_16} 0%, {overlay_03} 100%),
+    {border_02};
+}}
+
+.surface-backdrop-copy {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+
+.surface-backdrop-eyebrow {{
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: {text_dim};
+}}
+
+.surface-backdrop-title {{
+  color: {text_bright};
+  font-size: 22px;
+  font-weight: 600;
+}}
+
+.surface-backdrop-note {{
+  max-width: 70ch;
+  color: {text_subtle};
+  font-size: 13px;
+  line-height: 1.45;
+}}
+
+.surface-meta {{
+  flex-wrap: wrap;
+}}
+
+.surface-chip,
+.shortcut-pill {{
+  padding: 4px 8px;
+  color: {text_muted};
+  font-size: 11px;
+}}
+
+.shortcut-pill-muted {{
+  opacity: 0.72;
+}}
+
+.status-dot {{
+  font-size: 10px;
+}}
+
+.status-dot-normal {{
+  color: {text_dim};
+}}
+
+.status-dot-busy {{
+  color: {busy};
+}}
+
+.status-dot-completed {{
+  color: {completed};
+}}
+
+.status-dot-waiting {{
+  color: {waiting};
+}}
+
+.status-dot-error {{
+  color: {error};
+}}
+
+.empty-state {{
+  border: 1px dashed {border_10};
+  padding: 12px;
+  color: {text_dim};
+  font-size: 12px;
+}}
+
+.activity-item {{
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}}
+
+.activity-item-button {{
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}}
+
+.activity-item-button:hover .activity-item {{
+  background: {border_04};
+}}
+
+.notification-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}}
+
+.notification-counts {{
+  display: flex;
+  gap: 6px;
+}}
+
+.notification-count-pill {{
+  font-size: 10px;
+  font-weight: 600;
+  color: {text_dim};
+  padding: 2px 6px;
+  background: {border_06};
+}}
+
+.notification-count-unread {{
+  background: {accent_14};
+  color: {text_bright};
+}}
+
+.agent-session-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
+.notification-timeline {{
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}}
+
+.notification-row-button {{
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}}
+
+.notification-row {{
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  background: {border_03};
+  transition: background 0.14s ease-in-out;
+}}
+
+.notification-row-button:hover .notification-row {{
+  background: {border_06};
+}}
+
+.notification-dot {{
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+}}
+
+.notification-dot-unread {{
+  background: {accent};
+}}
+
+.notification-dot-read {{
+  background: transparent;
+  border: 1px solid {accent_20};
+}}
+
+.notification-row-content {{
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}}
+
+.notification-row-header {{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}}
+
+.notification-title {{
+  font-weight: 600;
+  font-size: 12.5px;
+  color: {text_bright};
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+
+.notification-body {{
+  color: {text_subtle};
+  font-size: 11px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}}
+
+.notification-timestamp {{
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: {text_dim};
+  white-space: nowrap;
+}}
+
+.notification-row-footer {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}}
+
+.notification-source {{
+  font-size: 10px;
+  color: {text_dim};
+}}
+
+.notification-clear {{
+  width: 16px;
+  height: 16px;
+  border: 0;
+  background: transparent;
+  color: {text_dim};
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
+}}
+
+.notification-clear:hover {{
+  background: {error_16};
+  color: {error};
+}}
+
+.notification-empty {{
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 16px;
+}}
+
+.notification-empty-title {{
+  font-weight: 600;
+  font-size: 13px;
+  color: {text_muted};
+}}
+
+.notification-empty-subtitle {{
+  font-size: 11px;
+  color: {text_dim};
+  text-align: center;
+  line-height: 1.4;
+}}
+
+.settings-grid {{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}}
+
+.settings-card-span {{
+  grid-column: 1 / -1;
+}}
+
+.theme-grid,
+.preset-grid {{
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}}
+
+.theme-card,
+.preset-card {{
+  border: 1px solid {border_08};
+  padding: 10px;
+}}
+
+.theme-card:hover,
+.preset-card:hover {{
+  background: {border_04};
+  border-color: {border_12};
+}}
+
+.theme-card-active,
+.preset-card-active {{
+  background: {accent_12};
+  border-color: {accent_24};
+}}
+
+.shortcut-groups {{
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}}
+
+.shortcut-group {{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}}
+
+.shortcut-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}}
+
+.shortcut-row {{
+  align-items: flex-start;
+  border-top: 1px solid {border_06};
+  padding-top: 8px;
+}}
+
+.shortcut-row:first-child {{
+  border-top: 0;
+  padding-top: 0;
+}}
+
+.shortcut-accelerators {{
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 40%;
+}}
+
+@media (max-width: 1180px) {{
+  .app-shell {{
+    grid-template-columns: 228px minmax(0, 1fr);
+  }}
+
+  .attention-panel {{
+    display: none;
+  }}
+}}
+"#,
+        base = p.base.to_hex(),
+        surface = p.surface.to_hex(),
+        surface_85 = rgba(p.surface, 0.85),
+        elevated = p.elevated.to_hex(),
+        overlay_03 = rgba(p.overlay, 0.03),
+        overlay_05 = rgba(p.overlay, 0.05),
+        overlay_16 = rgba(p.overlay, 0.16),
+        text = p.text.to_hex(),
+        text_bright = p.text_bright.to_hex(),
+        text_muted = p.text_muted.to_hex(),
+        text_subtle = p.text_subtle.to_hex(),
+        text_dim = p.text_dim.to_hex(),
+        border_02 = rgba(p.border, 0.02),
+        border_03 = rgba(p.border, 0.03),
+        border_04 = rgba(p.border, 0.04),
+        border_06 = rgba(p.border, 0.06),
+        border_07 = rgba(p.border, 0.07),
+        border_08 = rgba(p.border, 0.08),
+        border_10 = rgba(p.border, 0.10),
+        border_12 = rgba(p.border, 0.12),
+        accent = p.accent.to_hex(),
+        accent_08 = rgba(p.accent, 0.08),
+        accent_12 = rgba(p.accent, 0.12),
+        accent_14 = rgba(p.accent, 0.14),
+        accent_20 = rgba(p.accent, 0.20),
+        accent_22 = rgba(p.accent, 0.22),
+        accent_24 = rgba(p.accent, 0.24),
+        busy = p.busy.to_hex(),
+        busy_12 = rgba(p.busy, 0.12),
+        busy_16 = rgba(p.busy, 0.16),
+        busy_text = p.busy_text.to_hex(),
+        completed = p.completed.to_hex(),
+        completed_12 = rgba(p.completed, 0.12),
+        completed_16 = rgba(p.completed, 0.16),
+        completed_text = p.completed_text.to_hex(),
+        waiting = p.waiting.to_hex(),
+        waiting_10 = rgba(p.waiting, 0.10),
+        waiting_14 = rgba(p.waiting, 0.14),
+        waiting_18 = rgba(p.waiting, 0.18),
+        waiting_text = p.waiting_text.to_hex(),
+        error = p.error.to_hex(),
+        error_10 = rgba(p.error, 0.10),
+        error_12 = rgba(p.error, 0.12),
+        error_16 = rgba(p.error, 0.16),
+        error_text = p.error_text.to_hex(),
+    );
+    css
+}

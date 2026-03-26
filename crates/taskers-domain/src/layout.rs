@@ -54,21 +54,46 @@ impl LayoutNode {
         new_pane: PaneId,
         ratio: u16,
     ) -> bool {
+        let direction = match axis {
+            SplitAxis::Horizontal => Direction::Right,
+            SplitAxis::Vertical => Direction::Down,
+        };
+        self.split_leaf_with_direction(target, direction, new_pane, ratio)
+    }
+
+    pub fn split_leaf_with_direction(
+        &mut self,
+        target: PaneId,
+        direction: Direction,
+        new_pane: PaneId,
+        ratio: u16,
+    ) -> bool {
+        let (axis, new_pane_first) = match direction {
+            Direction::Left => (SplitAxis::Horizontal, true),
+            Direction::Right => (SplitAxis::Horizontal, false),
+            Direction::Up => (SplitAxis::Vertical, true),
+            Direction::Down => (SplitAxis::Vertical, false),
+        };
         match self {
             Self::Leaf { pane_id } if *pane_id == target => {
                 let existing = *pane_id;
+                let (first, second) = if new_pane_first {
+                    (Self::leaf(new_pane), Self::leaf(existing))
+                } else {
+                    (Self::leaf(existing), Self::leaf(new_pane))
+                };
                 *self = Self::Split {
                     axis,
                     ratio: clamp_ratio(ratio),
-                    first: Box::new(Self::leaf(existing)),
-                    second: Box::new(Self::leaf(new_pane)),
+                    first: Box::new(first),
+                    second: Box::new(second),
                 };
                 true
             }
             Self::Leaf { .. } => false,
             Self::Split { first, second, .. } => {
-                first.split_leaf(target, axis, new_pane, ratio)
-                    || second.split_leaf(target, axis, new_pane, ratio)
+                first.split_leaf_with_direction(target, direction, new_pane, ratio)
+                    || second.split_leaf_with_direction(target, direction, new_pane, ratio)
             }
         }
     }
