@@ -1096,8 +1096,9 @@ mod tests {
 
         let log = fs::read_to_string(&test_log)
             .unwrap_or_else(|error| panic!("read lifecycle log failed: {error}; output={output}"));
-        let claude_args = fs::read_to_string(&args_log)
-            .unwrap_or_else(|error| panic!("read claude args log failed: {error}; output={output}"));
+        let claude_args = fs::read_to_string(&args_log).unwrap_or_else(|error| {
+            panic!("read claude args log failed: {error}; output={output}")
+        });
         assert!(
             claude_args.contains("--settings"),
             "expected claude wrapper to inject hook settings, got: {claude_args}"

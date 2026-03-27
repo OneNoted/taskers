@@ -234,7 +234,10 @@ impl ManagedInstallation {
             .with_context(|| format!("failed to create {}", xdg_bin_home.display()))?;
 
         let desktop_launcher = xdg_bin_home.join("taskers-desktop-launch");
-        write_executable(&desktop_launcher, &desktop_launch_wrapper_contents(&launcher))?;
+        write_executable(
+            &desktop_launcher,
+            &desktop_launch_wrapper_contents(&launcher),
+        )?;
 
         let desktop_entry_path = applications_dir.join("dev.taskers.app.desktop");
         let desktop_entry = include_str!(concat!(
@@ -242,7 +245,7 @@ impl ManagedInstallation {
             "/assets/taskers.desktop.in"
         ))
         .replace("{{EXEC}}", &desktop_exec(&desktop_launcher));
-        if should_update_desktop_entry(&desktop_entry_path, &desktop_launcher)? {
+        if should_update_desktop_entry(&desktop_entry_path, &desktop_launcher, &launcher)? {
             fs::write(&desktop_entry_path, desktop_entry)
                 .with_context(|| format!("failed to write {}", applications_dir.display()))?;
         }
@@ -464,7 +467,11 @@ fn desktop_launch_wrapper_contents(target: &Path) -> String {
     )
 }
 
-fn should_update_desktop_entry(path: &Path, desktop_launcher: &Path) -> Result<bool> {
+fn should_update_desktop_entry(
+    path: &Path,
+    desktop_launcher: &Path,
+    launcher: &Path,
+) -> Result<bool> {
     let Ok(existing) = fs::read_to_string(path) else {
         return Ok(true);
     };
@@ -476,7 +483,11 @@ fn should_update_desktop_entry(path: &Path, desktop_launcher: &Path) -> Result<b
         return Ok(true);
     };
 
-    Ok(existing_exec == desktop_exec(desktop_launcher))
+    let managed_execs = [desktop_exec(desktop_launcher), desktop_exec(launcher)];
+
+    Ok(managed_execs
+        .iter()
+        .any(|candidate| candidate == existing_exec))
 }
 
 fn write_executable(path: &Path, contents: &str) -> Result<()> {
@@ -588,13 +599,18 @@ where
 mod tests {
     use super::{
         ArtifactKind, ManagedInstallation, ReleaseArtifact, ReleaseManifest, bundle_root,
-        current_target_triple, default_manifest_url, desktop_exec,
-        desktop_launch_wrapper_contents, launcher_path_looks_installed, path_taskers_executable,
-        sha256_path, should_update_desktop_entry,
+        current_target_triple, default_manifest_url, desktop_exec, desktop_launch_wrapper_contents,
+        launcher_path_looks_installed, path_taskers_executable, sha256_path,
+        should_update_desktop_entry,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::{collections::BTreeMap, ffi::OsString, fs, path::{Path, PathBuf}};
+    use std::{
+        collections::BTreeMap,
+        ffi::OsString,
+        fs,
+        path::{Path, PathBuf},
+    };
     use tar::Builder;
     use tempfile::tempdir;
     use xz2::write::XzEncoder;
@@ -748,7 +764,7 @@ mod tests {
 
         let launcher = PathBuf::from("/home/notes/.local/bin/taskers");
         assert!(
-            !should_update_desktop_entry(&desktop_entry, &launcher).expect("decision"),
+            !should_update_desktop_entry(&desktop_entry, &launcher, &launcher).expect("decision"),
         );
     }
 
@@ -763,7 +779,27 @@ mod tests {
         )
         .expect("desktop entry");
 
-        assert!(should_update_desktop_entry(&desktop_entry, &launcher).expect("decision"));
+        assert!(
+            should_update_desktop_entry(&desktop_entry, &launcher, &launcher).expect("decision")
+        );
+    }
+
+    #[test]
+    fn updates_legacy_launcher_desktop_entry() {
+        let temp = tempdir().expect("tempdir");
+        let desktop_entry = temp.path().join("dev.taskers.app.desktop");
+        let desktop_launcher = PathBuf::from("/home/notes/.local/bin/taskers-desktop-launch");
+        let launcher = PathBuf::from("/home/notes/.cargo/bin/taskers");
+        fs::write(
+            &desktop_entry,
+            format!("[Desktop Entry]\nExec={}\n", desktop_exec(&launcher)),
+        )
+        .expect("desktop entry");
+
+        assert!(
+            should_update_desktop_entry(&desktop_entry, &desktop_launcher, &launcher)
+                .expect("decision")
+        );
     }
 
     #[test]
