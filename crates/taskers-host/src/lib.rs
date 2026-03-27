@@ -1,24 +1,32 @@
-use anyhow::{Result, anyhow, bail};
+mod browser_automation;
+
+use anyhow::{Result, anyhow};
 use gtk::{
-    Align, Box as GtkBox, CssProvider, EventControllerFocus, EventControllerScroll,
+    Align, Box as GtkBox, CssProvider, DrawingArea, EventControllerFocus, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, Orientation, Overflow, Overlay,
     STYLE_PROVIDER_PRIORITY_APPLICATION, Widget, glib, prelude::*,
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
+    f64::consts::{FRAC_PI_2, PI, TAU},
     rc::Rc,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use taskers_shell_core as taskers_core;
+use taskers_control::{
+    BrowserControlCommand, BrowserLoadState, ControlError, TerminalDebugCommand,
+    TerminalDebugResult, TerminalRenderStats,
+};
 use taskers_core::{
-    BrowserMountSpec, HostCommand, HostEvent, PortalSurfacePlan, ShellDragMode, ShellSnapshot,
-    SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
+    BrowserSurfaceCatalogEntry, HostCommand, HostEvent, PaneId, PortalSurfacePlan, ShellDragMode,
+    ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
+    TerminalSurfaceCatalogEntry, WorkspaceId,
 };
 use taskers_domain::PaneKind;
 use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
-use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
+use taskers_shell_core as taskers_core;
+use webkit6::{LoadEvent, Settings as WebKitSettings, WebView, prelude::*};
 
 pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
@@ -100,6 +108,83 @@ pub struct TaskersHost {
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
 }
 
+#[derive(Clone)]
+pub struct BrowserSurfaceHandle {
+    surface_id: SurfaceId,
+    workspace_id: Rc<Cell<WorkspaceId>>,
+    pane_id: Rc<Cell<PaneId>>,
+    webview: WebView,
+    last_load_state: Rc<Cell<Option<BrowserLoadState>>>,
+}
+
+impl BrowserSurfaceHandle {
+    pub fn surface_id(&self) -> SurfaceId {
+        self.surface_id
+    }
+
+    pub fn workspace_id(&self) -> WorkspaceId {
+        self.workspace_id.get()
+    }
+
+    pub fn pane_id(&self) -> PaneId {
+        self.pane_id.get()
+    }
+
+    pub(crate) fn webview(&self) -> &WebView {
+        &self.webview
+    }
+
+    pub(crate) fn url(&self) -> String {
+        self.webview
+            .uri()
+            .map(|uri| uri.to_string())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn title(&self) -> String {
+        self.webview
+            .title()
+            .map(|title| title.to_string())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn is_loading(&self) -> bool {
+        self.webview.is_loading()
+    }
+
+    pub(crate) fn load_state(&self) -> Option<BrowserLoadState> {
+        self.last_load_state.get()
+    }
+
+    pub(crate) fn focus_webview(&self) {
+        self.webview.grab_focus();
+    }
+
+    pub(crate) fn is_webview_focused(&self) -> bool {
+        self.webview.has_focus()
+    }
+
+    pub(crate) fn navigate(&self, url: &str) {
+        self.webview.load_uri(url);
+    }
+
+    pub(crate) fn go_back(&self) {
+        if self.webview.can_go_back() {
+            self.webview.go_back();
+        }
+    }
+
+    pub(crate) fn go_forward(&self) {
+        if self.webview.can_go_forward() {
+            self.webview.go_forward();
+        }
+    }
+
+    pub(crate) fn reload(&self) {
+        self.webview.reload();
+    }
+}
+
 impl TaskersHost {
     pub fn new(
         shell_widget: &impl IsA<Widget>,
@@ -167,8 +252,14 @@ impl TaskersHost {
                 format!("host sync start panes={}", snapshot.portal.panes.len()),
             ),
         );
-        self.sync_browser_surfaces(&snapshot.portal, snapshot.revision, interactive)?;
-        self.sync_terminal_surfaces(&snapshot.portal, snapshot.revision, interactive)?;
+        self.sync_browser_surfaces(snapshot, interactive)?;
+        self.sync_terminal_surfaces(
+            &snapshot.portal,
+            &snapshot.terminal_catalog,
+            &snapshot.settings.selected_theme_id,
+            snapshot.revision,
+            interactive,
+        )?;
         Ok(())
     }
 
@@ -204,6 +295,66 @@ impl TaskersHost {
         }
     }
 
+    pub async fn execute_browser_command(
+        &self,
+        command: BrowserControlCommand,
+    ) -> Result<serde_json::Value, ControlError> {
+        let surface_id = browser_command_surface_id(&command);
+        let handle = self.browser_surface_handle(surface_id)?;
+        handle.execute(command).await
+    }
+
+    pub fn execute_terminal_debug(
+        &self,
+        command: TerminalDebugCommand,
+    ) -> Result<TerminalDebugResult, ControlError> {
+        let Some(host) = self.ghostty_host.as_ref() else {
+            return Err(ControlError::not_supported(
+                "terminal debug requires the Ghostty host backend",
+            ));
+        };
+
+        let surface_id = terminal_debug_surface_id(&command);
+        let surface = self.terminal_surfaces.get(&surface_id).ok_or_else(|| {
+            ControlError::not_found(format!("terminal surface {surface_id} not found"))
+        })?;
+
+        match command {
+            TerminalDebugCommand::IsFocused { .. } => Ok(TerminalDebugResult::IsFocused {
+                focused: surface.is_focused(),
+            }),
+            TerminalDebugCommand::ReadText { tail_lines, .. } => {
+                let text = host
+                    .read_surface_text(&surface.widget)
+                    .map_err(|error| ControlError::internal(error.to_string()))?;
+                Ok(TerminalDebugResult::ReadText {
+                    text: trim_terminal_tail(text, tail_lines),
+                })
+            }
+            TerminalDebugCommand::RenderStats { .. } => {
+                let has_selection = host
+                    .surface_has_selection(&surface.widget)
+                    .map_err(|error| ControlError::internal(error.to_string()))?;
+                Ok(TerminalDebugResult::RenderStats {
+                    stats: TerminalRenderStats {
+                        surface_id,
+                        workspace_id: surface.workspace_id.get(),
+                        pane_id: surface.pane_id.get(),
+                        mounted: true,
+                        visible: surface.visible,
+                        focused: surface.is_focused(),
+                        backend: "ghostty".into(),
+                        cols: surface.spec.cols,
+                        rows: surface.spec.rows,
+                        width_px: surface.width_px,
+                        height_px: surface.height_px,
+                        has_selection,
+                    },
+                })
+            }
+        }
+    }
+
     fn with_browser_surface(
         &mut self,
         surface_id: SurfaceId,
@@ -226,17 +377,30 @@ impl TaskersHost {
         Ok(())
     }
 
-    fn sync_browser_surfaces(
-        &mut self,
-        portal: &SurfacePortalPlan,
-        revision: u64,
-        interactive: bool,
-    ) -> Result<()> {
-        let desired = browser_plans(portal);
-        let desired_ids = desired
+    pub fn browser_surface_handle(
+        &self,
+        surface_id: SurfaceId,
+    ) -> Result<BrowserSurfaceHandle, ControlError> {
+        self.browser_surfaces
+            .get(&surface_id)
+            .map(BrowserSurface::handle)
+            .ok_or_else(|| {
+                ControlError::not_found(format!("browser surface {surface_id} not found"))
+            })
+    }
+
+    fn sync_browser_surfaces(&mut self, snapshot: &ShellSnapshot, interactive: bool) -> Result<()> {
+        let desired = browser_plans(&snapshot.portal);
+        let desired_by_id = desired
+            .into_iter()
+            .map(|plan| (plan.surface_id, plan))
+            .collect::<HashMap<_, _>>();
+        let catalog_by_id = snapshot
+            .browser_catalog
             .iter()
-            .map(|plan| plan.surface_id)
-            .collect::<HashSet<_>>();
+            .map(|entry| (entry.surface_id, entry))
+            .collect::<HashMap<_, _>>();
+        let desired_ids = catalog_by_id.keys().copied().collect::<HashSet<_>>();
 
         let stale = self
             .browser_surfaces
@@ -248,11 +412,12 @@ impl TaskersHost {
         for surface_id in stale {
             if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
                 surface.shell.detach(&self.root);
+                surface.attention_ring.detach(&self.root);
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
                         DiagnosticCategory::SurfaceLifecycle,
-                        Some(revision),
+                        Some(snapshot.revision),
                         "browser surface removed",
                     )
                     .with_surface(surface_id),
@@ -260,25 +425,30 @@ impl TaskersHost {
             }
         }
 
-        for plan in desired {
-            match self.browser_surfaces.get_mut(&plan.surface_id) {
+        for entry in snapshot.browser_catalog.iter() {
+            let visible_plan = desired_by_id.get(&entry.surface_id);
+            match self.browser_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
-                    &plan,
-                    revision,
+                    entry,
+                    visible_plan,
+                    &snapshot.settings.selected_theme_id,
+                    snapshot.revision,
                     interactive,
                     self.diagnostics.as_ref(),
                 )?,
                 None => {
                     let surface = BrowserSurface::new(
                         &self.root,
-                        &plan,
-                        revision,
+                        entry,
+                        visible_plan,
+                        &snapshot.settings.selected_theme_id,
+                        snapshot.revision,
                         interactive,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                     )?;
-                    self.browser_surfaces.insert(plan.surface_id, surface);
+                    self.browser_surfaces.insert(entry.surface_id, surface);
                 }
             }
         }
@@ -289,14 +459,21 @@ impl TaskersHost {
     fn sync_terminal_surfaces(
         &mut self,
         portal: &SurfacePortalPlan,
+        catalog: &[TerminalSurfaceCatalogEntry],
+        theme_id: &str,
         revision: u64,
         interactive: bool,
     ) -> Result<()> {
         let desired = terminal_plans(portal);
-        let desired_ids = desired
+        let desired_by_id = desired
+            .into_iter()
+            .map(|plan| (plan.surface_id, plan))
+            .collect::<HashMap<_, _>>();
+        let catalog_by_id = catalog
             .iter()
-            .map(|plan| plan.surface_id)
-            .collect::<HashSet<_>>();
+            .map(|entry| (entry.surface_id, entry))
+            .collect::<HashMap<_, _>>();
+        let desired_ids = catalog_by_id.keys().copied().collect::<HashSet<_>>();
 
         let stale = self
             .terminal_surfaces
@@ -308,6 +485,7 @@ impl TaskersHost {
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
                 surface.shell.detach(&self.root);
+                surface.attention_ring.detach(&self.root);
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -324,12 +502,14 @@ impl TaskersHost {
             return Ok(());
         };
 
-        for plan in desired {
-            match self.terminal_surfaces.get_mut(&plan.surface_id) {
+        for entry in catalog {
+            let visible_plan = desired_by_id.get(&entry.surface_id);
+            match self.terminal_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
-                    plan.frame,
-                    plan.active,
+                    entry,
+                    visible_plan,
+                    theme_id,
                     revision,
                     interactive,
                     host,
@@ -338,14 +518,16 @@ impl TaskersHost {
                 None => {
                     let surface = TerminalSurface::new(
                         &self.root,
-                        &plan,
+                        entry,
+                        visible_plan,
+                        theme_id,
                         revision,
                         interactive,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                         host,
                     )?;
-                    self.terminal_surfaces.insert(plan.surface_id, surface);
+                    self.terminal_surfaces.insert(entry.surface_id, surface);
                 }
             }
         }
@@ -356,12 +538,17 @@ impl TaskersHost {
 
 struct BrowserSurface {
     shell: NativeSurfaceShell,
+    attention_ring: AttentionRingOverlay,
     surface_id: SurfaceId,
+    workspace_id: Rc<Cell<WorkspaceId>>,
+    pane_id: Rc<Cell<PaneId>>,
     webview: WebView,
     url: String,
     active: bool,
     interactive: bool,
+    visible: bool,
     devtools_open: Rc<Cell<bool>>,
+    last_load_state: Rc<Cell<Option<BrowserLoadState>>>,
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
 }
@@ -369,13 +556,15 @@ struct BrowserSurface {
 impl BrowserSurface {
     fn new(
         overlay: &Overlay,
-        plan: &PortalSurfacePlan,
+        entry: &BrowserSurfaceCatalogEntry,
+        visible_plan: Option<&PortalSurfacePlan>,
+        theme_id: &str,
         revision: u64,
         interactive: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Result<Self> {
-        let BrowserMountSpec { url } = browser_spec(plan)?.clone();
+        let url = entry.url.clone();
 
         let settings = WebKitSettings::builder()
             .enable_back_forward_navigation_gestures(true)
@@ -390,23 +579,37 @@ impl BrowserSurface {
         let (shell_class, widget_class) = native_surface_classes(PaneKind::Browser);
         webview.add_css_class("native-surface-widget");
         webview.add_css_class(widget_class);
-        webview.set_can_target(interactive);
+        webview.set_can_target(visible_plan.is_some() && interactive);
         webview.load_uri(&url);
         (event_sink)(HostEvent::SurfaceUrlChanged {
-            surface_id: plan.surface_id,
+            surface_id: entry.surface_id,
             url: url.clone(),
         });
-        let shell = NativeSurfaceShell::new(shell_class, interactive);
+        let shell = NativeSurfaceShell::new(shell_class, visible_plan.is_some() && interactive);
+        let attention_ring = AttentionRingOverlay::new();
         shell.mount_child(webview.upcast_ref());
-        shell.position(overlay, plan.frame);
+        match visible_plan {
+            Some(plan) => {
+                shell.show_at(overlay, plan.frame);
+                attention_ring.show_at(overlay, plan.pane_frame, plan.notification_ring, theme_id);
+            }
+            None => {
+                shell.park_hidden(overlay);
+                attention_ring.park_hidden(overlay);
+            }
+        }
         let devtools_open = Rc::new(Cell::new(false));
+        let workspace_id = Rc::new(Cell::new(entry.workspace_id));
+        let pane_id = Rc::new(Cell::new(entry.pane_id));
+        let last_load_state = Rc::new(Cell::new(None));
 
-        let pane_id = plan.pane_id;
-        let surface_id = plan.surface_id;
+        let focus_pane_id = pane_id.clone();
+        let surface_id = entry.surface_id;
         let focus_sink = event_sink.clone();
         let focus_diagnostics = diagnostics.clone();
         let focus = EventControllerFocus::new();
         focus.connect_enter(move |_| {
+            let pane_id = focus_pane_id.get();
             emit_diagnostic(
                 focus_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -421,10 +624,12 @@ impl BrowserSurface {
         });
         webview.add_controller(focus);
 
+        let click_pane_id = pane_id.clone();
         let click_sink = event_sink.clone();
         let click_diagnostics = diagnostics.clone();
         let click = GestureClick::new();
         click.connect_pressed(move |_, _, _, _| {
+            let pane_id = click_pane_id.get();
             emit_diagnostic(
                 click_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -439,7 +644,7 @@ impl BrowserSurface {
         });
         webview.add_controller(click);
 
-        let surface_id = plan.surface_id;
+        let surface_id = entry.surface_id;
         let title_sink = event_sink.clone();
         let title_diagnostics = diagnostics.clone();
         webview.connect_title_notify(move |web_view| {
@@ -460,11 +665,13 @@ impl BrowserSurface {
             }
         });
 
-        let surface_id = plan.surface_id;
+        let surface_id = entry.surface_id;
         let navigation_sink = event_sink.clone();
         let navigation_diagnostics = diagnostics.clone();
         let navigation_devtools = devtools_open.clone();
-        webview.connect_load_changed(move |web_view, _| {
+        let load_state_cell = last_load_state.clone();
+        webview.connect_load_changed(move |web_view, load_event| {
+            load_state_cell.set(Some(browser_load_state_from_webkit(load_event)));
             emit_browser_navigation_state(
                 web_view,
                 surface_id,
@@ -474,7 +681,7 @@ impl BrowserSurface {
             );
         });
 
-        let url_surface_id = plan.surface_id;
+        let url_surface_id = entry.surface_id;
         let url_sink = event_sink;
         let uri_sink = url_sink.clone();
         let url_diagnostics = diagnostics.clone();
@@ -511,7 +718,7 @@ impl BrowserSurface {
             let navigation_sink = url_sink.clone();
             let navigation_diagnostics = diagnostics.clone();
             let navigation_devtools = devtools_open.clone();
-            let inspector_surface_id = plan.surface_id;
+            let inspector_surface_id = entry.surface_id;
             inspector.connect_closed(move |_| {
                 navigation_devtools.set(false);
                 emit_browser_navigation_state(
@@ -524,7 +731,7 @@ impl BrowserSurface {
             });
         }
 
-        if plan.active && interactive {
+        if visible_plan.is_some_and(|plan| plan.active) && interactive {
             webview.grab_focus();
         }
 
@@ -535,13 +742,13 @@ impl BrowserSurface {
                 Some(revision),
                 "browser surface created",
             )
-            .with_pane(plan.pane_id)
-            .with_surface(plan.surface_id),
+            .with_pane(entry.pane_id)
+            .with_surface(entry.surface_id),
         );
 
         emit_browser_navigation_state(
             &webview,
-            plan.surface_id,
+            entry.surface_id,
             devtools_open.get(),
             &url_sink,
             diagnostics.as_ref(),
@@ -549,12 +756,17 @@ impl BrowserSurface {
 
         Ok(Self {
             shell,
-            surface_id: plan.surface_id,
+            attention_ring,
+            surface_id: entry.surface_id,
+            workspace_id,
+            pane_id,
             webview,
             url,
-            active: plan.active,
-            interactive,
+            active: visible_plan.is_some_and(|plan| plan.active),
+            interactive: visible_plan.is_some() && interactive,
+            visible: visible_plan.is_some(),
             devtools_open,
+            last_load_state,
             event_sink: url_sink,
             diagnostics,
         })
@@ -563,25 +775,48 @@ impl BrowserSurface {
     fn sync(
         &mut self,
         overlay: &Overlay,
-        plan: &PortalSurfacePlan,
+        entry: &BrowserSurfaceCatalogEntry,
+        visible_plan: Option<&PortalSurfacePlan>,
+        theme_id: &str,
         revision: u64,
         interactive: bool,
         diagnostics: Option<&DiagnosticsSink>,
     ) -> Result<()> {
-        self.shell.position(overlay, plan.frame);
-        self.shell.set_interactive(interactive);
-        self.webview.set_can_target(interactive);
-
-        let BrowserMountSpec { url } = browser_spec(plan)?;
-        if self.url != *url {
-            self.webview.load_uri(url);
-            self.url = url.clone();
+        self.workspace_id.set(entry.workspace_id);
+        self.pane_id.set(entry.pane_id);
+        let visible = visible_plan.is_some();
+        let effective_interactive = visible && interactive;
+        self.shell.set_interactive(effective_interactive);
+        self.webview.set_can_target(effective_interactive);
+        match visible_plan {
+            Some(plan) => {
+                self.shell.show_at(overlay, plan.frame);
+                self.attention_ring.show_at(
+                    overlay,
+                    plan.pane_frame,
+                    plan.notification_ring,
+                    theme_id,
+                );
+            }
+            None => {
+                self.shell.park_hidden(overlay);
+                self.attention_ring.park_hidden(overlay);
+            }
         }
-        if plan.active && interactive && (!self.active || !self.interactive) {
+
+        if self.url != entry.url {
+            self.webview.load_uri(&entry.url);
+            self.url = entry.url.clone();
+        }
+        if visible_plan.is_some_and(|plan| plan.active)
+            && effective_interactive
+            && (!self.active || !self.interactive || !self.visible)
+        {
             self.webview.grab_focus();
         }
-        self.active = plan.active;
-        self.interactive = interactive;
+        self.active = visible_plan.is_some_and(|plan| plan.active);
+        self.interactive = effective_interactive;
+        self.visible = visible;
 
         emit_diagnostic(
             diagnostics,
@@ -590,8 +825,8 @@ impl BrowserSurface {
                 Some(revision),
                 "browser surface updated",
             )
-            .with_pane(plan.pane_id)
-            .with_surface(plan.surface_id),
+            .with_pane(entry.pane_id)
+            .with_surface(entry.surface_id),
         );
 
         Ok(())
@@ -602,7 +837,6 @@ impl BrowserSurface {
             self.webview.load_uri(url);
             self.url = url.to_string();
         }
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
@@ -610,7 +844,6 @@ impl BrowserSurface {
         if self.webview.can_go_back() {
             self.webview.go_back();
         }
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
@@ -618,13 +851,11 @@ impl BrowserSurface {
         if self.webview.can_go_forward() {
             self.webview.go_forward();
         }
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
     fn reload(&mut self) {
         self.webview.reload();
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
@@ -641,7 +872,6 @@ impl BrowserSurface {
             inspector.show();
             self.devtools_open.set(true);
         }
-        self.webview.grab_focus();
         self.emit_navigation_state();
     }
 
@@ -654,26 +884,47 @@ impl BrowserSurface {
             self.diagnostics.as_ref(),
         );
     }
+
+    fn handle(&self) -> BrowserSurfaceHandle {
+        BrowserSurfaceHandle {
+            surface_id: self.surface_id,
+            workspace_id: self.workspace_id.clone(),
+            pane_id: self.pane_id.clone(),
+            webview: self.webview.clone(),
+            last_load_state: self.last_load_state.clone(),
+        }
+    }
 }
 
 struct TerminalSurface {
+    surface_id: SurfaceId,
+    workspace_id: Rc<Cell<WorkspaceId>>,
+    pane_id: Rc<Cell<PaneId>>,
+    spec: TerminalMountSpec,
     shell: NativeSurfaceShell,
+    attention_ring: AttentionRingOverlay,
     widget: Widget,
+    focus_state: Rc<Cell<bool>>,
     active: bool,
     interactive: bool,
+    visible: bool,
+    width_px: i32,
+    height_px: i32,
 }
 
 impl TerminalSurface {
     fn new(
         overlay: &Overlay,
-        plan: &PortalSurfacePlan,
+        entry: &TerminalSurfaceCatalogEntry,
+        visible_plan: Option<&PortalSurfacePlan>,
+        theme_id: &str,
         revision: u64,
         interactive: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
         host: &GhosttyHost,
     ) -> Result<Self> {
-        let spec = terminal_spec(plan)?.clone();
+        let spec = entry.spec.clone();
         let descriptor = surface_descriptor_from(&spec);
         let widget = host
             .create_surface(&descriptor)
@@ -687,14 +938,36 @@ impl TerminalSurface {
         widget.add_css_class("native-surface-widget");
         widget.add_css_class(widget_class);
         widget.add_css_class("terminal-output");
-        widget.set_can_target(interactive);
-        let shell = NativeSurfaceShell::new(shell_class, interactive);
+        let effective_interactive = visible_plan.is_some() && interactive;
+        widget.set_can_target(effective_interactive);
+        let shell = NativeSurfaceShell::new(shell_class, effective_interactive);
+        let attention_ring = AttentionRingOverlay::new();
         shell.mount_child(&widget);
-        shell.position(overlay, plan.frame);
+        match visible_plan {
+            Some(plan) => {
+                shell.show_at(overlay, plan.frame);
+                attention_ring.show_at(overlay, plan.pane_frame, plan.notification_ring, theme_id);
+            }
+            None => {
+                shell.park_hidden(overlay);
+                attention_ring.park_hidden(overlay);
+            }
+        }
 
-        connect_ghostty_widget(host, &widget, plan, event_sink, diagnostics.clone());
+        let workspace_id = Rc::new(Cell::new(entry.workspace_id));
+        let pane_id = Rc::new(Cell::new(entry.pane_id));
+        let focus_state = Rc::new(Cell::new(false));
+        connect_ghostty_widget(
+            host,
+            &widget,
+            pane_id.clone(),
+            entry.surface_id,
+            event_sink,
+            diagnostics.clone(),
+            focus_state.clone(),
+        );
 
-        if plan.active && interactive {
+        if visible_plan.is_some_and(|plan| plan.active) && effective_interactive {
             let _ = host.focus_surface(&widget);
         }
 
@@ -705,36 +978,74 @@ impl TerminalSurface {
                 Some(revision),
                 "terminal surface created",
             )
-            .with_pane(plan.pane_id)
-            .with_surface(plan.surface_id),
+            .with_pane(entry.pane_id)
+            .with_surface(entry.surface_id),
         );
 
         Ok(Self {
+            surface_id: entry.surface_id,
+            workspace_id,
+            pane_id,
+            spec,
             shell,
+            attention_ring,
             widget,
-            active: plan.active,
-            interactive,
+            focus_state,
+            active: visible_plan.is_some_and(|plan| plan.active),
+            interactive: effective_interactive,
+            visible: visible_plan.is_some(),
+            width_px: visible_plan.map_or(0, |plan| plan.frame.width),
+            height_px: visible_plan.map_or(0, |plan| plan.frame.height),
         })
     }
 
     fn sync(
         &mut self,
         overlay: &Overlay,
-        frame: taskers_core::Frame,
-        active: bool,
+        entry: &TerminalSurfaceCatalogEntry,
+        visible_plan: Option<&PortalSurfacePlan>,
+        theme_id: &str,
         revision: u64,
         interactive: bool,
         host: &GhosttyHost,
         diagnostics: Option<&DiagnosticsSink>,
     ) {
-        self.widget.set_can_target(interactive);
-        self.shell.set_interactive(interactive);
-        self.shell.position(overlay, frame);
-        if active && interactive && (!self.active || !self.interactive) {
+        self.workspace_id.set(entry.workspace_id);
+        self.pane_id.set(entry.pane_id);
+        self.spec = entry.spec.clone();
+        let visible = visible_plan.is_some();
+        let effective_interactive = visible && interactive;
+        self.widget.set_can_target(effective_interactive);
+        self.shell.set_interactive(effective_interactive);
+        match visible_plan {
+            Some(plan) => {
+                self.shell.show_at(overlay, plan.frame);
+                self.attention_ring.show_at(
+                    overlay,
+                    plan.pane_frame,
+                    plan.notification_ring,
+                    theme_id,
+                );
+            }
+            None => {
+                self.shell.park_hidden(overlay);
+                self.attention_ring.park_hidden(overlay);
+            }
+        }
+        if visible_plan.is_some_and(|plan| plan.active)
+            && effective_interactive
+            && (!self.active || !self.interactive || !self.visible)
+        {
             let _ = host.focus_surface(&self.widget);
         }
-        self.active = active;
-        self.interactive = interactive;
+        if !visible || !effective_interactive {
+            self.focus_state.set(false);
+        }
+        self.active = visible_plan.is_some_and(|plan| plan.active);
+        self.interactive = effective_interactive;
+        self.visible = visible;
+        self.width_px = visible_plan.map_or(0, |plan| plan.frame.width);
+        self.height_px = visible_plan.map_or(0, |plan| plan.frame.height);
 
         emit_diagnostic(
             diagnostics,
@@ -742,8 +1053,14 @@ impl TerminalSurface {
                 DiagnosticCategory::SurfaceLifecycle,
                 Some(revision),
                 "terminal surface updated",
-            ),
+            )
+            .with_pane(entry.pane_id)
+            .with_surface(self.surface_id),
         );
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focus_state.get() || self.widget.has_focus()
     }
 }
 
@@ -754,10 +1071,10 @@ struct NativeSurfaceShell {
 impl NativeSurfaceShell {
     fn new(kind_class: &'static str, interactive: bool) -> Self {
         let root = GtkBox::new(Orientation::Vertical, 0);
-        root.set_hexpand(true);
-        root.set_vexpand(true);
-        root.set_halign(Align::Fill);
-        root.set_valign(Align::Fill);
+        root.set_hexpand(false);
+        root.set_vexpand(false);
+        root.set_halign(Align::Start);
+        root.set_valign(Align::Start);
         root.set_overflow(Overflow::Hidden);
         root.set_focusable(false);
         root.set_can_target(interactive);
@@ -780,6 +1097,16 @@ impl NativeSurfaceShell {
         position_widget(overlay, self.root.upcast_ref(), frame);
     }
 
+    fn show_at(&self, overlay: &Overlay, frame: taskers_core::Frame) {
+        self.root.set_opacity(1.0);
+        self.position(overlay, frame);
+    }
+
+    fn park_hidden(&self, overlay: &Overlay) {
+        self.root.set_opacity(0.0);
+        self.position(overlay, self.hidden_frame());
+    }
+
     fn set_interactive(&self, interactive: bool) {
         self.root.set_can_target(interactive);
     }
@@ -787,6 +1114,208 @@ impl NativeSurfaceShell {
     fn detach(&self, overlay: &Overlay) {
         detach_from_overlay(overlay, self.root.upcast_ref());
     }
+
+    fn hidden_frame(&self) -> taskers_core::Frame {
+        hidden_frame()
+    }
+}
+
+struct AttentionRingOverlay {
+    widget: DrawingArea,
+    state: Rc<Cell<Option<taskers_core::AttentionRingState>>>,
+    palette: Rc<RefCell<HostAttentionPalette>>,
+}
+
+impl AttentionRingOverlay {
+    fn new() -> Self {
+        let widget = DrawingArea::new();
+        widget.set_hexpand(true);
+        widget.set_vexpand(true);
+        widget.set_halign(Align::Fill);
+        widget.set_valign(Align::Fill);
+        widget.set_can_target(false);
+        widget.set_focusable(false);
+        widget.set_visible(false);
+
+        let state = Rc::new(Cell::new(None));
+        let palette = Rc::new(RefCell::new(host_attention_palette("dark")));
+        let draw_state = state.clone();
+        let draw_palette = palette.clone();
+        widget.set_draw_func(move |_, ctx, width, height| {
+            let Some(state) = draw_state.get() else {
+                return;
+            };
+            let width = width.max(1) as f64;
+            let height = height.max(1) as f64;
+            if width <= 4.0 || height <= 4.0 {
+                return;
+            }
+
+            let paint = draw_palette.borrow().paint(state);
+            let glow_inset = 3.0;
+            draw_attention_ring_path(
+                ctx,
+                glow_inset,
+                glow_inset,
+                (width - glow_inset * 2.0).max(1.0),
+                (height - glow_inset * 2.0).max(1.0),
+                7.0,
+            );
+            apply_host_rgba(ctx, paint.glow);
+            ctx.set_line_width(6.0);
+            let _ = ctx.stroke();
+
+            let stroke_inset = 2.0;
+            draw_attention_ring_path(
+                ctx,
+                stroke_inset,
+                stroke_inset,
+                (width - stroke_inset * 2.0).max(1.0),
+                (height - stroke_inset * 2.0).max(1.0),
+                6.0,
+            );
+            apply_host_rgba(ctx, paint.stroke);
+            ctx.set_line_width(2.5);
+            let _ = ctx.stroke();
+        });
+
+        Self {
+            widget,
+            state,
+            palette,
+        }
+    }
+
+    fn show_at(
+        &self,
+        overlay: &Overlay,
+        frame: taskers_core::Frame,
+        state: Option<taskers_core::AttentionRingState>,
+        theme_id: &str,
+    ) {
+        self.state.set(state);
+        *self.palette.borrow_mut() = host_attention_palette(theme_id);
+        self.widget.set_visible(state.is_some());
+        if state.is_some() {
+            self.widget.set_opacity(1.0);
+            position_widget(overlay, self.widget.upcast_ref(), frame);
+        } else {
+            self.park_hidden(overlay);
+        }
+        self.widget.queue_draw();
+    }
+
+    fn park_hidden(&self, overlay: &Overlay) {
+        self.widget.set_visible(false);
+        self.widget.set_opacity(0.0);
+        position_widget(overlay, self.widget.upcast_ref(), hidden_frame());
+    }
+
+    fn detach(&self, overlay: &Overlay) {
+        detach_from_overlay(overlay, self.widget.upcast_ref());
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HostRgba {
+    red: f64,
+    green: f64,
+    blue: f64,
+    alpha: f64,
+}
+
+#[derive(Clone, Copy)]
+struct HostRingPaint {
+    stroke: HostRgba,
+    glow: HostRgba,
+}
+
+#[derive(Clone, Copy)]
+struct HostAttentionPalette {
+    waiting: HostRingPaint,
+    error: HostRingPaint,
+    completed: HostRingPaint,
+}
+
+impl HostAttentionPalette {
+    fn paint(self, state: taskers_core::AttentionRingState) -> HostRingPaint {
+        match state {
+            taskers_core::AttentionRingState::Waiting => self.waiting,
+            taskers_core::AttentionRingState::Error => self.error,
+            taskers_core::AttentionRingState::Completed => self.completed,
+        }
+    }
+}
+
+fn host_attention_palette(theme_id: &str) -> HostAttentionPalette {
+    match theme_id {
+        "catppuccin-mocha" => HostAttentionPalette {
+            waiting: host_ring_paint(0x94, 0xe2, 0xd5),
+            error: host_ring_paint(0xf3, 0x8b, 0xa8),
+            completed: host_ring_paint(0xa6, 0xe3, 0xa1),
+        },
+        "tokyo-night" => HostAttentionPalette {
+            waiting: host_ring_paint(0x7d, 0xcf, 0xff),
+            error: host_ring_paint(0xf7, 0x76, 0x8e),
+            completed: host_ring_paint(0x9e, 0xce, 0x6a),
+        },
+        "gruvbox-dark" => HostAttentionPalette {
+            waiting: host_ring_paint(0x8e, 0xc0, 0x7c),
+            error: host_ring_paint(0xfb, 0x49, 0x34),
+            completed: host_ring_paint(0xb8, 0xbb, 0x26),
+        },
+        _ => HostAttentionPalette {
+            waiting: host_ring_paint(0x60, 0xa5, 0xfa),
+            error: host_ring_paint(0xf8, 0x71, 0x71),
+            completed: host_ring_paint(0x34, 0xd3, 0x99),
+        },
+    }
+}
+
+fn host_ring_paint(red: u8, green: u8, blue: u8) -> HostRingPaint {
+    let base = host_rgba(red, green, blue, 1.0);
+    HostRingPaint {
+        stroke: host_rgba(red, green, blue, 0.98),
+        glow: HostRgba {
+            red: base.red,
+            green: base.green,
+            blue: base.blue,
+            alpha: 0.34,
+        },
+    }
+}
+
+fn host_rgba(red: u8, green: u8, blue: u8, alpha: f64) -> HostRgba {
+    HostRgba {
+        red: f64::from(red) / 255.0,
+        green: f64::from(green) / 255.0,
+        blue: f64::from(blue) / 255.0,
+        alpha,
+    }
+}
+
+fn apply_host_rgba(ctx: &gtk::cairo::Context, color: HostRgba) {
+    ctx.set_source_rgba(color.red, color.green, color.blue, color.alpha);
+}
+
+fn draw_attention_ring_path(
+    ctx: &gtk::cairo::Context,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    radius: f64,
+) {
+    let radius = radius.min(width / 2.0).min(height / 2.0).max(0.0);
+    let right = x + width;
+    let bottom = y + height;
+
+    ctx.new_sub_path();
+    ctx.arc(right - radius, y + radius, radius, -FRAC_PI_2, 0.0);
+    ctx.arc(right - radius, bottom - radius, radius, 0.0, FRAC_PI_2);
+    ctx.arc(x + radius, bottom - radius, radius, FRAC_PI_2, PI);
+    ctx.arc(x + radius, y + radius, radius, PI, TAU - FRAC_PI_2);
+    ctx.close_path();
 }
 
 fn install_native_surface_css() {
@@ -835,18 +1364,20 @@ fn native_surface_css() -> &'static str {
 fn connect_ghostty_widget(
     host: &GhosttyHost,
     widget: &Widget,
-    plan: &PortalSurfacePlan,
+    pane_id: Rc<Cell<PaneId>>,
+    surface_id: SurfaceId,
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
+    focus_state: Rc<Cell<bool>>,
 ) {
     let _ = host;
 
-    let pane_id = plan.pane_id;
-    let surface_id = plan.surface_id;
+    let click_pane_id = pane_id.clone();
     let focus_sink = event_sink.clone();
     let focus_diagnostics = diagnostics.clone();
     let click = GestureClick::new();
     click.connect_pressed(move |_, _, _, _| {
+        let pane_id = click_pane_id.get();
         emit_diagnostic(
             focus_diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -861,12 +1392,14 @@ fn connect_ghostty_widget(
     });
     widget.add_controller(click);
 
-    let pane_id = plan.pane_id;
-    let surface_id = plan.surface_id;
+    let focus_pane_id = pane_id.clone();
     let focus_sink = event_sink.clone();
     let focus_diagnostics = diagnostics.clone();
+    let focus_enter_state = focus_state.clone();
     let focus = EventControllerFocus::new();
     focus.connect_enter(move |_| {
+        let pane_id = focus_pane_id.get();
+        focus_enter_state.set(true);
         emit_diagnostic(
             focus_diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -879,9 +1412,12 @@ fn connect_ghostty_widget(
         );
         (focus_sink)(HostEvent::PaneFocused { pane_id });
     });
+    let focus_leave_state = focus_state;
+    focus.connect_leave(move |_| {
+        focus_leave_state.set(false);
+    });
     widget.add_controller(focus);
 
-    let surface_id = plan.surface_id;
     let title_sink = event_sink.clone();
     let title_diagnostics = diagnostics.clone();
     widget.connect_notify_local(Some("title"), move |widget, _| {
@@ -902,7 +1438,6 @@ fn connect_ghostty_widget(
         }
     });
 
-    let surface_id = plan.surface_id;
     let cwd_sink = event_sink.clone();
     let cwd_diagnostics = diagnostics.clone();
     widget.connect_notify_local(Some("pwd"), move |widget, _| {
@@ -923,12 +1458,12 @@ fn connect_ghostty_widget(
         }
     });
 
-    let pane_id = plan.pane_id;
-    let surface_id = plan.surface_id;
+    let exit_pane_id = pane_id;
     let exit_sink = event_sink;
     let exit_diagnostics = diagnostics;
     widget.connect_notify_local(Some("child-exited"), move |widget, _| {
         if widget.property::<bool>("child-exited") {
+            let pane_id = exit_pane_id.get();
             emit_diagnostic(
                 exit_diagnostics.as_ref(),
                 DiagnosticRecord::new(DiagnosticCategory::HostEvent, None, "terminal child exited")
@@ -972,13 +1507,75 @@ fn emit_browser_navigation_state(
     });
 }
 
+fn browser_load_state_from_webkit(load_event: LoadEvent) -> BrowserLoadState {
+    match load_event {
+        LoadEvent::Started => BrowserLoadState::Started,
+        LoadEvent::Redirected => BrowserLoadState::Redirected,
+        LoadEvent::Committed => BrowserLoadState::Committed,
+        LoadEvent::Finished => BrowserLoadState::Finished,
+        _ => BrowserLoadState::Finished,
+    }
+}
+
+fn browser_command_surface_id(command: &BrowserControlCommand) -> SurfaceId {
+    match command {
+        BrowserControlCommand::Navigate { surface_id, .. }
+        | BrowserControlCommand::Back { surface_id }
+        | BrowserControlCommand::Forward { surface_id }
+        | BrowserControlCommand::Reload { surface_id }
+        | BrowserControlCommand::FocusWebview { surface_id }
+        | BrowserControlCommand::IsWebviewFocused { surface_id }
+        | BrowserControlCommand::Snapshot { surface_id }
+        | BrowserControlCommand::Eval { surface_id, .. }
+        | BrowserControlCommand::Wait { surface_id, .. }
+        | BrowserControlCommand::Click { surface_id, .. }
+        | BrowserControlCommand::Dblclick { surface_id, .. }
+        | BrowserControlCommand::Type { surface_id, .. }
+        | BrowserControlCommand::Fill { surface_id, .. }
+        | BrowserControlCommand::Press { surface_id, .. }
+        | BrowserControlCommand::Keydown { surface_id, .. }
+        | BrowserControlCommand::Keyup { surface_id, .. }
+        | BrowserControlCommand::Hover { surface_id, .. }
+        | BrowserControlCommand::Focus { surface_id, .. }
+        | BrowserControlCommand::Check { surface_id, .. }
+        | BrowserControlCommand::Uncheck { surface_id, .. }
+        | BrowserControlCommand::Select { surface_id, .. }
+        | BrowserControlCommand::Scroll { surface_id, .. }
+        | BrowserControlCommand::ScrollIntoView { surface_id, .. }
+        | BrowserControlCommand::Get { surface_id, .. }
+        | BrowserControlCommand::Is { surface_id, .. }
+        | BrowserControlCommand::Screenshot { surface_id, .. } => *surface_id,
+    }
+}
+
+fn terminal_debug_surface_id(command: &TerminalDebugCommand) -> SurfaceId {
+    match command {
+        TerminalDebugCommand::IsFocused { surface_id }
+        | TerminalDebugCommand::ReadText { surface_id, .. }
+        | TerminalDebugCommand::RenderStats { surface_id } => *surface_id,
+    }
+}
+
+fn trim_terminal_tail(text: String, tail_lines: Option<usize>) -> String {
+    let Some(limit) = tail_lines else {
+        return text;
+    };
+    if limit == 0 {
+        return String::new();
+    }
+
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(limit);
+    lines[start..].join("\n")
+}
+
 fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
     SurfaceDescriptor {
         cols: spec.cols,
         rows: spec.rows,
         kind: PaneKind::Terminal,
         cwd: spec.cwd.clone(),
-        title: None,
+        title: Some(spec.title.clone()),
         url: None,
         // The current Ghostty bridge is more stable when it controls shell
         // selection itself, so keep command overrides empty until that path is
@@ -988,26 +1585,16 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
     }
 }
 
-fn browser_spec(plan: &PortalSurfacePlan) -> Result<&BrowserMountSpec> {
-    match &plan.mount {
-        SurfaceMountSpec::Browser(spec) => Ok(spec),
-        SurfaceMountSpec::Terminal(_) => bail!("surface {} is not a browser", plan.surface_id),
-    }
-}
-
-fn terminal_spec(plan: &PortalSurfacePlan) -> Result<&TerminalMountSpec> {
-    match &plan.mount {
-        SurfaceMountSpec::Terminal(spec) => Ok(spec),
-        SurfaceMountSpec::Browser(_) => bail!("surface {} is not a terminal", plan.surface_id),
-    }
-}
-
 fn position_widget(overlay: &Overlay, widget: &Widget, frame: taskers_core::Frame) {
+    let clamped_margin_start = frame.x.clamp(0, i32::from(i16::MAX));
+    let clamped_margin_top = frame.y.clamp(0, i32::from(i16::MAX));
     widget.set_size_request(frame.width.max(1), frame.height.max(1));
+    widget.set_hexpand(false);
+    widget.set_vexpand(false);
     widget.set_halign(Align::Start);
     widget.set_valign(Align::Start);
-    widget.set_margin_start(frame.x.max(0));
-    widget.set_margin_top(frame.y.max(0));
+    widget.set_margin_start(clamped_margin_start);
+    widget.set_margin_top(clamped_margin_top);
     if widget.parent().is_some() {
         widget.queue_allocate();
     } else {
@@ -1059,7 +1646,21 @@ fn clip_to_content(
     plan: &PortalSurfacePlan,
     content: &taskers_core::Frame,
 ) -> Option<PortalSurfacePlan> {
-    let f = &plan.frame;
+    let clipped_frame = clip_frame_to_content(plan.frame, *content)?;
+    let clipped_pane_frame = clip_frame_to_content(plan.pane_frame, *content)?;
+
+    Some(PortalSurfacePlan {
+        frame: clipped_frame,
+        pane_frame: clipped_pane_frame,
+        ..plan.clone()
+    })
+}
+
+fn clip_frame_to_content(
+    frame: taskers_core::Frame,
+    content: taskers_core::Frame,
+) -> Option<taskers_core::Frame> {
+    let f = &frame;
     let cx = content.x;
     let cy = content.y;
     let cr = content.x + content.width;
@@ -1077,10 +1678,9 @@ fn clip_to_content(
         return None;
     }
 
-    Some(PortalSurfacePlan {
-        frame: taskers_core::Frame::new(clipped_x, clipped_y, clipped_w, clipped_h),
-        ..plan.clone()
-    })
+    Some(taskers_core::Frame::new(
+        clipped_x, clipped_y, clipped_w, clipped_h,
+    ))
 }
 
 fn emit_diagnostic(sink: Option<&DiagnosticsSink>, record: DiagnosticRecord) {
@@ -1096,14 +1696,20 @@ fn current_timestamp_ms() -> u128 {
         .unwrap_or_default()
 }
 
+fn hidden_frame() -> taskers_core::Frame {
+    taskers_core::Frame::new(100_000, 100_000, 1, 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_plans, native_surface_classes, native_surface_css, native_surfaces_interactive,
-        terminal_plans, workspace_pan_delta,
+        browser_plans, host_attention_palette, native_surface_classes, native_surface_css,
+        native_surfaces_interactive, terminal_plans, trim_terminal_tail, workspace_pan_delta,
     };
-    use taskers_shell_core::{BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec};
     use taskers_domain::PaneKind;
+    use taskers_shell_core::{
+        AttentionRingState, BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec,
+    };
 
     #[test]
     fn partitions_portal_plans_by_surface_kind() {
@@ -1153,5 +1759,27 @@ mod tests {
         assert!(css.contains(".native-surface-terminal-widget"));
         assert!(css.contains(".terminal-output"));
         assert!(css.contains("background: #0f1117;"));
+    }
+
+    #[test]
+    fn trim_terminal_tail_keeps_requested_suffix() {
+        let text = "one\ntwo\nthree\nfour".to_string();
+        assert_eq!(trim_terminal_tail(text.clone(), None), text);
+        assert_eq!(trim_terminal_tail(text.clone(), Some(2)), "three\nfour");
+        assert_eq!(trim_terminal_tail(text, Some(10)), "one\ntwo\nthree\nfour");
+    }
+
+    #[test]
+    fn host_attention_palette_tracks_selected_theme_ring_colors() {
+        let dark = host_attention_palette("dark");
+        let gruvbox = host_attention_palette("gruvbox-dark");
+
+        let dark_waiting = dark.paint(AttentionRingState::Waiting);
+        let gruvbox_waiting = gruvbox.paint(AttentionRingState::Waiting);
+        let dark_error = dark.paint(AttentionRingState::Error);
+
+        assert!(dark_waiting.stroke.blue > dark_waiting.stroke.red);
+        assert!(dark_error.stroke.red > dark_error.stroke.green);
+        assert_ne!(dark_waiting.stroke.green, gruvbox_waiting.stroke.green);
     }
 }

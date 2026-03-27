@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -71,11 +70,7 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
             "-Di18n=false",
         ])
         .arg(version_arg)
-        .args([
-            "--summary",
-            "none",
-            "--prefix",
-        ])
+        .args(["--summary", "none", "--prefix"])
         .arg(install_dir)
         .output()
         .expect("failed to invoke zig");

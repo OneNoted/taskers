@@ -1,5 +1,9 @@
 # Release Prep
 
+This guide is for release maintainers. For everyday usage and operator flows,
+start with the root [README](../README.md), [daily usage](usage.md), and
+[notifications guide](notifications.md).
+
 Use this checklist before publishing a new `taskers` Linux release.
 
 ## 1. Finalize The Repo State
@@ -68,12 +72,20 @@ cargo publish --dry-run -p taskers-paths
   - `taskers-cli`
   - `taskers`
 
+Before publishing, also verify the operator path still works:
+
+```bash
+cargo run -p taskers-cli -- --help
+cargo run -p taskers-cli -- notify --help
+```
+
 ## 3. Publish
 
 - Push the release tag so GitHub Actions can assemble the assets and attach them to a draft GitHub release.
 - Confirm the draft release tagged `v<version>` contains:
   - `taskers-manifest-v<version>.json`
   - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
+  - `taskers-ghostty-runtime-v<version>-x86_64-unknown-linux-gnu.tar.xz`
 - Publish the GitHub release so the launcher assets are publicly downloadable before publishing the crates.
 - Publish the crates to crates.io in dependency order:
 
@@ -99,3 +111,11 @@ taskers
 - Confirm the published Linux launcher downloads the exact version-matched bundle on first launch.
 - Confirm `cargo install taskers-cli --bin taskersctl --locked` still works as the standalone helper path.
 - Confirm `cargo install taskers --locked` on macOS fails with the Linux-only guidance from the launcher crate.
+
+For dev-desktop testing against the local checkout after a release pass:
+
+```bash
+bash scripts/install-dev-desktop-entry.sh
+```
+
+That reinstalls the repo-local app into Cargo's bin directory and repoints the desktop entry to that installed binary.

@@ -69,8 +69,6 @@ function taskers__collect_metadata
 
     if set -q TASKERS_ACTIVE_AGENT_KIND
         set -g TASKERS_META_AGENT "$TASKERS_ACTIVE_AGENT_KIND"
-    else if set -q TASKERS_PANE_AGENT_KIND
-        set -g TASKERS_META_AGENT "$TASKERS_PANE_AGENT_KIND"
     else
         set -g TASKERS_META_AGENT shell
     end
@@ -103,12 +101,21 @@ function taskers__agent_active_for_kind --argument kind
     end
 end
 
+function taskers__context_tty_matches
+    set -q TASKERS_TTY_NAME; or return 1
+    set -l current_tty (tty 2>/dev/null)
+    string match -qr '^/dev/' -- "$current_tty"; or return 1
+    test "$current_tty" = "$TASKERS_TTY_NAME"
+end
+
 function taskers__emit_with_metadata --argument kind message
     taskers__collect_metadata
     set -l agent_active (taskers__agent_active_for_kind "$kind")
     test -x "$TASKERS_CTL_PATH"; or return 0
     test -n "$TASKERS_WORKSPACE_ID"; or return 0
     test -n "$TASKERS_PANE_ID"; or return 0
+    test -n "$TASKERS_SURFACE_ID"; or return 0
+    taskers__context_tty_matches; or return 0
 
     set -l argv \
         "$TASKERS_CTL_PATH" \
@@ -149,24 +156,28 @@ function taskers__emit_metadata_if_changed
     taskers__emit_with_metadata metadata
 end
 
+function taskers__invalidate_metadata_cache
+    set -e TASKERS_LAST_META_CWD
+    set -e TASKERS_LAST_META_REPO_NAME
+    set -e TASKERS_LAST_META_BRANCH
+    set -e TASKERS_LAST_META_AGENT
+    set -e TASKERS_LAST_META_TITLE
+    set -e TASKERS_LAST_META_AGENT_ACTIVE
+end
+
 function taskers__on_preexec --on-event fish_preexec
     set -l agent (taskers__classify_command "$argv[1]" 2>/dev/null)
     if test -n "$agent"
-        set -gx TASKERS_PANE_AGENT_KIND "$agent"
         set -gx TASKERS_ACTIVE_AGENT_KIND "$agent"
-        taskers__emit_with_metadata started
+        taskers__invalidate_metadata_cache
+        taskers__emit_metadata_if_changed
     end
 end
 
 function taskers__on_postexec --on-event fish_postexec
-    set -l exit_status $status
     if set -q TASKERS_ACTIVE_AGENT_KIND
-        if test "$exit_status" -eq 0
-            taskers__emit_with_metadata completed
-        else
-            taskers__emit_with_metadata error "Exited with status $exit_status"
-        end
         set -e TASKERS_ACTIVE_AGENT_KIND
+        taskers__invalidate_metadata_cache
     end
 
     taskers__emit_metadata_if_changed
@@ -205,4 +216,10 @@ set -gx TASKERS_LAST_META_BRANCH ''
 set -gx TASKERS_LAST_META_AGENT ''
 set -gx TASKERS_LAST_META_TITLE ''
 set -gx TASKERS_LAST_META_AGENT_ACTIVE ''
+if not set -q TASKERS_TTY_NAME
+    set -l current_tty (tty 2>/dev/null)
+    if string match -qr '^/dev/' -- "$current_tty"
+        set -gx TASKERS_TTY_NAME "$current_tty"
+    end
+end
 taskers__emit_metadata_if_changed

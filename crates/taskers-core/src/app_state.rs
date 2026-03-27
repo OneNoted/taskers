@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, ControlResponse, InMemoryController};
-use taskers_domain::{AppModel, PaneId, PaneKind, WorkspaceId};
+use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
 use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
 
@@ -112,9 +112,43 @@ impl AppState {
             .panes
             .get(&pane_id)
             .ok_or_else(|| anyhow!("pane {pane_id} is not present"))?;
-        let surface = pane
+        let surface_id = pane
             .active_surface()
+            .map(|surface| surface.id)
             .ok_or_else(|| anyhow!("pane {pane_id} has no active surface"))?;
+
+        self.surface_descriptor_for_surface_in_model(&model, workspace_id, pane_id, surface_id)
+    }
+
+    pub fn surface_descriptor_for_surface(
+        &self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> Result<SurfaceDescriptor> {
+        let model = self.snapshot_model();
+        self.surface_descriptor_for_surface_in_model(&model, workspace_id, pane_id, surface_id)
+    }
+
+    fn surface_descriptor_for_surface_in_model(
+        &self,
+        model: &AppModel,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> Result<SurfaceDescriptor> {
+        let workspace = model
+            .workspaces
+            .get(&workspace_id)
+            .ok_or_else(|| anyhow!("workspace {workspace_id} is not present"))?;
+        let pane = workspace
+            .panes
+            .get(&pane_id)
+            .ok_or_else(|| anyhow!("pane {pane_id} is not present"))?;
+        let surface = pane
+            .surfaces
+            .get(&surface_id)
+            .ok_or_else(|| anyhow!("surface {surface_id} is not present in pane {pane_id}"))?;
 
         let env = match surface.kind {
             PaneKind::Terminal => {
@@ -193,6 +227,58 @@ mod tests {
         );
         assert!(descriptor.env.contains_key("TASKERS_SURFACE_ID"));
         assert!(descriptor.env.contains_key("TASKERS_AGENT_SESSION_ID"));
+    }
+
+    #[test]
+    fn surface_descriptor_for_surface_keeps_target_ids_for_inactive_tabs() {
+        let mut model = AppModel::new("Main");
+        let workspace = model.active_workspace_id().expect("workspace");
+        let pane = model.active_workspace().expect("workspace").active_pane;
+        let first_surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("first surface");
+        let second_surface = model
+            .create_surface(workspace, pane, PaneKind::Terminal)
+            .expect("second surface");
+        model
+            .focus_surface(workspace, pane, first_surface)
+            .expect("restore active surface");
+
+        let mut shell_launch = ShellLaunchSpec::fallback();
+        shell_launch.program = PathBuf::from("/bin/zsh");
+        shell_launch.args = vec!["-i".into()];
+        shell_launch
+            .env
+            .insert("TASKERS_SOCKET".into(), "/tmp/taskers.sock".into());
+
+        let app_state = AppState::new(
+            model,
+            PathBuf::from("/tmp/taskers-session.json"),
+            BackendChoice::Mock,
+            shell_launch,
+        )
+        .expect("app state");
+
+        let descriptor = app_state
+            .surface_descriptor_for_surface(workspace, pane, second_surface)
+            .expect("descriptor");
+
+        assert_eq!(descriptor.kind, PaneKind::Terminal);
+        assert_eq!(
+            descriptor.env.get("TASKERS_WORKSPACE_ID"),
+            Some(&workspace.to_string())
+        );
+        assert_eq!(
+            descriptor.env.get("TASKERS_PANE_ID"),
+            Some(&pane.to_string())
+        );
+        assert_eq!(
+            descriptor.env.get("TASKERS_SURFACE_ID"),
+            Some(&second_surface.to_string())
+        );
     }
 
     #[test]

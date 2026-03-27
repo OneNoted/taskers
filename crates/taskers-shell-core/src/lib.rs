@@ -5,13 +5,13 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use taskers_core::{AppState, default_session_path};
 use taskers_control::{ControlCommand, ControlResponse};
+use taskers_core::{AppState, default_session_path};
 use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
-    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind, PaneMetadata,
-    PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
-    WorkspaceSummary as DomainWorkspaceSummary,
+    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, NotificationId, PaneKind,
+    PaneMetadata, PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame,
+    Workspace, WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
@@ -20,23 +20,17 @@ use tokio::sync::watch;
 
 pub use taskers_domain::{
     Direction, PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
-    WorkspaceWindowMoveTarget,
+    WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivityId {
-    pub workspace_id: WorkspaceId,
-    pub pane_id: PaneId,
-    pub surface_id: SurfaceId,
+    pub notification_id: NotificationId,
 }
 
 impl fmt::Display for ActivityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "activity-{}-{}-{}",
-            self.workspace_id, self.pane_id, self.surface_id
-        )
+        write!(f, "activity-{}", self.notification_id)
     }
 }
 
@@ -127,6 +121,23 @@ impl AttentionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AttentionRingState {
+    Waiting,
+    Error,
+    Completed,
+}
+
+impl AttentionRingState {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Error => "error",
+            Self::Completed => "completed",
+        }
+    }
+}
+
 impl From<taskers_domain::AttentionState> for AttentionState {
     fn from(value: taskers_domain::AttentionState) -> Self {
         match value {
@@ -191,6 +202,7 @@ impl ShortcutPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutAction {
     ToggleOverview,
+    FocusLatestUnread,
     CloseTerminal,
     OpenBrowserSplit,
     FocusBrowserAddress,
@@ -221,8 +233,9 @@ pub enum ShortcutAction {
 }
 
 impl ShortcutAction {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::ToggleOverview,
+        Self::FocusLatestUnread,
         Self::CloseTerminal,
         Self::OpenBrowserSplit,
         Self::FocusBrowserAddress,
@@ -255,6 +268,7 @@ impl ShortcutAction {
     pub fn id(self) -> &'static str {
         match self {
             Self::ToggleOverview => "toggle_overview",
+            Self::FocusLatestUnread => "focus_latest_unread",
             Self::CloseTerminal => "close_terminal",
             Self::OpenBrowserSplit => "open_browser_split",
             Self::FocusBrowserAddress => "focus_browser_address",
@@ -288,6 +302,7 @@ impl ShortcutAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::ToggleOverview => "Toggle overview",
+            Self::FocusLatestUnread => "Jump to latest unread",
             Self::CloseTerminal => "Close terminal",
             Self::OpenBrowserSplit => "Open browser in split",
             Self::FocusBrowserAddress => "Focus browser address bar",
@@ -321,6 +336,9 @@ impl ShortcutAction {
     pub fn detail(self) -> &'static str {
         match self {
             Self::ToggleOverview => "Zoom the current workspace out to fit the full column strip.",
+            Self::FocusLatestUnread => {
+                "Focus the most recent unread attention item in the current app window."
+            }
             Self::CloseTerminal => "Close the active pane.",
             Self::OpenBrowserSplit => {
                 "Split the active pane to the right and open a browser surface."
@@ -365,7 +383,7 @@ impl ShortcutAction {
 
     pub fn category(self) -> &'static str {
         match self {
-            Self::ToggleOverview | Self::CloseTerminal => "General",
+            Self::ToggleOverview | Self::FocusLatestUnread | Self::CloseTerminal => "General",
             Self::OpenBrowserSplit
             | Self::FocusBrowserAddress
             | Self::ReloadBrowserPage
@@ -395,6 +413,7 @@ impl ShortcutAction {
         match preset {
             ShortcutPreset::Balanced => match self {
                 Self::ToggleOverview => &["<Control><Alt>o"],
+                Self::FocusLatestUnread => &["<Control><Shift>u"],
                 Self::CloseTerminal => &["<Control><Alt>x"],
                 Self::OpenBrowserSplit => &["<Control><Alt><Shift>l"],
                 Self::FocusBrowserAddress => &["<Control>l"],
@@ -425,6 +444,7 @@ impl ShortcutAction {
             },
             ShortcutPreset::PowerUser => match self {
                 Self::ToggleOverview => &["<Control><Alt>o"],
+                Self::FocusLatestUnread => &["<Control><Shift>u"],
                 Self::CloseTerminal => &["<Control><Alt>x"],
                 Self::OpenBrowserSplit => &["<Control><Alt><Shift>l"],
                 Self::FocusBrowserAddress => &["<Control>l"],
@@ -507,6 +527,7 @@ pub struct BootstrapModel {
     pub runtime_status: RuntimeStatus,
     pub selected_theme_id: String,
     pub selected_shortcut_preset: ShortcutPreset,
+    pub notification_preferences: NotificationPreferencesSnapshot,
 }
 
 impl Default for BootstrapModel {
@@ -516,8 +537,36 @@ impl Default for BootstrapModel {
             runtime_status: RuntimeStatus::default(),
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: ShortcutPreset::Balanced,
+            notification_preferences: NotificationPreferencesSnapshot::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationPreferencesSnapshot {
+    pub alerts_on_waiting: bool,
+    pub alerts_on_error: bool,
+    pub alerts_on_completed: bool,
+    pub suppress_when_visible: bool,
+}
+
+impl Default for NotificationPreferencesSnapshot {
+    fn default() -> Self {
+        Self {
+            alerts_on_waiting: true,
+            alerts_on_error: true,
+            alerts_on_completed: true,
+            suppress_when_visible: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationPreferenceKey {
+    AlertsOnWaiting,
+    AlertsOnError,
+    AlertsOnCompleted,
+    SuppressWhenVisible,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -569,6 +618,16 @@ impl Frame {
             height: (self.height - clamped * 2).max(1),
         }
     }
+
+    pub fn inset_horizontal(self, amount: i32) -> Self {
+        let clamped = amount.clamp(0, self.width.saturating_sub(1) / 2);
+        Self {
+            x: self.x + clamped,
+            y: self.y,
+            width: (self.width - clamped * 2).max(1),
+            height: self.height,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,35 +644,79 @@ pub struct LayoutMetrics {
     pub pane_header_height: i32,
     pub browser_toolbar_height: i32,
     pub surface_tab_height: i32,
+    pub terminal_gutter_x: i32,
 }
 
 impl Default for LayoutMetrics {
     fn default() -> Self {
         Self {
-            sidebar_width: 248,
-            activity_width: 312,
-            toolbar_height: 42,
-            workspace_padding: 16,
+            sidebar_width: 212,
+            activity_width: 280,
+            toolbar_height: 32,
+            workspace_padding: 12,
             window_border_width: 2,
-            window_toolbar_height: 28,
+            window_toolbar_height: 20,
             window_body_padding: 0,
             split_gap: 8,
             pane_border_width: 1,
             pane_header_height: 26,
             browser_toolbar_height: 34,
             surface_tab_height: 28,
+            terminal_gutter_x: 6,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStateSnapshot {
+    Idle,
+    Working,
+    Waiting,
+    Completed,
+    Failed,
+}
+
+impl RuntimeStateSnapshot {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Working => "Working",
+            Self::Waiting => "Waiting",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+        }
+    }
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeIdentitySnapshot {
+    pub key: String,
+    pub label: String,
+    pub state: RuntimeStateSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceSnapshot {
     pub id: SurfaceId,
     pub kind: SurfaceKind,
+    pub runtime: RuntimeIdentitySnapshot,
     pub title: String,
+    pub activity_label: Option<String>,
+    pub status_label: Option<String>,
     pub url: Option<String>,
     pub cwd: Option<String>,
     pub attention: AttentionState,
+    pub notification_ring: Option<AttentionRingState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -621,7 +724,9 @@ pub struct PaneSnapshot {
     pub id: PaneId,
     pub active: bool,
     pub attention: AttentionState,
+    pub notification_ring: Option<AttentionRingState>,
     pub active_surface: SurfaceId,
+    pub runtime: RuntimeIdentitySnapshot,
     pub surfaces: Vec<SurfaceSnapshot>,
     pub focus_flash_token: u64,
 }
@@ -672,6 +777,8 @@ pub struct PortalSurfacePlan {
     pub pane_id: PaneId,
     pub surface_id: SurfaceId,
     pub active: bool,
+    pub notification_ring: Option<AttentionRingState>,
+    pub pane_frame: Frame,
     pub frame: Frame,
     pub mount: SurfaceMountSpec,
 }
@@ -689,6 +796,7 @@ pub struct WorkspaceSummary {
     pub title: String,
     pub preview: String,
     pub active: bool,
+    pub runtime: RuntimeIdentitySnapshot,
     pub pane_count: usize,
     pub surface_count: usize,
     pub agent_count: usize,
@@ -696,6 +804,7 @@ pub struct WorkspaceSummary {
     pub unread_activity: usize,
     pub attention: AttentionState,
     pub notification_text: Option<String>,
+    pub status_text: Option<String>,
     pub git_branch: Option<String>,
     pub working_directory: Option<String>,
     pub listening_ports: Vec<u16>,
@@ -708,6 +817,29 @@ pub struct WorkspaceSummary {
 pub struct ProgressSnapshot {
     pub fraction: f32,
     pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceLogEntrySnapshot {
+    pub source: Option<String>,
+    pub message: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserSurfaceCatalogEntry {
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalSurfaceCatalogEntry {
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub spec: TerminalMountSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -755,12 +887,26 @@ pub struct WorkspaceWindowSnapshot {
     pub column_id: WorkspaceColumnId,
     pub active: bool,
     pub attention: AttentionState,
+    pub runtime: RuntimeIdentitySnapshot,
     pub title: String,
     pub pane_count: usize,
     pub surface_count: usize,
+    pub active_tab: WorkspaceWindowTabId,
     pub active_pane: PaneId,
     pub frame: Frame,
+    pub tabs: Vec<WorkspaceWindowTabSnapshot>,
     pub layout: LayoutNodeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceWindowTabSnapshot {
+    pub id: WorkspaceWindowTabId,
+    pub active: bool,
+    pub attention: AttentionState,
+    pub runtime: RuntimeIdentitySnapshot,
+    pub title: String,
+    pub pane_count: usize,
+    pub surface_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -797,14 +943,24 @@ pub enum ShellDragMode {
     #[default]
     None,
     Window,
+    WindowTab,
     Surface,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceDragSessionSnapshot {
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub preview_workspace_id: WorkspaceId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStateSnapshot {
     Working,
     Waiting,
-    Inactive,
+    Completed,
+    Failed,
 }
 
 impl AgentStateSnapshot {
@@ -812,7 +968,8 @@ impl AgentStateSnapshot {
         match self {
             Self::Working => "Working",
             Self::Waiting => "Waiting",
-            Self::Inactive => "Inactive",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
         }
     }
 
@@ -820,7 +977,8 @@ impl AgentStateSnapshot {
         match self {
             Self::Working => "busy",
             Self::Waiting => "waiting",
-            Self::Inactive => "completed",
+            Self::Completed => "completed",
+            Self::Failed => "error",
         }
     }
 }
@@ -830,7 +988,8 @@ impl From<taskers_domain::WorkspaceAgentState> for AgentStateSnapshot {
         match value {
             taskers_domain::WorkspaceAgentState::Working => Self::Working,
             taskers_domain::WorkspaceAgentState::Waiting => Self::Waiting,
-            taskers_domain::WorkspaceAgentState::Inactive => Self::Inactive,
+            taskers_domain::WorkspaceAgentState::Completed => Self::Completed,
+            taskers_domain::WorkspaceAgentState::Failed => Self::Failed,
         }
     }
 }
@@ -877,6 +1036,7 @@ pub struct SettingsSnapshot {
     pub theme_options: Vec<ThemeOptionSnapshot>,
     pub shortcut_presets: Vec<ShortcutPresetSnapshot>,
     pub shortcuts: Vec<ShortcutBindingSnapshot>,
+    pub notification_preferences: NotificationPreferencesSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -885,6 +1045,7 @@ pub struct ShellSnapshot {
     pub section: ShellSection,
     pub overview_mode: bool,
     pub drag_mode: ShellDragMode,
+    pub surface_drag: Option<SurfaceDragSessionSnapshot>,
     pub attention_panel_visible: bool,
     pub workspaces: Vec<WorkspaceSummary>,
     pub current_workspace: WorkspaceViewSnapshot,
@@ -892,6 +1053,11 @@ pub struct ShellSnapshot {
     pub agents: Vec<AgentSessionSnapshot>,
     pub activity: Vec<ActivityItemSnapshot>,
     pub done_activity: Vec<ActivityItemSnapshot>,
+    pub current_workspace_status: Option<String>,
+    pub current_workspace_progress: Option<ProgressSnapshot>,
+    pub current_workspace_log: Vec<WorkspaceLogEntrySnapshot>,
+    pub browser_catalog: Vec<BrowserSurfaceCatalogEntry>,
+    pub terminal_catalog: Vec<TerminalSurfaceCatalogEntry>,
     pub portal: SurfacePortalPlan,
     pub metrics: LayoutMetrics,
     pub runtime_status: RuntimeStatus,
@@ -966,6 +1132,33 @@ pub enum ShellAction {
         window_id: WorkspaceWindowId,
         target: WorkspaceWindowMoveTarget,
     },
+    CreateWorkspaceWindowTab {
+        window_id: WorkspaceWindowId,
+    },
+    FocusWorkspaceWindowTab {
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    },
+    MoveWorkspaceWindowTab {
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target_index: usize,
+    },
+    TransferWorkspaceWindowTab {
+        source_window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target_window_id: WorkspaceWindowId,
+        target_index: usize,
+    },
+    ExtractWorkspaceWindowTab {
+        source_window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target: WorkspaceWindowMoveTarget,
+    },
+    CloseWorkspaceWindowTab {
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    },
     ScrollViewport {
         dx: i32,
         dy: i32,
@@ -1006,12 +1199,22 @@ pub enum ShellAction {
         target_workspace_id: WorkspaceId,
     },
     BeginWindowDrag,
-    BeginSurfaceDrag,
+    BeginWindowTabDrag,
+    BeginSurfaceDrag {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    PreviewSurfaceDragWorkspace {
+        workspace_id: WorkspaceId,
+    },
+    CancelSurfaceDrag,
     EndDrag,
     NavigateBrowser {
         surface_id: SurfaceId,
         url: String,
     },
+    FocusLatestUnread,
     BrowserBack {
         surface_id: SurfaceId,
     },
@@ -1028,14 +1231,26 @@ pub enum ShellAction {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    OpenActivity {
+        activity_id: ActivityId,
+    },
     DismissActivity {
         activity_id: ActivityId,
+    },
+    DismissSurfaceAlert {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
     },
     SelectTheme {
         theme_id: String,
     },
     SelectShortcutPreset {
         preset_id: String,
+    },
+    SetNotificationPreference {
+        key: NotificationPreferenceKey,
+        enabled: bool,
     },
 }
 
@@ -1044,8 +1259,10 @@ struct UiState {
     section: ShellSection,
     overview_mode: bool,
     drag_mode: ShellDragMode,
+    surface_drag: Option<SurfaceDragSessionSnapshot>,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
+    notification_preferences: NotificationPreferencesSnapshot,
     window_size: PixelSize,
 }
 
@@ -1106,8 +1323,10 @@ impl TaskersCore {
                 section: ShellSection::Workspace,
                 overview_mode: false,
                 drag_mode: ShellDragMode::None,
+                surface_drag: None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
+                notification_preferences: bootstrap.notification_preferences,
                 window_size: PixelSize::new(1440, 900),
             },
             host_commands: VecDeque::new(),
@@ -1124,8 +1343,7 @@ impl TaskersCore {
         let agents = self.agent_sessions_snapshot(&model);
         let activity = self.activity_snapshot(&model);
         let done_activity = self.done_activity_snapshot(&model);
-        let attention_panel_visible =
-            !agents.is_empty() || !activity.is_empty() || !done_activity.is_empty();
+        let attention_panel_visible = !agents.is_empty() || !activity.is_empty();
         let workspace_id = model
             .active_workspace_id()
             .expect("active workspace should exist");
@@ -1133,6 +1351,18 @@ impl TaskersCore {
             .workspaces
             .get(&workspace_id)
             .expect("active workspace should exist");
+        let current_workspace_progress = workspace_progress_snapshot(workspace);
+        let current_workspace_log = workspace
+            .log_entries
+            .iter()
+            .rev()
+            .take(12)
+            .map(|entry| WorkspaceLogEntrySnapshot {
+                source: entry.source.clone(),
+                message: entry.message.clone(),
+                timestamp: format_relative_time(entry.created_at),
+            })
+            .collect::<Vec<_>>();
         let active_window = workspace
             .active_window_record()
             .expect("active workspace window should exist");
@@ -1177,6 +1407,7 @@ impl TaskersCore {
             section: self.ui.section,
             overview_mode: self.ui.overview_mode,
             drag_mode: self.ui.drag_mode,
+            surface_drag: self.ui.surface_drag,
             attention_panel_visible,
             workspaces: self.workspace_summaries(&model),
             current_workspace: WorkspaceViewSnapshot {
@@ -1201,12 +1432,22 @@ impl TaskersCore {
                 canvas_offset_x: canvas_metrics.offset_x,
                 canvas_offset_y: canvas_metrics.offset_y,
                 columns: self.workspace_columns_snapshot(workspace, &window_frames),
-                layout: self.snapshot_layout(workspace, &active_window.layout),
+                layout: self.snapshot_layout(
+                    workspace,
+                    active_window
+                        .active_layout()
+                        .expect("active workspace window tab should exist"),
+                ),
             },
             browser_chrome: self.browser_chrome_snapshot(workspace),
             agents,
             activity,
             done_activity,
+            current_workspace_status: workspace.status_text.clone(),
+            current_workspace_progress,
+            current_workspace_log,
+            browser_catalog: self.browser_catalog_snapshot(&model),
+            terminal_catalog: self.terminal_catalog_snapshot(&model),
             portal: SurfacePortalPlan {
                 window: Frame::new(0, 0, self.ui.window_size.width, self.ui.window_size.height),
                 content: viewport,
@@ -1254,11 +1495,13 @@ impl TaskersCore {
                 })
                 .collect(),
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
+            notification_preferences: self.ui.notification_preferences,
         }
     }
 
     fn workspace_summaries(&self, model: &AppModel) -> Vec<WorkspaceSummary> {
         let active_window = model.active_window;
+        let now = OffsetDateTime::now_utc();
         model
             .workspace_summaries(active_window)
             .unwrap_or_default()
@@ -1286,6 +1529,7 @@ impl TaskersCore {
                     title: summary.label.clone(),
                     preview: workspace_preview(&summary),
                     active: model.active_workspace_id() == Some(summary.workspace_id),
+                    runtime: workspace_runtime_identity(workspace, now),
                     pane_count: workspace.map(|ws| ws.panes.len()).unwrap_or_default(),
                     surface_count: workspace.map(workspace_surface_count).unwrap_or_default(),
                     agent_count: summary.agent_summaries.len(),
@@ -1299,24 +1543,12 @@ impl TaskersCore {
                     unread_activity: summary.unread_count,
                     attention: summary.display_attention.into(),
                     notification_text: summary.latest_notification,
+                    status_text: summary.status_text,
                     git_branch,
                     working_directory,
                     listening_ports,
                     custom_color: workspace.and_then(|ws| ws.custom_color.clone()),
-                    progress: workspace
-                        .into_iter()
-                        .flat_map(|ws| ws.panes.values())
-                        .flat_map(|pane| pane.surfaces.values())
-                        .find_map(|surface| {
-                            surface
-                                .metadata
-                                .progress
-                                .as_ref()
-                                .map(|p| ProgressSnapshot {
-                                    fraction: f32::from(p.value.min(1000)) / 1000.0,
-                                    label: p.label.clone(),
-                                })
-                        }),
+                    progress: workspace.and_then(workspace_progress_snapshot),
                     pull_requests: workspace
                         .into_iter()
                         .flat_map(|ws| ws.panes.values())
@@ -1372,7 +1604,7 @@ impl TaskersCore {
         model
             .activity_items()
             .into_iter()
-            .map(|item| activity_item_snapshot(model, &item, true))
+            .map(|item| activity_item_snapshot(model, &item))
             .collect()
     }
 
@@ -1386,6 +1618,7 @@ impl TaskersCore {
                     .iter()
                     .filter(|notification| notification.cleared_at.is_some())
                     .map(move |notification| ActivityItem {
+                        notification_id: notification.id,
                         workspace_id: workspace.id,
                         workspace_window_id: workspace.window_for_pane(notification.pane_id),
                         pane_id: notification.pane_id,
@@ -1393,7 +1626,9 @@ impl TaskersCore {
                         kind: notification.kind.clone(),
                         state: notification.state,
                         title: notification.title.clone(),
+                        subtitle: notification.subtitle.clone(),
                         message: notification.message.clone(),
+                        read_at: notification.read_at,
                         created_at: notification.created_at,
                     })
             })
@@ -1401,7 +1636,7 @@ impl TaskersCore {
         items.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         items
             .into_iter()
-            .map(|item| activity_item_snapshot(model, &item, false))
+            .map(|item| activity_item_snapshot(model, &item))
             .collect()
     }
 
@@ -1410,6 +1645,7 @@ impl TaskersCore {
         workspace: &Workspace,
         window_frames: &BTreeMap<WorkspaceWindowId, (WorkspaceColumnId, Frame)>,
     ) -> Vec<WorkspaceColumnSnapshot> {
+        let now = OffsetDateTime::now_utc();
         let active_column_id = workspace.active_column_id();
         workspace
             .columns
@@ -1424,7 +1660,11 @@ impl TaskersCore {
                     .filter_map(|window_id| {
                         let window = workspace.windows.get(window_id)?;
                         let (_, frame) = window_frames.get(window_id)?;
-                        Some(self.workspace_window_snapshot(workspace, column.id, window, *frame))
+                        Some(
+                            self.workspace_window_snapshot(
+                                workspace, column.id, window, *frame, now,
+                            ),
+                        )
                     })
                     .collect(),
             })
@@ -1437,8 +1677,12 @@ impl TaskersCore {
         column_id: WorkspaceColumnId,
         window: &taskers_domain::WorkspaceWindowRecord,
         frame: Frame,
+        now: OffsetDateTime,
     ) -> WorkspaceWindowSnapshot {
-        let pane_ids = window.layout.leaves();
+        let active_tab = window
+            .active_tab_record()
+            .expect("workspace window should have an active tab");
+        let pane_ids = active_tab.layout.leaves();
         let pane_count = pane_ids.len();
         let surface_count = pane_ids
             .iter()
@@ -1446,18 +1690,28 @@ impl TaskersCore {
             .map(|pane| pane.surfaces.len())
             .sum();
         let title = window_primary_title(workspace, window);
+        let tabs = window
+            .tabs
+            .values()
+            .map(|tab| workspace_window_tab_snapshot(workspace, tab, window.active_tab, now))
+            .collect();
 
         WorkspaceWindowSnapshot {
             id: window.id,
             column_id,
             active: workspace.active_window == window.id,
             attention: workspace_window_attention(workspace, window),
+            runtime: workspace_window_runtime_identity(workspace, window, now),
             title,
             pane_count,
             surface_count,
-            active_pane: window.active_pane,
+            active_tab: window.active_tab,
+            active_pane: window
+                .active_pane()
+                .expect("workspace window should have an active pane"),
             frame,
-            layout: self.snapshot_layout(workspace, &window.layout),
+            tabs,
+            layout: self.snapshot_layout(workspace, &active_tab.layout),
         }
     }
 
@@ -1495,30 +1749,50 @@ impl TaskersCore {
         workspace: &Workspace,
         pane: &taskers_domain::PaneRecord,
     ) -> PaneSnapshot {
+        let now = OffsetDateTime::now_utc();
         let is_active = workspace.active_pane == pane.id;
         let has_unread = pane.highest_attention() != taskers_domain::AttentionState::Normal;
-        let flash_token = if is_active && has_unread {
+        let explicit_flash_token = pane
+            .surfaces
+            .values()
+            .filter_map(|surface| workspace.surface_flash_tokens.get(&surface.id))
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let focus_flash_token = if is_active && has_unread {
             self.revision
         } else {
             0
         };
+        let flash_token = focus_flash_token.max(explicit_flash_token);
+        let surfaces = pane
+            .surfaces
+            .values()
+            .map(|surface| SurfaceSnapshot {
+                id: surface.id,
+                kind: SurfaceKind::from_domain(&surface.kind),
+                runtime: surface_runtime_identity(surface, now),
+                title: display_surface_title(surface),
+                activity_label: surface_activity_label(surface, now),
+                status_label: surface_status_label(surface, now),
+                url: normalized_surface_url(surface),
+                cwd: normalized_cwd(&surface.metadata),
+                attention: surface.attention.into(),
+                notification_ring: surface_notification_ring(surface),
+            })
+            .collect::<Vec<_>>();
         PaneSnapshot {
             id: pane.id,
             active: is_active,
             attention: pane.highest_attention().into(),
+            notification_ring: dominant_attention_ring(
+                surfaces
+                    .iter()
+                    .filter_map(|surface| surface.notification_ring),
+            ),
             active_surface: pane.active_surface,
-            surfaces: pane
-                .surfaces
-                .values()
-                .map(|surface| SurfaceSnapshot {
-                    id: surface.id,
-                    kind: SurfaceKind::from_domain(&surface.kind),
-                    title: display_surface_title(surface),
-                    url: normalized_surface_url(surface),
-                    cwd: normalized_cwd(&surface.metadata),
-                    attention: surface.attention.into(),
-                })
-                .collect(),
+            runtime: pane_runtime_identity(pane, now),
+            surfaces,
             focus_flash_token: flash_token,
         }
     }
@@ -1534,8 +1808,7 @@ impl TaskersCore {
             pane_id: pane.id,
             surface_id: surface.id,
             title: display_surface_title(surface),
-            url: normalized_surface_url(surface)
-                .unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
+            url: normalized_surface_url(surface).unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
             can_go_back: self
                 .browser_navigation
                 .get(&surface.id)
@@ -1554,6 +1827,59 @@ impl TaskersCore {
         })
     }
 
+    fn browser_catalog_snapshot(&self, model: &AppModel) -> Vec<BrowserSurfaceCatalogEntry> {
+        let mut catalog = Vec::new();
+        for (workspace_id, workspace) in &model.workspaces {
+            for pane in workspace.panes.values() {
+                for surface in pane.surfaces.values() {
+                    if surface.kind != PaneKind::Browser {
+                        continue;
+                    }
+                    let descriptor = fallback_surface_descriptor(surface);
+                    let mount = mount_spec_from_descriptor(surface, descriptor);
+                    let SurfaceMountSpec::Browser(BrowserMountSpec { url }) = mount else {
+                        continue;
+                    };
+                    catalog.push(BrowserSurfaceCatalogEntry {
+                        workspace_id: *workspace_id,
+                        pane_id: pane.id,
+                        surface_id: surface.id,
+                        url,
+                    });
+                }
+            }
+        }
+        catalog
+    }
+
+    fn terminal_catalog_snapshot(&self, model: &AppModel) -> Vec<TerminalSurfaceCatalogEntry> {
+        let mut catalog = Vec::new();
+        for (workspace_id, workspace) in &model.workspaces {
+            for pane in workspace.panes.values() {
+                for surface in pane.surfaces.values() {
+                    if surface.kind != PaneKind::Terminal {
+                        continue;
+                    }
+                    let descriptor = self
+                        .app_state
+                        .surface_descriptor_for_surface(*workspace_id, pane.id, surface.id)
+                        .unwrap_or_else(|_| fallback_surface_descriptor(surface));
+                    let mount = mount_spec_from_descriptor(surface, descriptor);
+                    let SurfaceMountSpec::Terminal(spec) = mount else {
+                        continue;
+                    };
+                    catalog.push(TerminalSurfaceCatalogEntry {
+                        workspace_id: *workspace_id,
+                        pane_id: pane.id,
+                        surface_id: surface.id,
+                        spec,
+                    });
+                }
+            }
+        }
+        catalog
+    }
+
     fn collect_workspace_surface_plans(
         &self,
         workspace_id: WorkspaceId,
@@ -1565,10 +1891,11 @@ impl TaskersCore {
             .values()
             .filter_map(|window| {
                 let (_, frame) = window_frames.get(&window.id)?;
+                let layout = window.active_layout()?;
                 Some(self.collect_surface_plans(
                     workspace_id,
                     workspace,
-                    &window.layout,
+                    layout,
                     workspace_window_content_frame(*frame, self.metrics),
                 ))
             })
@@ -1593,7 +1920,14 @@ impl TaskersCore {
                         pane_id: pane.id,
                         surface_id: active_surface.id,
                         active: workspace.active_pane == pane.id,
-                        frame: pane_body_frame(frame, self.metrics, &active_surface.kind),
+                        notification_ring: pane_notification_ring(pane),
+                        pane_frame: frame,
+                        frame: pane_body_frame(
+                            frame,
+                            self.metrics,
+                            &active_surface.kind,
+                            pane_shows_tab_strip_for_surface_count(pane.surfaces.len()),
+                        ),
                         mount: self.mount_spec_for_active_surface(
                             workspace_id,
                             pane,
@@ -1743,6 +2077,36 @@ impl TaskersCore {
             ShellAction::MoveWorkspaceWindow { window_id, target } => {
                 self.move_workspace_window_by_id(window_id, target)
             }
+            ShellAction::CreateWorkspaceWindowTab { window_id } => {
+                self.create_workspace_window_tab(window_id)
+            }
+            ShellAction::FocusWorkspaceWindowTab { window_id, tab_id } => {
+                self.focus_workspace_window_tab(window_id, tab_id)
+            }
+            ShellAction::MoveWorkspaceWindowTab {
+                window_id,
+                tab_id,
+                target_index,
+            } => self.move_workspace_window_tab(window_id, tab_id, target_index),
+            ShellAction::TransferWorkspaceWindowTab {
+                source_window_id,
+                tab_id,
+                target_window_id,
+                target_index,
+            } => self.transfer_workspace_window_tab(
+                source_window_id,
+                tab_id,
+                target_window_id,
+                target_index,
+            ),
+            ShellAction::ExtractWorkspaceWindowTab {
+                source_window_id,
+                tab_id,
+                target,
+            } => self.extract_workspace_window_tab(source_window_id, tab_id, target),
+            ShellAction::CloseWorkspaceWindowTab { window_id, tab_id } => {
+                self.close_workspace_window_tab(window_id, tab_id)
+            }
             ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
             ShellAction::SplitBrowser { pane_id } => {
                 self.split_with_kind_axis(pane_id, PaneKind::Browser, DomainSplitAxis::Horizontal)
@@ -1786,11 +2150,23 @@ impl TaskersCore {
                 surface_id,
                 target_workspace_id,
             ),
-            ShellAction::BeginWindowDrag => self.set_drag_mode(ShellDragMode::Window),
-            ShellAction::BeginSurfaceDrag => self.set_drag_mode(ShellDragMode::Surface),
-            ShellAction::EndDrag => self.set_drag_mode(ShellDragMode::None),
+            ShellAction::BeginWindowDrag => self.begin_window_drag(),
+            ShellAction::BeginWindowTabDrag => self.begin_window_tab_drag(),
+            ShellAction::BeginSurfaceDrag {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => self.begin_surface_drag(workspace_id, pane_id, surface_id),
+            ShellAction::PreviewSurfaceDragWorkspace { workspace_id } => {
+                self.preview_surface_drag_workspace(workspace_id)
+            }
+            ShellAction::CancelSurfaceDrag => self.clear_surface_drag(true),
+            ShellAction::EndDrag => self.clear_surface_drag(false),
             ShellAction::NavigateBrowser { surface_id, url } => {
                 self.navigate_browser_surface(surface_id, &url)
+            }
+            ShellAction::FocusLatestUnread => {
+                self.dispatch_control(ControlCommand::AgentFocusLatestUnread { window_id: None })
             }
             ShellAction::BrowserBack { surface_id } => {
                 self.queue_host_command(HostCommand::BrowserBack { surface_id })
@@ -1808,7 +2184,13 @@ impl TaskersCore {
                 pane_id,
                 surface_id,
             } => self.close_surface_by_id(pane_id, surface_id),
+            ShellAction::OpenActivity { activity_id } => self.open_activity(activity_id),
             ShellAction::DismissActivity { activity_id } => self.dismiss_activity(activity_id),
+            ShellAction::DismissSurfaceAlert {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => self.dismiss_surface_alert(workspace_id, pane_id, surface_id),
             ShellAction::SelectTheme { theme_id } => {
                 if self.ui.selected_theme_id == theme_id {
                     return false;
@@ -1828,6 +2210,28 @@ impl TaskersCore {
                 self.bump_local_revision();
                 true
             }
+            ShellAction::SetNotificationPreference { key, enabled } => {
+                let changed = match key {
+                    NotificationPreferenceKey::AlertsOnWaiting => {
+                        &mut self.ui.notification_preferences.alerts_on_waiting
+                    }
+                    NotificationPreferenceKey::AlertsOnError => {
+                        &mut self.ui.notification_preferences.alerts_on_error
+                    }
+                    NotificationPreferenceKey::AlertsOnCompleted => {
+                        &mut self.ui.notification_preferences.alerts_on_completed
+                    }
+                    NotificationPreferenceKey::SuppressWhenVisible => {
+                        &mut self.ui.notification_preferences.suppress_when_visible
+                    }
+                };
+                if *changed == enabled {
+                    return false;
+                }
+                *changed = enabled;
+                self.bump_local_revision();
+                true
+            }
         }
     }
 
@@ -1835,6 +2239,9 @@ impl TaskersCore {
         match action {
             ShortcutAction::ToggleOverview => {
                 self.dispatch_shell_action(ShellAction::ToggleOverview)
+            }
+            ShortcutAction::FocusLatestUnread => {
+                self.dispatch_shell_action(ShellAction::FocusLatestUnread)
             }
             ShortcutAction::CloseTerminal => self.run_workspace_shortcut(|core, workspace_id| {
                 let pane_id = core
@@ -2059,6 +2466,113 @@ impl TaskersCore {
         })
     }
 
+    fn create_workspace_window_tab(&mut self, window_id: WorkspaceWindowId) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CreateWorkspaceWindowTab {
+            workspace_id,
+            workspace_window_id: window_id,
+        })
+    }
+
+    fn focus_workspace_window_tab(
+        &mut self,
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::FocusWorkspaceWindowTab {
+            workspace_id,
+            workspace_window_id: window_id,
+            workspace_window_tab_id: tab_id,
+        })
+    }
+
+    fn move_workspace_window_tab(
+        &mut self,
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target_index: usize,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::MoveWorkspaceWindowTab {
+            workspace_id,
+            workspace_window_id: window_id,
+            workspace_window_tab_id: tab_id,
+            to_index: target_index,
+        })
+    }
+
+    fn transfer_workspace_window_tab(
+        &mut self,
+        source_window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target_window_id: WorkspaceWindowId,
+        target_index: usize,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let changed = self.dispatch_control(ControlCommand::TransferWorkspaceWindowTab {
+            workspace_id,
+            source_workspace_window_id: source_window_id,
+            workspace_window_tab_id: tab_id,
+            target_workspace_window_id: target_window_id,
+            to_index: target_index,
+        });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
+    }
+
+    fn extract_workspace_window_tab(
+        &mut self,
+        source_window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+        target: WorkspaceWindowMoveTarget,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let changed = self.dispatch_control(ControlCommand::ExtractWorkspaceWindowTab {
+            workspace_id,
+            source_workspace_window_id: source_window_id,
+            workspace_window_tab_id: tab_id,
+            target,
+        });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
+    }
+
+    fn close_workspace_window_tab(
+        &mut self,
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CloseWorkspaceWindowTab {
+            workspace_id,
+            workspace_window_id: window_id,
+            workspace_window_tab_id: tab_id,
+        })
+    }
+
     fn scroll_viewport_by(&mut self, dx: i32, dy: i32) -> bool {
         let model = self.app_state.snapshot_model();
         let Some(workspace_id) = model.active_workspace_id() else {
@@ -2226,9 +2740,6 @@ impl TaskersCore {
         else {
             return false;
         };
-        if workspace_id != target_workspace_id {
-            return false;
-        }
         if source_pane_id == target_pane_id {
             return self.dispatch_control(ControlCommand::MoveSurface {
                 workspace_id,
@@ -2237,13 +2748,20 @@ impl TaskersCore {
                 to_index: target_index,
             });
         }
-        self.dispatch_control(ControlCommand::TransferSurface {
-            workspace_id,
-            source_pane_id,
-            surface_id,
-            target_pane_id,
-            to_index: target_index,
-        })
+        let changed = self
+            .dispatch_control_with_response(ControlCommand::TransferSurface {
+                source_workspace_id: workspace_id,
+                source_pane_id,
+                surface_id,
+                target_workspace_id,
+                target_pane_id,
+                to_index: target_index,
+            })
+            .is_some();
+        if changed && workspace_id != target_workspace_id {
+            return self.ensure_active_window_visible() || changed;
+        }
+        changed
     }
 
     fn move_surface_to_split_by_id(
@@ -2254,7 +2772,7 @@ impl TaskersCore {
         direction: Direction,
     ) -> bool {
         let model = self.app_state.snapshot_model();
-        let Some((workspace_id, located_source_pane_id)) =
+        let Some((source_workspace_id, located_source_pane_id)) =
             self.resolve_surface_location(&model, surface_id)
         else {
             return false;
@@ -2263,14 +2781,15 @@ impl TaskersCore {
         else {
             return false;
         };
-        if workspace_id != target_workspace_id || located_source_pane_id != source_pane_id {
+        if located_source_pane_id != source_pane_id {
             return false;
         }
         let Some(response) =
             self.dispatch_control_with_response(ControlCommand::MoveSurfaceToSplit {
-                workspace_id,
+                source_workspace_id,
                 source_pane_id,
                 surface_id,
+                target_workspace_id,
                 target_pane_id,
                 direction,
             })
@@ -2338,10 +2857,28 @@ impl TaskersCore {
     }
 
     fn dismiss_activity(&mut self, activity_id: ActivityId) -> bool {
-        self.dispatch_control(ControlCommand::MarkSurfaceCompleted {
-            workspace_id: activity_id.workspace_id,
-            pane_id: activity_id.pane_id,
-            surface_id: activity_id.surface_id,
+        self.dispatch_control(ControlCommand::ClearNotification {
+            notification_id: activity_id.notification_id,
+        })
+    }
+
+    fn dismiss_surface_alert(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> bool {
+        self.dispatch_control(ControlCommand::DismissSurfaceAlert {
+            workspace_id,
+            pane_id,
+            surface_id,
+        })
+    }
+
+    fn open_activity(&mut self, activity_id: ActivityId) -> bool {
+        self.dispatch_control(ControlCommand::OpenNotification {
+            window_id: None,
+            notification_id: activity_id.notification_id,
         })
     }
 
@@ -2456,6 +2993,109 @@ impl TaskersCore {
         changed
     }
 
+    fn begin_window_drag(&mut self) -> bool {
+        let mut changed = false;
+        if self.ui.surface_drag.is_some() {
+            self.ui.surface_drag = None;
+            changed = true;
+        }
+        if self.ui.drag_mode != ShellDragMode::Window {
+            self.ui.drag_mode = ShellDragMode::Window;
+            changed = true;
+        }
+        if changed {
+            self.bump_local_revision();
+        }
+        changed
+    }
+
+    fn begin_window_tab_drag(&mut self) -> bool {
+        let mut changed = false;
+        if self.ui.surface_drag.is_some() {
+            self.ui.surface_drag = None;
+            changed = true;
+        }
+        if self.ui.drag_mode != ShellDragMode::WindowTab {
+            self.ui.drag_mode = ShellDragMode::WindowTab;
+            changed = true;
+        }
+        if changed {
+            self.bump_local_revision();
+        }
+        changed
+    }
+
+    fn begin_surface_drag(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        if self.resolve_surface_location(&model, surface_id) != Some((workspace_id, pane_id)) {
+            return false;
+        }
+        let next = SurfaceDragSessionSnapshot {
+            workspace_id,
+            pane_id,
+            surface_id,
+            preview_workspace_id: workspace_id,
+        };
+        if self.ui.drag_mode == ShellDragMode::Surface && self.ui.surface_drag == Some(next) {
+            return false;
+        }
+        self.ui.drag_mode = ShellDragMode::Surface;
+        self.ui.surface_drag = Some(next);
+        self.bump_local_revision();
+        true
+    }
+
+    fn preview_surface_drag_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        let Some(mut session) = self.ui.surface_drag else {
+            return false;
+        };
+        let mut changed = false;
+        if session.preview_workspace_id != workspace_id {
+            session.preview_workspace_id = workspace_id;
+            self.ui.surface_drag = Some(session);
+            self.bump_local_revision();
+            changed = true;
+        }
+        if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
+            changed |= self.dispatch_control(ControlCommand::SwitchWorkspace {
+                window_id: None,
+                workspace_id,
+            });
+        }
+        changed
+    }
+
+    fn clear_surface_drag(&mut self, restore_source_workspace: bool) -> bool {
+        let source_workspace_id = self.ui.surface_drag.map(|session| session.workspace_id);
+        let mut changed = false;
+        if self.ui.surface_drag.is_some() {
+            self.ui.surface_drag = None;
+            changed = true;
+        }
+        if self.ui.drag_mode != ShellDragMode::None {
+            self.ui.drag_mode = ShellDragMode::None;
+            changed = true;
+        }
+        if changed {
+            self.bump_local_revision();
+        }
+        if restore_source_workspace
+            && let Some(workspace_id) = source_workspace_id
+            && self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id)
+        {
+            changed |= self.dispatch_control(ControlCommand::SwitchWorkspace {
+                window_id: None,
+                workspace_id,
+            });
+        }
+        changed
+    }
+
     fn prepare_workspace_interaction(&mut self) -> Option<WorkspaceId> {
         let mut changed = false;
         if self.ui.section != ShellSection::Workspace {
@@ -2470,19 +3110,14 @@ impl TaskersCore {
             self.ui.drag_mode = ShellDragMode::None;
             changed = true;
         }
+        if self.ui.surface_drag.is_some() {
+            self.ui.surface_drag = None;
+            changed = true;
+        }
         if changed {
             self.bump_local_revision();
         }
         self.app_state.snapshot_model().active_workspace_id()
-    }
-
-    fn set_drag_mode(&mut self, drag_mode: ShellDragMode) -> bool {
-        if self.ui.drag_mode == drag_mode {
-            return false;
-        }
-        self.ui.drag_mode = drag_mode;
-        self.bump_local_revision();
-        true
     }
 
     fn ensure_active_window_visible(&mut self) -> bool {
@@ -3173,14 +3808,29 @@ fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, F
     }
 }
 
-fn pane_body_frame(frame: Frame, metrics: LayoutMetrics, kind: &PaneKind) -> Frame {
+fn pane_body_frame(
+    frame: Frame,
+    metrics: LayoutMetrics,
+    kind: &PaneKind,
+    show_tab_strip: bool,
+) -> Frame {
     let browser_toolbar_height = match kind {
         PaneKind::Terminal => 0,
         PaneKind::Browser => metrics.browser_toolbar_height,
     };
+    let terminal_gutter_x = match kind {
+        PaneKind::Terminal => metrics.terminal_gutter_x,
+        PaneKind::Browser => 0,
+    };
+    let tab_strip_height = if show_tab_strip {
+        metrics.surface_tab_height
+    } else {
+        0
+    };
     frame
         .inset(metrics.pane_border_width)
-        .inset_top(metrics.pane_header_height + metrics.surface_tab_height + browser_toolbar_height)
+        .inset_horizontal(terminal_gutter_x)
+        .inset_top(metrics.pane_header_height + tab_strip_height + browser_toolbar_height)
 }
 
 fn workspace_window_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
@@ -3229,7 +3879,234 @@ fn workspace_window_attention(
     window: &taskers_domain::WorkspaceWindowRecord,
 ) -> AttentionState {
     window
-        .layout
+        .active_tab_record()
+        .map(|tab| workspace_window_tab_attention(workspace, tab))
+        .unwrap_or(AttentionState::Normal)
+}
+
+fn surface_runtime_identity(
+    surface: &SurfaceRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    let key = runtime_key(surface);
+    RuntimeIdentitySnapshot {
+        label: runtime_label(&key),
+        state: surface_runtime_state(surface, now),
+        key,
+    }
+}
+
+fn pane_runtime_identity(
+    pane: &taskers_domain::PaneRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    pane.active_surface()
+        .map(|surface| surface_runtime_identity(surface, now))
+        .unwrap_or_else(|| fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle))
+}
+
+fn workspace_window_runtime_identity(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    window
+        .active_tab_record()
+        .map(|tab| workspace_window_tab_runtime_identity(workspace, tab, now))
+        .unwrap_or_else(|| fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle))
+}
+
+fn workspace_runtime_identity(
+    workspace: Option<&Workspace>,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    workspace
+        .map(|workspace| {
+            dominant_runtime_identity(
+                workspace.windows.values().map(|window| {
+                    (
+                        workspace_window_runtime_identity(workspace, window, now),
+                        window.id == workspace.active_window,
+                    )
+                }),
+                fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
+            )
+        })
+        .unwrap_or_else(|| fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle))
+}
+
+fn fallback_runtime_identity(key: &str, state: RuntimeStateSnapshot) -> RuntimeIdentitySnapshot {
+    RuntimeIdentitySnapshot {
+        key: key.to_string(),
+        label: runtime_label(key),
+        state,
+    }
+}
+
+fn dominant_runtime_identity<I>(
+    candidates: I,
+    fallback: RuntimeIdentitySnapshot,
+) -> RuntimeIdentitySnapshot
+where
+    I: IntoIterator<Item = (RuntimeIdentitySnapshot, bool)>,
+{
+    let mut best: Option<(RuntimeIdentitySnapshot, bool)> = None;
+    for candidate in candidates {
+        let replace = best.as_ref().is_none_or(|(best_runtime, best_active)| {
+            runtime_priority(&candidate.0, candidate.1)
+                < runtime_priority(best_runtime, *best_active)
+        });
+        if replace {
+            best = Some(candidate);
+        }
+    }
+    best.map(|(runtime, _)| runtime).unwrap_or(fallback)
+}
+
+fn runtime_priority(runtime: &RuntimeIdentitySnapshot, active: bool) -> (u8, u8, u8) {
+    (
+        runtime_state_priority(runtime.state),
+        if active { 0 } else { 1 },
+        runtime_kind_priority(&runtime.key),
+    )
+}
+
+fn runtime_state_priority(state: RuntimeStateSnapshot) -> u8 {
+    match state {
+        RuntimeStateSnapshot::Failed => 0,
+        RuntimeStateSnapshot::Waiting => 1,
+        RuntimeStateSnapshot::Working => 2,
+        RuntimeStateSnapshot::Completed => 3,
+        RuntimeStateSnapshot::Idle => 4,
+    }
+}
+
+fn runtime_kind_priority(key: &str) -> u8 {
+    match key {
+        "browser" => 1,
+        "terminal" => 2,
+        _ => 0,
+    }
+}
+
+fn dominant_attention_ring(
+    rings: impl IntoIterator<Item = AttentionRingState>,
+) -> Option<AttentionRingState> {
+    rings.into_iter().min_by_key(|ring| match ring {
+        AttentionRingState::Error => 0,
+        AttentionRingState::Waiting => 1,
+        AttentionRingState::Completed => 2,
+    })
+}
+
+fn runtime_key(surface: &SurfaceRecord) -> String {
+    if let Some(agent_key) = surface_agent_key(surface) {
+        return agent_key;
+    }
+
+    match surface.kind {
+        PaneKind::Browser => "browser".into(),
+        PaneKind::Terminal => "terminal".into(),
+    }
+}
+
+fn runtime_label(key: &str) -> String {
+    match key {
+        "codex" => "Codex".into(),
+        "claude" => "Claude".into(),
+        "opencode" => "OpenCode".into(),
+        "aider" => "Aider".into(),
+        "browser" => "Browser".into(),
+        "terminal" => "Terminal".into(),
+        other => other
+            .split(|ch: char| matches!(ch, '-' | '_' | ' '))
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                let Some(first) = chars.next() else {
+                    return String::new();
+                };
+                let mut label = String::new();
+                label.push(first.to_ascii_uppercase());
+                label.push_str(chars.as_str());
+                label
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn surface_runtime_state(surface: &SurfaceRecord, now: OffsetDateTime) -> RuntimeStateSnapshot {
+    surface_agent_state(surface, now)
+        .map(runtime_state_from_agent_state)
+        .unwrap_or(RuntimeStateSnapshot::Idle)
+}
+
+fn surface_agent_state(
+    surface: &SurfaceRecord,
+    now: OffsetDateTime,
+) -> Option<taskers_domain::WorkspaceAgentState> {
+    let session = surface.agent_session.as_ref()?;
+    match session.state {
+        taskers_domain::WorkspaceAgentState::Working
+        | taskers_domain::WorkspaceAgentState::Waiting => Some(session.state),
+        taskers_domain::WorkspaceAgentState::Completed
+        | taskers_domain::WorkspaceAgentState::Failed => {
+            (session.updated_at >= now - time::Duration::minutes(15)).then_some(session.state)
+        }
+    }
+}
+
+fn runtime_state_from_agent_state(
+    state: taskers_domain::WorkspaceAgentState,
+) -> RuntimeStateSnapshot {
+    match state {
+        taskers_domain::WorkspaceAgentState::Working => RuntimeStateSnapshot::Working,
+        taskers_domain::WorkspaceAgentState::Waiting => RuntimeStateSnapshot::Waiting,
+        taskers_domain::WorkspaceAgentState::Completed => RuntimeStateSnapshot::Completed,
+        taskers_domain::WorkspaceAgentState::Failed => RuntimeStateSnapshot::Failed,
+    }
+}
+
+fn window_primary_title(
+    workspace: &Workspace,
+    window: &taskers_domain::WorkspaceWindowRecord,
+) -> String {
+    window
+        .active_tab_record()
+        .map(|tab| window_tab_primary_title(workspace, tab))
+        .unwrap_or_else(|| "Workspace window".into())
+}
+
+fn workspace_window_tab_snapshot(
+    workspace: &Workspace,
+    tab: &WorkspaceWindowTabRecord,
+    active_tab_id: WorkspaceWindowTabId,
+    now: OffsetDateTime,
+) -> WorkspaceWindowTabSnapshot {
+    let pane_ids = tab.layout.leaves();
+    let pane_count = pane_ids.len();
+    let surface_count = pane_ids
+        .iter()
+        .filter_map(|pane_id| workspace.panes.get(pane_id))
+        .map(|pane| pane.surfaces.len())
+        .sum();
+    WorkspaceWindowTabSnapshot {
+        id: tab.id,
+        active: tab.id == active_tab_id,
+        attention: workspace_window_tab_attention(workspace, tab),
+        runtime: workspace_window_tab_runtime_identity(workspace, tab, now),
+        title: window_tab_primary_title(workspace, tab),
+        pane_count,
+        surface_count,
+    }
+}
+
+fn workspace_window_tab_attention(
+    workspace: &Workspace,
+    tab: &WorkspaceWindowTabRecord,
+) -> AttentionState {
+    tab.layout
         .leaves()
         .into_iter()
         .filter_map(|pane_id| workspace.panes.get(&pane_id))
@@ -3239,21 +4116,152 @@ fn workspace_window_attention(
         .into()
 }
 
-fn window_primary_title(
+fn workspace_window_tab_runtime_identity(
     workspace: &Workspace,
-    window: &taskers_domain::WorkspaceWindowRecord,
-) -> String {
+    tab: &WorkspaceWindowTabRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    dominant_runtime_identity(
+        tab.layout
+            .leaves()
+            .into_iter()
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .map(|pane| (pane_runtime_identity(pane, now), pane.id == tab.active_pane)),
+        fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
+    )
+}
+
+fn window_tab_primary_title(workspace: &Workspace, tab: &WorkspaceWindowTabRecord) -> String {
     workspace
         .panes
-        .get(&window.active_pane)
+        .get(&tab.active_pane)
         .and_then(|pane| pane.active_surface())
         .map(display_surface_title)
         .unwrap_or_else(|| "Workspace window".into())
 }
 
 fn display_surface_title(surface: &SurfaceRecord) -> String {
+    match surface.kind {
+        PaneKind::Terminal => display_terminal_title(surface),
+        PaneKind::Browser => display_browser_title(&surface.metadata),
+    }
+}
+
+fn surface_activity_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Option<String> {
+    let _ = active_agent_surface_state(surface, now)?;
+    surface
+        .agent_session
+        .as_ref()
+        .and_then(|session| session.latest_message.as_deref())
+        .as_deref()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_owned)
+}
+
+fn surface_status_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Option<String> {
+    match active_agent_surface_state(surface, now)? {
+        RuntimeStateSnapshot::Waiting => Some("Awaiting response".into()),
+        RuntimeStateSnapshot::Working => Some("Working".into()),
+        RuntimeStateSnapshot::Completed => Some("Completed".into()),
+        RuntimeStateSnapshot::Failed => Some("Failed".into()),
+        RuntimeStateSnapshot::Idle => None,
+    }
+}
+
+fn active_agent_surface_state(
+    surface: &SurfaceRecord,
+    now: OffsetDateTime,
+) -> Option<RuntimeStateSnapshot> {
+    if surface.kind != PaneKind::Terminal {
+        return None;
+    }
+
+    let state = surface_runtime_state(surface, now);
+    (!matches!(state, RuntimeStateSnapshot::Idle)).then_some(state)
+}
+
+fn surface_notification_ring(surface: &SurfaceRecord) -> Option<AttentionRingState> {
+    if surface.kind != PaneKind::Terminal {
+        return None;
+    }
+
+    match surface.attention {
+        taskers_domain::AttentionState::WaitingInput => Some(AttentionRingState::Waiting),
+        taskers_domain::AttentionState::Error => Some(AttentionRingState::Error),
+        taskers_domain::AttentionState::Completed => Some(AttentionRingState::Completed),
+        taskers_domain::AttentionState::Normal | taskers_domain::AttentionState::Busy => None,
+    }
+}
+
+fn pane_notification_ring(pane: &taskers_domain::PaneRecord) -> Option<AttentionRingState> {
+    dominant_attention_ring(pane.surfaces.values().filter_map(surface_notification_ring))
+}
+
+fn surface_agent_key(surface: &SurfaceRecord) -> Option<String> {
+    surface
+        .agent_session
+        .as_ref()
+        .map(|session| session.kind.clone())
+        .or_else(|| {
+            surface
+                .agent_process
+                .as_ref()
+                .map(|process| process.kind.clone())
+        })
+}
+
+#[cfg(test)]
+fn normalized_agent_key(value: Option<&str>) -> Option<String> {
+    let normalized = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())?;
+    match normalized.as_str() {
+        "shell" => None,
+        "claude code" | "claude-code" => Some("claude".into()),
+        "codex" | "claude" | "opencode" | "aider" => Some(normalized),
+        _ => None,
+    }
+}
+
+fn display_terminal_title(surface: &SurfaceRecord) -> String {
+    let context = terminal_context_label(&surface.metadata);
+
+    if let Some(session) = surface.agent_session.as_ref() {
+        if let Some(context) = context.as_deref() {
+            return format!("{} · {context}", session.title);
+        }
+        return session.title.clone();
+    }
+
+    if let Some(process) = surface.agent_process.as_ref() {
+        if let Some(context) = context.as_deref() {
+            return format!("{} · {context}", process.title);
+        }
+        return process.title.clone();
+    }
+
+    if let Some(context) = context {
+        return context;
+    }
+
     if let Some(title) = surface
         .metadata
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .filter(|title| !is_generic_terminal_title(title))
+    {
+        return title.to_string();
+    }
+
+    "Terminal".into()
+}
+
+fn display_browser_title(metadata: &PaneMetadata) -> String {
+    if let Some(title) = metadata
         .title
         .as_deref()
         .map(str::trim)
@@ -3262,21 +4270,41 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
         return title.to_string();
     }
 
-    if matches!(surface.kind, PaneKind::Browser)
-        && let Some(url) = surface
-            .metadata
-            .url
-            .as_deref()
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
+    if let Some(url) = metadata
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
     {
         return url.to_string();
     }
 
-    match surface.kind {
-        PaneKind::Terminal => "Terminal".into(),
-        PaneKind::Browser => "Browser".into(),
+    "Browser".into()
+}
+
+fn terminal_context_label(metadata: &PaneMetadata) -> Option<String> {
+    let repo_name = metadata
+        .repo_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty());
+    let git_branch = metadata
+        .git_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
+
+    if let Some(repo_name) = repo_name {
+        return Some(match git_branch {
+            Some(git_branch) => format!("{repo_name}/{git_branch}"),
+            None => repo_name.to_string(),
+        });
     }
+
+    normalized_cwd(metadata)
+        .as_deref()
+        .and_then(path_basename)
+        .map(str::to_string)
 }
 
 fn normalized_surface_url(surface: &SurfaceRecord) -> Option<String> {
@@ -3296,6 +4324,67 @@ fn normalized_cwd(metadata: &PaneMetadata) -> Option<String> {
         .map(str::trim)
         .filter(|cwd| !cwd.is_empty())
         .map(str::to_string)
+}
+
+fn path_basename(path: &str) -> Option<&str> {
+    let trimmed = path.trim().trim_end_matches(|ch| matches!(ch, '/' | '\\'));
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    trimmed
+        .rsplit(|ch| matches!(ch, '/' | '\\'))
+        .find(|segment| !segment.is_empty())
+}
+
+fn is_generic_terminal_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    if !parts.all(|part| part.starts_with('-')) {
+        return false;
+    }
+
+    let basename = command
+        .rsplit(|ch| matches!(ch, '/' | '\\'))
+        .next()
+        .unwrap_or(command)
+        .trim()
+        .to_ascii_lowercase();
+
+    if matches!(
+        basename.as_str(),
+        "taskers-shell-wrapper.sh" | "taskers-agent-proxy.sh"
+    ) {
+        return true;
+    }
+
+    matches!(
+        basename.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "nu"
+            | "nushell"
+            | "dash"
+            | "ash"
+            | "ksh"
+            | "mksh"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+            | "cmd.exe"
+            | "xonsh"
+            | "elvish"
+    )
+}
+
+fn pane_shows_tab_strip_for_surface_count(surface_count: usize) -> bool {
+    surface_count > 1
 }
 
 fn format_relative_time(timestamp: OffsetDateTime) -> String {
@@ -3354,11 +4443,7 @@ fn activity_title(model: &AppModel, item: &ActivityItem) -> String {
         .unwrap_or_else(|| "Terminal pane".into())
 }
 
-fn activity_item_snapshot(
-    model: &AppModel,
-    item: &ActivityItem,
-    unread: bool,
-) -> ActivityItemSnapshot {
+fn activity_item_snapshot(model: &AppModel, item: &ActivityItem) -> ActivityItemSnapshot {
     let title = activity_title(model, item);
     let body = if item.message.trim() != title.trim() && !item.message.is_empty() {
         Some(item.message.clone())
@@ -3371,9 +4456,7 @@ fn activity_item_snapshot(
         .map(|workspace| workspace.label.clone());
     ActivityItemSnapshot {
         id: ActivityId {
-            workspace_id: item.workspace_id,
-            pane_id: item.pane_id,
-            surface_id: item.surface_id,
+            notification_id: item.notification_id,
         },
         title,
         preview: compact_preview(&item.message),
@@ -3382,7 +4465,7 @@ fn activity_item_snapshot(
         workspace_id: item.workspace_id,
         pane_id: Some(item.pane_id),
         surface_id: Some(item.surface_id),
-        unread,
+        unread: item.read_at.is_none(),
         timestamp: format_relative_time(item.created_at),
         body,
         source_workspace_title,
@@ -3424,19 +4507,46 @@ fn next_workspace_label(model: &AppModel) -> String {
     format!("Workspace {}", model.workspaces.len() + 1)
 }
 
+fn workspace_progress_snapshot(workspace: &Workspace) -> Option<ProgressSnapshot> {
+    workspace
+        .progress
+        .as_ref()
+        .map(|progress| ProgressSnapshot {
+            fraction: f32::from(progress.value.min(1000)) / 1000.0,
+            label: progress.label.clone(),
+        })
+        .or_else(|| {
+            workspace
+                .panes
+                .values()
+                .flat_map(|pane| pane.surfaces.values())
+                .find_map(|surface| {
+                    surface
+                        .metadata
+                        .progress
+                        .as_ref()
+                        .map(|progress| ProgressSnapshot {
+                            fraction: f32::from(progress.value.min(1000)) / 1000.0,
+                            label: progress.label.clone(),
+                        })
+                })
+        })
+}
+
 fn attention_panel_visible(model: &AppModel) -> bool {
     model
         .workspace_summaries(model.active_window)
         .map(|summaries| {
             summaries
                 .iter()
-                .any(|summary| !summary.agent_summaries.is_empty())
+                .any(|summary| !summary.agent_summaries.is_empty() || summary.status_text.is_some())
         })
         .unwrap_or(false)
-        || model
-            .workspaces
-            .values()
-            .any(|workspace| !workspace.notifications.is_empty())
+        || model.workspaces.values().any(|workspace| {
+            !workspace.notifications.is_empty()
+                || !workspace.log_entries.is_empty()
+                || workspace.progress.is_some()
+        })
 }
 
 fn fallback_surface_descriptor(surface: &SurfaceRecord) -> SurfaceDescriptor {
@@ -3471,9 +4581,7 @@ fn mount_spec_from_descriptor(
                 .unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
         }),
         PaneKind::Terminal => SurfaceMountSpec::Terminal(TerminalMountSpec {
-            title: descriptor
-                .title
-                .unwrap_or_else(|| display_surface_title(surface)),
+            title: display_surface_title(surface),
             cwd: descriptor.cwd,
             cols: descriptor.cols,
             rows: descriptor.rows,
@@ -3543,10 +4651,11 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use taskers_core::AppState;
     use taskers_control::ControlCommand;
+    use taskers_core::AppState;
     use taskers_domain::{
-        AppModel, AttentionState as DomainAttentionState, NotificationItem, SignalKind,
+        AppModel, AttentionState as DomainAttentionState, NotificationId, NotificationItem,
+        SignalKind,
     };
     use taskers_ghostty::BackendChoice;
     use taskers_runtime::ShellLaunchSpec;
@@ -3554,9 +4663,11 @@ mod tests {
 
     use super::{
         BootstrapModel, BrowserMountSpec, DEFAULT_BROWSER_HOME, Direction, HostCommand, HostEvent,
-        LayoutMetrics, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
-        ShellSection, SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
-        default_session_path_for_preview, pane_body_frame, resolved_browser_uri, split_frame,
+        LayoutMetrics, NotificationPreferencesSnapshot, RuntimeCapability, RuntimeStatus,
+        SharedCore, ShellAction, ShellDragMode, ShellSection, SurfaceDragSessionSnapshot,
+        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
+        default_session_path_for_preview, display_surface_title, pane_body_frame,
+        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
 
@@ -3572,6 +4683,7 @@ mod tests {
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
+            notification_preferences: NotificationPreferencesSnapshot::default(),
         }
     }
 
@@ -3596,14 +4708,19 @@ mod tests {
             .expect("workspace")
             .notifications
             .push(NotificationItem {
+                id: NotificationId::new(),
                 pane_id,
                 surface_id,
                 kind: SignalKind::Notification,
                 state: DomainAttentionState::WaitingInput,
                 title: Some("Heads up".into()),
+                subtitle: None,
+                external_id: None,
                 message: "Needs attention".into(),
                 created_at: now,
+                read_at: cleared.then_some(now),
                 cleared_at: cleared.then_some(now),
+                desktop_delivery: taskers_domain::NotificationDeliveryState::Shown,
             });
 
         BootstrapModel {
@@ -3616,6 +4733,19 @@ mod tests {
                 }),
                 BackendChoice::Mock,
                 ShellLaunchSpec::fallback(),
+            )
+            .expect("preview app state"),
+            ..bootstrap()
+        }
+    }
+
+    fn bootstrap_with_model(model: AppModel, name: &str) -> BootstrapModel {
+        BootstrapModel {
+            app_state: super::AppState::new(
+                model,
+                default_session_path_for_preview(name),
+                super::BackendChoice::Mock,
+                super::ShellLaunchSpec::fallback(),
             )
             .expect("preview app state"),
             ..bootstrap()
@@ -3669,6 +4799,681 @@ mod tests {
         }
     }
 
+    fn surface_with_metadata(
+        kind: taskers_domain::PaneKind,
+        metadata: taskers_domain::PaneMetadata,
+    ) -> taskers_domain::SurfaceRecord {
+        let agent_kind = metadata
+            .agent_kind
+            .as_deref()
+            .and_then(|kind| super::normalized_agent_key(Some(kind)))
+            .or_else(|| {
+                metadata
+                    .agent_title
+                    .as_deref()
+                    .and_then(|title| super::normalized_agent_key(Some(title)))
+            });
+        let process = agent_kind
+            .clone()
+            .map(|kind| taskers_domain::SurfaceAgentProcess {
+                id: taskers_domain::SessionId::new(),
+                kind: kind.clone(),
+                title: metadata
+                    .agent_title
+                    .clone()
+                    .unwrap_or_else(|| super::runtime_label(&kind)),
+                started_at: metadata
+                    .last_signal_at
+                    .unwrap_or_else(OffsetDateTime::now_utc),
+            });
+        let session = agent_kind.clone().and_then(|kind| {
+            metadata
+                .agent_state
+                .map(|state| taskers_domain::SurfaceAgentSession {
+                    id: taskers_domain::SessionId::new(),
+                    kind: kind.clone(),
+                    title: metadata
+                        .agent_title
+                        .clone()
+                        .unwrap_or_else(|| super::runtime_label(&kind)),
+                    state,
+                    latest_message: metadata.latest_agent_message.clone(),
+                    updated_at: metadata
+                        .last_signal_at
+                        .unwrap_or_else(OffsetDateTime::now_utc),
+                })
+        });
+        let mut surface = taskers_domain::SurfaceRecord::new(kind);
+        surface.metadata = metadata;
+        surface.agent_process = process;
+        surface.agent_session = session;
+        surface
+    }
+
+    #[test]
+    fn terminal_surface_titles_prefer_agent_and_repo_context() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("/usr/bin/zsh".into()),
+                agent_title: Some("Codex".into()),
+                repo_name: Some("taskers".into()),
+                git_branch: Some("main".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "Codex · taskers/main");
+    }
+
+    #[test]
+    fn terminal_surface_titles_prefer_repo_context_over_generic_shell_names() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("/usr/bin/zsh".into()),
+                repo_name: Some("taskers".into()),
+                git_branch: Some("main".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "taskers/main");
+    }
+
+    #[test]
+    fn terminal_surface_titles_fall_back_to_cwd_basename_before_generic_shell_names() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("zsh".into()),
+                cwd: Some("/home/notes/Projects/taskers".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "taskers");
+    }
+
+    #[test]
+    fn terminal_surface_titles_treat_taskers_shell_wrapper_as_generic() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("/run/user/1000/taskers/shell/taskers-shell-wrapper.sh".into()),
+                cwd: Some("/home/notes/Projects/taskers".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "taskers");
+    }
+
+    #[test]
+    fn terminal_surface_titles_keep_non_generic_host_titles_as_fallback() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("OpenAI Codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "OpenAI Codex");
+    }
+
+    #[test]
+    fn browser_surface_titles_stay_page_title_first() {
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Browser,
+            taskers_domain::PaneMetadata {
+                title: Some("Taskers Docs".into()),
+                url: Some("https://example.com/docs".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(display_surface_title(&surface), "Taskers Docs");
+    }
+
+    #[test]
+    fn surface_runtime_identity_prefers_agent_key_and_recent_state() {
+        let now = OffsetDateTime::now_utc();
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        let runtime = super::surface_runtime_identity(&surface, now);
+        assert_eq!(runtime.key, "codex");
+        assert_eq!(runtime.label, "Codex");
+        assert_eq!(runtime.state, super::RuntimeStateSnapshot::Waiting);
+    }
+
+    #[test]
+    fn waiting_agent_labels_prefer_latest_message_and_human_status() {
+        let now = OffsetDateTime::now_utc();
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                latest_agent_message: Some("Summarize recent commits".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            super::surface_activity_label(&surface, now).as_deref(),
+            Some("Summarize recent commits")
+        );
+        assert_eq!(
+            super::surface_status_label(&surface, now).as_deref(),
+            Some("Awaiting response")
+        );
+    }
+
+    #[test]
+    fn working_agent_labels_keep_activity_message_and_status() {
+        let now = OffsetDateTime::now_utc();
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Working),
+                latest_agent_message: Some("Updating tests".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            super::surface_activity_label(&surface, now).as_deref(),
+            Some("Updating tests")
+        );
+        assert_eq!(
+            super::surface_status_label(&surface, now).as_deref(),
+            Some("Working")
+        );
+    }
+
+    #[test]
+    fn recent_completed_and_failed_agents_keep_status_badges() {
+        let now = OffsetDateTime::now_utc();
+        let completed = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: false,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Completed),
+                latest_agent_message: Some("Finished sync".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let failed = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: false,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Failed),
+                latest_agent_message: Some("Migration failed".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(
+            super::surface_activity_label(&completed, now).as_deref(),
+            Some("Finished sync")
+        );
+        assert_eq!(
+            super::surface_status_label(&completed, now).as_deref(),
+            Some("Completed")
+        );
+        assert_eq!(
+            super::surface_activity_label(&failed, now).as_deref(),
+            Some("Migration failed")
+        );
+        assert_eq!(
+            super::surface_status_label(&failed, now).as_deref(),
+            Some("Failed")
+        );
+    }
+
+    #[test]
+    fn stale_terminal_agents_clear_activity_and_status_labels() {
+        let now = OffsetDateTime::now_utc();
+        let stale_timestamp = now - time::Duration::minutes(16);
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: false,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Completed),
+                latest_agent_message: Some("Finished sync".into()),
+                last_signal_at: Some(stale_timestamp),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(super::surface_activity_label(&surface, now), None);
+        assert_eq!(super::surface_status_label(&surface, now), None);
+    }
+
+    #[test]
+    fn non_agent_and_browser_surfaces_do_not_emit_activity_or_status_labels() {
+        let now = OffsetDateTime::now_utc();
+        let terminal = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                title: Some("zsh".into()),
+                latest_agent_message: Some("Ignored".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let browser = surface_with_metadata(
+            taskers_domain::PaneKind::Browser,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                latest_agent_message: Some("Should not surface".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(super::surface_activity_label(&terminal, now), None);
+        assert_eq!(super::surface_status_label(&terminal, now), None);
+        assert_eq!(super::surface_activity_label(&browser, now), None);
+        assert_eq!(super::surface_status_label(&browser, now), None);
+    }
+
+    #[test]
+    fn notification_rings_only_cover_agent_terminal_attention_states() {
+        let waiting = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let completed = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let busy = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        let non_agent = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata::default(),
+        );
+        let browser = surface_with_metadata(
+            taskers_domain::PaneKind::Browser,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        let mut waiting = waiting;
+        waiting.attention = taskers_domain::AttentionState::WaitingInput;
+        let mut completed = completed;
+        completed.attention = taskers_domain::AttentionState::Completed;
+        let mut busy = busy;
+        busy.attention = taskers_domain::AttentionState::Busy;
+
+        assert_eq!(
+            super::surface_notification_ring(&waiting),
+            Some(super::AttentionRingState::Waiting)
+        );
+        assert_eq!(
+            super::surface_notification_ring(&completed),
+            Some(super::AttentionRingState::Completed)
+        );
+        assert_eq!(super::surface_notification_ring(&busy), None);
+        assert_eq!(super::surface_notification_ring(&non_agent), None);
+        assert_eq!(super::surface_notification_ring(&browser), None);
+    }
+
+    #[test]
+    fn notification_rings_cover_agent_notifications_without_agent_kind_metadata() {
+        let mut waiting = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_title: Some("Codex".into()),
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                latest_agent_message: Some("Need input".into()),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+        waiting.attention = taskers_domain::AttentionState::WaitingInput;
+
+        assert_eq!(
+            super::surface_notification_ring(&waiting),
+            Some(super::AttentionRingState::Waiting)
+        );
+        assert_eq!(super::runtime_key(&waiting), "codex");
+    }
+
+    #[test]
+    fn status_label_survives_when_agent_has_no_latest_message() {
+        let now = OffsetDateTime::now_utc();
+        let surface = surface_with_metadata(
+            taskers_domain::PaneKind::Terminal,
+            taskers_domain::PaneMetadata {
+                agent_kind: Some("codex".into()),
+                agent_active: true,
+                agent_state: Some(taskers_domain::WorkspaceAgentState::Waiting),
+                latest_agent_message: Some("   ".into()),
+                last_signal_at: Some(now),
+                ..taskers_domain::PaneMetadata::default()
+            },
+        );
+
+        assert_eq!(super::surface_activity_label(&surface, now), None);
+        assert_eq!(
+            super::surface_status_label(&surface, now).as_deref(),
+            Some("Awaiting response")
+        );
+    }
+
+    #[test]
+    fn workspace_runtime_identity_prioritizes_failed_agents_over_idle_surfaces() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_pane_id = model.active_workspace().expect("workspace").active_pane;
+        model
+            .split_pane(
+                workspace_id,
+                Some(first_pane_id),
+                taskers_domain::SplitAxis::Horizontal,
+            )
+            .expect("split pane");
+
+        let now = OffsetDateTime::now_utc();
+        let second_pane_id = {
+            let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+            workspace
+                .windows
+                .get(&workspace.active_window)
+                .expect("window")
+                .active_layout()
+                .expect("layout")
+                .leaves()
+                .into_iter()
+                .find(|pane_id| *pane_id != first_pane_id)
+                .expect("second pane")
+        };
+
+        {
+            let workspace = model.workspaces.get_mut(&workspace_id).expect("workspace");
+            let first_surface_id = workspace
+                .panes
+                .get(&first_pane_id)
+                .map(|pane| pane.active_surface)
+                .expect("first surface");
+            let second_surface_id = workspace
+                .panes
+                .get(&second_pane_id)
+                .map(|pane| pane.active_surface)
+                .expect("second surface");
+            let first_surface = workspace
+                .panes
+                .get_mut(&first_pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&first_surface_id))
+                .expect("first surface record");
+            first_surface.metadata.agent_kind = Some("codex".into());
+            first_surface.metadata.agent_active = true;
+            first_surface.metadata.agent_state = Some(taskers_domain::WorkspaceAgentState::Working);
+            first_surface.metadata.last_signal_at = Some(now);
+            first_surface.agent_session = Some(taskers_domain::SurfaceAgentSession {
+                id: taskers_domain::SessionId::new(),
+                kind: "codex".into(),
+                title: "Codex".into(),
+                state: taskers_domain::WorkspaceAgentState::Working,
+                latest_message: None,
+                updated_at: now,
+            });
+            first_surface.attention = taskers_domain::AttentionState::Busy;
+
+            let second_surface = workspace
+                .panes
+                .get_mut(&second_pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&second_surface_id))
+                .expect("second surface record");
+            second_surface.metadata.agent_kind = Some("claude".into());
+            second_surface.metadata.agent_active = false;
+            second_surface.metadata.agent_state = Some(taskers_domain::WorkspaceAgentState::Failed);
+            second_surface.metadata.last_signal_at = Some(now);
+            second_surface.agent_session = Some(taskers_domain::SurfaceAgentSession {
+                id: taskers_domain::SessionId::new(),
+                kind: "claude".into(),
+                title: "Claude".into(),
+                state: taskers_domain::WorkspaceAgentState::Failed,
+                latest_message: None,
+                updated_at: now,
+            });
+            second_surface.attention = taskers_domain::AttentionState::Error;
+        }
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-runtime-priority",
+        ));
+        let snapshot = core.snapshot();
+        let workspace_summary = snapshot.workspaces.first().expect("workspace summary");
+        assert_eq!(workspace_summary.runtime.key, "claude");
+        assert_eq!(
+            workspace_summary.runtime.state,
+            super::RuntimeStateSnapshot::Failed
+        );
+
+        let active_window = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == snapshot.current_workspace.active_window_id)
+            .expect("active window");
+        assert_eq!(active_window.runtime.key, "claude");
+
+        let first_pane =
+            find_pane(&snapshot.current_workspace.layout, first_pane_id).expect("first pane");
+        let second_pane =
+            find_pane(&snapshot.current_workspace.layout, second_pane_id).expect("second pane");
+        assert_eq!(first_pane.runtime.key, "codex");
+        assert_eq!(
+            first_pane.runtime.state,
+            super::RuntimeStateSnapshot::Working
+        );
+        assert_eq!(second_pane.runtime.key, "claude");
+        assert_eq!(
+            second_pane.runtime.state,
+            super::RuntimeStateSnapshot::Failed
+        );
+    }
+
+    #[test]
+    fn pane_notification_ring_prioritizes_inactive_agent_tabs() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let inactive_surface_id = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("inactive surface");
+        let active_surface_id = model
+            .create_surface(workspace_id, pane_id, taskers_domain::PaneKind::Terminal)
+            .expect("create active terminal");
+
+        {
+            let workspace = model.workspaces.get_mut(&workspace_id).expect("workspace");
+            let active_surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&active_surface_id))
+                .expect("active surface record");
+            active_surface.metadata.agent_kind = Some("codex".into());
+            active_surface.attention = taskers_domain::AttentionState::Completed;
+
+            let inactive_surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&inactive_surface_id))
+                .expect("inactive surface record");
+            inactive_surface.metadata.agent_kind = Some("claude".into());
+            inactive_surface.attention = taskers_domain::AttentionState::Error;
+        }
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-pane-notification-ring",
+        ));
+        let snapshot = core.snapshot();
+        let pane = find_pane(&snapshot.current_workspace.layout, pane_id).expect("pane");
+        let active_surface = pane
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == active_surface_id)
+            .expect("active surface snapshot");
+        let inactive_surface = pane
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == inactive_surface_id)
+            .expect("inactive surface snapshot");
+
+        assert_eq!(
+            active_surface.notification_ring,
+            Some(super::AttentionRingState::Completed)
+        );
+        assert_eq!(
+            inactive_surface.notification_ring,
+            Some(super::AttentionRingState::Error)
+        );
+        assert_eq!(
+            pane.notification_ring,
+            Some(super::AttentionRingState::Error)
+        );
+    }
+
+    #[test]
+    fn portal_plan_carries_pane_notification_ring_for_active_surface_host() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let agent_surface_id = model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("agent surface");
+        let browser_surface_id = model
+            .create_surface(workspace_id, pane_id, taskers_domain::PaneKind::Browser)
+            .expect("create browser");
+
+        {
+            let workspace = model.workspaces.get_mut(&workspace_id).expect("workspace");
+            let browser_surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&browser_surface_id))
+                .expect("browser surface record");
+            browser_surface.attention = taskers_domain::AttentionState::Normal;
+
+            let agent_surface = workspace
+                .panes
+                .get_mut(&pane_id)
+                .and_then(|pane| pane.surfaces.get_mut(&agent_surface_id))
+                .expect("agent surface record");
+            agent_surface.metadata.agent_kind = Some("codex".into());
+            agent_surface.attention = taskers_domain::AttentionState::WaitingInput;
+        }
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-portal-notification-ring",
+        ));
+        let portal_plan = core
+            .snapshot()
+            .portal
+            .panes
+            .into_iter()
+            .find(|plan| plan.pane_id == pane_id)
+            .expect("portal plan");
+
+        assert_eq!(portal_plan.surface_id, browser_surface_id);
+        assert_eq!(
+            portal_plan.notification_ring,
+            Some(super::AttentionRingState::Waiting)
+        );
+    }
+
+    #[test]
+    fn portal_plan_carries_ring_for_agent_notifications_without_prior_agent_kind() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        model
+            .create_agent_notification(
+                taskers_domain::AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                taskers_domain::SignalKind::Notification,
+                Some("Codex".into()),
+                None,
+                None,
+                "Need input".into(),
+                taskers_domain::AttentionState::WaitingInput,
+            )
+            .expect("notification");
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-agent-notification-ring",
+        ));
+        let portal_plan = core
+            .snapshot()
+            .portal
+            .panes
+            .into_iter()
+            .find(|plan| plan.pane_id == pane_id)
+            .expect("portal plan");
+
+        assert_eq!(
+            portal_plan.notification_ring,
+            Some(super::AttentionRingState::Waiting)
+        );
+    }
+
     #[test]
     fn default_bootstrap_projects_browser_and_terminal_portal_plans() {
         let core = SharedCore::bootstrap(bootstrap());
@@ -3696,10 +5501,8 @@ mod tests {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
         let metrics = LayoutMetrics::default();
-        let min_content_y = snapshot.portal.content.y
-            + metrics.window_toolbar_height
-            + metrics.pane_header_height
-            + metrics.surface_tab_height;
+        let min_content_y =
+            snapshot.portal.content.y + metrics.window_toolbar_height + metrics.pane_header_height;
 
         assert!(
             snapshot
@@ -3708,6 +5511,49 @@ mod tests {
                 .iter()
                 .all(|plan| plan.frame.y >= min_content_y),
             "expected native surfaces to stay below window chrome"
+        );
+    }
+
+    #[test]
+    fn workspace_window_snapshots_expose_window_tabs() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab { window_id });
+
+        let snapshot = core.snapshot();
+        let active_window = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == window_id)
+            .expect("active window");
+
+        assert_eq!(active_window.tabs.len(), 2);
+        assert_eq!(active_window.active_tab, active_window.tabs[1].id);
+        assert!(active_window.tabs[1].active);
+        assert_eq!(
+            active_window.active_pane,
+            snapshot.current_workspace.active_pane
+        );
+    }
+
+    #[test]
+    fn terminal_portal_frames_include_horizontal_gutter() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let metrics = LayoutMetrics::default();
+        let terminal_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
+            .expect("terminal plan");
+
+        assert_eq!(
+            terminal_plan.frame.x,
+            terminal_plan.pane_frame.x + metrics.pane_border_width + metrics.terminal_gutter_x
         );
     }
 
@@ -3740,11 +5586,67 @@ mod tests {
             SurfaceMountSpec::Browser(_) => taskers_domain::PaneKind::Browser,
             SurfaceMountSpec::Terminal(_) => taskers_domain::PaneKind::Terminal,
         };
+        let pane = find_pane(&workspace.layout, workspace.active_pane).expect("active pane");
 
         assert_eq!(
             active_plan.frame,
-            pane_body_frame(pane_frame, metrics, &pane_kind),
+            pane_body_frame(
+                pane_frame,
+                metrics,
+                &pane_kind,
+                pane_shows_tab_strip_for_surface_count(pane.surfaces.len()),
+            ),
             "expected native surface frame to match shell pane-body insets"
+        );
+    }
+
+    #[test]
+    fn multi_surface_pane_frames_include_tab_strip_height() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let pane_id = core.snapshot().current_workspace.active_pane;
+
+        core.dispatch_shell_action(ShellAction::AddTerminalSurface {
+            pane_id: Some(pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let workspace = &snapshot.current_workspace;
+        let metrics = LayoutMetrics::default();
+        let active_window = workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == workspace.active_window_id)
+            .expect("active window");
+        let active_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == pane_id)
+            .expect("active portal plan");
+        let pane_frame = find_pane_frame(
+            &active_window.layout,
+            pane_id,
+            workspace_window_content_frame(active_window.frame, metrics),
+            metrics.split_gap,
+        )
+        .expect("active pane frame");
+        let pane_kind = match &active_plan.mount {
+            SurfaceMountSpec::Browser(_) => taskers_domain::PaneKind::Browser,
+            SurfaceMountSpec::Terminal(_) => taskers_domain::PaneKind::Terminal,
+        };
+        let pane = find_pane(&workspace.layout, pane_id).expect("active pane");
+
+        assert_eq!(pane.surfaces.len(), 2);
+        assert_eq!(
+            active_plan.frame,
+            pane_body_frame(
+                pane_frame,
+                metrics,
+                &pane_kind,
+                pane_shows_tab_strip_for_surface_count(pane.surfaces.len()),
+            ),
+            "expected multi-surface panes to reserve tab-strip height"
         );
     }
 
@@ -3851,6 +5753,108 @@ mod tests {
     }
 
     #[test]
+    fn browser_catalog_keeps_background_browser_surfaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let first_workspace_id = core.snapshot().current_workspace.id;
+        let first_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: Some(first_pane_id),
+        });
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let second_workspace_id = core.snapshot().current_workspace.id;
+        let second_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: Some(second_pane_id),
+        });
+
+        let catalog = core.snapshot().browser_catalog;
+        assert!(catalog.len() >= 2);
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.workspace_id == first_workspace_id)
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.workspace_id == second_workspace_id)
+        );
+        assert!(catalog.iter().all(|entry| !entry.url.is_empty()));
+    }
+
+    #[test]
+    fn terminal_catalog_keeps_background_terminal_surfaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let first_workspace_id = core.snapshot().current_workspace.id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let second_workspace_id = core.snapshot().current_workspace.id;
+
+        let catalog = core.snapshot().terminal_catalog;
+        assert!(catalog.len() >= 2);
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.workspace_id == first_workspace_id)
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.workspace_id == second_workspace_id)
+        );
+        assert!(catalog.iter().all(|entry| entry.spec.cols > 0));
+        assert!(catalog.iter().all(|entry| entry.spec.rows > 0));
+    }
+
+    #[test]
+    fn terminal_catalog_preserves_per_surface_env_for_inactive_tabs() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let pane_id = snapshot.current_workspace.active_pane;
+        let first_surface_id = find_pane(&snapshot.current_workspace.layout, pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("first surface");
+
+        core.dispatch_shell_action(ShellAction::AddTerminalSurface {
+            pane_id: Some(pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let second_surface_id = find_pane(&snapshot.current_workspace.layout, pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("second surface");
+        assert_ne!(first_surface_id, second_surface_id);
+
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id,
+            surface_id: first_surface_id,
+        });
+
+        let catalog = core.snapshot().terminal_catalog;
+        let background_entry = catalog
+            .iter()
+            .find(|entry| entry.surface_id == second_surface_id)
+            .expect("background terminal entry");
+
+        assert_eq!(background_entry.workspace_id, workspace_id);
+        assert_eq!(background_entry.pane_id, pane_id);
+        assert_eq!(
+            background_entry.spec.env.get("TASKERS_WORKSPACE_ID"),
+            Some(&workspace_id.to_string())
+        );
+        assert_eq!(
+            background_entry.spec.env.get("TASKERS_PANE_ID"),
+            Some(&pane_id.to_string())
+        );
+        assert_eq!(
+            background_entry.spec.env.get("TASKERS_SURFACE_ID"),
+            Some(&second_surface_id.to_string())
+        );
+    }
+
+    #[test]
     fn browser_navigation_host_events_update_browser_chrome_snapshot() {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
@@ -3882,13 +5886,19 @@ mod tests {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
 
-        let browser = core.snapshot().browser_chrome.expect("active browser chrome");
+        let browser = core
+            .snapshot()
+            .browser_chrome
+            .expect("active browser chrome");
         core.apply_host_event(HostEvent::SurfaceUrlChanged {
             surface_id: browser.surface_id,
             url: "about:blank".into(),
         });
 
-        let browser = core.snapshot().browser_chrome.expect("active browser chrome");
+        let browser = core
+            .snapshot()
+            .browser_chrome
+            .expect("active browser chrome");
         assert_eq!(browser.url, "about:blank");
     }
 
@@ -3908,15 +5918,131 @@ mod tests {
     #[test]
     fn shell_drag_actions_update_snapshot_drag_mode() {
         let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let pane_id = snapshot.current_workspace.active_pane;
+        let surface_id = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == pane_id)
+            .map(|plan| plan.surface_id)
+            .expect("active surface");
 
-        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag);
+        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
         assert_eq!(core.snapshot().drag_mode, ShellDragMode::Surface);
+        assert_eq!(
+            core.snapshot().surface_drag,
+            Some(SurfaceDragSessionSnapshot {
+                workspace_id,
+                pane_id,
+                surface_id,
+                preview_workspace_id: workspace_id,
+            })
+        );
 
         core.dispatch_shell_action(ShellAction::BeginWindowDrag);
         assert_eq!(core.snapshot().drag_mode, ShellDragMode::Window);
+        assert_eq!(core.snapshot().surface_drag, None);
 
         core.dispatch_shell_action(ShellAction::EndDrag);
         assert_eq!(core.snapshot().drag_mode, ShellDragMode::None);
+        assert_eq!(core.snapshot().surface_drag, None);
+    }
+
+    #[test]
+    fn surface_drag_preview_switches_workspace_and_cancel_restores_source() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_snapshot = core.snapshot();
+        let source_workspace_id = source_snapshot.current_workspace.id;
+        let source_pane_id = source_snapshot.current_workspace.active_pane;
+        let source_surface_id = source_snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == source_pane_id)
+            .map(|plan| plan.surface_id)
+            .expect("active surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id != source_workspace_id)
+            .map(|workspace| workspace.id)
+            .expect("target workspace");
+
+        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag {
+            workspace_id: source_workspace_id,
+            pane_id: source_pane_id,
+            surface_id: source_surface_id,
+        });
+        core.dispatch_shell_action(ShellAction::PreviewSurfaceDragWorkspace {
+            workspace_id: target_workspace_id,
+        });
+
+        let preview_snapshot = core.snapshot();
+        assert_eq!(preview_snapshot.current_workspace.id, target_workspace_id);
+        assert_eq!(
+            preview_snapshot.surface_drag,
+            Some(SurfaceDragSessionSnapshot {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                surface_id: source_surface_id,
+                preview_workspace_id: target_workspace_id,
+            })
+        );
+
+        core.dispatch_shell_action(ShellAction::CancelSurfaceDrag);
+
+        let canceled_snapshot = core.snapshot();
+        assert_eq!(canceled_snapshot.current_workspace.id, source_workspace_id);
+        assert_eq!(canceled_snapshot.drag_mode, ShellDragMode::None);
+        assert_eq!(canceled_snapshot.surface_drag, None);
+    }
+
+    #[test]
+    fn end_drag_clears_surface_drag_without_restoring_source_workspace() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_snapshot = core.snapshot();
+        let source_workspace_id = source_snapshot.current_workspace.id;
+        let source_pane_id = source_snapshot.current_workspace.active_pane;
+        let source_surface_id = source_snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == source_pane_id)
+            .map(|plan| plan.surface_id)
+            .expect("active surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id != source_workspace_id)
+            .map(|workspace| workspace.id)
+            .expect("target workspace");
+
+        core.dispatch_shell_action(ShellAction::BeginSurfaceDrag {
+            workspace_id: source_workspace_id,
+            pane_id: source_pane_id,
+            surface_id: source_surface_id,
+        });
+        core.dispatch_shell_action(ShellAction::PreviewSurfaceDragWorkspace {
+            workspace_id: target_workspace_id,
+        });
+        core.dispatch_shell_action(ShellAction::EndDrag);
+
+        let ended_snapshot = core.snapshot();
+        assert_eq!(ended_snapshot.current_workspace.id, target_workspace_id);
+        assert_eq!(ended_snapshot.drag_mode, ShellDragMode::None);
+        assert_eq!(ended_snapshot.surface_drag, None);
     }
 
     #[test]
@@ -4020,10 +6146,13 @@ mod tests {
         assert!(!unread_snapshot.activity.is_empty());
         assert!(unread_snapshot.portal.content.width < empty_snapshot.portal.content.width);
 
-        assert!(done_snapshot.attention_panel_visible);
+        assert!(!done_snapshot.attention_panel_visible);
         assert!(done_snapshot.activity.is_empty());
         assert!(!done_snapshot.done_activity.is_empty());
-        assert!(done_snapshot.portal.content.width < empty_snapshot.portal.content.width);
+        assert_eq!(
+            done_snapshot.portal.content.width,
+            empty_snapshot.portal.content.width
+        );
     }
 
     #[test]
@@ -4137,6 +6266,48 @@ mod tests {
     }
 
     #[test]
+    fn move_surface_shell_action_transfers_surface_between_workspaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_workspace_id = core.snapshot().current_workspace.id;
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core.snapshot().current_workspace.id;
+        let target_pane_id = core.snapshot().current_workspace.active_pane;
+
+        core.dispatch_shell_action(ShellAction::FocusWorkspace {
+            workspace_id: source_workspace_id,
+        });
+        core.dispatch_shell_action(ShellAction::MoveSurface {
+            surface_id: moved_surface_id,
+            target_pane_id,
+            target_index: usize::MAX,
+        });
+
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.current_workspace.id, target_workspace_id);
+        let target_pane =
+            find_pane(&snapshot.current_workspace.layout, target_pane_id).expect("target pane");
+
+        assert!(
+            target_pane
+                .surfaces
+                .iter()
+                .any(|surface| surface.id == moved_surface_id)
+        );
+        assert_eq!(target_pane.active_surface, moved_surface_id);
+        assert_eq!(snapshot.current_workspace.active_pane, target_pane_id);
+    }
+
+    #[test]
     fn move_surface_to_split_shell_action_creates_neighbor_pane() {
         let core = SharedCore::bootstrap(bootstrap());
         let source_pane_id = core.snapshot().current_workspace.active_pane;
@@ -4180,6 +6351,97 @@ mod tests {
         );
         assert_eq!(
             target_pane.surfaces.first().map(|surface| surface.id),
+            Some(moved_surface_id)
+        );
+        assert_eq!(snapshot.current_workspace.active_pane, new_pane_id);
+    }
+
+    #[test]
+    fn move_surface_to_split_shell_action_keeps_source_pane_live() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::MoveSurfaceToSplit {
+            source_pane_id,
+            surface_id: moved_surface_id,
+            target_pane_id: source_pane_id,
+            direction: Direction::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let source_pane =
+            find_pane(&snapshot.current_workspace.layout, source_pane_id).expect("source pane");
+        let remaining_surface_id = source_pane
+            .surfaces
+            .first()
+            .map(|surface| surface.id)
+            .expect("remaining surface");
+
+        assert_eq!(source_pane.active_surface, remaining_surface_id);
+        assert!(snapshot.portal.panes.iter().any(|plan| {
+            plan.pane_id == source_pane_id && plan.surface_id == remaining_surface_id
+        }));
+        assert!(
+            snapshot.portal.panes.iter().any(|plan| {
+                plan.surface_id == moved_surface_id && plan.pane_id != source_pane_id
+            })
+        );
+    }
+
+    #[test]
+    fn move_surface_to_split_shell_action_moves_surface_into_other_workspace() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let source_workspace_id = core.snapshot().current_workspace.id;
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+        });
+
+        let snapshot = core.snapshot();
+        let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core.snapshot().current_workspace.id;
+        let target_pane_id = core.snapshot().current_workspace.active_pane;
+
+        core.dispatch_shell_action(ShellAction::FocusWorkspace {
+            workspace_id: source_workspace_id,
+        });
+        core.dispatch_shell_action(ShellAction::MoveSurfaceToSplit {
+            source_pane_id,
+            surface_id: moved_surface_id,
+            target_pane_id,
+            direction: Direction::Left,
+        });
+
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.current_workspace.id, target_workspace_id);
+
+        let mut pane_ids = Vec::new();
+        collect_pane_ids(&snapshot.current_workspace.layout, &mut pane_ids);
+        let new_pane_id = pane_ids
+            .into_iter()
+            .find(|pane_id| {
+                *pane_id != target_pane_id
+                    && find_pane(&snapshot.current_workspace.layout, *pane_id)
+                        .is_some_and(|pane| pane.active_surface == moved_surface_id)
+            })
+            .expect("new pane");
+        let new_pane =
+            find_pane(&snapshot.current_workspace.layout, new_pane_id).expect("new pane");
+
+        assert_eq!(
+            new_pane.surfaces.first().map(|surface| surface.id),
             Some(moved_surface_id)
         );
         assert_eq!(snapshot.current_workspace.active_pane, new_pane_id);
@@ -4233,5 +6495,305 @@ mod tests {
             Some(moved_surface_id)
         );
         assert_eq!(snapshot.current_workspace.active_pane, moved_pane_id);
+    }
+
+    #[test]
+    fn snapshot_exposes_workspace_agent_status_progress_and_log() {
+        let app_state = default_preview_app_state();
+        let workspace_id = app_state
+            .snapshot_model()
+            .active_workspace_id()
+            .expect("workspace");
+        let _ = app_state
+            .dispatch(ControlCommand::AgentSetStatus {
+                workspace_id,
+                text: "Running agent sync".into(),
+            })
+            .expect("set status");
+        let _ = app_state
+            .dispatch(ControlCommand::AgentSetProgress {
+                workspace_id,
+                progress: taskers_domain::ProgressState {
+                    value: 650,
+                    label: Some("65%".into()),
+                },
+            })
+            .expect("set progress");
+        let _ = app_state
+            .dispatch(ControlCommand::AgentAppendLog {
+                workspace_id,
+                entry: taskers_domain::WorkspaceLogEntry {
+                    source: Some("codex".into()),
+                    message: "Applied patch".into(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            })
+            .expect("append log");
+
+        let core = SharedCore::bootstrap(BootstrapModel {
+            app_state,
+            ..bootstrap()
+        });
+        let snapshot = core.snapshot();
+
+        assert_eq!(
+            snapshot.current_workspace_status.as_deref(),
+            Some("Running agent sync")
+        );
+        assert_eq!(
+            snapshot
+                .current_workspace_progress
+                .as_ref()
+                .map(|progress| progress.label.as_deref()),
+            Some(Some("65%"))
+        );
+        assert_eq!(snapshot.current_workspace_log.len(), 1);
+        assert_eq!(
+            snapshot.current_workspace_log[0].source.as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn agent_focus_latest_unread_command_switches_to_newest_workspace() {
+        let app_state = default_preview_app_state();
+        let core = SharedCore::bootstrap(BootstrapModel {
+            app_state: app_state.clone(),
+            ..bootstrap()
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let second_workspace_id = core.snapshot().current_workspace.id;
+        let second_pane_id = core.snapshot().current_workspace.active_pane;
+        let second_surface_id =
+            find_pane(&core.snapshot().current_workspace.layout, second_pane_id)
+                .map(|pane| pane.active_surface)
+                .expect("second surface");
+        let first_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id != second_workspace_id)
+            .map(|workspace| workspace.id)
+            .expect("first workspace");
+
+        core.dispatch_shell_action(ShellAction::FocusWorkspace {
+            workspace_id: first_workspace_id,
+        });
+        let first_pane_id = core.snapshot().current_workspace.active_pane;
+        let first_surface_id = find_pane(&core.snapshot().current_workspace.layout, first_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("first surface");
+
+        let _ = app_state
+            .dispatch(ControlCommand::AgentCreateNotification {
+                target: taskers_domain::AgentTarget::Surface {
+                    workspace_id: first_workspace_id,
+                    pane_id: first_pane_id,
+                    surface_id: first_surface_id,
+                },
+                kind: SignalKind::Notification,
+                title: Some("Older".into()),
+                subtitle: None,
+                external_id: None,
+                message: "Older".into(),
+                state: DomainAttentionState::WaitingInput,
+            })
+            .expect("create older notification");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = app_state
+            .dispatch(ControlCommand::AgentCreateNotification {
+                target: taskers_domain::AgentTarget::Surface {
+                    workspace_id: second_workspace_id,
+                    pane_id: second_pane_id,
+                    surface_id: second_surface_id,
+                },
+                kind: SignalKind::Notification,
+                title: Some("Newest".into()),
+                subtitle: None,
+                external_id: None,
+                message: "Newest".into(),
+                state: DomainAttentionState::WaitingInput,
+            })
+            .expect("create newest notification");
+        core.sync_external_changes();
+
+        core.dispatch_shortcut_action(super::ShortcutAction::FocusLatestUnread);
+
+        assert_eq!(core.snapshot().current_workspace.id, second_workspace_id);
+    }
+
+    #[test]
+    fn dismiss_activity_moves_notification_into_done_history() {
+        let core = SharedCore::bootstrap(bootstrap_with_notification(false));
+        let activity_id = core
+            .snapshot()
+            .activity
+            .first()
+            .map(|item| item.id)
+            .expect("notification activity");
+
+        core.dispatch_shell_action(ShellAction::DismissActivity { activity_id });
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.activity.is_empty());
+        assert_eq!(snapshot.done_activity.len(), 1);
+        assert_eq!(snapshot.done_activity[0].id, activity_id);
+        assert!(!snapshot.attention_panel_visible);
+    }
+
+    #[test]
+    fn dismiss_activity_clears_notification_ring_outline_state() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        model
+            .create_agent_notification(
+                taskers_domain::AgentTarget::Surface {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                },
+                taskers_domain::SignalKind::Notification,
+                Some("Codex".into()),
+                None,
+                None,
+                "Need input".into(),
+                taskers_domain::AttentionState::WaitingInput,
+            )
+            .expect("notification");
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-dismiss-activity-ring",
+        ));
+
+        let before = core.snapshot();
+        let pane = find_pane(
+            &before.current_workspace.layout,
+            before.current_workspace.active_pane,
+        )
+        .expect("pane before dismiss");
+        assert_eq!(
+            pane.notification_ring,
+            Some(super::AttentionRingState::Waiting)
+        );
+
+        let activity_id = before
+            .activity
+            .first()
+            .map(|item| item.id)
+            .expect("notification activity");
+
+        core.dispatch_shell_action(ShellAction::DismissActivity { activity_id });
+
+        let after = core.snapshot();
+        let pane = find_pane(
+            &after.current_workspace.layout,
+            after.current_workspace.active_pane,
+        )
+        .expect("pane after dismiss");
+        assert_eq!(pane.notification_ring, None);
+        assert!(
+            pane.surfaces
+                .iter()
+                .all(|surface| surface.notification_ring.is_none())
+        );
+    }
+
+    #[test]
+    fn dismiss_surface_alert_removes_working_agent_session_and_status() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+
+        model
+            .start_surface_agent_session(workspace_id, pane_id, surface_id, "codex".into())
+            .expect("working session");
+        model
+            .apply_surface_signal(
+                workspace_id,
+                pane_id,
+                surface_id,
+                taskers_domain::SignalEvent::with_metadata(
+                    "agent-hook:codex",
+                    taskers_domain::SignalKind::Started,
+                    Some("Working".into()),
+                    Some(taskers_domain::SignalPaneMetadata {
+                        title: None,
+                        agent_title: Some("Codex".into()),
+                        cwd: None,
+                        repo_name: None,
+                        git_branch: None,
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                    }),
+                ),
+            )
+            .expect("started signal");
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-dismiss-surface-alert",
+        ));
+        assert_eq!(core.snapshot().agents.len(), 1);
+
+        core.dispatch_shell_action(ShellAction::DismissSurfaceAlert {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.agents.is_empty());
+        let pane = find_pane(&snapshot.current_workspace.layout, pane_id).expect("pane");
+        let surface = pane
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == surface_id)
+            .expect("surface");
+        assert_eq!(surface.status_label, None);
+        assert_eq!(surface.notification_ring, None);
+    }
+
+    #[test]
+    fn surface_flash_command_updates_pane_flash_token() {
+        let app_state = default_preview_app_state();
+        let snapshot_model = app_state.snapshot_model();
+        let workspace_id = snapshot_model.active_workspace_id().expect("workspace");
+        let pane_id = snapshot_model
+            .active_workspace()
+            .expect("workspace")
+            .active_pane;
+        let surface_id = snapshot_model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+        let _ = app_state
+            .dispatch(ControlCommand::AgentTriggerFlash {
+                workspace_id,
+                pane_id,
+                surface_id,
+            })
+            .expect("trigger flash");
+        let core = SharedCore::bootstrap(BootstrapModel {
+            app_state,
+            ..bootstrap()
+        });
+        let snapshot = core.snapshot();
+        let pane = find_pane(&snapshot.current_workspace.layout, pane_id).expect("pane");
+        assert!(pane.focus_flash_token > 0);
     }
 }

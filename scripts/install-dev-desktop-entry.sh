@@ -3,31 +3,47 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-launcher_home="${HOME}/.local/bin"
 desktop_entry_path="${xdg_data_home}/applications/dev.taskers.app.desktop"
-launcher_path="${launcher_home}/taskers-dev"
 
 if [[ -n "${CARGO:-}" ]]; then
-  cargo_bin="${CARGO}"
+  cargo_cmd="${CARGO}"
 elif [[ -n "${CARGO_HOME:-}" ]]; then
-  cargo_bin="${CARGO_HOME}/bin/cargo"
+  cargo_cmd="${CARGO_HOME}/bin/cargo"
 else
-  cargo_bin="${HOME}/.cargo/bin/cargo"
+  cargo_cmd="${HOME}/.cargo/bin/cargo"
 fi
 
-if [[ ! -x "${cargo_bin}" ]]; then
-  cargo_bin="$(command -v cargo)"
+if [[ ! -x "${cargo_cmd}" ]]; then
+  cargo_cmd="$(command -v cargo)"
 fi
 
-mkdir -p "${launcher_home}" "$(dirname -- "${desktop_entry_path}")"
+if [[ -z "${cargo_cmd:-}" || ! -x "${cargo_cmd}" ]]; then
+  echo "cargo executable not found" >&2
+  exit 1
+fi
 
-cat > "${launcher_path}" <<EOF
-#!/usr/bin/env sh
+cargo_root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
+app_bin_dir="${cargo_root}/bin"
+app_binary_path="${app_bin_dir}/taskers-gtk"
+desktop_wrapper_path="${app_bin_dir}/taskers-gtk-desktop-launch"
+
+mkdir -p "${app_bin_dir}" "$(dirname -- "${desktop_entry_path}")"
+
+"${cargo_cmd}" install --path "${repo_root}/crates/taskers-app" --force --root "${cargo_root}"
+
+if [[ ! -x "${app_binary_path}" ]]; then
+  echo "expected installed app at ${app_binary_path}" >&2
+  exit 1
+fi
+
+cat > "${desktop_wrapper_path}" <<EOF
+#!/bin/sh
 set -eu
-
-exec "${cargo_bin}" run --manifest-path "${repo_root}/Cargo.toml" -p taskers-gtk --bin taskers-gtk -- "\$@"
+log_dir="\${XDG_CACHE_HOME:-\$HOME/.cache}/taskers"
+mkdir -p "\${log_dir}"
+exec /usr/bin/setsid -f "${app_binary_path}" --diagnostic-log "\${log_dir}/desktop-launch-diagnostics.log" >>"\${log_dir}/desktop-launch.log" 2>&1
 EOF
-chmod +x "${launcher_path}"
+chmod +x "${desktop_wrapper_path}"
 
 cat > "${desktop_entry_path}" <<EOF
 [Desktop Entry]
@@ -35,13 +51,13 @@ Version=1.0
 Type=Application
 Name=Taskers
 Comment=Agent-first terminal workspace
-Exec=${launcher_path}
-TryExec=${launcher_path}
+Exec=${desktop_wrapper_path}
+TryExec=${desktop_wrapper_path}
 Icon=taskers
 Terminal=false
 Categories=Development;
 StartupNotify=true
-StartupWMClass=taskers
+StartupWMClass=dev.taskers.app
 X-GNOME-UsesNotifications=true
 EOF
 
@@ -49,4 +65,6 @@ if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "${xdg_data_home}/applications"
 fi
 
+echo "installed ${app_binary_path}"
+echo "installed ${desktop_wrapper_path}"
 echo "installed ${desktop_entry_path}"

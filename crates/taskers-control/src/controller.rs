@@ -1,8 +1,12 @@
 use std::sync::{Arc, Mutex};
 
-use taskers_domain::{AppModel, DomainError, WindowId, WorkspaceId};
+use taskers_domain::{
+    AppModel, DomainError, PaneId, PaneKind, SurfaceId, SurfaceRecord, WindowId, WorkspaceId,
+};
 
-use crate::protocol::{ControlCommand, ControlQuery, ControlResponse};
+use crate::protocol::{
+    ControlCommand, ControlQuery, ControlResponse, IdentifyContext, IdentifyResult,
+};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryController {
@@ -141,6 +145,113 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::CreateWorkspaceWindowTab {
+                workspace_id,
+                workspace_window_id,
+            } => {
+                let (workspace_window_tab_id, pane_id) =
+                    model.create_workspace_window_tab(workspace_id, workspace_window_id)?;
+                (
+                    ControlResponse::WorkspaceWindowTabCreated {
+                        pane_id,
+                        workspace_window_tab_id,
+                    },
+                    true,
+                )
+            }
+            ControlCommand::FocusWorkspaceWindowTab {
+                workspace_id,
+                workspace_window_id,
+                workspace_window_tab_id,
+            } => {
+                model.focus_workspace_window_tab(
+                    workspace_id,
+                    workspace_window_id,
+                    workspace_window_tab_id,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab focused".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MoveWorkspaceWindowTab {
+                workspace_id,
+                workspace_window_id,
+                workspace_window_tab_id,
+                to_index,
+            } => {
+                model.move_workspace_window_tab(
+                    workspace_id,
+                    workspace_window_id,
+                    workspace_window_tab_id,
+                    to_index,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab moved".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::TransferWorkspaceWindowTab {
+                workspace_id,
+                source_workspace_window_id,
+                workspace_window_tab_id,
+                target_workspace_window_id,
+                to_index,
+            } => {
+                model.transfer_workspace_window_tab(
+                    workspace_id,
+                    source_workspace_window_id,
+                    workspace_window_tab_id,
+                    target_workspace_window_id,
+                    to_index,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab transferred".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::ExtractWorkspaceWindowTab {
+                workspace_id,
+                source_workspace_window_id,
+                workspace_window_tab_id,
+                target,
+            } => {
+                model.extract_workspace_window_tab(
+                    workspace_id,
+                    source_workspace_window_id,
+                    workspace_window_tab_id,
+                    target,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab extracted".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::CloseWorkspaceWindowTab {
+                workspace_id,
+                workspace_window_id,
+                workspace_window_tab_id,
+            } => {
+                model.close_workspace_window_tab(
+                    workspace_id,
+                    workspace_window_id,
+                    workspace_window_tab_id,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window tab closed".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::FocusPane {
                 workspace_id,
                 pane_id,
@@ -270,6 +381,40 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::StartSurfaceAgentSession {
+                workspace_id,
+                pane_id,
+                surface_id,
+                agent_kind,
+            } => {
+                model.start_surface_agent_session(workspace_id, pane_id, surface_id, agent_kind)?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface agent session started".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::StopSurfaceAgentSession {
+                workspace_id: _,
+                pane_id: _,
+                surface_id,
+                exit_status,
+            } => {
+                let current = resolve_identify_context(model, None, None, Some(surface_id))?;
+                model.stop_surface_agent_session(
+                    current.workspace_id,
+                    current.pane_id,
+                    surface_id,
+                    exit_status,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface agent session stopped".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::MarkSurfaceCompleted {
                 workspace_id,
                 pane_id,
@@ -311,16 +456,18 @@ impl InMemoryController {
                 )
             }
             ControlCommand::TransferSurface {
-                workspace_id,
+                source_workspace_id,
                 source_pane_id,
                 surface_id,
+                target_workspace_id,
                 target_pane_id,
                 to_index,
             } => {
                 model.transfer_surface(
-                    workspace_id,
+                    source_workspace_id,
                     source_pane_id,
                     surface_id,
+                    target_workspace_id,
                     target_pane_id,
                     to_index,
                 )?;
@@ -332,16 +479,18 @@ impl InMemoryController {
                 )
             }
             ControlCommand::MoveSurfaceToSplit {
-                workspace_id,
+                source_workspace_id,
                 source_pane_id,
                 surface_id,
+                target_workspace_id,
                 target_pane_id,
                 direction,
             } => {
                 let new_pane_id = model.move_surface_to_split(
-                    workspace_id,
+                    source_workspace_id,
                     source_pane_id,
                     surface_id,
+                    target_workspace_id,
                     target_pane_id,
                     direction,
                 )?;
@@ -423,7 +572,13 @@ impl InMemoryController {
                 event,
             } => {
                 if let Some(surface_id) = surface_id {
-                    model.apply_surface_signal(workspace_id, pane_id, surface_id, event)?;
+                    let current = resolve_identify_context(model, None, None, Some(surface_id))?;
+                    model.apply_surface_signal(
+                        current.workspace_id,
+                        current.pane_id,
+                        surface_id,
+                        event,
+                    )?;
                 } else {
                     model.apply_signal(workspace_id, pane_id, event)?;
                 }
@@ -433,6 +588,179 @@ impl InMemoryController {
                     },
                     true,
                 )
+            }
+            ControlCommand::AgentSetStatus { workspace_id, text } => {
+                model.set_workspace_status(workspace_id, text)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace agent status updated".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentClearStatus { workspace_id } => {
+                model.clear_workspace_status(workspace_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace agent status cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentSetProgress {
+                workspace_id,
+                progress,
+            } => {
+                model.set_workspace_progress(workspace_id, progress)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace progress updated".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentClearProgress { workspace_id } => {
+                model.clear_workspace_progress(workspace_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace progress cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentAppendLog {
+                workspace_id,
+                entry,
+            } => {
+                model.append_workspace_log(workspace_id, entry)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace log appended".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentClearLog { workspace_id } => {
+                model.clear_workspace_log(workspace_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace log cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentCreateNotification {
+                target,
+                kind,
+                title,
+                subtitle,
+                external_id,
+                message,
+                state,
+            } => {
+                model.create_agent_notification(
+                    target,
+                    kind,
+                    title,
+                    subtitle,
+                    external_id,
+                    message,
+                    state,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "agent notification created".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::OpenNotification {
+                window_id,
+                notification_id,
+            } => {
+                model
+                    .open_notification(window_id.unwrap_or(model.active_window), notification_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "notification opened".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::ClearNotification { notification_id } => {
+                model.clear_notification(notification_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "notification cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MarkNotificationDelivery {
+                notification_id,
+                delivery,
+            } => {
+                model.mark_notification_delivery(notification_id, delivery)?;
+                (
+                    ControlResponse::Ack {
+                        message: "notification delivery updated".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentClearNotifications { target } => {
+                model.clear_agent_notifications(target)?;
+                (
+                    ControlResponse::Ack {
+                        message: "agent notifications cleared".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::DismissSurfaceAlert {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                model.dismiss_surface_alert(workspace_id, pane_id, surface_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface alert dismissed".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentTriggerFlash {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                model.trigger_surface_flash(workspace_id, pane_id, surface_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "surface flash triggered".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::AgentFocusLatestUnread { window_id } => {
+                model.focus_latest_unread(window_id.unwrap_or(model.active_window))?;
+                (
+                    ControlResponse::Ack {
+                        message: "focused latest unread activity".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::Browser { .. } => {
+                return Err(DomainError::InvalidOperation(
+                    "browser automation commands require a live GTK host",
+                ));
+            }
+            ControlCommand::TerminalDebug { .. } => {
+                return Err(DomainError::InvalidOperation(
+                    "terminal debug commands require a live GTK host",
+                ));
             }
             ControlCommand::QueryStatus { query } => match query {
                 ControlQuery::ActiveWindow | ControlQuery::All => (
@@ -445,6 +773,16 @@ impl InMemoryController {
                 ControlQuery::Workspace { workspace_id } => {
                     (workspace_snapshot(model, workspace_id)?, false)
                 }
+                ControlQuery::Identify {
+                    workspace_id,
+                    pane_id,
+                    surface_id,
+                } => (
+                    ControlResponse::Identify {
+                        result: identify_snapshot(model, workspace_id, pane_id, surface_id)?,
+                    },
+                    false,
+                ),
             },
         };
 
@@ -480,11 +818,148 @@ fn workspace_snapshot(
     })
 }
 
+fn identify_snapshot(
+    model: &AppModel,
+    workspace_id: Option<WorkspaceId>,
+    pane_id: Option<PaneId>,
+    surface_id: Option<SurfaceId>,
+) -> Result<IdentifyResult, DomainError> {
+    let focused = focused_identify_context(model)?;
+    let caller = if workspace_id.is_some() || pane_id.is_some() || surface_id.is_some() {
+        Some(resolve_identify_context(
+            model,
+            workspace_id,
+            pane_id,
+            surface_id,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(IdentifyResult { focused, caller })
+}
+
+fn focused_identify_context(model: &AppModel) -> Result<IdentifyContext, DomainError> {
+    let window_id = model.active_window;
+    let workspace = model
+        .active_workspace()
+        .ok_or(DomainError::InvalidOperation("app has no active workspace"))?;
+    let pane = workspace
+        .panes
+        .get(&workspace.active_pane)
+        .ok_or(DomainError::MissingPane(workspace.active_pane))?;
+    let surface = pane
+        .surfaces
+        .get(&pane.active_surface)
+        .ok_or(DomainError::MissingSurface(pane.active_surface))?;
+
+    Ok(identify_context_from_parts(
+        window_id, workspace, pane.id, surface,
+    ))
+}
+
+fn resolve_identify_context(
+    model: &AppModel,
+    workspace_id: Option<WorkspaceId>,
+    pane_id: Option<PaneId>,
+    surface_id: Option<SurfaceId>,
+) -> Result<IdentifyContext, DomainError> {
+    let window_id = model.active_window;
+
+    if let Some(surface_id) = surface_id {
+        for (candidate_workspace_id, workspace) in &model.workspaces {
+            if workspace_id.is_some_and(|expected| expected != *candidate_workspace_id) {
+                continue;
+            }
+            for (candidate_pane_id, pane) in &workspace.panes {
+                if pane_id.is_some_and(|expected| expected != *candidate_pane_id) {
+                    continue;
+                }
+                if let Some(surface) = pane.surfaces.get(&surface_id) {
+                    return Ok(identify_context_from_parts(
+                        window_id,
+                        workspace,
+                        *candidate_pane_id,
+                        surface,
+                    ));
+                }
+            }
+        }
+        return Err(DomainError::MissingSurface(surface_id));
+    }
+
+    if let Some(pane_id) = pane_id {
+        for (candidate_workspace_id, workspace) in &model.workspaces {
+            if workspace_id.is_some_and(|expected| expected != *candidate_workspace_id) {
+                continue;
+            }
+            if let Some(pane) = workspace.panes.get(&pane_id) {
+                let surface = pane
+                    .surfaces
+                    .get(&pane.active_surface)
+                    .ok_or(DomainError::MissingSurface(pane.active_surface))?;
+                return Ok(identify_context_from_parts(
+                    window_id, workspace, pane_id, surface,
+                ));
+            }
+        }
+        return Err(DomainError::MissingPane(pane_id));
+    }
+
+    if let Some(workspace_id) = workspace_id {
+        let workspace = model
+            .workspaces
+            .get(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let pane = workspace
+            .panes
+            .get(&workspace.active_pane)
+            .ok_or(DomainError::MissingPane(workspace.active_pane))?;
+        let surface = pane
+            .surfaces
+            .get(&pane.active_surface)
+            .ok_or(DomainError::MissingSurface(pane.active_surface))?;
+        return Ok(identify_context_from_parts(
+            window_id, workspace, pane.id, surface,
+        ));
+    }
+
+    focused_identify_context(model)
+}
+
+fn identify_context_from_parts(
+    window_id: WindowId,
+    workspace: &taskers_domain::Workspace,
+    pane_id: PaneId,
+    surface: &SurfaceRecord,
+) -> IdentifyContext {
+    IdentifyContext {
+        window_id,
+        workspace_id: workspace.id,
+        workspace_label: workspace.label.clone(),
+        workspace_window_id: workspace.window_for_pane(pane_id),
+        pane_id,
+        surface_id: surface.id,
+        surface_kind: surface.kind.clone(),
+        title: normalized_value(surface.metadata.title.as_deref()),
+        cwd: normalized_value(surface.metadata.cwd.as_deref()),
+        url: normalized_value(surface.metadata.url.as_deref()),
+        loading: matches!(surface.kind, PaneKind::Browser).then_some(false),
+    }
+}
+
+fn normalized_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
-    use taskers_domain::{AppModel, SignalEvent, SignalKind};
+    use taskers_domain::{AppModel, PaneKind, SignalEvent, SignalKind};
 
-    use crate::{ControlCommand, ControlQuery};
+    use crate::{ControlCommand, ControlQuery, ControlResponse};
 
     use super::InMemoryController;
 
@@ -525,5 +1000,224 @@ mod tests {
             .expect("emit signal");
 
         assert_eq!(controller.revision(), 1);
+    }
+
+    #[test]
+    fn surface_signals_follow_a_moved_surface_even_with_stale_pane_context() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let source_workspace = snapshot.model.active_workspace().expect("workspace");
+        let source_workspace_id = source_workspace.id;
+        let source_pane_id = source_workspace.active_pane;
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                kind: PaneKind::Browser,
+            })
+            .expect("create moved surface");
+        let moved_surface_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&source_workspace_id)
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("moved surface");
+
+        controller
+            .handle(ControlCommand::CreateWorkspace {
+                label: "Docs".into(),
+            })
+            .expect("create target workspace");
+        let target_workspace_id = controller
+            .snapshot()
+            .model
+            .active_workspace_id()
+            .expect("target workspace");
+
+        controller
+            .handle(ControlCommand::MoveSurfaceToWorkspace {
+                source_workspace_id,
+                source_pane_id,
+                surface_id: moved_surface_id,
+                target_workspace_id,
+            })
+            .expect("move surface");
+
+        controller
+            .handle(ControlCommand::EmitSignal {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                surface_id: Some(moved_surface_id),
+                event: SignalEvent::new("pty", SignalKind::Progress, Some("Running".into())),
+            })
+            .expect("emit moved surface signal");
+
+        let snapshot = controller.snapshot();
+        let target_surface = snapshot
+            .model
+            .workspaces
+            .values()
+            .flat_map(|workspace| {
+                workspace.panes.values().flat_map(move |pane| {
+                    pane.surfaces
+                        .values()
+                        .map(move |surface| (workspace, pane, surface))
+                })
+            })
+            .find(|(_, _, surface)| surface.id == moved_surface_id)
+            .expect("target surface");
+
+        assert_eq!(target_surface.0.id, target_workspace_id);
+        assert_eq!(
+            target_surface.2.attention,
+            taskers_domain::AttentionState::Busy
+        );
+        assert_eq!(
+            snapshot
+                .model
+                .workspaces
+                .get(&source_workspace_id)
+                .and_then(|workspace| workspace.panes.get(&source_pane_id))
+                .and_then(|pane| pane.active_surface())
+                .map(|surface| surface.attention),
+            Some(taskers_domain::AttentionState::Normal)
+        );
+    }
+
+    #[test]
+    fn surface_agent_stop_follows_a_moved_surface_even_with_stale_pane_context() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let source_workspace = snapshot.model.active_workspace().expect("workspace");
+        let source_workspace_id = source_workspace.id;
+        let source_pane_id = source_workspace.active_pane;
+
+        let moved_surface_id = source_workspace
+            .panes
+            .get(&source_pane_id)
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+
+        controller
+            .handle(ControlCommand::StartSurfaceAgentSession {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                surface_id: moved_surface_id,
+                agent_kind: "codex".into(),
+            })
+            .expect("start surface agent session");
+
+        controller
+            .handle(ControlCommand::CreateWorkspace {
+                label: "Docs".into(),
+            })
+            .expect("create target workspace");
+        let target_workspace_id = controller
+            .snapshot()
+            .model
+            .active_workspace_id()
+            .expect("target workspace");
+
+        controller
+            .handle(ControlCommand::MoveSurfaceToWorkspace {
+                source_workspace_id,
+                source_pane_id,
+                surface_id: moved_surface_id,
+                target_workspace_id,
+            })
+            .expect("move surface");
+
+        controller
+            .handle(ControlCommand::StopSurfaceAgentSession {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                surface_id: moved_surface_id,
+                exit_status: 1,
+            })
+            .expect("stop moved surface agent session");
+
+        let snapshot = controller.snapshot();
+        let target_surface = snapshot
+            .model
+            .workspaces
+            .values()
+            .flat_map(|workspace| {
+                workspace.panes.values().flat_map(move |pane| {
+                    pane.surfaces
+                        .values()
+                        .map(move |surface| (workspace, pane, surface))
+                })
+            })
+            .find(|(_, _, surface)| surface.id == moved_surface_id)
+            .expect("target surface");
+
+        assert_eq!(target_surface.0.id, target_workspace_id);
+        assert!(target_surface.2.agent_process.is_none());
+        assert!(target_surface.2.agent_session.is_none());
+        assert_eq!(
+            target_surface.2.attention,
+            taskers_domain::AttentionState::Error
+        );
+        assert!(
+            snapshot
+                .model
+                .workspaces
+                .get(&source_workspace_id)
+                .and_then(|workspace| workspace.panes.get(&source_pane_id))
+                .and_then(|pane| pane.active_surface())
+                .and_then(|surface| surface.agent_process.as_ref())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn identify_returns_focused_context_and_optional_caller() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+        let pane = workspace
+            .panes
+            .get(&workspace.active_pane)
+            .expect("active pane");
+        let surface = pane.active_surface().expect("active surface");
+
+        let response = controller
+            .handle(ControlCommand::QueryStatus {
+                query: ControlQuery::Identify {
+                    workspace_id: None,
+                    pane_id: None,
+                    surface_id: None,
+                },
+            })
+            .expect("identify focused");
+        let ControlResponse::Identify { result } = response else {
+            panic!("unexpected identify response");
+        };
+        assert_eq!(result.focused.workspace_id, workspace.id);
+        assert_eq!(result.focused.pane_id, workspace.active_pane);
+        assert_eq!(result.focused.surface_id, surface.id);
+        assert_eq!(result.focused.surface_kind, PaneKind::Terminal);
+        assert!(result.caller.is_none());
+
+        let response = controller
+            .handle(ControlCommand::QueryStatus {
+                query: ControlQuery::Identify {
+                    workspace_id: Some(workspace.id),
+                    pane_id: Some(workspace.active_pane),
+                    surface_id: Some(surface.id),
+                },
+            })
+            .expect("identify caller");
+        let ControlResponse::Identify { result } = response else {
+            panic!("unexpected identify response");
+        };
+        let caller = result.caller.expect("caller context");
+        assert_eq!(caller.workspace_id, workspace.id);
+        assert_eq!(caller.pane_id, workspace.active_pane);
+        assert_eq!(caller.surface_id, surface.id);
     }
 }

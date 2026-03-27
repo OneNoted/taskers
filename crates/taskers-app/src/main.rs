@@ -2,33 +2,44 @@ use adw::prelude::*;
 use anyhow::{Context, Result};
 use axum::{Router, extract::ws::WebSocketUpgrade, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
-use gtk::{EventControllerKey, gdk, glib};
+use gtk::{EventControllerKey, gdk, gio, glib};
+use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
-    fs::{File, OpenOptions, remove_file},
+    fs::{File, OpenOptions, create_dir_all, read_to_string, remove_file, write},
     future::pending,
     io::{self, Write},
     net::TcpListener,
     path::PathBuf,
     process::{Command, Stdio},
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use taskers_core::{AppState, default_session_path, load_or_bootstrap};
-use taskers_control::{bind_socket, default_socket_path, serve_with_handler};
-use taskers_shell_core::{
-    BootstrapModel, LayoutNodeSnapshot, PixelSize, RuntimeCapability, RuntimeStatus, SharedCore,
-    ShellSection, ShortcutAction, ShortcutPreset, SurfaceKind,
+use taskers_control::{
+    BrowserControlCommand, ControlCommand, ControlError, ControlResponse, TerminalDebugCommand,
+    bind_socket, default_socket_path, serve_with_handler,
 };
-use taskers_domain::AppModel;
+use taskers_core::{AppState, default_session_path, load_or_bootstrap};
+use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
 use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
+use taskers_shell_core::{
+    BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PixelSize,
+    RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
+    ShortcutPreset, SurfaceKind,
+};
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
+use glib::variant::ToVariant;
+
 const APP_ID: &str = taskers_paths::APP_ID;
+const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "taskers")]
@@ -66,7 +77,10 @@ impl GhosttyProbeMode {
 
 struct BootstrapContext {
     core: SharedCore,
+    app_state: AppState,
+    socket_path: PathBuf,
     ghostty_host: Option<GhosttyHost>,
+    config: TaskersConfig,
     startup_notes: Vec<String>,
 }
 
@@ -79,6 +93,153 @@ struct RuntimeBootstrap {
     startup_notes: Vec<String>,
 }
 
+enum HostAutomationCommand {
+    Browser(BrowserControlCommand),
+    TerminalDebug(TerminalDebugCommand),
+}
+
+struct HostAutomationRequest {
+    command: HostAutomationCommand,
+    response_tx: tokio::sync::oneshot::Sender<Result<ControlResponse, ControlError>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDesktopNotification {
+    id: NotificationId,
+    workspace_id: taskers_shell_core::WorkspaceId,
+    pane_id: taskers_shell_core::PaneId,
+    surface_id: taskers_shell_core::SurfaceId,
+    title: String,
+    body: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaskersConfig {
+    #[serde(default = "default_theme_id")]
+    selected_theme_id: String,
+    #[serde(default = "default_shortcut_preset_id")]
+    selected_shortcut_preset: String,
+    #[serde(default)]
+    notification_preferences: NotificationPreferencesConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct NotificationPreferencesConfig {
+    #[serde(default = "default_true")]
+    alerts_on_waiting: bool,
+    #[serde(default = "default_true")]
+    alerts_on_error: bool,
+    #[serde(default = "default_true")]
+    alerts_on_completed: bool,
+    #[serde(default = "default_true")]
+    suppress_when_visible: bool,
+}
+
+impl Default for TaskersConfig {
+    fn default() -> Self {
+        Self {
+            selected_theme_id: default_theme_id(),
+            selected_shortcut_preset: default_shortcut_preset_id(),
+            notification_preferences: NotificationPreferencesConfig::default(),
+        }
+    }
+}
+
+impl Default for NotificationPreferencesConfig {
+    fn default() -> Self {
+        Self {
+            alerts_on_waiting: true,
+            alerts_on_error: true,
+            alerts_on_completed: true,
+            suppress_when_visible: true,
+        }
+    }
+}
+
+impl NotificationPreferencesConfig {
+    fn to_snapshot(self) -> NotificationPreferencesSnapshot {
+        NotificationPreferencesSnapshot {
+            alerts_on_waiting: self.alerts_on_waiting,
+            alerts_on_error: self.alerts_on_error,
+            alerts_on_completed: self.alerts_on_completed,
+            suppress_when_visible: self.suppress_when_visible,
+        }
+    }
+
+    fn from_snapshot(snapshot: NotificationPreferencesSnapshot) -> Self {
+        Self {
+            alerts_on_waiting: snapshot.alerts_on_waiting,
+            alerts_on_error: snapshot.alerts_on_error,
+            alerts_on_completed: snapshot.alerts_on_completed,
+            suppress_when_visible: snapshot.suppress_when_visible,
+        }
+    }
+}
+
+fn default_theme_id() -> String {
+    "dark".into()
+}
+
+fn default_shortcut_preset_id() -> String {
+    ShortcutPreset::PowerUser.id().into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn safe_eprintln(message: impl std::fmt::Display) {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "{message}");
+}
+
+impl TaskersConfig {
+    fn load() -> Result<Self> {
+        let path = taskers_paths::default_config_path();
+        let data = match read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read config {}", path.display()));
+            }
+        };
+        let config: Self = serde_json::from_str(&data)
+            .with_context(|| format!("failed to parse config {}", path.display()))?;
+        Ok(config)
+    }
+
+    fn save(&self) -> Result<()> {
+        let path = taskers_paths::default_config_path();
+        if let Some(parent) = path.parent() {
+            create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory {}", parent.display())
+            })?;
+        }
+        let data = serde_json::to_string_pretty(self).context("failed to serialize config")?;
+        write(&path, data).with_context(|| format!("failed to write config {}", path.display()))
+    }
+
+    fn shortcut_preset(&self) -> ShortcutPreset {
+        ShortcutPreset::parse(&self.selected_shortcut_preset).unwrap_or(ShortcutPreset::PowerUser)
+    }
+
+    fn from_settings(settings: &taskers_shell_core::SettingsSnapshot) -> Self {
+        Self {
+            selected_theme_id: settings.selected_theme_id.clone(),
+            selected_shortcut_preset: settings
+                .shortcut_presets
+                .iter()
+                .find(|preset| preset.active)
+                .map(|preset| preset.id.clone())
+                .unwrap_or_else(default_shortcut_preset_id),
+            notification_preferences: NotificationPreferencesConfig::from_snapshot(
+                settings.notification_preferences,
+            ),
+        }
+    }
+}
+
 fn main() -> glib::ExitCode {
     let cli = Cli::parse();
     scrub_inherited_terminal_env();
@@ -89,7 +250,7 @@ fn main() -> glib::ExitCode {
     let bootstrap = match bootstrap_runtime(None) {
         Ok(bootstrap) => bootstrap,
         Err(error) => {
-            eprintln!("failed to bootstrap Taskers host: {error:?}");
+            safe_eprintln(format!("failed to bootstrap Taskers host: {error:?}"));
             return glib::ExitCode::FAILURE;
         }
     };
@@ -126,7 +287,7 @@ fn build_ui(
     cli: Cli,
 ) {
     if let Err(error) = build_ui_result(app, bootstrap, hold_guard, cli) {
-        eprintln!("failed to launch Taskers host: {error:?}");
+        safe_eprintln(format!("failed to launch Taskers host: {error:?}"));
     }
 }
 
@@ -167,6 +328,7 @@ fn build_ui_result(
         event_sink,
         diagnostics_sink,
     )));
+    let persisted_config = Rc::new(RefCell::new(bootstrap.config.clone()));
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -174,21 +336,50 @@ fn build_ui_result(
         .default_width(1440)
         .default_height(900)
         .build();
+    let app_for_close = app.clone();
     window.connect_close_request(move |_| {
         drop(hold_guard.borrow_mut().take());
+        app_for_close.quit();
         glib::Propagation::Proceed
     });
     let host_widget = host.borrow().widget();
     window.set_content(Some(&host_widget));
     connect_navigation_shortcuts(&window, &shell_view, &core);
+    install_notification_action(app, &window, &core, &bootstrap.app_state);
+    let last_revision = Rc::new(Cell::new(0_u64));
+    let last_size = Rc::new(Cell::new((0_i32, 0_i32)));
+    let (host_request_tx, host_request_rx) = mpsc::channel::<HostAutomationRequest>();
+    let control_server_note = spawn_control_server(
+        bootstrap.app_state.clone(),
+        bootstrap.socket_path,
+        host_request_tx,
+    );
+    install_host_bridge(
+        host_request_rx,
+        &window,
+        &core,
+        &host,
+        &last_revision,
+        &last_size,
+        diagnostics.clone(),
+    );
 
     for note in bootstrap.startup_notes {
         log_diagnostic(
             diagnostics.as_ref(),
             DiagnosticRecord::new(DiagnosticCategory::Startup, None, note.clone()),
         );
-        eprintln!("{note}");
+        safe_eprintln(note);
     }
+    log_diagnostic(
+        diagnostics.as_ref(),
+        DiagnosticRecord::new(
+            DiagnosticCategory::Startup,
+            Some(core.revision()),
+            control_server_note.clone(),
+        ),
+    );
+    safe_eprintln(control_server_note);
     log_diagnostic(
         diagnostics.as_ref(),
         DiagnosticRecord::new(
@@ -197,18 +388,19 @@ fn build_ui_result(
             format!("shared shell listening on {shell_url}"),
         ),
     );
-    eprintln!("shared shell listening on {shell_url}");
+    safe_eprintln(format!("shared shell listening on {shell_url}"));
 
     let smoke_script = cli.smoke_script;
     let quit_after_ms = cli.quit_after_ms.unwrap_or(8_000);
-    let last_revision = Rc::new(Cell::new(0_u64));
-    let last_size = Rc::new(Cell::new((0_i32, 0_i32)));
     let tick_window = window.clone();
     let tick_core = core.clone();
     let tick_host = host.clone();
     let tick_revision = last_revision.clone();
     let tick_size = last_size.clone();
     let tick_diagnostics = diagnostics.clone();
+    let tick_app = app.clone();
+    let tick_app_state = bootstrap.app_state.clone();
+    let tick_config = persisted_config.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
         sync_window(
             &tick_window,
@@ -218,6 +410,14 @@ fn build_ui_result(
             &tick_size,
             tick_diagnostics.as_ref(),
         );
+        process_pending_notifications(
+            &tick_app,
+            &tick_window,
+            &tick_core,
+            &tick_app_state,
+            tick_diagnostics.as_ref(),
+        );
+        persist_settings_if_needed(&tick_core, &tick_config, tick_diagnostics.as_ref());
         glib::ControlFlow::Continue
     });
 
@@ -229,6 +429,8 @@ fn build_ui_result(
     let initial_revision = last_revision.clone();
     let initial_size = last_size.clone();
     let initial_diagnostics = diagnostics.clone();
+    let initial_app = app.clone();
+    let initial_app_state = bootstrap.app_state.clone();
     glib::timeout_add_local_once(Duration::from_millis(80), move || {
         sync_window(
             &initial_window,
@@ -236,6 +438,13 @@ fn build_ui_result(
             &initial_host,
             &initial_revision,
             &initial_size,
+            initial_diagnostics.as_ref(),
+        );
+        process_pending_notifications(
+            &initial_app,
+            &initial_window,
+            &initial_core,
+            &initial_app_state,
             initial_diagnostics.as_ref(),
         );
     });
@@ -255,6 +464,344 @@ fn normalize_shortcut_modifiers(state: gdk::ModifierType) -> gdk::ModifierType {
             | gdk::ModifierType::META_MASK
             | gdk::ModifierType::SUPER_MASK
             | gdk::ModifierType::HYPER_MASK)
+}
+
+fn install_notification_action(
+    app: &adw::Application,
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    app_state: &AppState,
+) {
+    let action = gio::SimpleAction::new("open-notification", Some(&String::static_variant_type()));
+    let action_window = window.clone();
+    let action_core = core.clone();
+    let action_state = app_state.clone();
+    action.connect_activate(move |_, parameter| {
+        let Some(notification_id) = parameter
+            .and_then(|value| value.str())
+            .and_then(|value| value.parse::<NotificationId>().ok())
+        else {
+            return;
+        };
+
+        let _ = action_state.dispatch(ControlCommand::OpenNotification {
+            window_id: None,
+            notification_id,
+        });
+        action_window.present();
+        action_core.sync_external_changes();
+    });
+    app.add_action(&action);
+}
+
+fn process_pending_notifications(
+    app: &adw::Application,
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    app_state: &AppState,
+    diagnostics: Option<&DiagnosticsWriter>,
+) {
+    let model = app_state.snapshot_model();
+    let settings = core.snapshot().settings;
+    let prefs = settings.notification_preferences;
+    let pending = pending_desktop_notifications_with_prefs(&model, prefs);
+    if pending.is_empty() {
+        return;
+    }
+
+    for notification in pending {
+        let delivery = if prefs.suppress_when_visible
+            && notification_target_visible(&model, window, &notification)
+        {
+            NotificationDeliveryState::Suppressed
+        } else {
+            let desktop = gio::Notification::new(&notification.title);
+            if let Some(body) = &notification.body {
+                desktop.set_body(Some(body));
+            }
+            desktop.set_default_action_and_target_value(
+                "app.open-notification",
+                Some(&notification.id.to_string().to_variant()),
+            );
+            app.send_notification(Some(&notification.id.to_string()), &desktop);
+            NotificationDeliveryState::Shown
+        };
+
+        if let Err(error) = app_state.dispatch(ControlCommand::MarkNotificationDelivery {
+            notification_id: notification.id,
+            delivery,
+        }) {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Sync,
+                    Some(core.revision()),
+                    format!("notification delivery update failed: {error:?}"),
+                )
+                .with_pane(notification.pane_id)
+                .with_surface(notification.surface_id),
+            );
+            safe_eprintln(format!(
+                "taskers notification delivery update failed: {error:?}"
+            ));
+        }
+    }
+
+    core.sync_external_changes();
+}
+
+fn pending_desktop_notifications_with_prefs(
+    model: &AppModel,
+    prefs: NotificationPreferencesSnapshot,
+) -> Vec<PendingDesktopNotification> {
+    model
+        .workspaces
+        .values()
+        .flat_map(|workspace| {
+            workspace
+                .notifications
+                .iter()
+                .filter_map(move |notification| {
+                    if notification.cleared_at.is_some()
+                        || !matches!(
+                            notification.desktop_delivery,
+                            NotificationDeliveryState::Pending
+                        )
+                        || !notification_alerts_enabled(&notification.kind, prefs)
+                    {
+                        return None;
+                    }
+
+                    let title = notification
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| notification.message.clone());
+                    Some(PendingDesktopNotification {
+                        id: notification.id,
+                        workspace_id: workspace.id,
+                        pane_id: notification.pane_id,
+                        surface_id: notification.surface_id,
+                        title,
+                        body: notification_body(
+                            notification.subtitle.as_deref(),
+                            &notification.message,
+                        ),
+                    })
+                })
+        })
+        .collect()
+}
+
+fn notification_alerts_enabled(kind: &SignalKind, prefs: NotificationPreferencesSnapshot) -> bool {
+    match kind {
+        SignalKind::WaitingInput => prefs.alerts_on_waiting,
+        SignalKind::Error => prefs.alerts_on_error,
+        SignalKind::Completed => prefs.alerts_on_completed,
+        SignalKind::Notification => true,
+        SignalKind::Started | SignalKind::Progress | SignalKind::Metadata => false,
+    }
+}
+
+fn notification_body(subtitle: Option<&str>, message: &str) -> Option<String> {
+    let subtitle = subtitle
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let message = message.trim();
+
+    match (subtitle, message.is_empty()) {
+        (Some(subtitle), false) if subtitle != message => Some(format!("{subtitle}\n{message}")),
+        (Some(subtitle), _) => Some(subtitle),
+        (None, false) => Some(message.to_owned()),
+        (None, true) => None,
+    }
+}
+
+fn notification_target_visible(
+    model: &AppModel,
+    window: &adw::ApplicationWindow,
+    notification: &PendingDesktopNotification,
+) -> bool {
+    if !window.is_active() || model.active_workspace_id() != Some(notification.workspace_id) {
+        return false;
+    }
+
+    model
+        .workspaces
+        .get(&notification.workspace_id)
+        .and_then(|workspace| {
+            if workspace.active_pane != notification.pane_id {
+                return None;
+            }
+            workspace.panes.get(&notification.pane_id)
+        })
+        .is_some_and(|pane| pane.active_surface == notification.surface_id)
+}
+
+fn persist_settings_if_needed(
+    core: &SharedCore,
+    persisted_config: &Rc<RefCell<TaskersConfig>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+) {
+    let snapshot = core.snapshot();
+    let next = TaskersConfig::from_settings(&snapshot.settings);
+    if *persisted_config.borrow() == next {
+        return;
+    }
+
+    if let Err(error) = next.save() {
+        log_diagnostic(
+            diagnostics,
+            DiagnosticRecord::new(
+                DiagnosticCategory::Startup,
+                Some(core.revision()),
+                format!("failed to persist config: {error:?}"),
+            ),
+        );
+        safe_eprintln(format!("taskers config save failed: {error:?}"));
+        return;
+    }
+
+    *persisted_config.borrow_mut() = next;
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::{
+        notification_alerts_enabled, notification_body, pending_desktop_notifications_with_prefs,
+    };
+    use taskers_domain::{
+        AppModel, AttentionState, NotificationDeliveryState, NotificationId, NotificationItem,
+        SignalKind,
+    };
+    use taskers_shell_core::NotificationPreferencesSnapshot;
+    use time::OffsetDateTime;
+
+    #[test]
+    fn desktop_alert_filter_includes_user_facing_notification_kinds() {
+        let prefs = NotificationPreferencesSnapshot::default();
+        assert!(notification_alerts_enabled(
+            &SignalKind::WaitingInput,
+            prefs
+        ));
+        assert!(notification_alerts_enabled(&SignalKind::Error, prefs));
+        assert!(notification_alerts_enabled(&SignalKind::Completed, prefs));
+        assert!(notification_alerts_enabled(
+            &SignalKind::Notification,
+            prefs
+        ));
+        assert!(!notification_alerts_enabled(&SignalKind::Started, prefs));
+        assert!(!notification_alerts_enabled(&SignalKind::Progress, prefs));
+    }
+
+    #[test]
+    fn notification_body_prefers_subtitle_then_message() {
+        assert_eq!(
+            notification_body(Some("Codex"), "Finished"),
+            Some("Codex\nFinished".into())
+        );
+        assert_eq!(
+            notification_body(Some("Finished"), "Finished"),
+            Some("Finished".into())
+        );
+        assert_eq!(notification_body(None, "Done"), Some("Done".into()));
+        assert_eq!(notification_body(None, "   "), None);
+    }
+
+    #[test]
+    fn pending_desktop_notifications_only_returns_pending_active_items() {
+        let mut model = AppModel::new("Main");
+        let workspace = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+        let now = OffsetDateTime::now_utc();
+        let workspace = model.workspaces.get_mut(&workspace).expect("workspace");
+        workspace.notifications.push(NotificationItem {
+            id: NotificationId::new(),
+            pane_id,
+            surface_id,
+            kind: SignalKind::Notification,
+            state: AttentionState::WaitingInput,
+            title: Some("Codex".into()),
+            subtitle: Some("Waiting".into()),
+            external_id: None,
+            message: "Need input".into(),
+            created_at: now,
+            read_at: None,
+            cleared_at: None,
+            desktop_delivery: NotificationDeliveryState::Pending,
+        });
+        workspace.notifications.push(NotificationItem {
+            id: NotificationId::new(),
+            pane_id,
+            surface_id,
+            kind: SignalKind::Notification,
+            state: AttentionState::WaitingInput,
+            title: Some("Old".into()),
+            subtitle: None,
+            external_id: None,
+            message: "Shown already".into(),
+            created_at: now,
+            read_at: None,
+            cleared_at: None,
+            desktop_delivery: NotificationDeliveryState::Shown,
+        });
+
+        let pending = pending_desktop_notifications_with_prefs(
+            &model,
+            NotificationPreferencesSnapshot::default(),
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].title, "Codex");
+        assert_eq!(pending[0].body.as_deref(), Some("Waiting\nNeed input"));
+    }
+
+    #[test]
+    fn pending_desktop_notifications_respects_waiting_toggle() {
+        let mut model = AppModel::new("Main");
+        let workspace = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+        let workspace = model.workspaces.get_mut(&workspace).expect("workspace");
+        workspace.notifications.push(NotificationItem {
+            id: NotificationId::new(),
+            pane_id,
+            surface_id,
+            kind: SignalKind::WaitingInput,
+            state: AttentionState::WaitingInput,
+            title: Some("Codex".into()),
+            subtitle: None,
+            external_id: None,
+            message: "Need input".into(),
+            created_at: OffsetDateTime::now_utc(),
+            read_at: None,
+            cleared_at: None,
+            desktop_delivery: NotificationDeliveryState::Pending,
+        });
+
+        let pending = pending_desktop_notifications_with_prefs(
+            &model,
+            NotificationPreferencesSnapshot {
+                alerts_on_waiting: false,
+                ..NotificationPreferencesSnapshot::default()
+            },
+        );
+
+        assert!(pending.is_empty());
+    }
 }
 
 fn is_modifier_key(key: gdk::Key) -> bool {
@@ -350,6 +897,13 @@ fn connect_navigation_shortcuts(
 fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
     let runtime = resolve_runtime_bootstrap();
     let mut startup_notes = runtime.startup_notes;
+    let config = match TaskersConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            startup_notes.push(format!("Taskers config unavailable: {error}"));
+            TaskersConfig::default()
+        }
+    };
     let session_path = default_session_path();
     let initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
         format!(
@@ -405,22 +959,22 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         runtime.shell_launch,
     )
     .context("failed to initialize Taskers app state")?;
-    startup_notes.push(spawn_control_server(
-        app_state.clone(),
-        runtime.socket_path.clone(),
-    ));
     let core = SharedCore::bootstrap(BootstrapModel {
-        app_state,
+        app_state: app_state.clone(),
         runtime_status,
-        selected_theme_id: "dark".into(),
-        selected_shortcut_preset: ShortcutPreset::PowerUser,
+        selected_theme_id: config.selected_theme_id.clone(),
+        selected_shortcut_preset: config.shortcut_preset(),
+        notification_preferences: config.notification_preferences.to_snapshot(),
     });
 
     log_runtime_status(diagnostics, &core.snapshot().runtime_status);
 
     Ok(BootstrapContext {
         core,
+        app_state,
+        socket_path: runtime.socket_path,
         ghostty_host,
+        config,
         startup_notes,
     })
 }
@@ -485,10 +1039,10 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
             host
         }
         Err(error) => {
-            eprintln!(
+            safe_eprintln(format!(
                 "ghostty {} self-probe failed during host init: {error}",
                 mode.as_arg()
-            );
+            ));
             return glib::ExitCode::FAILURE;
         }
     };
@@ -508,10 +1062,10 @@ fn run_internal_surface_probe(
 ) -> glib::ExitCode {
     if !gtk::is_initialized_main_thread() {
         if let Err(error) = gtk::init() {
-            eprintln!(
+            safe_eprintln(format!(
                 "ghostty {} self-probe failed during gtk init: {error}",
                 mode.as_arg()
-            );
+            ));
             return glib::ExitCode::FAILURE;
         }
     }
@@ -539,10 +1093,10 @@ fn run_internal_surface_probe(
     ) {
         Ok(app_state) => app_state,
         Err(error) => {
-            eprintln!(
+            safe_eprintln(format!(
                 "ghostty {} self-probe failed during app state bootstrap: {error}",
                 mode.as_arg()
-            );
+            ));
             return glib::ExitCode::FAILURE;
         }
     };
@@ -556,26 +1110,30 @@ fn run_internal_surface_probe(
         },
         selected_theme_id: "dark".into(),
         selected_shortcut_preset: ShortcutPreset::PowerUser,
+        notification_preferences: NotificationPreferencesSnapshot::default(),
     });
-    core.set_window_size(PixelSize::new(1200, 800));
+    core.set_window_size(PixelSize::new(
+        GHOSTTY_PROBE_WINDOW_SIZE_PX,
+        GHOSTTY_PROBE_WINDOW_SIZE_PX,
+    ));
 
     let event_sink = Rc::new(|_| {});
     let mut taskers_host = TaskersHost::new(&shell_view, Some(host), event_sink, None);
     let host_widget = taskers_host.widget();
     let window = gtk::Window::builder()
-        .title("Taskers Ghostty Probe")
-        .default_width(1200)
-        .default_height(800)
+        .default_width(GHOSTTY_PROBE_WINDOW_SIZE_PX)
+        .default_height(GHOSTTY_PROBE_WINDOW_SIZE_PX)
         .child(&host_widget)
         .build();
-    window.present();
+    configure_probe_window(&window);
+    window.show();
 
     spin_probe_main_context(Duration::from_millis(80));
     if let Err(error) = taskers_host.sync_snapshot(&core.snapshot()) {
-        eprintln!(
+        safe_eprintln(format!(
             "ghostty {} self-probe failed during snapshot sync: {error}",
             mode.as_arg()
-        );
+        ));
         return glib::ExitCode::FAILURE;
     }
 
@@ -595,6 +1153,17 @@ fn run_internal_surface_probe(
     // and let the parent make the real startup decision.
     let _ = window;
     std::process::exit(0);
+}
+
+fn configure_probe_window(window: &gtk::Window) {
+    // The probe still needs a mapped GTK toplevel so Ghostty can realize an
+    // embedded surface, but it should not flash a visible window at startup.
+    window.set_decorated(false);
+    window.set_deletable(false);
+    window.set_resizable(false);
+    window.set_focusable(false);
+    window.set_can_target(false);
+    window.set_opacity(0.0);
 }
 
 fn spin_probe_main_context(duration: Duration) {
@@ -711,11 +1280,18 @@ fn sync_window(
                     format!("host command failed: {error}"),
                 ),
             );
-            eprintln!("taskers host command failed: {error}");
+            safe_eprintln(format!("taskers host command failed: {error}"));
         }
     }
 
-    let size = PixelSize::new(window.width().max(1), window.height().max(1));
+    let width = window.width();
+    let height = window.height();
+    if should_defer_initial_sync(last_size.get(), width, height) {
+        host.borrow().tick();
+        return;
+    }
+
+    let size = PixelSize::new(width.max(1), height.max(1));
     if last_size.get() != (size.width, size.height) {
         core.set_window_size(size);
         last_size.set((size.width, size.height));
@@ -753,7 +1329,9 @@ fn sync_window(
                     format!("snapshot sync failed: {error}"),
                 ),
             );
-            eprintln!("taskers host sync failed for revision {revision}: {error}");
+            safe_eprintln(format!(
+                "taskers host sync failed for revision {revision}: {error}"
+            ));
         }
         last_revision.set(revision);
     }
@@ -761,7 +1339,179 @@ fn sync_window(
     host.borrow().tick();
 }
 
-fn spawn_control_server(app_state: AppState, socket_path: PathBuf) -> String {
+fn should_defer_initial_sync(last_size: (i32, i32), width: i32, height: i32) -> bool {
+    last_size == (0, 0) && (width <= 1 || height <= 1)
+}
+
+fn install_host_bridge(
+    receiver: Receiver<HostAutomationRequest>,
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<DiagnosticsWriter>,
+) {
+    let receiver = Rc::new(receiver);
+    let bridge_window = window.clone();
+    let bridge_core = core.clone();
+    let bridge_host = host.clone();
+    let bridge_revision = last_revision.clone();
+    let bridge_size = last_size.clone();
+    glib::timeout_add_local(Duration::from_millis(8), move || {
+        loop {
+            let request = match receiver.try_recv() {
+                Ok(request) => request,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return glib::ControlFlow::Break,
+            };
+            let request_window = bridge_window.clone();
+            let request_core = bridge_core.clone();
+            let request_host = bridge_host.clone();
+            let request_revision = bridge_revision.clone();
+            let request_size = bridge_size.clone();
+            let request_diagnostics = diagnostics.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let response = handle_host_request(
+                    &request_window,
+                    &request_core,
+                    &request_host,
+                    &request_revision,
+                    &request_size,
+                    request_diagnostics.as_ref(),
+                    request.command,
+                )
+                .await;
+                let _ = request.response_tx.send(response);
+            });
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+async fn handle_host_request(
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    command: HostAutomationCommand,
+) -> Result<ControlResponse, ControlError> {
+    match command {
+        HostAutomationCommand::Browser(command) => {
+            handle_browser_request(
+                window,
+                core,
+                host,
+                last_revision,
+                last_size,
+                diagnostics,
+                command,
+            )
+            .await
+        }
+        HostAutomationCommand::TerminalDebug(command) => handle_terminal_debug_request(
+            window,
+            core,
+            host,
+            last_revision,
+            last_size,
+            diagnostics,
+            command,
+        ),
+    }
+}
+
+async fn handle_browser_request(
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    command: BrowserControlCommand,
+) -> Result<ControlResponse, ControlError> {
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+
+    if let BrowserControlCommand::FocusWebview { surface_id } = &command {
+        let snapshot = core.snapshot();
+        let Some(entry) = snapshot
+            .browser_catalog
+            .iter()
+            .find(|entry| entry.surface_id == *surface_id)
+        else {
+            return Err(ControlError::not_found(format!(
+                "browser surface {surface_id} not found"
+            )));
+        };
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id: entry.pane_id,
+            surface_id: *surface_id,
+        });
+        sync_window(window, core, host, last_revision, last_size, diagnostics);
+    }
+
+    let handle = {
+        let host_ref = host.borrow();
+        host_ref.browser_surface_handle(browser_surface_id(&command))?
+    };
+    let result = handle.execute(command).await?;
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+    Ok(ControlResponse::Browser { result })
+}
+
+fn handle_terminal_debug_request(
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    command: TerminalDebugCommand,
+) -> Result<ControlResponse, ControlError> {
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+    let result = host.borrow().execute_terminal_debug(command)?;
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+    Ok(ControlResponse::TerminalDebug { result })
+}
+
+fn browser_surface_id(command: &BrowserControlCommand) -> taskers_shell_core::SurfaceId {
+    match command {
+        BrowserControlCommand::Navigate { surface_id, .. }
+        | BrowserControlCommand::Back { surface_id }
+        | BrowserControlCommand::Forward { surface_id }
+        | BrowserControlCommand::Reload { surface_id }
+        | BrowserControlCommand::FocusWebview { surface_id }
+        | BrowserControlCommand::IsWebviewFocused { surface_id }
+        | BrowserControlCommand::Snapshot { surface_id }
+        | BrowserControlCommand::Eval { surface_id, .. }
+        | BrowserControlCommand::Wait { surface_id, .. }
+        | BrowserControlCommand::Click { surface_id, .. }
+        | BrowserControlCommand::Dblclick { surface_id, .. }
+        | BrowserControlCommand::Type { surface_id, .. }
+        | BrowserControlCommand::Fill { surface_id, .. }
+        | BrowserControlCommand::Press { surface_id, .. }
+        | BrowserControlCommand::Keydown { surface_id, .. }
+        | BrowserControlCommand::Keyup { surface_id, .. }
+        | BrowserControlCommand::Hover { surface_id, .. }
+        | BrowserControlCommand::Focus { surface_id, .. }
+        | BrowserControlCommand::Check { surface_id, .. }
+        | BrowserControlCommand::Uncheck { surface_id, .. }
+        | BrowserControlCommand::Select { surface_id, .. }
+        | BrowserControlCommand::Scroll { surface_id, .. }
+        | BrowserControlCommand::ScrollIntoView { surface_id, .. }
+        | BrowserControlCommand::Get { surface_id, .. }
+        | BrowserControlCommand::Is { surface_id, .. }
+        | BrowserControlCommand::Screenshot { surface_id, .. } => *surface_id,
+    }
+}
+
+fn spawn_control_server(
+    app_state: AppState,
+    socket_path: PathBuf,
+    host_tx: Sender<HostAutomationRequest>,
+) -> String {
     if let Some(parent) = socket_path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
@@ -781,20 +1531,68 @@ fn spawn_control_server(app_state: AppState, socket_path: PathBuf) -> String {
             match bind_socket(&socket_path) {
                 Ok(listener) => {
                     let handler = move |command| {
-                        app_state
-                            .dispatch(command)
-                            .map_err(|error| error.to_string())
+                        let app_state = app_state.clone();
+                        let host_tx = host_tx.clone();
+                        async move {
+                            match command {
+                                ControlCommand::Browser { browser_command } => {
+                                    let (response_tx, response_rx) =
+                                        tokio::sync::oneshot::channel();
+                                    host_tx
+                                        .send(HostAutomationRequest {
+                                            command: HostAutomationCommand::Browser(
+                                                browser_command,
+                                            ),
+                                            response_tx,
+                                        })
+                                        .map_err(|_| {
+                                            ControlError::internal(
+                                                "host automation bridge is unavailable",
+                                            )
+                                        })?;
+                                    response_rx.await.map_err(|_| {
+                                        ControlError::internal(
+                                            "host automation bridge dropped the response",
+                                        )
+                                    })?
+                                }
+                                ControlCommand::TerminalDebug { debug_command } => {
+                                    let (response_tx, response_rx) =
+                                        tokio::sync::oneshot::channel();
+                                    host_tx
+                                        .send(HostAutomationRequest {
+                                            command: HostAutomationCommand::TerminalDebug(
+                                                debug_command,
+                                            ),
+                                            response_tx,
+                                        })
+                                        .map_err(|_| {
+                                            ControlError::internal(
+                                                "host automation bridge is unavailable",
+                                            )
+                                        })?;
+                                    response_rx.await.map_err(|_| {
+                                        ControlError::internal(
+                                            "host automation bridge dropped the response",
+                                        )
+                                    })?
+                                }
+                                other => app_state
+                                    .dispatch(other)
+                                    .map_err(|error| ControlError::internal(error.to_string())),
+                            }
+                        }
                     };
                     if let Err(error) = serve_with_handler(listener, handler, pending::<()>()).await
                     {
-                        eprintln!("control server error: {error}");
+                        safe_eprintln(format!("control server error: {error}"));
                     }
                 }
                 Err(error) => {
-                    eprintln!(
+                    safe_eprintln(format!(
                         "control server unavailable at {}: {error}",
                         socket_path.display()
-                    );
+                    ));
                 }
             }
         });
@@ -862,7 +1660,7 @@ fn launch_liveview_server(core: SharedCore) -> Result<String> {
                 );
 
             if let Err(error) = axum::serve(listener, router.into_make_service()).await {
-                eprintln!("liveview server failed: {error}");
+                safe_eprintln(format!("liveview server failed: {error}"));
             }
         });
     });
@@ -1086,7 +1884,7 @@ impl DiagnosticsWriter {
                 target: DiagnosticsTarget::File(Arc::new(Mutex::new(file))),
             }),
             Err(error) => {
-                eprintln!("taskers diagnostics log path failed: {error}");
+                safe_eprintln(format!("taskers diagnostics log path failed: {error}"));
                 None
             }
         }
@@ -1109,5 +1907,22 @@ impl DiagnosticsWriter {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::should_defer_initial_sync;
+
+    #[test]
+    fn initial_sync_waits_for_real_allocation() {
+        assert!(should_defer_initial_sync((0, 0), 1, 1));
+        assert!(should_defer_initial_sync((0, 0), 1440, 1));
+        assert!(!should_defer_initial_sync((0, 0), 1440, 900));
+    }
+
+    #[test]
+    fn later_resizes_do_not_get_blocked() {
+        assert!(!should_defer_initial_sync((1440, 900), 1, 1));
     }
 }

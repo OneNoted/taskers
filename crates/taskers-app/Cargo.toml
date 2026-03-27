@@ -13,6 +13,10 @@ publish = false
 name = "taskers-gtk"
 path = "src/main.rs"
 
+[[bin]]
+name = "taskersctl"
+path = "src/bin/taskersctl.rs"
+
 [dependencies]
 adw.workspace = true
 anyhow.workspace = true
@@ -21,6 +25,8 @@ clap.workspace = true
 dioxus.workspace = true
 dioxus-liveview.workspace = true
 gtk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 taskers-control.workspace = true
 taskers-core.workspace = true
 taskers-domain.workspace = true
@@ -30,5 +36,6 @@ taskers-paths.workspace = true
 taskers-runtime.workspace = true
 taskers-shell.workspace = true
 taskers-shell-core.workspace = true
+time.workspace = true
 tokio.workspace = true
 webkit6.workspace = true

@@ -6,16 +6,19 @@ pub mod signal;
 
 pub use attention::AttentionState;
 pub use ids::{
-    PaneId, SessionId, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
+    NotificationId, PaneId, SessionId, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId,
+    WorkspaceWindowId, WorkspaceWindowTabId,
 };
 pub use layout::{Direction, LayoutNode, SplitAxis};
 pub use model::{
-    ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, DEFAULT_WORKSPACE_WINDOW_HEIGHT,
-    DEFAULT_WORKSPACE_WINDOW_WIDTH, DomainError, KEYBOARD_RESIZE_STEP, MIN_WORKSPACE_WINDOW_HEIGHT,
-    MIN_WORKSPACE_WINDOW_WIDTH, NotificationItem, PaneKind, PaneMetadata, PaneMetadataPatch,
+    ActivityItem, AgentTarget, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP,
+    DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, DomainError,
+    KEYBOARD_RESIZE_STEP, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH,
+    NotificationDeliveryState, NotificationItem, PaneKind, PaneMetadata, PaneMetadataPatch,
     PaneRecord, PersistedSession, PrStatus, ProgressState, PullRequestState,
-    SESSION_SCHEMA_VERSION, SurfaceRecord, WindowFrame, WindowRecord, Workspace,
-    WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord, WorkspaceSummary,
-    WorkspaceViewport, WorkspaceWindowMoveTarget, WorkspaceWindowRecord,
+    SESSION_SCHEMA_VERSION, SurfaceAgentProcess, SurfaceAgentSession, SurfaceRecord, WindowFrame,
+    WindowRecord, Workspace, WorkspaceAgentState, WorkspaceAgentSummary, WorkspaceColumnRecord,
+    WorkspaceLogEntry, WorkspaceSummary, WorkspaceViewport, WorkspaceWindowMoveTarget,
+    WorkspaceWindowRecord, WorkspaceWindowTabRecord,
 };
 pub use signal::{SignalEvent, SignalKind, SignalPaneMetadata};

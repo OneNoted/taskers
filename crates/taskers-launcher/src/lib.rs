@@ -233,16 +233,22 @@ impl ManagedInstallation {
         fs::create_dir_all(&xdg_bin_home)
             .with_context(|| format!("failed to create {}", xdg_bin_home.display()))?;
 
+        let desktop_launcher = xdg_bin_home.join("taskers-desktop-launch");
+        write_executable(
+            &desktop_launcher,
+            &desktop_launch_wrapper_contents(&launcher),
+        )?;
+
+        let desktop_entry_path = applications_dir.join("dev.taskers.app.desktop");
         let desktop_entry = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/taskers.desktop.in"
         ))
-        .replace("{{EXEC}}", &desktop_exec(&launcher));
-        fs::write(
-            applications_dir.join("dev.taskers.app.desktop"),
-            desktop_entry,
-        )
-        .with_context(|| format!("failed to write {}", applications_dir.display()))?;
+        .replace("{{EXEC}}", &desktop_exec(&desktop_launcher));
+        if should_update_desktop_entry(&desktop_entry_path, &desktop_launcher, &launcher)? {
+            fs::write(&desktop_entry_path, desktop_entry)
+                .with_context(|| format!("failed to write {}", applications_dir.display()))?;
+        }
         fs::write(
             icons_dir.join("taskers.svg"),
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/taskers.svg")),
@@ -298,6 +304,7 @@ fn validate_bundle_layout(bundle_root: &Path) -> bool {
             .join("lib")
             .join("libtaskers_ghostty_bridge.so")
             .is_file()
+        && bundle_root.join("ghostty").join("themes").is_dir()
         && bundle_root.join("terminfo").is_dir()
 }
 
@@ -449,6 +456,40 @@ fn desktop_exec(path: &Path) -> String {
     raw.replace('\\', "\\\\").replace(' ', "\\ ")
 }
 
+fn shell_single_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+}
+
+fn desktop_launch_wrapper_contents(target: &Path) -> String {
+    format!(
+        "#!/bin/sh\nset -eu\nlog_dir=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/taskers\"\nmkdir -p \"$log_dir\"\nexec /usr/bin/setsid -f {target} --diagnostic-log \"$log_dir/desktop-launch-diagnostics.log\" >>\"$log_dir/desktop-launch.log\" 2>&1\n",
+        target = shell_single_quote(target),
+    )
+}
+
+fn should_update_desktop_entry(
+    path: &Path,
+    desktop_launcher: &Path,
+    launcher: &Path,
+) -> Result<bool> {
+    let Ok(existing) = fs::read_to_string(path) else {
+        return Ok(true);
+    };
+    let Some(existing_exec) = existing
+        .lines()
+        .find_map(|line| line.strip_prefix("Exec="))
+        .map(str::trim)
+    else {
+        return Ok(true);
+    };
+
+    let managed_execs = [desktop_exec(desktop_launcher), desktop_exec(launcher)];
+
+    Ok(managed_execs
+        .iter()
+        .any(|candidate| candidate == existing_exec))
+}
+
 fn write_executable(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -558,12 +599,18 @@ where
 mod tests {
     use super::{
         ArtifactKind, ManagedInstallation, ReleaseArtifact, ReleaseManifest, bundle_root,
-        current_target_triple, default_manifest_url, launcher_path_looks_installed,
-        path_taskers_executable, sha256_path,
+        current_target_triple, default_manifest_url, desktop_exec, desktop_launch_wrapper_contents,
+        launcher_path_looks_installed, path_taskers_executable, sha256_path,
+        should_update_desktop_entry,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf};
+    use std::{
+        collections::BTreeMap,
+        ffi::OsString,
+        fs,
+        path::{Path, PathBuf},
+    };
     use tar::Builder;
     use tempfile::tempdir;
     use xz2::write::XzEncoder;
@@ -594,6 +641,7 @@ mod tests {
         let bundle_dir = temp.path().join("bundle");
         fs::create_dir_all(bundle_dir.join("bin")).expect("bin dir");
         fs::create_dir_all(bundle_dir.join("ghostty").join("lib")).expect("ghostty dir");
+        fs::create_dir_all(bundle_dir.join("ghostty").join("themes")).expect("themes dir");
         fs::create_dir_all(bundle_dir.join("terminfo").join("g")).expect("terminfo dir");
         fs::write(
             bundle_dir.join("bin").join("taskers"),
@@ -618,6 +666,14 @@ mod tests {
             "bridge",
         )
         .expect("bridge");
+        fs::write(
+            bundle_dir
+                .join("ghostty")
+                .join("themes")
+                .join("Catppuccin Mocha"),
+            "palette = 0=#1e1e2e\n",
+        )
+        .expect("theme");
         fs::write(
             bundle_dir.join("terminfo").join("g").join("ghostty"),
             "ghostty",
@@ -694,5 +750,64 @@ mod tests {
     fn repo_local_binaries_do_not_look_installed() {
         let repo_binary = PathBuf::from("/home/notes/Projects/taskers/target/debug/taskers");
         assert!(!launcher_path_looks_installed(&repo_binary));
+    }
+
+    #[test]
+    fn preserves_non_launcher_desktop_entry() {
+        let temp = tempdir().expect("tempdir");
+        let desktop_entry = temp.path().join("dev.taskers.app.desktop");
+        fs::write(
+            &desktop_entry,
+            "[Desktop Entry]\nExec=/home/notes/.cargo/bin/taskers-gtk\n",
+        )
+        .expect("desktop entry");
+
+        let launcher = PathBuf::from("/home/notes/.local/bin/taskers");
+        assert!(
+            !should_update_desktop_entry(&desktop_entry, &launcher, &launcher).expect("decision"),
+        );
+    }
+
+    #[test]
+    fn updates_matching_launcher_desktop_entry() {
+        let temp = tempdir().expect("tempdir");
+        let desktop_entry = temp.path().join("dev.taskers.app.desktop");
+        let launcher = PathBuf::from("/home/notes/.local/bin/taskers-desktop-launch");
+        fs::write(
+            &desktop_entry,
+            format!("[Desktop Entry]\nExec={}\n", desktop_exec(&launcher)),
+        )
+        .expect("desktop entry");
+
+        assert!(
+            should_update_desktop_entry(&desktop_entry, &launcher, &launcher).expect("decision")
+        );
+    }
+
+    #[test]
+    fn updates_legacy_launcher_desktop_entry() {
+        let temp = tempdir().expect("tempdir");
+        let desktop_entry = temp.path().join("dev.taskers.app.desktop");
+        let desktop_launcher = PathBuf::from("/home/notes/.local/bin/taskers-desktop-launch");
+        let launcher = PathBuf::from("/home/notes/.cargo/bin/taskers");
+        fs::write(
+            &desktop_entry,
+            format!("[Desktop Entry]\nExec={}\n", desktop_exec(&launcher)),
+        )
+        .expect("desktop entry");
+
+        assert!(
+            should_update_desktop_entry(&desktop_entry, &desktop_launcher, &launcher)
+                .expect("decision")
+        );
+    }
+
+    #[test]
+    fn desktop_launch_wrapper_targets_binary_with_log_redirection() {
+        let contents = desktop_launch_wrapper_contents(Path::new("/home/notes/.local/bin/taskers"));
+        assert!(contents.contains("desktop-launch-diagnostics.log"));
+        assert!(contents.contains("desktop-launch.log"));
+        assert!(contents.contains("/usr/bin/setsid -f"));
+        assert!(contents.contains("'/home/notes/.local/bin/taskers'"));
     }
 }

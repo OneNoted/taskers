@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use taskers_domain::{
-    AppModel, Direction, PaneId, PaneKind, PaneMetadataPatch, PersistedSession, SignalEvent,
-    SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceViewport,
-    WorkspaceWindowId, WorkspaceWindowMoveTarget,
+    AgentTarget, AppModel, AttentionState, Direction, NotificationDeliveryState, NotificationId,
+    PaneId, PaneKind, PaneMetadataPatch, PersistedSession, ProgressState, SignalEvent, SignalKind,
+    SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceLogEntry,
+    WorkspaceViewport, WorkspaceWindowId, WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,39 @@ pub enum ControlCommand {
         workspace_id: WorkspaceId,
         workspace_window_id: WorkspaceWindowId,
         target: WorkspaceWindowMoveTarget,
+    },
+    CreateWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+    },
+    FocusWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+    },
+    MoveWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        to_index: usize,
+    },
+    TransferWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        source_workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        target_workspace_window_id: WorkspaceWindowId,
+        to_index: usize,
+    },
+    ExtractWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        source_workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+        target: WorkspaceWindowMoveTarget,
+    },
+    CloseWorkspaceWindowTab {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
     },
     FocusPane {
         workspace_id: WorkspaceId,
@@ -96,6 +131,18 @@ pub enum ControlCommand {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    StartSurfaceAgentSession {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        agent_kind: String,
+    },
+    StopSurfaceAgentSession {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+        exit_status: i32,
+    },
     MarkSurfaceCompleted {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
@@ -113,16 +160,18 @@ pub enum ControlCommand {
         to_index: usize,
     },
     TransferSurface {
-        workspace_id: WorkspaceId,
+        source_workspace_id: WorkspaceId,
         source_pane_id: PaneId,
         surface_id: SurfaceId,
+        target_workspace_id: WorkspaceId,
         target_pane_id: PaneId,
         to_index: usize,
     },
     MoveSurfaceToSplit {
-        workspace_id: WorkspaceId,
+        source_workspace_id: WorkspaceId,
         source_pane_id: PaneId,
         surface_id: SurfaceId,
+        target_workspace_id: WorkspaceId,
         target_pane_id: PaneId,
         direction: Direction,
     },
@@ -153,17 +202,400 @@ pub enum ControlCommand {
         surface_id: Option<SurfaceId>,
         event: SignalEvent,
     },
+    AgentSetStatus {
+        workspace_id: WorkspaceId,
+        text: String,
+    },
+    AgentClearStatus {
+        workspace_id: WorkspaceId,
+    },
+    AgentSetProgress {
+        workspace_id: WorkspaceId,
+        progress: ProgressState,
+    },
+    AgentClearProgress {
+        workspace_id: WorkspaceId,
+    },
+    AgentAppendLog {
+        workspace_id: WorkspaceId,
+        entry: WorkspaceLogEntry,
+    },
+    AgentClearLog {
+        workspace_id: WorkspaceId,
+    },
+    AgentCreateNotification {
+        target: AgentTarget,
+        kind: SignalKind,
+        title: Option<String>,
+        subtitle: Option<String>,
+        external_id: Option<String>,
+        message: String,
+        state: AttentionState,
+    },
+    OpenNotification {
+        window_id: Option<WindowId>,
+        notification_id: NotificationId,
+    },
+    ClearNotification {
+        notification_id: NotificationId,
+    },
+    MarkNotificationDelivery {
+        notification_id: NotificationId,
+        delivery: NotificationDeliveryState,
+    },
+    AgentClearNotifications {
+        target: AgentTarget,
+    },
+    DismissSurfaceAlert {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    AgentTriggerFlash {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    AgentFocusLatestUnread {
+        window_id: Option<WindowId>,
+    },
+    Browser {
+        browser_command: BrowserControlCommand,
+    },
+    TerminalDebug {
+        debug_command: TerminalDebugCommand,
+    },
     QueryStatus {
         query: ControlQuery,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlErrorCode {
+    InvalidParams,
+    NotFound,
+    Timeout,
+    InvalidState,
+    NotSupported,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlError {
+    pub code: ControlErrorCode,
+    pub message: String,
+}
+
+impl ControlError {
+    pub fn new(code: ControlErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self::new(ControlErrorCode::InvalidParams, message)
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(ControlErrorCode::NotFound, message)
+    }
+
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::new(ControlErrorCode::Timeout, message)
+    }
+
+    pub fn invalid_state(message: impl Into<String>) -> Self {
+        Self::new(ControlErrorCode::InvalidState, message)
+    }
+
+    pub fn not_supported(message: impl Into<String>) -> Self {
+        Self::new(ControlErrorCode::NotSupported, message)
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(ControlErrorCode::Internal, message)
+    }
+}
+
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ControlError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "browser_command", rename_all = "snake_case")]
+pub enum BrowserControlCommand {
+    Navigate {
+        surface_id: SurfaceId,
+        url: String,
+    },
+    Back {
+        surface_id: SurfaceId,
+    },
+    Forward {
+        surface_id: SurfaceId,
+    },
+    Reload {
+        surface_id: SurfaceId,
+    },
+    FocusWebview {
+        surface_id: SurfaceId,
+    },
+    IsWebviewFocused {
+        surface_id: SurfaceId,
+    },
+    Snapshot {
+        surface_id: SurfaceId,
+    },
+    Eval {
+        surface_id: SurfaceId,
+        script: String,
+    },
+    Wait {
+        surface_id: SurfaceId,
+        condition: BrowserWaitCondition,
+        timeout_ms: u64,
+        poll_interval_ms: u64,
+    },
+    Click {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        snapshot_after: bool,
+    },
+    Dblclick {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        snapshot_after: bool,
+    },
+    Type {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        text: String,
+        snapshot_after: bool,
+    },
+    Fill {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        text: String,
+        snapshot_after: bool,
+    },
+    Press {
+        surface_id: SurfaceId,
+        target: Option<BrowserTarget>,
+        key: String,
+        snapshot_after: bool,
+    },
+    Keydown {
+        surface_id: SurfaceId,
+        target: Option<BrowserTarget>,
+        key: String,
+        snapshot_after: bool,
+    },
+    Keyup {
+        surface_id: SurfaceId,
+        target: Option<BrowserTarget>,
+        key: String,
+        snapshot_after: bool,
+    },
+    Hover {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        snapshot_after: bool,
+    },
+    Focus {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        snapshot_after: bool,
+    },
+    Check {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        snapshot_after: bool,
+    },
+    Uncheck {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        snapshot_after: bool,
+    },
+    Select {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        values: Vec<String>,
+        snapshot_after: bool,
+    },
+    Scroll {
+        surface_id: SurfaceId,
+        target: Option<BrowserTarget>,
+        dx: i32,
+        dy: i32,
+        snapshot_after: bool,
+    },
+    ScrollIntoView {
+        surface_id: SurfaceId,
+        target: BrowserTarget,
+        snapshot_after: bool,
+    },
+    Get {
+        surface_id: SurfaceId,
+        query: BrowserGetCommand,
+    },
+    Is {
+        surface_id: SurfaceId,
+        query: BrowserPredicateCommand,
+    },
+    Screenshot {
+        surface_id: SurfaceId,
+        path: Option<String>,
+        full_document: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "target", rename_all = "snake_case")]
+pub enum BrowserTarget {
+    Ref { value: String },
+    Selector { value: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "condition", rename_all = "snake_case")]
+pub enum BrowserWaitCondition {
+    Selector { selector: String },
+    Text { text: String },
+    UrlMatches { pattern: String },
+    LoadState { state: BrowserLoadState },
+    Function { script: String },
+    Delay { duration_ms: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserLoadState {
+    Started,
+    Redirected,
+    Committed,
+    Finished,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "query", rename_all = "snake_case")]
+pub enum BrowserGetCommand {
+    Url,
+    Title,
+    Text {
+        target: BrowserTarget,
+    },
+    Html {
+        target: BrowserTarget,
+    },
+    Value {
+        target: BrowserTarget,
+    },
+    Attr {
+        target: BrowserTarget,
+        name: String,
+    },
+    Count {
+        selector: String,
+    },
+    Box {
+        target: BrowserTarget,
+    },
+    Styles {
+        target: BrowserTarget,
+        properties: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "query", rename_all = "snake_case")]
+pub enum BrowserPredicateCommand {
+    Visible { target: BrowserTarget },
+    Enabled { target: BrowserTarget },
+    Checked { target: BrowserTarget },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "terminal_command", rename_all = "snake_case")]
+pub enum TerminalDebugCommand {
+    IsFocused {
+        surface_id: SurfaceId,
+    },
+    ReadText {
+        surface_id: SurfaceId,
+        tail_lines: Option<usize>,
+    },
+    RenderStats {
+        surface_id: SurfaceId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum TerminalDebugResult {
+    IsFocused { focused: bool },
+    ReadText { text: String },
+    RenderStats { stats: TerminalRenderStats },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalRenderStats {
+    pub surface_id: SurfaceId,
+    pub workspace_id: WorkspaceId,
+    pub pane_id: PaneId,
+    pub mounted: bool,
+    pub visible: bool,
+    pub focused: bool,
+    pub backend: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub width_px: i32,
+    pub height_px: i32,
+    pub has_selection: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentifyContext {
+    pub window_id: WindowId,
+    pub workspace_id: WorkspaceId,
+    pub workspace_label: String,
+    pub workspace_window_id: Option<WorkspaceWindowId>,
+    pub pane_id: PaneId,
+    pub surface_id: SurfaceId,
+    pub surface_kind: PaneKind,
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub url: Option<String>,
+    pub loading: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentifyResult {
+    pub focused: IdentifyContext,
+    pub caller: Option<IdentifyContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum ControlQuery {
     ActiveWindow,
-    Window { window_id: WindowId },
-    Workspace { workspace_id: WorkspaceId },
+    Window {
+        window_id: WindowId,
+    },
+    Workspace {
+        workspace_id: WorkspaceId,
+    },
+    Identify {
+        workspace_id: Option<WorkspaceId>,
+        pane_id: Option<PaneId>,
+        surface_id: Option<SurfaceId>,
+    },
     All,
 }
 
@@ -191,12 +623,25 @@ pub enum ControlResponse {
     WorkspaceWindowCreated {
         pane_id: PaneId,
     },
+    WorkspaceWindowTabCreated {
+        pane_id: PaneId,
+        workspace_window_tab_id: WorkspaceWindowTabId,
+    },
     Status {
         session: PersistedSession,
     },
     WorkspaceState {
         workspace_id: WorkspaceId,
         session: PersistedSession,
+    },
+    Browser {
+        result: JsonValue,
+    },
+    TerminalDebug {
+        result: TerminalDebugResult,
+    },
+    Identify {
+        result: IdentifyResult,
     },
 }
 
@@ -209,7 +654,7 @@ pub struct RequestFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseFrame {
     pub request_id: Uuid,
-    pub response: Result<ControlResponse, String>,
+    pub response: Result<ControlResponse, ControlError>,
 }
 
 impl RequestFrame {
