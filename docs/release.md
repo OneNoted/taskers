@@ -85,6 +85,7 @@ cargo run -p taskers-cli -- notify --help
 - Confirm the draft release tagged `v<version>` contains:
   - `taskers-manifest-v<version>.json`
   - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
+  - `taskers-ghostty-runtime-v<version>-x86_64-unknown-linux-gnu.tar.xz`
 - Publish the GitHub release so the launcher assets are publicly downloadable before publishing the crates.
 - Publish the crates to crates.io in dependency order:
 

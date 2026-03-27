@@ -54,6 +54,7 @@ jobs:
       - name: Run headless app smoke
         run: |
           TASKERS_TERMINAL_BACKEND=mock \
+          TIMEOUT_SECONDS=90 \
             bash scripts/headless-smoke.sh \
             ./target/debug/taskers-gtk \
             --smoke-script baseline \
@@ -63,14 +64,19 @@ jobs:
       - name: Build Linux bundle
         run: bash scripts/build_linux_bundle.sh
 
-      - name: Run launcher smoke
-        run: bash scripts/smoke_linux_release_launcher.sh
+      - name: Build Ghostty runtime bundle
+        run: bash scripts/build_ghostty_runtime_bundle.sh
 
-      - name: Upload Linux bundle
+      - name: Run launcher smoke
+        run: TIMEOUT_SECONDS=90 bash scripts/smoke_linux_release_launcher.sh
+
+      - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:
-          name: linux-bundle
-          path: dist/taskers-linux-bundle-v*.tar.xz
+          name: release-assets
+          path: |
+            dist/taskers-linux-bundle-v*.tar.xz
+            dist/taskers-ghostty-runtime-v*.tar.xz
 
   release-manifest:
     needs:
@@ -124,6 +130,7 @@ jobs:
             echo 'files<<EOF'
             echo 'dist/release/taskers-manifest-v*.json'
             echo 'dist/release/taskers-linux-bundle-v*.tar.xz'
+            echo 'dist/release/taskers-ghostty-runtime-v*.tar.xz'
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
