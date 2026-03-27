@@ -42,9 +42,20 @@ impl ParsedSignal {
 
 #[derive(Debug, Default, Clone)]
 struct NotificationDraft {
-    title: Option<String>,
-    subtitle: Option<String>,
-    body: Option<String>,
+    title: NotificationFieldDraft,
+    subtitle: NotificationFieldDraft,
+    body: NotificationFieldDraft,
+}
+
+#[derive(Debug, Default, Clone)]
+struct NotificationFieldDraft {
+    fragments: Vec<NotificationFragment>,
+}
+
+#[derive(Debug, Clone)]
+struct NotificationFragment {
+    payload: String,
+    encoded: bool,
 }
 
 pub fn parse_terminal_events(buffer: &str) -> Vec<ParsedTerminalEvent> {
@@ -221,6 +232,7 @@ impl SignalStreamParser {
         let mut external_id = None;
         let mut part = None;
         let mut done = None;
+        let mut encoded = false;
 
         for token in param_tokens {
             let (key, value) = token.split_once('=')?;
@@ -238,7 +250,9 @@ impl SignalStreamParser {
                         _ => None,
                     };
                 }
-                "e" => {}
+                "e" => {
+                    encoded = value == "1";
+                }
                 _ => {}
             }
         }
@@ -250,22 +264,25 @@ impl SignalStreamParser {
 
         let payload = Some(payload.to_string()).filter(|value| !value.is_empty());
         match part.as_deref() {
-            Some("title") => draft.title = payload,
-            Some("subtitle") => draft.subtitle = payload,
-            Some("body") => draft.body = payload,
-            Some(_) => {}
-            None => {
+            Some("title") | None => {
                 if let Some(payload) = payload {
-                    if draft.title.is_none() {
-                        draft.title = Some(payload);
-                    } else {
-                        draft.body = Some(payload);
-                    }
+                    draft.title.push(payload, encoded);
                 }
             }
+            Some("subtitle") => {
+                if let Some(payload) = payload {
+                    draft.subtitle.push(payload, encoded);
+                }
+            }
+            Some("body") => {
+                if let Some(payload) = payload {
+                    draft.body.push(payload, encoded);
+                }
+            }
+            Some(_) => {}
         }
 
-        let should_defer = matches!(done, Some(false)) && part.is_some();
+        let should_defer = matches!(done, Some(false));
         if should_defer {
             if let Some(external_id) = external_id {
                 self.kitty_notification_drafts.insert(external_id, draft);
@@ -273,14 +290,18 @@ impl SignalStreamParser {
             return None;
         }
 
-        if draft.title.is_none() && draft.subtitle.is_none() && draft.body.is_none() {
+        let title = draft.title.into_value();
+        let subtitle = draft.subtitle.into_value();
+        let body = draft.body.into_value();
+
+        if title.is_none() && subtitle.is_none() && body.is_none() {
             return None;
         }
 
         Some(ParsedNotification {
-            title: draft.title,
-            subtitle: draft.subtitle,
-            body: draft.body,
+            title,
+            subtitle,
+            body,
             external_id,
         })
     }
@@ -343,8 +364,57 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn decode_base64(value: &str) -> Option<String> {
-    let decoded = STANDARD.decode(value).ok()?;
+    let mut normalized = value.to_string();
+    let missing_padding = normalized.len() % 4;
+    if missing_padding != 0 {
+        normalized.extend(std::iter::repeat_n('=', 4 - missing_padding));
+    }
+    let decoded = STANDARD.decode(normalized).ok()?;
     String::from_utf8(decoded).ok()
+}
+
+impl NotificationFieldDraft {
+    fn push(&mut self, payload: String, encoded: bool) {
+        self.fragments
+            .push(NotificationFragment { payload, encoded });
+    }
+
+    fn into_value(self) -> Option<String> {
+        let mut combined = String::new();
+        let mut pending = String::new();
+        let mut pending_encoded = None;
+
+        for fragment in self.fragments {
+            match pending_encoded {
+                Some(current_encoded) if current_encoded == fragment.encoded => {
+                    pending.push_str(&fragment.payload);
+                }
+                Some(current_encoded) => {
+                    combined.push_str(&decode_notification_payload(current_encoded, &pending)?);
+                    pending = fragment.payload;
+                    pending_encoded = Some(fragment.encoded);
+                }
+                None => {
+                    pending = fragment.payload;
+                    pending_encoded = Some(fragment.encoded);
+                }
+            }
+        }
+
+        if let Some(current_encoded) = pending_encoded {
+            combined.push_str(&decode_notification_payload(current_encoded, &pending)?);
+        }
+
+        Some(combined).filter(|value| !value.is_empty())
+    }
+}
+
+fn decode_notification_payload(encoded: bool, payload: &str) -> Option<String> {
+    if encoded {
+        decode_base64(payload)
+    } else {
+        Some(payload.to_string())
+    }
 }
 
 fn percent_decode(value: &str) -> Option<String> {
@@ -551,8 +621,32 @@ mod tests {
     }
 
     #[test]
-    fn parses_doc_style_kitty_notification_payloads() {
-        let frames = parse_terminal_events("\u{1b}]99;i=1;e=1;d=0:Hello World\u{1b}\\");
+    fn defers_title_first_chunked_kitty_notification_frames_without_part() {
+        let mut parser = SignalStreamParser::default();
+
+        assert!(
+            parser
+                .push_events("\u{1b}]99;i=kitty;d=0:Kitty Title \u{1b}\\")
+                .is_empty()
+        );
+
+        let frames = parser.push_events("\u{1b}]99;i=kitty;p=body;e=1:Qm9keQ\u{1b}\\");
+        assert_eq!(
+            frames,
+            vec![ParsedTerminalEvent::Notification(
+                super::ParsedNotification {
+                    title: Some("Kitty Title ".into()),
+                    subtitle: None,
+                    body: Some("Body".into()),
+                    external_id: Some("kitty".into()),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn parses_encoded_kitty_notification_payloads() {
+        let frames = parse_terminal_events("\u{1b}]99;i=1;e=1:SGVsbG8gV29ybGQ\u{1b}\\");
 
         assert_eq!(
             frames,
@@ -562,6 +656,30 @@ mod tests {
                     subtitle: None,
                     body: None,
                     external_id: Some("1".into()),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn concatenates_encoded_kitty_notification_chunks_before_decoding() {
+        let mut parser = SignalStreamParser::default();
+
+        assert!(
+            parser
+                .push_events("\u{1b}]99;i=kitty;e=1;d=0:SGVsbG8g\u{1b}\\")
+                .is_empty()
+        );
+
+        let frames = parser.push_events("\u{1b}]99;i=kitty;e=1:V29ybGQ\u{1b}\\");
+        assert_eq!(
+            frames,
+            vec![ParsedTerminalEvent::Notification(
+                super::ParsedNotification {
+                    title: Some("Hello World".into()),
+                    subtitle: None,
+                    body: None,
+                    external_id: Some("kitty".into()),
                 }
             )]
         );

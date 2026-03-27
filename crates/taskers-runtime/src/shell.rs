@@ -593,6 +593,7 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
+        process::Command,
         sync::Mutex,
         time::{Duration, SystemTime},
     };
@@ -1099,17 +1100,19 @@ mod tests {
         let claude_args = fs::read_to_string(&args_log).unwrap_or_else(|error| {
             panic!("read claude args log failed: {error}; output={output}")
         });
+        let hook_path = runtime_root.join("taskers-claude-hook.sh");
         assert!(
             claude_args.contains("--settings"),
             "expected claude wrapper to inject hook settings, got: {claude_args}"
         );
         assert!(
-            claude_args.contains("taskers-claude-hook.sh user-prompt-submit"),
-            "expected claude wrapper to inject prompt-submit hook, got: {claude_args}"
+            claude_args.contains(&hook_path.display().to_string())
+                && claude_args.contains("user-prompt-submit"),
+            "expected claude wrapper to inject prompt-submit hook path, got: {claude_args}"
         );
         assert!(
-            claude_args.contains("taskers-claude-hook.sh stop"),
-            "expected claude wrapper to inject stop hook, got: {claude_args}"
+            claude_args.contains(&hook_path.display().to_string()) && claude_args.contains("stop"),
+            "expected claude wrapper to inject stop hook path, got: {claude_args}"
         );
         assert!(
             log.contains(
@@ -1127,6 +1130,67 @@ mod tests {
         restore_env_var("HOME", original_home);
         restore_env_var("PATH", original_path);
         restore_env_var("ZDOTDIR", original_zdotdir);
+        fs::remove_dir_all(&runtime_root).expect("cleanup runtime root");
+    }
+
+    #[test]
+    fn claude_code_shim_preserves_binary_lookup_and_quotes_hook_paths() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = unique_temp_dir("taskers runtime claude code");
+        install_runtime_assets(&runtime_root).expect("install runtime assets");
+        super::install_agent_shims(&runtime_root).expect("install agent shims");
+
+        let real_bin_dir = runtime_root.join("real-bin");
+        fs::create_dir_all(&real_bin_dir).expect("real bin dir");
+
+        let capture_path = runtime_root.join("claude-code-capture.log");
+        write_executable(
+            &real_bin_dir.join("claude-code"),
+            "#!/bin/sh\nprintf 'target=%s\\n' \"${TASKERS_AGENT_PROXY_TARGET:-}\" >> \"$FAKE_CLAUDE_CAPTURE\"\nprintf '%s\\n' \"$@\" >> \"$FAKE_CLAUDE_CAPTURE\"\nexit 0\n",
+        );
+
+        let original_path = std::env::var_os("PATH");
+        let shim_path = runtime_root.join("bin").join("claude-code");
+        let output = Command::new(&shim_path)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    real_bin_dir.display(),
+                    original_path
+                        .as_deref()
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                ),
+            )
+            .env("FAKE_CLAUDE_CAPTURE", &capture_path)
+            .arg("--help")
+            .output()
+            .expect("run claude-code shim");
+
+        assert!(
+            output.status.success(),
+            "expected claude-code shim to succeed, stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let capture = fs::read_to_string(&capture_path).expect("read capture log");
+        let hook_path = runtime_root.join("taskers-claude-hook.sh");
+        assert!(
+            capture.contains("target=claude-code"),
+            "expected shim to preserve the invoked claude-code lookup target, got: {capture}"
+        );
+        assert!(
+            capture.contains("--settings"),
+            "expected claude-code shim to forward hook settings, got: {capture}"
+        );
+        assert!(
+            capture.contains(&format!("'{}' user-prompt-submit", hook_path.display())),
+            "expected claude-code hook path to be single-quoted inside settings, got: {capture}"
+        );
+
+        restore_env_var("PATH", original_path);
         fs::remove_dir_all(&runtime_root).expect("cleanup runtime root");
     }
 
