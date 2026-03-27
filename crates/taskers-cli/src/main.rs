@@ -2104,6 +2104,31 @@ async fn query_model(client: &ControlClient) -> anyhow::Result<AppModel> {
     }
 }
 
+async fn resolve_surface_context(
+    client: &ControlClient,
+    surface_id: SurfaceId,
+) -> anyhow::Result<(WorkspaceId, PaneId, SurfaceId)> {
+    let response = send_control_command(
+        client,
+        ControlCommand::QueryStatus {
+            query: ControlQuery::Identify {
+                workspace_id: None,
+                pane_id: None,
+                surface_id: Some(surface_id),
+            },
+        },
+    )
+    .await?;
+
+    let ControlResponse::Identify { result } = response else {
+        bail!("unexpected identify response: {response:?}");
+    };
+    let caller = result
+        .caller
+        .ok_or_else(|| anyhow!("missing identify caller context for surface {surface_id}"))?;
+    Ok((caller.workspace_id, caller.pane_id, caller.surface_id))
+}
+
 fn active_surface_for_pane(
     model: &AppModel,
     workspace_id: WorkspaceId,
@@ -2956,11 +2981,20 @@ async fn emit_agent_hook(
     )
     .await?;
 
+    let (resolved_workspace_id, resolved_pane_id, resolved_surface_id) = match surface_id {
+        Some(surface_id) => {
+            let (workspace_id, pane_id, surface_id) =
+                resolve_surface_context(&client, surface_id).await?;
+            (workspace_id, pane_id, Some(surface_id))
+        }
+        None => (workspace_id, pane_id, surface_id),
+    };
+
     if let Some(log_message) = normalized_message.clone() {
         let _ = send_control_command(
             &client,
             ControlCommand::AgentAppendLog {
-                workspace_id,
+                workspace_id: resolved_workspace_id,
                 entry: WorkspaceLogEntry {
                     source: Some(normalized_agent.clone()),
                     message: log_message,
@@ -2976,7 +3010,7 @@ async fn emit_agent_hook(
             let _ = send_control_command(
                 &client,
                 ControlCommand::AgentSetStatus {
-                    workspace_id,
+                    workspace_id: resolved_workspace_id,
                     text: status_text,
                 },
             )
@@ -2986,7 +3020,7 @@ async fn emit_agent_hook(
             let _ = send_control_command(
                 &client,
                 ControlCommand::AgentSetStatus {
-                    workspace_id,
+                    workspace_id: resolved_workspace_id,
                     text: status_text.clone(),
                 },
             )
@@ -2996,26 +3030,32 @@ async fn emit_agent_hook(
             if matches!(kind, CliSignalKind::Completed) {
                 let _ = send_control_command(
                     &client,
-                    ControlCommand::AgentClearStatus { workspace_id },
+                    ControlCommand::AgentClearStatus {
+                        workspace_id: resolved_workspace_id,
+                    },
                 )
                 .await?;
                 let _ = send_control_command(
                     &client,
-                    ControlCommand::AgentClearProgress { workspace_id },
+                    ControlCommand::AgentClearProgress {
+                        workspace_id: resolved_workspace_id,
+                    },
                 )
                 .await?;
             } else {
                 let _ = send_control_command(
                     &client,
                     ControlCommand::AgentSetStatus {
-                        workspace_id,
+                        workspace_id: resolved_workspace_id,
                         text: status_text,
                     },
                 )
                 .await?;
                 let _ = send_control_command(
                     &client,
-                    ControlCommand::AgentClearProgress { workspace_id },
+                    ControlCommand::AgentClearProgress {
+                        workspace_id: resolved_workspace_id,
+                    },
                 )
                 .await?;
             }
@@ -3027,19 +3067,23 @@ async fn emit_agent_hook(
         kind,
         CliSignalKind::WaitingInput | CliSignalKind::Notification | CliSignalKind::Error
     ) {
-        let flash_surface_id = match surface_id.or_else(env_surface_id) {
+        let flash_surface_id = match resolved_surface_id.or_else(env_surface_id) {
             Some(surface_id) => Some(surface_id),
             None => {
                 let model = query_model(&client).await?;
-                Some(active_surface_for_pane(&model, workspace_id, pane_id)?)
+                Some(active_surface_for_pane(
+                    &model,
+                    resolved_workspace_id,
+                    resolved_pane_id,
+                )?)
             }
         };
         if let Some(surface_id) = flash_surface_id {
             let _ = send_control_command(
                 &client,
                 ControlCommand::AgentTriggerFlash {
-                    workspace_id,
-                    pane_id,
+                    workspace_id: resolved_workspace_id,
+                    pane_id: resolved_pane_id,
                     surface_id,
                 },
             )
@@ -3064,16 +3108,33 @@ fn infer_agent_kind(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{
+        path::PathBuf,
+        sync::Mutex,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
-    use taskers_control::{BrowserTarget, BrowserWaitCondition};
+    use taskers_control::{
+        BrowserTarget, BrowserWaitCondition, ControlCommand, InMemoryController, bind_socket, serve,
+    };
+    use taskers_domain::{AppModel, PaneKind};
+    use tokio::sync::oneshot;
 
     use super::{
-        CliBrowserLoadState, ensure_implicit_notify_target_context, env_pane_id, env_surface_id,
-        env_workspace_id, infer_agent_kind, resolve_browser_target, resolve_wait_condition,
+        CliBrowserLoadState, CliSignalKind, emit_agent_hook, ensure_implicit_notify_target_context,
+        env_pane_id, env_surface_id, env_workspace_id, infer_agent_kind, resolve_browser_target,
+        resolve_wait_condition,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{unique}"))
+    }
 
     #[test]
     fn infers_known_agent_names() {
@@ -3194,6 +3255,121 @@ mod tests {
             std::env::remove_var("TASKERS_SURFACE_ID");
             std::env::remove_var("TASKERS_TTY_NAME");
         }
+    }
+
+    #[tokio::test]
+    async fn agent_hook_status_and_logs_follow_surface_workspace_after_move() {
+        let tempdir = unique_temp_dir("taskers-cli-agent-hook");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("taskers.sock");
+        let listener = bind_socket(&socket_path).expect("listener");
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let source_workspace = snapshot.model.active_workspace().expect("workspace");
+        let source_workspace_id = source_workspace.id;
+        let source_pane_id = source_workspace.active_pane;
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                kind: PaneKind::Browser,
+            })
+            .expect("create surface");
+        let moved_surface_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&source_workspace_id)
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("moved surface");
+
+        controller
+            .handle(ControlCommand::CreateWorkspace {
+                label: "Docs".into(),
+            })
+            .expect("create target workspace");
+        let target_workspace_id = controller
+            .snapshot()
+            .model
+            .active_workspace_id()
+            .expect("target workspace");
+
+        controller
+            .handle(ControlCommand::MoveSurfaceToWorkspace {
+                source_workspace_id,
+                source_pane_id,
+                surface_id: moved_surface_id,
+                target_workspace_id,
+            })
+            .expect("move surface");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve(listener, controller.clone(), async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        emit_agent_hook(
+            Some(socket_path.clone()),
+            Some(source_workspace_id),
+            Some(source_pane_id),
+            Some(moved_surface_id),
+            Some("codex".into()),
+            Some("Codex".into()),
+            Some("Turn complete".into()),
+            CliSignalKind::Notification,
+        )
+        .await
+        .expect("emit agent hook");
+
+        let snapshot = controller.snapshot();
+        let source_workspace_after = snapshot
+            .model
+            .workspaces
+            .get(&source_workspace_id)
+            .expect("source workspace");
+        let target_workspace_after = snapshot
+            .model
+            .workspaces
+            .get(&target_workspace_id)
+            .expect("target workspace");
+
+        assert_eq!(source_workspace_after.status_text, None);
+        assert!(
+            source_workspace_after.log_entries.is_empty(),
+            "expected source workspace log to stay empty"
+        );
+        assert_eq!(
+            target_workspace_after.status_text.as_deref(),
+            Some("Turn complete")
+        );
+        assert_eq!(target_workspace_after.log_entries.len(), 1);
+        assert_eq!(
+            target_workspace_after.log_entries[0].message,
+            "Turn complete"
+        );
+
+        let target_surface = target_workspace_after
+            .panes
+            .values()
+            .flat_map(|pane| pane.surfaces.values())
+            .find(|surface| surface.id == moved_surface_id)
+            .expect("target surface");
+        assert_eq!(
+            target_surface.metadata.latest_agent_message.as_deref(),
+            Some("Turn complete")
+        );
+        assert!(
+            target_workspace_after
+                .surface_flash_tokens
+                .contains_key(&moved_surface_id),
+            "expected flash token on moved target surface"
+        );
+
+        shutdown_tx.send(()).expect("shutdown");
+        server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
     }
 
     #[test]
