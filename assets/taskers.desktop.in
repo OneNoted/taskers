@@ -8,5 +8,5 @@ Icon=taskers
 Terminal=false
 Categories=Development;
 StartupNotify=true
-StartupWMClass=taskers
+StartupWMClass=dev.taskers.app
 X-GNOME-UsesNotifications=true

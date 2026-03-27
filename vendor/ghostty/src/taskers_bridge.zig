@@ -218,7 +218,7 @@ fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOpti
 fn applyTaskersEmbeddedSurfaceInvariants(
     _: std.mem.Allocator,
     config: *configpkg.Config,
-    command_argv: []const [:0]u8,
+    command_argv: []const [:0]const u8,
 ) !void {
     const alloc = config.arenaAlloc();
 
@@ -231,13 +231,6 @@ fn applyTaskersEmbeddedSurfaceInvariants(
     config.@"shell-integration" = .none;
     config.@"shell-integration-features" = .{};
     config.@"linux-cgroup" = .never;
-
-    // Embedded Taskers panes already supply their own chrome and spacing.
-    // Ghostty's default window padding makes the terminal grid float inside
-    // the pane body and visibly misalign with the shell layout.
-    config.@"window-padding-x" = .{ .top_left = 0, .bottom_right = 0 };
-    config.@"window-padding-y" = .{ .top_left = 0, .bottom_right = 0 };
-    config.@"window-padding-balance" = false;
 }
 
 fn duplicateStringList(
@@ -293,11 +286,11 @@ test "taskers embedded config preserves user settings beyond required invariants
     try testing.expectEqual(configpkg.Config.ShellIntegration.none, config.@"shell-integration");
     try testing.expectEqual(configpkg.ShellIntegrationFeatures{}, config.@"shell-integration-features");
     try testing.expectEqual(configpkg.Config.LinuxCgroup.never, config.@"linux-cgroup");
-    try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".top_left);
-    try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".bottom_right);
-    try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".top_left);
-    try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".bottom_right);
-    try testing.expect(!config.@"window-padding-balance");
+    try testing.expectEqual(@as(u32, 7), config.@"window-padding-x".top_left);
+    try testing.expectEqual(@as(u32, 9), config.@"window-padding-x".bottom_right);
+    try testing.expectEqual(@as(u32, 11), config.@"window-padding-y".top_left);
+    try testing.expectEqual(@as(u32, 13), config.@"window-padding-y".bottom_right);
+    try testing.expect(config.@"window-padding-balance");
 
     const command = config.command orelse return error.TestUnexpectedResult;
     switch (command) {

@@ -25,6 +25,7 @@ fi
 cargo_root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
 app_bin_dir="${cargo_root}/bin"
 app_binary_path="${app_bin_dir}/taskers-gtk"
+desktop_wrapper_path="${app_bin_dir}/taskers-gtk-desktop-launch"
 
 mkdir -p "${app_bin_dir}" "$(dirname -- "${desktop_entry_path}")"
 
@@ -35,19 +36,28 @@ if [[ ! -x "${app_binary_path}" ]]; then
   exit 1
 fi
 
+cat > "${desktop_wrapper_path}" <<EOF
+#!/bin/sh
+set -eu
+log_dir="\${XDG_CACHE_HOME:-\$HOME/.cache}/taskers"
+mkdir -p "\${log_dir}"
+exec /usr/bin/setsid -f "${app_binary_path}" --diagnostic-log "\${log_dir}/desktop-launch-diagnostics.log" >>"\${log_dir}/desktop-launch.log" 2>&1
+EOF
+chmod +x "${desktop_wrapper_path}"
+
 cat > "${desktop_entry_path}" <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=Taskers
 Comment=Agent-first terminal workspace
-Exec=${app_binary_path}
-TryExec=${app_binary_path}
+Exec=${desktop_wrapper_path}
+TryExec=${desktop_wrapper_path}
 Icon=taskers
 Terminal=false
 Categories=Development;
 StartupNotify=true
-StartupWMClass=taskers
+StartupWMClass=dev.taskers.app
 X-GNOME-UsesNotifications=true
 EOF
 
@@ -56,4 +66,5 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 
 echo "installed ${app_binary_path}"
+echo "installed ${desktop_wrapper_path}"
 echo "installed ${desktop_entry_path}"

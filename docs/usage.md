@@ -37,10 +37,9 @@ Taskers still pins a small set of embedded-pane invariants:
 
 - the launch command stays Taskers-owned
 - Ghostty shell integration stays disabled because Taskers provides its own shell wrapper
-- Ghostty window padding stays zero and Taskers adds its own host-side terminal gutter
 - Ghostty Linux cgroup settings stay disabled for embedded panes
 
-That means Ghostty settings such as fonts, theme, colors, cursor behavior, and scrollback should carry over, while window-style and shell-launch behavior remains controlled by Taskers.
+That means Ghostty settings such as fonts, theme, colors, cursor behavior, scrollback, and window padding should carry over, while shell-launch behavior remains controlled by Taskers.
 
 ## A Typical Session
 

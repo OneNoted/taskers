@@ -188,6 +188,11 @@ fn default_true() -> bool {
     true
 }
 
+fn safe_eprintln(message: impl std::fmt::Display) {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(stderr, "{message}");
+}
+
 impl TaskersConfig {
     fn load() -> Result<Self> {
         let path = taskers_paths::default_config_path();
@@ -245,7 +250,7 @@ fn main() -> glib::ExitCode {
     let bootstrap = match bootstrap_runtime(None) {
         Ok(bootstrap) => bootstrap,
         Err(error) => {
-            eprintln!("failed to bootstrap Taskers host: {error:?}");
+            safe_eprintln(format!("failed to bootstrap Taskers host: {error:?}"));
             return glib::ExitCode::FAILURE;
         }
     };
@@ -282,7 +287,7 @@ fn build_ui(
     cli: Cli,
 ) {
     if let Err(error) = build_ui_result(app, bootstrap, hold_guard, cli) {
-        eprintln!("failed to launch Taskers host: {error:?}");
+        safe_eprintln(format!("failed to launch Taskers host: {error:?}"));
     }
 }
 
@@ -331,8 +336,10 @@ fn build_ui_result(
         .default_width(1440)
         .default_height(900)
         .build();
+    let app_for_close = app.clone();
     window.connect_close_request(move |_| {
         drop(hold_guard.borrow_mut().take());
+        app_for_close.quit();
         glib::Propagation::Proceed
     });
     let host_widget = host.borrow().widget();
@@ -362,7 +369,7 @@ fn build_ui_result(
             diagnostics.as_ref(),
             DiagnosticRecord::new(DiagnosticCategory::Startup, None, note.clone()),
         );
-        eprintln!("{note}");
+        safe_eprintln(note);
     }
     log_diagnostic(
         diagnostics.as_ref(),
@@ -372,7 +379,7 @@ fn build_ui_result(
             control_server_note.clone(),
         ),
     );
-    eprintln!("{control_server_note}");
+    safe_eprintln(control_server_note);
     log_diagnostic(
         diagnostics.as_ref(),
         DiagnosticRecord::new(
@@ -381,7 +388,7 @@ fn build_ui_result(
             format!("shared shell listening on {shell_url}"),
         ),
     );
-    eprintln!("shared shell listening on {shell_url}");
+    safe_eprintln(format!("shared shell listening on {shell_url}"));
 
     let smoke_script = cli.smoke_script;
     let quit_after_ms = cli.quit_after_ms.unwrap_or(8_000);
@@ -534,7 +541,9 @@ fn process_pending_notifications(
                 .with_pane(notification.pane_id)
                 .with_surface(notification.surface_id),
             );
-            eprintln!("taskers notification delivery update failed: {error:?}");
+            safe_eprintln(format!(
+                "taskers notification delivery update failed: {error:?}"
+            ));
         }
     }
 
@@ -652,7 +661,7 @@ fn persist_settings_if_needed(
                 format!("failed to persist config: {error:?}"),
             ),
         );
-        eprintln!("taskers config save failed: {error:?}");
+        safe_eprintln(format!("taskers config save failed: {error:?}"));
         return;
     }
 
@@ -1030,10 +1039,10 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
             host
         }
         Err(error) => {
-            eprintln!(
+            safe_eprintln(format!(
                 "ghostty {} self-probe failed during host init: {error}",
                 mode.as_arg()
-            );
+            ));
             return glib::ExitCode::FAILURE;
         }
     };
@@ -1053,10 +1062,10 @@ fn run_internal_surface_probe(
 ) -> glib::ExitCode {
     if !gtk::is_initialized_main_thread() {
         if let Err(error) = gtk::init() {
-            eprintln!(
+            safe_eprintln(format!(
                 "ghostty {} self-probe failed during gtk init: {error}",
                 mode.as_arg()
-            );
+            ));
             return glib::ExitCode::FAILURE;
         }
     }
@@ -1084,10 +1093,10 @@ fn run_internal_surface_probe(
     ) {
         Ok(app_state) => app_state,
         Err(error) => {
-            eprintln!(
+            safe_eprintln(format!(
                 "ghostty {} self-probe failed during app state bootstrap: {error}",
                 mode.as_arg()
-            );
+            ));
             return glib::ExitCode::FAILURE;
         }
     };
@@ -1121,10 +1130,10 @@ fn run_internal_surface_probe(
 
     spin_probe_main_context(Duration::from_millis(80));
     if let Err(error) = taskers_host.sync_snapshot(&core.snapshot()) {
-        eprintln!(
+        safe_eprintln(format!(
             "ghostty {} self-probe failed during snapshot sync: {error}",
             mode.as_arg()
-        );
+        ));
         return glib::ExitCode::FAILURE;
     }
 
@@ -1271,7 +1280,7 @@ fn sync_window(
                     format!("host command failed: {error}"),
                 ),
             );
-            eprintln!("taskers host command failed: {error}");
+            safe_eprintln(format!("taskers host command failed: {error}"));
         }
     }
 
@@ -1320,7 +1329,9 @@ fn sync_window(
                     format!("snapshot sync failed: {error}"),
                 ),
             );
-            eprintln!("taskers host sync failed for revision {revision}: {error}");
+            safe_eprintln(format!(
+                "taskers host sync failed for revision {revision}: {error}"
+            ));
         }
         last_revision.set(revision);
     }
@@ -1574,14 +1585,14 @@ fn spawn_control_server(
                     };
                     if let Err(error) = serve_with_handler(listener, handler, pending::<()>()).await
                     {
-                        eprintln!("control server error: {error}");
+                        safe_eprintln(format!("control server error: {error}"));
                     }
                 }
                 Err(error) => {
-                    eprintln!(
+                    safe_eprintln(format!(
                         "control server unavailable at {}: {error}",
                         socket_path.display()
-                    );
+                    ));
                 }
             }
         });
@@ -1649,7 +1660,7 @@ fn launch_liveview_server(core: SharedCore) -> Result<String> {
                 );
 
             if let Err(error) = axum::serve(listener, router.into_make_service()).await {
-                eprintln!("liveview server failed: {error}");
+                safe_eprintln(format!("liveview server failed: {error}"));
             }
         });
     });
@@ -1873,7 +1884,7 @@ impl DiagnosticsWriter {
                 target: DiagnosticsTarget::File(Arc::new(Mutex::new(file))),
             }),
             Err(error) => {
-                eprintln!("taskers diagnostics log path failed: {error}");
+                safe_eprintln(format!("taskers diagnostics log path failed: {error}"));
                 None
             }
         }
