@@ -382,12 +382,18 @@ impl InMemoryController {
                 )
             }
             ControlCommand::StartSurfaceAgentSession {
-                workspace_id,
-                pane_id,
+                workspace_id: _,
+                pane_id: _,
                 surface_id,
                 agent_kind,
             } => {
-                model.start_surface_agent_session(workspace_id, pane_id, surface_id, agent_kind)?;
+                let current = resolve_identify_context(model, None, None, Some(surface_id))?;
+                model.start_surface_agent_session(
+                    current.workspace_id,
+                    current.pane_id,
+                    surface_id,
+                    agent_kind,
+                )?;
                 (
                     ControlResponse::Ack {
                         message: "surface agent session started".into(),
@@ -1084,6 +1090,94 @@ mod tests {
                 .and_then(|pane| pane.active_surface())
                 .map(|surface| surface.attention),
             Some(taskers_domain::AttentionState::Normal)
+        );
+    }
+
+    #[test]
+    fn surface_agent_start_follows_a_moved_surface_even_with_stale_pane_context() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let source_workspace = snapshot.model.active_workspace().expect("workspace");
+        let source_workspace_id = source_workspace.id;
+        let source_pane_id = source_workspace.active_pane;
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                kind: PaneKind::Browser,
+            })
+            .expect("create moved surface");
+        let moved_surface_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&source_workspace_id)
+            .and_then(|workspace| workspace.panes.get(&source_pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("moved surface");
+
+        controller
+            .handle(ControlCommand::CreateWorkspace {
+                label: "Docs".into(),
+            })
+            .expect("create target workspace");
+        let target_workspace_id = controller
+            .snapshot()
+            .model
+            .active_workspace_id()
+            .expect("target workspace");
+
+        controller
+            .handle(ControlCommand::MoveSurfaceToWorkspace {
+                source_workspace_id,
+                source_pane_id,
+                surface_id: moved_surface_id,
+                target_workspace_id,
+            })
+            .expect("move surface");
+
+        controller
+            .handle(ControlCommand::StartSurfaceAgentSession {
+                workspace_id: source_workspace_id,
+                pane_id: source_pane_id,
+                surface_id: moved_surface_id,
+                agent_kind: "codex".into(),
+            })
+            .expect("start moved surface agent session");
+
+        let snapshot = controller.snapshot();
+        let target_surface = snapshot
+            .model
+            .workspaces
+            .values()
+            .flat_map(|workspace| {
+                workspace.panes.values().flat_map(move |pane| {
+                    pane.surfaces
+                        .values()
+                        .map(move |surface| (workspace, pane, surface))
+                })
+            })
+            .find(|(_, _, surface)| surface.id == moved_surface_id)
+            .expect("target surface");
+
+        assert_eq!(target_surface.0.id, target_workspace_id);
+        assert!(target_surface.2.agent_process.is_some());
+        assert!(target_surface.2.agent_session.is_none());
+        assert_eq!(
+            target_surface.2.metadata.agent_kind.as_deref(),
+            Some("codex")
+        );
+        assert_eq!(target_surface.2.metadata.agent_active, true);
+        assert!(
+            snapshot
+                .model
+                .workspaces
+                .get(&source_workspace_id)
+                .and_then(|workspace| workspace.panes.get(&source_pane_id))
+                .and_then(|pane| pane.active_surface())
+                .and_then(|surface| surface.agent_process.as_ref())
+                .is_none()
         );
     }
 
