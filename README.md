@@ -8,6 +8,9 @@ Taskers is a Linux-first terminal workspace for agent-heavy work. It combines:
 - an attention rail for unread, waiting, error, and completed work
 - a local control CLI for notifications, agent state, browser automation, and debugging
 
+<img width="2628" height="1431" alt="image" src="https://github.com/user-attachments/assets/46a8ba8d-9bce-496e-a010-83648e94c742" />
+
+
 The active product lives at the repo root. Archived pre-cutover GTK/AppKit code
 is kept under `taskers-old/` for reference only.
 
