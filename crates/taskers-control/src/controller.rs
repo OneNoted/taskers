@@ -736,6 +736,19 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::DismissInterruptedAgentResume {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => {
+                model.dismiss_interrupted_agent_resume(workspace_id, pane_id, surface_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "interrupted agent resume dismissed".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::AgentTriggerFlash {
                 workspace_id,
                 pane_id,

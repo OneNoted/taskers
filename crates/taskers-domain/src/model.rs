@@ -3207,7 +3207,8 @@ impl AppModel {
                         .map(|value| value.started_at)
                         .or_else(|| session.as_ref().map(|value| value.updated_at))
                         .unwrap_or_else(OffsetDateTime::now_utc);
-                    let command = normalized_agent_command(surface.metadata.agent_command.as_deref());
+                    let command =
+                        normalized_agent_command(surface.metadata.agent_command.as_deref());
 
                     surface.agent_process = None;
                     surface.agent_session = None;

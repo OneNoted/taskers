@@ -173,6 +173,19 @@ pub export fn taskers_ghostty_surface_has_selection(widget: ?*gtk.Widget) c_int 
     return if (core.hasSelection()) 1 else 0;
 }
 
+pub export fn taskers_ghostty_surface_send_text(
+    widget: ?*gtk.Widget,
+    ptr: ?[*]const u8,
+    len: usize,
+) c_int {
+    const widget_ptr = widget orelse return 0;
+    const bytes = ptr orelse return 0;
+    const surface: *Surface = @ptrCast(@alignCast(widget_ptr));
+    const core = surface.core() orelse return 0;
+    _ = core.textCallback(bytes[0..len]) catch return 0;
+    return 1;
+}
+
 pub export fn taskers_ghostty_surface_read_all_text(
     widget: ?*gtk.Widget,
     result: ?*Text,

@@ -292,6 +292,26 @@ impl TaskersHost {
                     surface.toggle_devtools()
                 })
             }
+            HostCommand::TerminalSendText { surface_id, text } => {
+                let Some(host) = self.ghostty_host.as_ref() else {
+                    return Ok(());
+                };
+                let Some(surface) = self.terminal_surfaces.get(&surface_id) else {
+                    return Ok(());
+                };
+                host.send_surface_text(&surface.widget, &text)
+                    .map_err(|error| anyhow!(error.to_string()))?;
+                emit_diagnostic(
+                    self.diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::HostEvent,
+                        None,
+                        "terminal send text command handled",
+                    )
+                    .with_surface(surface_id),
+                );
+                Ok(())
+            }
         }
     }
 

@@ -1677,11 +1677,34 @@ fn render_pane(
         runtime_state_class(active_surface.runtime.state)
     );
     let pane_surface_summary_title = surface_summary_title(active_surface);
+    let resume_prompt_active = active_surface.interrupted_agent_resume.is_some();
     let dismiss_surface_alert = {
         let core = core.clone();
         move |event: Event<MouseData>| {
             event.stop_propagation();
             core.dispatch_shell_action(ShellAction::DismissSurfaceAlert {
+                workspace_id,
+                pane_id,
+                surface_id: active_surface_id,
+            });
+        }
+    };
+    let resume_interrupted_agent = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::ResumeInterruptedAgent {
+                workspace_id,
+                pane_id,
+                surface_id: active_surface_id,
+            });
+        }
+    };
+    let dismiss_interrupted_agent_resume = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::DismissInterruptedAgentResume {
                 workspace_id,
                 pane_id,
                 surface_id: active_surface_id,
@@ -1707,7 +1730,26 @@ fn render_pane(
                                     if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
                                         span { class: "pane-runtime-badge", "{runtime_label}" }
                                     }
-                                    if let Some(status_label) = surface_status_text(active_surface) {
+                                    if resume_prompt_active {
+                                        button {
+                                            r#type: "button",
+                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
+                                            title: "Run the interrupted agent command again",
+                                            onpointerdown: swallow_runtime_state_pointer,
+                                            onpointerup: swallow_runtime_state_pointer,
+                                            onclick: resume_interrupted_agent,
+                                            "Run again"
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
+                                            title: "Dismiss interrupted agent prompt",
+                                            onpointerdown: swallow_runtime_state_pointer,
+                                            onpointerup: swallow_runtime_state_pointer,
+                                            onclick: dismiss_interrupted_agent_resume,
+                                            "Dismiss"
+                                        }
+                                    } else if let Some(status_label) = surface_status_text(active_surface) {
                                         button {
                                             r#type: "button",
                                             class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
@@ -1733,7 +1775,26 @@ fn render_pane(
                                     if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
                                         span { class: "pane-runtime-badge", "{runtime_label}" }
                                     }
-                                    if let Some(status_label) = surface_status_text(active_surface) {
+                                    if resume_prompt_active {
+                                        button {
+                                            r#type: "button",
+                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
+                                            title: "Run the interrupted agent command again",
+                                            onpointerdown: swallow_runtime_state_pointer,
+                                            onpointerup: swallow_runtime_state_pointer,
+                                            onclick: resume_interrupted_agent,
+                                            "Run again"
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
+                                            title: "Dismiss interrupted agent prompt",
+                                            onpointerdown: swallow_runtime_state_pointer,
+                                            onpointerup: swallow_runtime_state_pointer,
+                                            onclick: dismiss_interrupted_agent_resume,
+                                            "Dismiss"
+                                        }
+                                    } else if let Some(status_label) = surface_status_text(active_surface) {
                                         button {
                                             r#type: "button",
                                             class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
@@ -2059,7 +2120,8 @@ fn render_surface_tab(
         runtime_state_class(surface.runtime.state)
     );
     let surface_tab_title = surface_summary_title(surface);
-    let dismissible_status = surface_status_text(surface).is_some();
+    let dismissible_status =
+        surface_status_text(surface).is_some() && surface.interrupted_agent_resume.is_none();
     let dismiss_surface_alert = {
         let core = core.clone();
         move |event: Event<MouseData>| {
@@ -2420,6 +2482,7 @@ mod tests {
             cwd: None,
             attention: AttentionState::Normal,
             notification_ring: None,
+            interrupted_agent_resume: None,
         }
     }
 
