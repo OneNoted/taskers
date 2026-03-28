@@ -272,12 +272,47 @@ fn main() -> glib::ExitCode {
             );
         }
     });
-    app.connect_activate(|app| {
-        if let Some(window) = app.active_window() {
-            window.present();
+    app.connect_activate({
+        let hold_guard = hold_guard.clone();
+        move |app| {
+            if present_existing_window(app) {
+                return;
+            }
+
+            // A unique app instance with no windows can absorb desktop relaunches.
+            // Tear it down so the next launch starts a fresh process instead.
+            release_application_hold(&hold_guard);
+            app.quit();
+        }
+    });
+    app.connect_window_removed({
+        let hold_guard = hold_guard.clone();
+        move |app, _| {
+            if app.windows().is_empty() {
+                release_application_hold(&hold_guard);
+                app.quit();
+            }
         }
     });
     app.run_with_args::<&str>(&[])
+}
+
+fn present_existing_window(app: &adw::Application) -> bool {
+    let window = app
+        .active_window()
+        .or_else(|| app.windows().into_iter().next());
+    if let Some(window) = window {
+        window.present();
+        true
+    } else {
+        false
+    }
+}
+
+fn release_application_hold(hold_guard: &Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>) {
+    if let Ok(mut hold_guard) = hold_guard.try_borrow_mut() {
+        drop(hold_guard.take());
+    }
 }
 
 fn build_ui(
@@ -337,8 +372,9 @@ fn build_ui_result(
         .default_height(900)
         .build();
     let app_for_close = app.clone();
+    let hold_guard_for_close = hold_guard.clone();
     window.connect_close_request(move |_| {
-        drop(hold_guard.borrow_mut().take());
+        release_application_hold(&hold_guard_for_close);
         app_for_close.quit();
         glib::Propagation::Proceed
     });
