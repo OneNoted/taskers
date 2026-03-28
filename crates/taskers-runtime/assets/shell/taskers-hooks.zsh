@@ -139,6 +139,7 @@ taskers__emit_with_metadata() {
 
     [[ -n "$TASKERS_META_REPO_NAME" ]] && argv+=(--repo "$TASKERS_META_REPO_NAME")
     [[ -n "$TASKERS_META_BRANCH" ]] && argv+=(--branch "$TASKERS_META_BRANCH")
+    [[ -n "${TASKERS_ACTIVE_AGENT_COMMAND:-}" ]] && argv+=(--command "$TASKERS_ACTIVE_AGENT_COMMAND")
     [[ -n "$message" ]] && argv+=(--message "$message")
   else
     local subcommand
@@ -176,6 +177,7 @@ taskers__emit_metadata_if_changed() {
     && "${TASKERS_LAST_META_BRANCH:-}" = "$TASKERS_META_BRANCH" \
     && "${TASKERS_LAST_META_AGENT:-}" = "$TASKERS_META_AGENT" \
     && "${TASKERS_LAST_META_TITLE:-}" = "$TASKERS_META_TITLE" \
+    && "${TASKERS_LAST_META_COMMAND:-}" = "${TASKERS_ACTIVE_AGENT_COMMAND:-}" \
     && "${TASKERS_LAST_META_AGENT_ACTIVE:-}" = "$(taskers__agent_active_for_kind metadata)" ]]; then
     return 0
   fi
@@ -185,6 +187,7 @@ taskers__emit_metadata_if_changed() {
   export TASKERS_LAST_META_BRANCH=$TASKERS_META_BRANCH
   export TASKERS_LAST_META_AGENT=$TASKERS_META_AGENT
   export TASKERS_LAST_META_TITLE=$TASKERS_META_TITLE
+  export TASKERS_LAST_META_COMMAND=${TASKERS_ACTIVE_AGENT_COMMAND:-}
   export TASKERS_LAST_META_AGENT_ACTIVE=$(taskers__agent_active_for_kind metadata)
   taskers__emit_with_metadata metadata
 }
@@ -195,6 +198,7 @@ taskers__invalidate_metadata_cache() {
   unset TASKERS_LAST_META_BRANCH
   unset TASKERS_LAST_META_AGENT
   unset TASKERS_LAST_META_TITLE
+  unset TASKERS_LAST_META_COMMAND
   unset TASKERS_LAST_META_AGENT_ACTIVE
 }
 
@@ -203,6 +207,7 @@ taskers__preexec() {
   agent=$(taskers__classify_command "$1" || true)
   if [[ -n "$agent" ]]; then
     export TASKERS_ACTIVE_AGENT_KIND=$agent
+    export TASKERS_ACTIVE_AGENT_COMMAND=$1
     taskers__invalidate_metadata_cache
     taskers__emit_metadata_if_changed
   fi
@@ -211,6 +216,7 @@ taskers__preexec() {
 taskers__precmd() {
   if [[ -n "${TASKERS_ACTIVE_AGENT_KIND:-}" ]]; then
     unset TASKERS_ACTIVE_AGENT_KIND
+    unset TASKERS_ACTIVE_AGENT_COMMAND
     taskers__invalidate_metadata_cache
   fi
 

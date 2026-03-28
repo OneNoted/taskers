@@ -6738,6 +6738,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )

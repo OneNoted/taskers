@@ -60,6 +60,8 @@ enum Command {
         agent: Option<String>,
         #[arg(long)]
         agent_active: Option<bool>,
+        #[arg(long)]
+        command: Option<String>,
         #[arg(long, hide = true)]
         source: Option<String>,
     },
@@ -1138,6 +1140,7 @@ pub async fn run() -> anyhow::Result<()> {
             branch,
             agent,
             agent_active,
+            command,
             source,
         } => {
             let workspace_id = workspace
@@ -1154,6 +1157,7 @@ pub async fn run() -> anyhow::Result<()> {
                 || branch.is_some()
                 || agent.is_some()
                 || agent_active.is_some()
+                || command.is_some()
             {
                 Some(taskers_domain::SignalPaneMetadata {
                     title,
@@ -1164,6 +1168,7 @@ pub async fn run() -> anyhow::Result<()> {
                     ports: Vec::new(),
                     agent_kind: agent,
                     agent_active,
+                    agent_command: command,
                 })
             } else {
                 None
@@ -2954,6 +2959,7 @@ async fn emit_agent_hook(
                 | CliSignalKind::WaitingInput
                 | CliSignalKind::Notification
         )),
+        agent_command: None,
     });
     let normalized_message = message
         .as_deref()

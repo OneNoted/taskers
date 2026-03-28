@@ -13,6 +13,8 @@ pub struct SignalPaneMetadata {
     pub agent_kind: Option<String>,
     #[serde(default)]
     pub agent_active: Option<bool>,
+    #[serde(default)]
+    pub agent_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -193,6 +193,7 @@ fn parse_taskers_frame(frame: &str) -> Option<ParsedSignal> {
             ports: ports.unwrap_or_default(),
             agent_kind,
             agent_active,
+            agent_command: None,
         })
     } else {
         None

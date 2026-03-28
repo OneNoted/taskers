@@ -178,6 +178,8 @@ pub struct PaneMetadata {
     #[serde(default)]
     pub agent_active: bool,
     #[serde(default)]
+    pub agent_command: Option<String>,
+    #[serde(default)]
     pub agent_state: Option<WorkspaceAgentState>,
     #[serde(default)]
     pub latest_agent_message: Option<String>,
@@ -218,6 +220,15 @@ pub struct SurfaceAgentProcess {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterruptedAgentResume {
+    pub kind: String,
+    pub title: String,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub captured_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SurfaceRecord {
     pub id: SurfaceId,
     pub kind: PaneKind,
@@ -229,6 +240,8 @@ pub struct SurfaceRecord {
     pub attention: AttentionState,
     pub session_id: SessionId,
     pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub interrupted_agent_resume: Option<InterruptedAgentResume>,
 }
 
 impl SurfaceRecord {
@@ -242,6 +255,7 @@ impl SurfaceRecord {
             attention: AttentionState::Normal,
             session_id: SessionId::new(),
             command: None,
+            interrupted_agent_resume: None,
         }
     }
 }
@@ -2651,6 +2665,8 @@ impl AppModel {
                 surface.metadata.git_branch = metadata.git_branch.clone();
                 surface.metadata.ports = metadata.ports.clone();
                 surface.metadata.agent_kind = normalized_agent_kind(metadata.agent_kind.as_deref());
+                surface.metadata.agent_command =
+                    normalized_agent_command(metadata.agent_command.as_deref());
                 if let Some(agent_active) = metadata.agent_active {
                     surface.metadata.agent_active = agent_active;
                 }
@@ -2658,6 +2674,7 @@ impl AppModel {
                     surface.agent_process = None;
                     surface.agent_session = None;
                     surface.metadata.agent_state = None;
+                    surface.metadata.agent_command = None;
                     surface.metadata.latest_agent_message = None;
                     surface.metadata.last_signal_at = None;
                     surface.attention = AttentionState::Normal;
@@ -2734,6 +2751,7 @@ impl AppModel {
                 surface.agent_process = None;
                 surface.agent_session = None;
                 surface.attention = AttentionState::Normal;
+                surface.metadata.agent_command = None;
                 surface.metadata.agent_state = None;
                 surface.metadata.latest_agent_message = None;
                 surface.metadata.last_signal_at = None;
@@ -3072,6 +3090,7 @@ impl AppModel {
             surface.agent_session = None;
             surface.attention = AttentionState::Normal;
             surface.metadata.agent_active = false;
+            surface.metadata.agent_command = None;
             surface.metadata.agent_state = None;
             surface.metadata.agent_title = None;
             surface.metadata.agent_kind = None;
@@ -3142,6 +3161,7 @@ impl AppModel {
         surface.agent_session = None;
         surface.attention = AttentionState::Normal;
         surface.metadata.agent_active = surface.agent_process.is_some();
+        surface.metadata.agent_command = None;
         surface.metadata.agent_state = None;
         if surface.agent_process.is_none() {
             surface.metadata.agent_title = None;
@@ -3150,6 +3170,141 @@ impl AppModel {
         surface.metadata.latest_agent_message = None;
         surface.metadata.last_signal_at = None;
 
+        Ok(())
+    }
+
+    pub fn recover_interrupted_agent_resumes(&mut self) -> usize {
+        let mut recovered = 0;
+
+        for workspace in self.workspaces.values_mut() {
+            let mut pending_notifications = Vec::new();
+            for pane in workspace.panes.values_mut() {
+                for surface in pane.surfaces.values_mut() {
+                    if surface.kind != PaneKind::Terminal {
+                        continue;
+                    }
+                    if surface.interrupted_agent_resume.is_some() {
+                        continue;
+                    }
+
+                    let process = surface.agent_process.as_ref().cloned();
+                    let session = surface.agent_session.as_ref().cloned();
+                    if process.is_none() && session.is_none() {
+                        continue;
+                    }
+
+                    let agent_kind = process
+                        .as_ref()
+                        .map(|value| value.kind.clone())
+                        .or_else(|| session.as_ref().map(|value| value.kind.clone()));
+                    let agent_title = process
+                        .as_ref()
+                        .map(|value| value.title.clone())
+                        .or_else(|| session.as_ref().map(|value| value.title.clone()))
+                        .or_else(|| surface.metadata.agent_title.clone());
+                    let captured_at = process
+                        .as_ref()
+                        .map(|value| value.started_at)
+                        .or_else(|| session.as_ref().map(|value| value.updated_at))
+                        .unwrap_or_else(OffsetDateTime::now_utc);
+                    let command = normalized_agent_command(surface.metadata.agent_command.as_deref());
+
+                    surface.agent_process = None;
+                    surface.agent_session = None;
+                    surface.metadata.agent_active = false;
+                    surface.metadata.agent_state = None;
+                    surface.metadata.latest_agent_message = None;
+                    surface.metadata.last_signal_at = None;
+                    surface.attention = AttentionState::Normal;
+
+                    let Some(command) = command else {
+                        surface.metadata.agent_command = None;
+                        surface.metadata.agent_title = None;
+                        surface.metadata.agent_kind = None;
+                        continue;
+                    };
+                    let Some(kind) = agent_kind else {
+                        surface.metadata.agent_command = None;
+                        surface.metadata.agent_title = None;
+                        surface.metadata.agent_kind = None;
+                        continue;
+                    };
+
+                    let title = agent_title.unwrap_or_else(|| agent_display_title(&kind));
+                    surface.metadata.agent_kind = Some(kind.clone());
+                    surface.metadata.agent_title = Some(title.clone());
+                    surface.metadata.agent_command = Some(command.clone());
+                    surface.attention = AttentionState::WaitingInput;
+                    surface.interrupted_agent_resume = Some(InterruptedAgentResume {
+                        kind: kind.clone(),
+                        title: title.clone(),
+                        command,
+                        cwd: surface.metadata.cwd.clone(),
+                        captured_at,
+                    });
+                    pending_notifications.push(NotificationItem {
+                        id: NotificationId::new(),
+                        pane_id: pane.id,
+                        surface_id: surface.id,
+                        kind: SignalKind::WaitingInput,
+                        state: AttentionState::WaitingInput,
+                        title: Some(title),
+                        subtitle: Some("Interrupted agent".into()),
+                        external_id: Some(interrupted_agent_resume_external_id(surface.id)),
+                        message:
+                            "Taskers closed while this agent was still running. Open the pane to run it again."
+                                .into(),
+                        created_at: OffsetDateTime::now_utc(),
+                        read_at: None,
+                        cleared_at: None,
+                        desktop_delivery: NotificationDeliveryState::Pending,
+                    });
+                    recovered += 1;
+                }
+            }
+            for notification in pending_notifications {
+                workspace.upsert_notification(notification);
+            }
+        }
+
+        recovered
+    }
+
+    pub fn dismiss_interrupted_agent_resume(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let pane = workspace
+            .panes
+            .get_mut(&pane_id)
+            .ok_or(DomainError::PaneNotInWorkspace {
+                workspace_id,
+                pane_id,
+            })?;
+        let surface = pane
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or(DomainError::SurfaceNotInPane {
+                workspace_id,
+                pane_id,
+                surface_id,
+            })?;
+
+        surface.interrupted_agent_resume = None;
+        surface.metadata.agent_command = None;
+        surface.metadata.agent_title = None;
+        surface.metadata.agent_kind = None;
+        surface.attention = AttentionState::Normal;
+        workspace.notifications.retain(|item| {
+            item.external_id.as_deref()
+                != Some(interrupted_agent_resume_external_id(surface_id).as_str())
+        });
         Ok(())
     }
 
@@ -4009,6 +4164,17 @@ fn normalized_agent_kind(agent_kind: Option<&str>) -> Option<String> {
         "claude code" | "claude-code" => Some("claude".into()),
         other => Some(other.to_string()),
     }
+}
+
+fn normalized_agent_command(command: Option<&str>) -> Option<String> {
+    command
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn interrupted_agent_resume_external_id(surface_id: SurfaceId) -> String {
+    format!("interrupted-agent-resume:{surface_id}")
 }
 
 fn agent_display_title(agent_kind: &str) -> String {
@@ -5396,6 +5562,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -5442,6 +5609,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -5464,6 +5632,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(false),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -5558,6 +5727,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -5597,6 +5767,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(false),
+                        agent_command: None,
                     }),
                     timestamp: stale_timestamp,
                 },
@@ -5620,6 +5791,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("shell".into()),
                         agent_active: Some(false),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -5677,6 +5849,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -5731,6 +5904,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -5753,6 +5927,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(false),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -5818,6 +5993,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -6263,6 +6439,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )
@@ -6324,6 +6501,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                     timestamp: OffsetDateTime::now_utc(),
                 },
@@ -6337,6 +6515,104 @@ mod tests {
             .expect("surface record");
         assert!(surface.agent_session.is_none());
         assert_eq!(surface.attention, AttentionState::WaitingInput);
+    }
+
+    #[test]
+    fn recover_interrupted_agent_resume_converts_live_agent_into_resume_offer() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+
+        model
+            .start_surface_agent_session(workspace_id, pane_id, surface_id, "codex".into())
+            .expect("start agent");
+        model
+            .apply_surface_signal(
+                workspace_id,
+                pane_id,
+                surface_id,
+                SignalEvent::with_metadata(
+                    "shell",
+                    SignalKind::Metadata,
+                    None,
+                    Some(SignalPaneMetadata {
+                        title: Some("codex :: taskers".into()),
+                        agent_title: Some("Codex".into()),
+                        cwd: Some("/tmp/taskers".into()),
+                        repo_name: Some("taskers".into()),
+                        git_branch: Some("main".into()),
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                        agent_command: Some("codex --model gpt-5".into()),
+                    }),
+                ),
+            )
+            .expect("metadata signal applied");
+
+        assert_eq!(model.recover_interrupted_agent_resumes(), 1);
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .expect("surface");
+        let resume = surface
+            .interrupted_agent_resume
+            .as_ref()
+            .expect("resume offer");
+        assert_eq!(resume.kind, "codex");
+        assert_eq!(resume.title, "Codex");
+        assert_eq!(resume.command, "codex --model gpt-5");
+        assert_eq!(resume.cwd.as_deref(), Some("/tmp/taskers"));
+        assert!(surface.agent_process.is_none());
+        assert!(surface.agent_session.is_none());
+        assert_eq!(surface.attention, AttentionState::WaitingInput);
+        assert_eq!(surface.metadata.agent_active, false);
+        assert_eq!(
+            model
+                .activity_items()
+                .iter()
+                .any(|item| item.surface_id == surface_id),
+            true
+        );
+    }
+
+    #[test]
+    fn recover_interrupted_agent_resume_clears_stale_agent_without_command() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+
+        model
+            .start_surface_agent_session(workspace_id, pane_id, surface_id, "codex".into())
+            .expect("start agent");
+
+        assert_eq!(model.recover_interrupted_agent_resumes(), 0);
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .expect("surface");
+        assert!(surface.interrupted_agent_resume.is_none());
+        assert!(surface.agent_process.is_none());
+        assert!(surface.agent_session.is_none());
+        assert_eq!(surface.metadata.agent_command, None);
+        assert_eq!(surface.metadata.agent_kind, None);
+        assert_eq!(surface.attention, AttentionState::Normal);
     }
 
     #[test]
