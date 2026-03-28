@@ -2169,17 +2169,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
-]
-
-[[package]]
 name = "shared_library"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2402,14 +2391,28 @@ name = "taskers"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "axum",
+ "clap",
+ "dioxus",
+ "dioxus-liveview",
+ "gtk4",
+ "libadwaita",
  "serde",
  "serde_json",
- "sha2",
- "tar",
+ "taskers-cli",
+ "taskers-control",
+ "taskers-core",
+ "taskers-domain",
+ "taskers-ghostty",
+ "taskers-host",
  "taskers-paths",
+ "taskers-runtime",
+ "taskers-shell",
+ "taskers-shell-core",
  "tempfile",
- "ureq",
- "xz2",
+ "time",
+ "tokio",
+ "webkit6",
 ]
 
 [[package]]
@@ -2482,33 +2485,6 @@ dependencies = [
  "thiserror 2.0.18",
  "ureq",
  "xz2",
-]
-
-[[package]]
-name = "taskers-gtk"
-version = "0.3.1"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "dioxus",
- "dioxus-liveview",
- "gtk4",
- "libadwaita",
- "serde",
- "serde_json",
- "taskers-control",
- "taskers-core",
- "taskers-domain",
- "taskers-ghostty",
- "taskers-host",
- "taskers-paths",
- "taskers-runtime",
- "taskers-shell",
- "taskers-shell-core",
- "time",
- "tokio",
- "webkit6",
 ]
 
 [[package]]

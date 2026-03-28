@@ -30,32 +30,19 @@ cargo test
 - Build the mainline app and run the headless smoke:
 
 ```bash
-cargo build -p taskers-gtk --bin taskers-gtk
+cargo build -p taskers --bin taskers --bin taskers-gtk
 TASKERS_TERMINAL_BACKEND=mock \
   bash scripts/headless-smoke.sh \
-  ./target/debug/taskers-gtk \
+  ./target/debug/taskers \
   --smoke-script baseline \
   --diagnostic-log stderr \
   --quit-after-ms 5000
 ```
 
-- Build the Linux bundle and verify the published launcher path:
+- Verify the installed Linux package layout:
 
 ```bash
-bash scripts/build_linux_bundle.sh
 bash scripts/smoke_linux_release_launcher.sh
-```
-
-The output asset name must match:
-
-```text
-taskers-linux-bundle-v<version>-<target>.tar.xz
-```
-
-- Build the release manifest from the generated assets:
-
-```bash
-python3 scripts/build_release_manifest.py
 ```
 
 - Dry-run the leaf crates that do not depend on unpublished workspace siblings:
@@ -83,10 +70,8 @@ cargo run -p taskers-cli -- notify --help
 
 - Push the release tag so GitHub Actions can assemble the assets and attach them to a draft GitHub release.
 - Confirm the draft release tagged `v<version>` contains:
-  - `taskers-manifest-v<version>.json`
-  - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
   - `taskers-ghostty-runtime-v<version>-x86_64-unknown-linux-gnu.tar.xz`
-- Publish the GitHub release so the launcher assets are publicly downloadable before publishing the crates.
+- Publish the GitHub release so the Ghostty runtime asset is publicly downloadable before publishing the crates.
 - Publish the crates to crates.io in dependency order:
 
 ```bash
@@ -101,21 +86,22 @@ cargo publish -p taskers
 
 ## 4. Post-Publish Check
 
-- Verify the Linux launcher install:
+- Verify the Linux install:
 
 ```bash
+sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev
 cargo install taskers --locked
 taskers
 ```
 
-- Confirm the published Linux launcher downloads the exact version-matched bundle on first launch.
+- Confirm the published Linux install builds the real app binaries directly and only bootstraps the exact version-matched Ghostty runtime on first launch.
 - Confirm `cargo install taskers-cli --bin taskersctl --locked` still works as the standalone helper path.
-- Confirm `cargo install taskers --locked` on macOS fails with the Linux-only guidance from the launcher crate.
+- Confirm `cargo install taskers --locked` on macOS fails with the Linux-only guidance from the published app package.
 
 For dev-desktop testing against the local checkout after a release pass:
 
 ```bash
-bash scripts/install-dev-app.sh
+cargo install --path crates/taskers-app --force
 ```
 
-That reinstalls the repo-local app into Cargo's bin directory and leaves desktop integration to the installed `taskers` launcher.
+That reinstalls the repo-local app into Cargo's bin directory as the real `taskers` package.

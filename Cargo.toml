@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/taskers-app",
-    "crates/taskers-launcher",
     "crates/taskers-core",
     "crates/taskers-cli",
     "crates/taskers-control",
@@ -48,6 +47,7 @@ uuid = { version = "1.22.0", features = ["serde", "v7"] }
 webkit6 = { version = "0.6.1", features = ["v2_50"] }
 xz2 = "0.1"
 taskers-core = { version = "0.3.1", path = "crates/taskers-core" }
+taskers-cli = { version = "0.3.1", path = "crates/taskers-cli" }
 taskers-control = { version = "0.3.1", path = "crates/taskers-control" }
 taskers-domain = { version = "0.3.1", path = "crates/taskers-domain" }
 taskers-ghostty = { version = "0.3.1", path = "crates/taskers-ghostty" }

@@ -23,13 +23,16 @@ is kept under `taskers-old/` for reference only.
 Linux (`x86_64-unknown-linux-gnu`):
 
 ```bash
+sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev
 cargo install taskers --locked
 taskers
 ```
 
-The first launch downloads the exact version-matched Linux bundle from the
-tagged GitHub release. The Linux app requires GTK4/libadwaita plus the host
-WebKitGTK 6.0 runtime.
+`cargo install taskers` builds and installs the real Linux app binaries
+directly. The first launch only bootstraps the version-matched Ghostty runtime
+assets when needed. The Linux app requires GTK4/libadwaita plus the host
+WebKitGTK 6.0 development packages at install time and the WebKitGTK 6.0
+runtime at launch time.
 
 Mainline macOS support is currently not shipped from this repo root.
 
@@ -86,12 +89,13 @@ sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-d
 Install the app into Cargo's bin directory:
 
 ```bash
-bash scripts/install-dev-app.sh
+cargo install --path crates/taskers-app --force
 ```
 
-Run the local GTK host from there:
+Run the installed launcher or the GTK host directly:
 
 ```bash
+taskers
 taskers-gtk
 ```
 
@@ -100,7 +104,7 @@ Run the headless baseline smoke:
 ```bash
 TASKERS_TERMINAL_BACKEND=mock \
 bash scripts/headless-smoke.sh \
-  "$(command -v taskers-gtk)" \
+  "$(command -v taskers)" \
   --smoke-script baseline \
   --diagnostic-log stderr \
   --quit-after-ms 5000

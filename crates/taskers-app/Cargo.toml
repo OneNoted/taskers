@@ -1,13 +1,16 @@
 [package]
-name = "taskers-gtk"
-description = "GTK host for the mainline Taskers workspace shell."
+name = "taskers"
+description = "Linux Taskers app and launcher."
 edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 readme = "../../README.md"
 repository.workspace = true
 version.workspace = true
-publish = false
+
+[[bin]]
+name = "taskers"
+path = "src/bin/taskers.rs"
 
 [[bin]]
 name = "taskers-gtk"
@@ -27,6 +30,7 @@ dioxus-liveview.workspace = true
 gtk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+taskers-cli.workspace = true
 taskers-control.workspace = true
 taskers-core.workspace = true
 taskers-domain.workspace = true
@@ -39,3 +43,6 @@ taskers-shell-core.workspace = true
 time.workspace = true
 tokio.workspace = true
 webkit6.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

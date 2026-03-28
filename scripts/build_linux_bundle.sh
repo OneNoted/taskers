@@ -18,8 +18,7 @@ trap cleanup EXIT
 
 (
   cd "$repo_root"
-  cargo build --release -p taskers-gtk --bin taskers-gtk
-  cargo build --release -p taskers-cli --bin taskersctl
+  cargo build --release -p taskers --bin taskers --bin taskers-gtk --bin taskersctl
 )
 
 (

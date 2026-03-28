@@ -1,3 +1,8 @@
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+compile_error!(
+    "taskers on crates.io currently supports x86_64 Linux only. Mainline macOS support is not shipped from this repo root."
+);
+
 use adw::prelude::*;
 use anyhow::{Context, Result};
 use axum::{Router, extract::ws::WebSocketUpgrade, response::Html, routing::get};

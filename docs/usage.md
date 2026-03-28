@@ -129,7 +129,7 @@ taskersctl debug terminal render-stats
 If you are testing repo-local changes, install the app into Cargo's bin directory:
 
 ```bash
-bash scripts/install-dev-app.sh
+cargo install --path crates/taskers-app --force
 ```
 
-That reinstalls the local app into Cargo's install root, refreshes `taskers-gtk` and `taskersctl`, and asks the installed `taskers` launcher to refresh its desktop integration when available.
+That installs `taskers`, `taskers-gtk`, and `taskersctl` into Cargo's install root. Desktop integration is refreshed by the installed `taskers` binary on launch.
