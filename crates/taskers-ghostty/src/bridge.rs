@@ -99,6 +99,12 @@ impl GhosttyHost {
                         .map_err(|_| GhosttyError::InvalidString("env"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let embedded_terminal_appearance =
+                CString::new(match options.embedded_terminal_appearance {
+                    crate::backend::EmbeddedTerminalAppearance::Taskers => "taskers",
+                    crate::backend::EmbeddedTerminalAppearance::Ghostty => "ghostty",
+                })
+                .map_err(|_| GhosttyError::InvalidString("embedded_terminal_appearance"))?;
             let env_entry_ptrs = env_entries
                 .iter()
                 .map(|value| value.as_ptr())
@@ -116,6 +122,7 @@ impl GhosttyHost {
                     env_entry_ptrs.as_ptr()
                 },
                 env_count: env_entry_ptrs.len(),
+                embedded_terminal_appearance: embedded_terminal_appearance.as_ptr(),
             };
 
             let raw = (bridge.host_new)(&host_options);
@@ -374,6 +381,7 @@ struct taskers_ghostty_host_options_s {
     command_argc: usize,
     env_entries: *const *const c_char,
     env_count: usize,
+    embedded_terminal_appearance: *const c_char,
 }
 
 #[cfg(taskers_ghostty_bridge)]

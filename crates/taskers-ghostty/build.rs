@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt/gtk/Surface.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt/gtk/class/surface.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/build/SharedDeps.zig");
+    println!("cargo:rerun-if-changed=../../vendor/ghostty/src/os/resourcesdir.zig");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;

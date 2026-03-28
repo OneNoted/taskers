@@ -38,6 +38,14 @@ pub const ResourcesDir = struct {
 /// This is highly Ghostty-specific and can likely be generalized at
 /// some point but we can cross that bridge if we ever need to.
 pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
+    if (taskersResourcesDir(alloc)) |dir| {
+        std.log.info("using Taskers Ghostty resources dir: {s}", .{dir});
+        return .{ .app_path = dir };
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
     // Use the GHOSTTY_RESOURCES_DIR environment variable in release builds.
     //
     // In debug builds we try using terminfo detection first instead, since
@@ -111,6 +119,18 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     }
 
     return .{};
+}
+
+fn taskersResourcesDir(alloc: Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(alloc, "TASKERS_GHOSTTY_RUNTIME_DIR")) |dir| {
+        if (dir.len > 0) return dir;
+        alloc.free(dir);
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    return std.process.getEnvVarOwned(alloc, "GHOSTTY_RESOURCES_DIR");
 }
 
 /// Little helper to check if the "base/sub/suffix" directory exists and

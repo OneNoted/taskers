@@ -138,23 +138,17 @@ pub fn configure_runtime_environment() {
     }
 
     if let Some(path) = explicit_runtime_dir().filter(|path| path.exists()) {
-        unsafe {
-            env::set_var("GHOSTTY_RESOURCES_DIR", &path);
-        }
+        set_runtime_environment_vars(&path);
         return;
     }
 
     if let Some(path) = build_runtime_resources_dir() {
-        unsafe {
-            env::set_var("GHOSTTY_RESOURCES_DIR", &path);
-        }
+        set_runtime_environment_vars(&path);
         return;
     }
 
     if let Some(path) = default_installed_runtime_dir().filter(|path| path.exists()) {
-        unsafe {
-            env::set_var("GHOSTTY_RESOURCES_DIR", &path);
-        }
+        set_runtime_environment_vars(&path);
     }
 }
 
@@ -265,6 +259,13 @@ fn build_runtime_resources_dir() -> Option<PathBuf> {
         .filter(|path| path.exists())
 }
 
+fn set_runtime_environment_vars(path: &Path) {
+    unsafe {
+        env::set_var("GHOSTTY_RESOURCES_DIR", path);
+        env::set_var("TASKERS_GHOSTTY_RUNTIME_DIR", path);
+    }
+}
+
 fn installed_runtime_dir() -> Option<PathBuf> {
     explicit_runtime_dir().or_else(default_installed_runtime_dir)
 }
@@ -372,6 +373,7 @@ mod tests {
                 "TASKERS_GHOSTTY_RUNTIME_BUNDLE_PATH",
                 Some(bundle_path.as_os_str()),
             ),
+            ("TASKERS_DISABLE_GHOSTTY_RUNTIME_BOOTSTRAP", None),
             ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.as_os_str())),
             ("TASKERS_GHOSTTY_BRIDGE_PATH", None),
             ("GHOSTTY_RESOURCES_DIR", None),
@@ -410,6 +412,29 @@ mod tests {
             Some(runtime_dir.join("lib").join("libtaskers_ghostty_bridge.so"))
         );
         assert_eq!(runtime_resources_dir(), Some(runtime_dir));
+    }
+
+    #[test]
+    fn configure_runtime_environment_uses_explicit_runtime_dir() {
+        let temp = tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+
+        let _guard = EnvGuard::set([
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.as_os_str())),
+            ("GHOSTTY_RESOURCES_DIR", None),
+        ]);
+
+        super::configure_runtime_environment();
+
+        assert_eq!(
+            env::var_os("GHOSTTY_RESOURCES_DIR").map(std::path::PathBuf::from),
+            Some(runtime_dir.clone())
+        );
+        assert_eq!(
+            env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR").map(std::path::PathBuf::from),
+            Some(runtime_dir)
+        );
     }
 
     fn write_bundle(source_dir: &Path, bundle_path: &Path) {

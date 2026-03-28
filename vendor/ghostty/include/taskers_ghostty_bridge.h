@@ -12,6 +12,7 @@ typedef struct {
   size_t command_argc;
   const char *const *env_entries;
   size_t env_count;
+  const char *embedded_terminal_appearance;
 } taskers_ghostty_host_options_s;
 
 typedef struct {

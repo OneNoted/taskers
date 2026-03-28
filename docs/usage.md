@@ -31,15 +31,23 @@ Each pane can hold one or more surface tabs of either kind. The active surface t
 
 ## Embedded Ghostty Config
 
-On the GTK/Linux shell, embedded terminal panes start from the user's normal Ghostty config file and inherit most visual and terminal behavior settings from there.
-
-Taskers still pins a small set of embedded-pane invariants:
+On the GTK/Linux shell, embedded terminal panes always keep a few Taskers-owned invariants:
 
 - the launch command stays Taskers-owned
 - Ghostty shell integration stays disabled because Taskers provides its own shell wrapper
 - Ghostty Linux cgroup settings stay disabled for embedded panes
 
-That means Ghostty settings such as fonts, theme, colors, cursor behavior, scrollback, and window padding should carry over, while shell-launch behavior remains controlled by Taskers.
+By default, Taskers also keeps the embedded terminal background and pane padding on the Taskers visual contract, even if the user's Ghostty theme differs.
+
+If you want embedded panes to inherit your Ghostty theme and padding instead, add this to Taskers' config JSON:
+
+```json
+{
+  "embedded_terminal_appearance": "ghostty"
+}
+```
+
+With that opt-in enabled, Ghostty settings such as fonts, theme, colors, cursor behavior, scrollback, and window padding carry over into embedded Taskers panes.
 
 ## A Typical Session
 

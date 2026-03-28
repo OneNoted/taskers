@@ -26,7 +26,10 @@ use taskers_control::{
 };
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
-use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
+use taskers_ghostty::{
+    BackendChoice, EmbeddedTerminalAppearance, GhosttyHost, GhosttyHostOptions,
+    ensure_runtime_installed,
+};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
 use taskers_shell_core::{
@@ -121,6 +124,8 @@ struct TaskersConfig {
     selected_shortcut_preset: String,
     #[serde(default)]
     notification_preferences: NotificationPreferencesConfig,
+    #[serde(default)]
+    embedded_terminal_appearance: EmbeddedTerminalAppearance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +146,7 @@ impl Default for TaskersConfig {
             selected_theme_id: default_theme_id(),
             selected_shortcut_preset: default_shortcut_preset_id(),
             notification_preferences: NotificationPreferencesConfig::default(),
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
         }
     }
 }
@@ -224,7 +230,7 @@ impl TaskersConfig {
         ShortcutPreset::parse(&self.selected_shortcut_preset).unwrap_or(ShortcutPreset::PowerUser)
     }
 
-    fn from_settings(settings: &taskers_shell_core::SettingsSnapshot) -> Self {
+    fn from_settings(settings: &taskers_shell_core::SettingsSnapshot, current: &Self) -> Self {
         Self {
             selected_theme_id: settings.selected_theme_id.clone(),
             selected_shortcut_preset: settings
@@ -236,6 +242,7 @@ impl TaskersConfig {
             notification_preferences: NotificationPreferencesConfig::from_snapshot(
                 settings.notification_preferences,
             ),
+            embedded_terminal_appearance: current.embedded_terminal_appearance,
         }
     }
 }
@@ -701,8 +708,9 @@ fn persist_settings_if_needed(
     diagnostics: Option<&DiagnosticsWriter>,
 ) {
     let snapshot = core.snapshot();
-    let next = TaskersConfig::from_settings(&snapshot.settings);
-    if *persisted_config.borrow() == next {
+    let current = persisted_config.borrow().clone();
+    let next = TaskersConfig::from_settings(&snapshot.settings, &current);
+    if current == next {
         return;
     }
 
@@ -858,6 +866,54 @@ mod notification_tests {
     }
 }
 
+#[cfg(test)]
+mod config_tests {
+    use super::{NotificationPreferencesConfig, TaskersConfig};
+    use taskers_ghostty::EmbeddedTerminalAppearance;
+    use taskers_shell_core::{NotificationPreferencesSnapshot, SettingsSnapshot};
+
+    #[test]
+    fn taskers_config_defaults_to_taskers_embedded_terminal_appearance() {
+        assert_eq!(
+            TaskersConfig::default().embedded_terminal_appearance,
+            EmbeddedTerminalAppearance::Taskers
+        );
+    }
+
+    #[test]
+    fn taskers_config_from_settings_preserves_embedded_terminal_appearance() {
+        let current = TaskersConfig {
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Ghostty,
+            ..TaskersConfig::default()
+        };
+
+        let settings = SettingsSnapshot {
+            selected_theme_id: "gruvbox-dark".into(),
+            theme_options: Vec::new(),
+            shortcut_presets: Vec::new(),
+            shortcuts: Vec::new(),
+            notification_preferences: NotificationPreferencesSnapshot {
+                alerts_on_waiting: false,
+                alerts_on_error: true,
+                alerts_on_completed: true,
+                suppress_when_visible: false,
+            },
+        };
+
+        let next = TaskersConfig::from_settings(&settings, &current);
+
+        assert_eq!(next.selected_theme_id, "gruvbox-dark");
+        assert_eq!(
+            next.embedded_terminal_appearance,
+            EmbeddedTerminalAppearance::Ghostty
+        );
+        assert_eq!(
+            next.notification_preferences,
+            NotificationPreferencesConfig::from_snapshot(settings.notification_preferences)
+        );
+    }
+}
+
 fn is_modifier_key(key: gdk::Key) -> bool {
     matches!(
         key,
@@ -949,15 +1005,24 @@ fn connect_navigation_shortcuts(
 }
 
 fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
-    let runtime = resolve_runtime_bootstrap();
-    let mut startup_notes = runtime.startup_notes;
-    let config = match TaskersConfig::load() {
-        Ok(config) => config,
-        Err(error) => {
-            startup_notes.push(format!("Taskers config unavailable: {error}"));
-            TaskersConfig::default()
-        }
+    let (config, config_note) = match TaskersConfig::load() {
+        Ok(config) => (config, None),
+        Err(error) => (
+            TaskersConfig::default(),
+            Some(format!("Taskers config unavailable: {error}")),
+        ),
     };
+    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
+    let mut startup_notes = runtime.startup_notes;
+    if let Some(note) = config_note {
+        if let Some(diagnostics) = diagnostics {
+            log_diagnostic(
+                Some(diagnostics),
+                DiagnosticRecord::new(DiagnosticCategory::Startup, None, note.clone()),
+            );
+        }
+        startup_notes.push(note);
+    }
     let session_path = default_session_path();
     let initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
         format!(
@@ -1033,7 +1098,9 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
     })
 }
 
-fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
+fn resolve_runtime_bootstrap(
+    embedded_terminal_appearance: EmbeddedTerminalAppearance,
+) -> RuntimeBootstrap {
     scrub_inherited_terminal_env();
 
     let mut startup_notes = Vec::new();
@@ -1065,7 +1132,8 @@ fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
         .env
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
 
-    let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+    let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch)
+        .with_embedded_terminal_appearance(embedded_terminal_appearance);
 
     RuntimeBootstrap {
         ghostty_runtime,
@@ -1086,7 +1154,8 @@ fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
 }
 
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
-    let runtime = resolve_runtime_bootstrap();
+    let config = TaskersConfig::load().unwrap_or_default();
+    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
     let host = match GhosttyHost::new_with_options(&runtime.host_options) {
         Ok(host) => {
             let _ = host.tick();
@@ -1102,7 +1171,7 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     };
 
     if matches!(mode, GhosttyProbeMode::Surface) {
-        return run_internal_surface_probe(host, runtime.shell_launch, mode);
+        return run_internal_surface_probe(host, runtime.shell_launch, mode, config);
     }
 
     spin_probe_main_context(Duration::from_millis(350));
@@ -1113,6 +1182,7 @@ fn run_internal_surface_probe(
     host: GhosttyHost,
     shell_launch: ShellLaunchSpec,
     mode: GhosttyProbeMode,
+    config: TaskersConfig,
 ) -> glib::ExitCode {
     if !gtk::is_initialized_main_thread() {
         if let Err(error) = gtk::init() {
@@ -1155,6 +1225,9 @@ fn run_internal_surface_probe(
         }
     };
 
+    let selected_theme_id = config.selected_theme_id.clone();
+    let selected_shortcut_preset = config.shortcut_preset();
+    let notification_preferences = config.notification_preferences.to_snapshot();
     let core = SharedCore::bootstrap(BootstrapModel {
         app_state,
         runtime_status: RuntimeStatus {
@@ -1162,9 +1235,9 @@ fn run_internal_surface_probe(
             shell_integration: RuntimeCapability::Ready,
             terminal_host: RuntimeCapability::Ready,
         },
-        selected_theme_id: "dark".into(),
-        selected_shortcut_preset: ShortcutPreset::PowerUser,
-        notification_preferences: NotificationPreferencesSnapshot::default(),
+        selected_theme_id,
+        selected_shortcut_preset,
+        notification_preferences,
     });
     core.set_window_size(PixelSize::new(
         GHOSTTY_PROBE_WINDOW_SIZE_PX,
