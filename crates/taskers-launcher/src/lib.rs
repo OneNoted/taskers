@@ -473,7 +473,7 @@ fn shell_single_quote(path: &Path) -> String {
 
 fn desktop_launch_wrapper_contents(target: &Path) -> String {
     format!(
-        "#!/bin/sh\nset -eu\nlog_dir=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/taskers\"\nmkdir -p \"$log_dir\"\nexec /usr/bin/setsid -f {target} --diagnostic-log \"$log_dir/desktop-launch-diagnostics.log\" >>\"$log_dir/desktop-launch.log\" 2>&1\n",
+        "#!/bin/sh\nset -eu\nlog_dir=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/taskers\"\nmkdir -p \"$log_dir\"\n\nfocus_taskers_window_niri_once() {{\n  command -v niri >/dev/null 2>&1 || return 1\n  command -v jq >/dev/null 2>&1 || return 1\n\n  window_id=\"$(niri msg -j windows 2>/dev/null | jq -r 'first(.[] | select(.app_id == \"dev.taskers.app\") | .id) // empty' 2>/dev/null)\"\n  [ -n \"$window_id\" ] || return 1\n  niri msg action focus-window --id \"$window_id\" >/dev/null 2>&1\n}}\n\nfocus_taskers_window_niri_retry() {{\n  command -v niri >/dev/null 2>&1 || return 1\n  command -v jq >/dev/null 2>&1 || return 1\n\n  (\n    i=0\n    while [ \"$i\" -lt 40 ]; do\n      sleep 0.1\n      focus_taskers_window_niri_once >/dev/null 2>&1 || true\n      i=$((i + 1))\n    done\n  ) >/dev/null 2>&1 &\n}}\n\nif focus_taskers_window_niri_once; then\n  focus_taskers_window_niri_retry || true\n  exit 0\nfi\n\n/usr/bin/setsid -f {target} --diagnostic-log \"$log_dir/desktop-launch-diagnostics.log\" >>\"$log_dir/desktop-launch.log\" 2>&1\nfocus_taskers_window_niri_retry || true\n",
         target = shell_single_quote(target),
     )
 }
@@ -862,6 +862,9 @@ mod tests {
         assert!(contents.contains("desktop-launch-diagnostics.log"));
         assert!(contents.contains("desktop-launch.log"));
         assert!(contents.contains("/usr/bin/setsid -f"));
+        assert!(contents.contains("focus_taskers_window_niri_once"));
+        assert!(contents.contains("focus_taskers_window_niri_retry"));
+        assert!(contents.contains("niri msg action focus-window --id"));
         assert!(contents.contains("'/home/notes/.local/bin/taskers'"));
     }
 }

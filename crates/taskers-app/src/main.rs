@@ -258,29 +258,47 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     let bootstrap = Rc::new(RefCell::new(Some(bootstrap)));
     let hold_guard = Rc::new(RefCell::new(None));
+    // A unique GTK application can receive activate before its first window is
+    // fully presentable. Track launch-in-progress explicitly so detached
+    // desktop-entry startups do not get mistaken for stale no-window instances.
+    let launch_in_progress = Rc::new(Cell::new(true));
     let bootstrap_for_startup = bootstrap.clone();
     let hold_guard_for_startup = hold_guard.clone();
+    let launch_in_progress_for_startup = launch_in_progress.clone();
     let cli_for_startup = cli.clone();
     app.connect_startup(move |app| {
-        *hold_guard_for_startup.borrow_mut() = Some(app.hold());
-        if let Some(bootstrap) = bootstrap_for_startup.borrow_mut().take() {
-            build_ui(
-                app,
-                bootstrap,
-                hold_guard_for_startup.clone(),
-                cli_for_startup.clone(),
-            );
+        ensure_application_hold(app, &hold_guard_for_startup);
+        let Some(bootstrap) = bootstrap_for_startup.borrow_mut().take() else {
+            launch_in_progress_for_startup.set(false);
+            release_application_hold(&hold_guard_for_startup);
+            app.quit();
+            return;
+        };
+
+        if let Err(error) = build_ui_result(
+            app,
+            bootstrap,
+            hold_guard_for_startup.clone(),
+            cli_for_startup.clone(),
+        ) {
+            safe_eprintln(format!("failed to launch Taskers host: {error:?}"));
+            launch_in_progress_for_startup.set(false);
+            release_application_hold(&hold_guard_for_startup);
+            app.quit();
+            return;
         }
+
+        let launch_in_progress = launch_in_progress_for_startup.clone();
+        glib::idle_add_local_once(move || launch_in_progress.set(false));
     });
     app.connect_activate({
         let hold_guard = hold_guard.clone();
+        let launch_in_progress = launch_in_progress.clone();
         move |app| {
-            if present_existing_window(app) {
+            if present_existing_window(app) || launch_in_progress.get() {
                 return;
             }
 
-            // A unique app instance with no windows can absorb desktop relaunches.
-            // Tear it down so the next launch starts a fresh process instead.
             release_application_hold(&hold_guard);
             app.quit();
         }
@@ -309,20 +327,20 @@ fn present_existing_window(app: &adw::Application) -> bool {
     }
 }
 
-fn release_application_hold(hold_guard: &Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>) {
-    if let Ok(mut hold_guard) = hold_guard.try_borrow_mut() {
-        drop(hold_guard.take());
+fn ensure_application_hold(
+    app: &adw::Application,
+    hold_guard: &Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>,
+) {
+    if let Ok(mut hold_guard) = hold_guard.try_borrow_mut()
+        && hold_guard.is_none()
+    {
+        *hold_guard = Some(app.hold());
     }
 }
 
-fn build_ui(
-    app: &adw::Application,
-    bootstrap: BootstrapContext,
-    hold_guard: Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>,
-    cli: Cli,
-) {
-    if let Err(error) = build_ui_result(app, bootstrap, hold_guard, cli) {
-        safe_eprintln(format!("failed to launch Taskers host: {error:?}"));
+fn release_application_hold(hold_guard: &Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>) {
+    if let Ok(mut hold_guard) = hold_guard.try_borrow_mut() {
+        drop(hold_guard.take());
     }
 }
 
