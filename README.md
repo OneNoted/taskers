@@ -83,17 +83,16 @@ On Ubuntu 24.04, install the Linux UI dependencies first:
 sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev xvfb
 ```
 
-Install the app into Cargo's bin directory, then run it from there:
+Install the app into Cargo's bin directory:
 
 ```bash
-cargo install --path crates/taskers-app --force
-taskers-gtk
+bash scripts/install-dev-app.sh
 ```
 
-Point the desktop launcher at that Cargo-bin install:
+Run the local GTK host from there:
 
 ```bash
-bash scripts/install-dev-desktop-entry.sh
+taskers-gtk
 ```
 
 Run the headless baseline smoke:

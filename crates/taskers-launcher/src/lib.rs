@@ -240,12 +240,21 @@ impl ManagedInstallation {
         )?;
 
         let desktop_entry_path = applications_dir.join("dev.taskers.app.desktop");
+        let cargo_bin_home = cargo_bin_home();
+        let legacy_desktop_launcher = cargo_bin_home
+            .as_deref()
+            .map(|path| path.join("taskers-gtk-desktop-launch"));
         let desktop_entry = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/taskers.desktop.in"
         ))
         .replace("{{EXEC}}", &desktop_exec(&desktop_launcher));
-        if should_update_desktop_entry(&desktop_entry_path, &desktop_launcher, &launcher)? {
+        if should_update_desktop_entry(
+            &desktop_entry_path,
+            &desktop_launcher,
+            &launcher,
+            legacy_desktop_launcher.as_deref(),
+        )? {
             fs::write(&desktop_entry_path, desktop_entry)
                 .with_context(|| format!("failed to write {}", applications_dir.display()))?;
         }
@@ -254,6 +263,8 @@ impl ManagedInstallation {
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/taskers.svg")),
         )
         .with_context(|| format!("failed to write {}", icons_dir.display()))?;
+
+        remove_legacy_desktop_integration(legacy_desktop_launcher.as_deref())?;
 
         let notify_path = xdg_bin_home.join("taskers-notify");
         write_executable(
@@ -471,6 +482,7 @@ fn should_update_desktop_entry(
     path: &Path,
     desktop_launcher: &Path,
     launcher: &Path,
+    legacy_desktop_launcher: Option<&Path>,
 ) -> Result<bool> {
     let Ok(existing) = fs::read_to_string(path) else {
         return Ok(true);
@@ -483,11 +495,27 @@ fn should_update_desktop_entry(
         return Ok(true);
     };
 
-    let managed_execs = [desktop_exec(desktop_launcher), desktop_exec(launcher)];
+    let mut managed_execs = vec![desktop_exec(desktop_launcher), desktop_exec(launcher)];
+    if let Some(legacy_desktop_launcher) = legacy_desktop_launcher {
+        managed_execs.push(desktop_exec(legacy_desktop_launcher));
+    }
 
     Ok(managed_execs
         .iter()
         .any(|candidate| candidate == existing_exec))
+}
+
+fn remove_legacy_desktop_integration(legacy_desktop_launcher: Option<&Path>) -> Result<bool> {
+    let Some(legacy_desktop_launcher) = legacy_desktop_launcher else {
+        return Ok(false);
+    };
+
+    if fs::symlink_metadata(legacy_desktop_launcher).is_err() {
+        return Ok(false);
+    }
+
+    remove_path(legacy_desktop_launcher)?;
+    Ok(true)
 }
 
 fn write_executable(path: &Path, contents: &str) -> Result<()> {
@@ -559,9 +587,14 @@ fn launcher_path_looks_installed(current_exe: &Path) -> bool {
 }
 
 fn cargo_bin_home() -> Option<PathBuf> {
-    env::var_os("CARGO_HOME")
+    env::var_os("CARGO_INSTALL_ROOT")
         .map(PathBuf::from)
         .map(|path| path.join("bin"))
+        .or_else(|| {
+            env::var_os("CARGO_HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join("bin"))
+        })
         .or_else(|| {
             env::var_os("HOME")
                 .map(PathBuf::from)
@@ -600,8 +633,8 @@ mod tests {
     use super::{
         ArtifactKind, ManagedInstallation, ReleaseArtifact, ReleaseManifest, bundle_root,
         current_target_triple, default_manifest_url, desktop_exec, desktop_launch_wrapper_contents,
-        launcher_path_looks_installed, path_taskers_executable, sha256_path,
-        should_update_desktop_entry,
+        launcher_path_looks_installed, path_taskers_executable, remove_legacy_desktop_integration,
+        sha256_path, should_update_desktop_entry,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -764,7 +797,8 @@ mod tests {
 
         let launcher = PathBuf::from("/home/notes/.local/bin/taskers");
         assert!(
-            !should_update_desktop_entry(&desktop_entry, &launcher, &launcher).expect("decision"),
+            !should_update_desktop_entry(&desktop_entry, &launcher, &launcher, None)
+                .expect("decision"),
         );
     }
 
@@ -780,26 +814,46 @@ mod tests {
         .expect("desktop entry");
 
         assert!(
-            should_update_desktop_entry(&desktop_entry, &launcher, &launcher).expect("decision")
+            should_update_desktop_entry(&desktop_entry, &launcher, &launcher, None)
+                .expect("decision")
         );
     }
 
     #[test]
-    fn updates_legacy_launcher_desktop_entry() {
+    fn updates_legacy_dev_desktop_entry() {
         let temp = tempdir().expect("tempdir");
         let desktop_entry = temp.path().join("dev.taskers.app.desktop");
         let desktop_launcher = PathBuf::from("/home/notes/.local/bin/taskers-desktop-launch");
-        let launcher = PathBuf::from("/home/notes/.cargo/bin/taskers");
+        let launcher = PathBuf::from("/home/notes/.local/bin/taskers");
+        let legacy_launcher = PathBuf::from("/home/notes/.cargo/bin/taskers-gtk-desktop-launch");
         fs::write(
             &desktop_entry,
-            format!("[Desktop Entry]\nExec={}\n", desktop_exec(&launcher)),
+            format!("[Desktop Entry]\nExec={}\n", desktop_exec(&legacy_launcher)),
         )
         .expect("desktop entry");
 
         assert!(
-            should_update_desktop_entry(&desktop_entry, &desktop_launcher, &launcher)
-                .expect("decision")
+            should_update_desktop_entry(
+                &desktop_entry,
+                &desktop_launcher,
+                &launcher,
+                Some(&legacy_launcher),
+            )
+            .expect("decision")
         );
+    }
+
+    #[test]
+    fn removes_legacy_desktop_wrapper() {
+        let temp = tempdir().expect("tempdir");
+        let cargo_bin_home = temp.path().join("cargo-bin");
+        fs::create_dir_all(&cargo_bin_home).expect("cargo bin dir");
+
+        let legacy_wrapper = cargo_bin_home.join("taskers-gtk-desktop-launch");
+        fs::write(&legacy_wrapper, "#!/bin/sh\n").expect("legacy wrapper");
+
+        assert!(remove_legacy_desktop_integration(Some(&legacy_wrapper)).expect("cleanup"),);
+        assert!(!legacy_wrapper.exists());
     }
 
     #[test]

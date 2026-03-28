@@ -116,12 +116,12 @@ taskersctl debug terminal read-text --tail-lines 40
 taskersctl debug terminal render-stats
 ```
 
-## Desktop Launcher For Development
+## Local Development Install
 
-If you are testing repo-local changes from your desktop environment, install the app into Cargo's bin directory and repoint the launcher there:
+If you are testing repo-local changes, install the app into Cargo's bin directory:
 
 ```bash
-bash scripts/install-dev-desktop-entry.sh
+bash scripts/install-dev-app.sh
 ```
 
-That reinstalls the local app into Cargo's install root and writes a desktop entry that launches that installed binary directly.
+That reinstalls the local app into Cargo's install root, refreshes `taskers-gtk` and `taskersctl`, and asks the installed `taskers` launcher to refresh its desktop integration when available.
