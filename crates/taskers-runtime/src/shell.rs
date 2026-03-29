@@ -522,6 +522,14 @@ fn install_runtime_assets(root: &Path) -> Result<()> {
         false,
     )?;
     write_asset(
+        &root.join("taskers-hooks.zsh"),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        )),
+        false,
+    )?;
+    write_asset(
         &zsh_runtime_dir(root).join(".zshenv"),
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -685,6 +693,7 @@ mod tests {
         assert!(root.join("taskers-shell-wrapper.sh").is_file());
         assert!(root.join("taskers-hooks.bash").is_file());
         assert!(root.join("taskers-hooks.fish").is_file());
+        assert!(root.join("taskers-hooks.zsh").is_file());
         assert!(root.join("taskers-codex-notify.sh").is_file());
         assert!(root.join("taskers-claude-hook.sh").is_file());
         assert!(root.join("taskers-agent-codex.sh").is_file());

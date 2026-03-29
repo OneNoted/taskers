@@ -63,4 +63,22 @@ fi
 echo "installed ${taskers_path}"
 echo "installed ${app_binary_path}"
 echo "installed ${taskersctl_path}"
-echo "desktop entry and terminal launch path now use the directly installed binaries"
+
+resolved_taskers="$(command -v taskers 2>/dev/null || true)"
+if [[ -n "${resolved_taskers}" ]]; then
+  resolved_taskers="$(readlink -f "${resolved_taskers}" 2>/dev/null || printf '%s' "${resolved_taskers}")"
+  if [[ "${resolved_taskers}" != "${taskers_path}" ]]; then
+    echo "warning: plain 'taskers' currently resolves to ${resolved_taskers}, not ${taskers_path}" >&2
+    echo "warning: for repo-local verification, launch ${app_binary_path} directly or prepend ${app_bin_dir} to PATH" >&2
+  fi
+fi
+
+resolved_taskersctl="$(command -v taskersctl 2>/dev/null || true)"
+if [[ -n "${resolved_taskersctl}" ]]; then
+  resolved_taskersctl="$(readlink -f "${resolved_taskersctl}" 2>/dev/null || printf '%s' "${resolved_taskersctl}")"
+  if [[ "${resolved_taskersctl}" != "${taskersctl_path}" ]]; then
+    echo "warning: plain 'taskersctl' currently resolves to ${resolved_taskersctl}, not ${taskersctl_path}" >&2
+  fi
+fi
+
+echo "for repo-local verification, prefer ${app_binary_path}"

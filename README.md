@@ -92,19 +92,23 @@ Install the app into Cargo's bin directory:
 cargo install --path crates/taskers-app --force
 ```
 
-Run the installed launcher or the GTK host directly:
+For repo-local verification, prefer the directly installed GTK host:
 
 ```bash
-taskers
 taskers-gtk
 ```
+
+If plain `taskers` still resolves to `~/.local/bin/taskers`, that is the
+launcher-managed bundle path and can lag behind your repo build. Use
+`taskers-gtk` or the absolute Cargo bin path for feature testing unless you
+intentionally refreshed the launcher-managed release bundle too.
 
 Run the headless baseline smoke:
 
 ```bash
 TASKERS_TERMINAL_BACKEND=mock \
 bash scripts/headless-smoke.sh \
-  "$(command -v taskers)" \
+  "$(command -v taskers-gtk)" \
   --smoke-script baseline \
   --diagnostic-log stderr \
   --quit-after-ms 5000
