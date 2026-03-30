@@ -6,7 +6,9 @@ use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
 use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
 use taskers_runtime::{ShellLaunchSpec, TerminalSessionClient};
 
-use crate::{pane_runtime::RuntimeManager, session_store, tmux_manager::TerminalSessionManager};
+use crate::{
+    pane_runtime::RuntimeManager, session_store, terminal_session_manager::TerminalSessionManager,
+};
 
 #[derive(Clone)]
 pub struct AppState {

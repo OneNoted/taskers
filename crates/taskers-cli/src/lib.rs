@@ -13,7 +13,7 @@ use taskers_domain::{
     PaneMetadataPatch, ProgressState, SignalEvent, SignalKind, SplitAxis, SurfaceId, WorkspaceId,
     WorkspaceLogEntry,
 };
-use taskers_paths::default_tmux_socket_path;
+use taskers_paths::default_terminal_socket_path;
 use taskers_runtime::TerminalSessionClient;
 use time::OffsetDateTime;
 
@@ -2132,7 +2132,7 @@ fn resolve_socket_path(socket: Option<PathBuf>) -> PathBuf {
 fn resolve_terminal_socket_path(socket: Option<PathBuf>) -> PathBuf {
     socket
         .or_else(|| env::var_os("TASKERS_TERMINAL_SOCKET").map(PathBuf::from))
-        .unwrap_or_else(default_tmux_socket_path)
+        .unwrap_or_else(default_terminal_socket_path)
 }
 
 async fn send_control_command(

@@ -3,6 +3,7 @@ use std::{
     env, fs,
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
+    os::unix::io::AsRawFd,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -96,12 +97,24 @@ impl TerminalSessionClient {
         }
     }
 
+    pub fn list_sessions(&self) -> Result<Vec<String>> {
+        let mut stream = self.connect()?;
+        write_request(&mut stream, &SessionRequest::ListSessions)?;
+        match read_event(&mut BufReader::new(stream))? {
+            SessionEvent::SessionList { session_ids } => Ok(session_ids),
+            SessionEvent::Error { message } => Err(anyhow!(message)),
+            other => bail!("unexpected session list response: {other:?}"),
+        }
+    }
+
     pub fn attach_or_create(&self, session_id: &str, shell_args: &[String]) -> Result<()> {
+        let _terminal_mode = TerminalModeGuard::new()?;
+        let (mut cols, mut rows) = terminal_size().unwrap_or((120, 40));
         let mut stream = self.connect()?;
         let attach = SessionRequest::Attach {
             session_id: session_id.into(),
-            cols: 120,
-            rows: 40,
+            cols,
+            rows,
             cwd: env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
@@ -109,59 +122,78 @@ impl TerminalSessionClient {
             env: collect_attach_env(),
         };
         write_request(&mut stream, &attach)?;
+        stream
+            .set_nonblocking(true)
+            .context("failed to set terminal session socket nonblocking")?;
 
-        let read_stream = stream
-            .try_clone()
-            .context("failed to clone session socket")?;
-        let reader = thread::spawn(move || -> Result<()> {
-            let mut reader = BufReader::new(read_stream);
-            let mut stdout = io::stdout().lock();
-            loop {
-                match read_event(&mut reader)? {
-                    SessionEvent::Attached => {}
-                    SessionEvent::Output { data_b64 } => {
-                        let bytes = BASE64
-                            .decode(data_b64)
-                            .context("failed to decode sidecar output")?;
-                        stdout
-                            .write_all(&bytes)
-                            .context("failed to write sidecar output")?;
-                        stdout.flush().ok();
-                    }
-                    SessionEvent::Closed => return Ok(()),
-                    SessionEvent::Error { message } => return Err(anyhow!(message)),
-                    other => bail!("unexpected attach event: {other:?}"),
+        let stdin = io::stdin();
+        let stdin_fd = stdin.as_raw_fd();
+        let socket_fd = stream.as_raw_fd();
+        let mut stdin = stdin.lock();
+        let mut stdout = io::stdout().lock();
+        let mut input_buffer = [0u8; 4096];
+        let mut socket_buffer = Vec::new();
+
+        loop {
+            if let Some((next_cols, next_rows)) = terminal_size() {
+                if next_cols != cols || next_rows != rows {
+                    cols = next_cols;
+                    rows = next_rows;
+                    write_request(&mut stream, &SessionRequest::Resize { cols, rows })?;
                 }
             }
-        });
 
-        let mut write_stream = stream;
-        let writer = thread::spawn(move || -> Result<()> {
-            let mut stdin = io::stdin().lock();
-            let mut buffer = [0u8; 4096];
-            loop {
-                let bytes_read = stdin.read(&mut buffer).context("failed to read stdin")?;
+            let mut pollfds = [
+                libc::pollfd {
+                    fd: stdin_fd,
+                    events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: socket_fd,
+                    events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+                    revents: 0,
+                },
+            ];
+            let poll_result = unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as _, 100) };
+            if poll_result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("terminal session poll failed");
+            }
+
+            if (pollfds[1].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
+                break;
+            }
+            if (pollfds[1].revents & libc::POLLIN) != 0 {
+                if pump_session_events(&mut stream, &mut socket_buffer, &mut stdout)? {
+                    break;
+                }
+            }
+            if (pollfds[0].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
+                let _ = write_request(&mut stream, &SessionRequest::Detach);
+                break;
+            }
+            if (pollfds[0].revents & libc::POLLIN) != 0 {
+                let bytes_read = stdin
+                    .read(&mut input_buffer)
+                    .context("failed to read terminal stdin")?;
                 if bytes_read == 0 {
-                    write_request(&mut write_stream, &SessionRequest::Detach)?;
-                    return Ok(());
+                    let _ = write_request(&mut stream, &SessionRequest::Detach);
+                    break;
                 }
                 write_request(
-                    &mut write_stream,
+                    &mut stream,
                     &SessionRequest::Input {
-                        data_b64: BASE64.encode(&buffer[..bytes_read]),
+                        data_b64: BASE64.encode(&input_buffer[..bytes_read]),
                     },
                 )?;
             }
-        });
+        }
 
-        let write_result = writer
-            .join()
-            .map_err(|_| anyhow!("session writer panicked"))?;
-        let read_result = reader
-            .join()
-            .map_err(|_| anyhow!("session reader panicked"))?;
-        write_result?;
-        read_result
+        Ok(())
     }
 
     fn connect(&self) -> Result<UnixStream> {
@@ -211,6 +243,7 @@ impl TerminalSessionDaemon {
 
         let listener = UnixListener::bind(socket_path)
             .with_context(|| format!("failed to bind {}", socket_path.display()))?;
+        set_private_socket_permissions(socket_path)?;
         for stream in listener.incoming() {
             let stream = match stream {
                 Ok(stream) => stream,
@@ -230,6 +263,7 @@ impl TerminalSessionDaemon {
     }
 
     fn handle_connection(&self, mut stream: UnixStream) -> Result<()> {
+        ensure_peer_is_owner(&stream)?;
         let mut reader = BufReader::new(
             stream
                 .try_clone()
@@ -239,6 +273,16 @@ impl TerminalSessionDaemon {
         match request {
             SessionRequest::Ping => {
                 write_event(&mut stream, &SessionEvent::Pong)?;
+            }
+            SessionRequest::ListSessions => {
+                let session_ids = self
+                    .sessions
+                    .lock()
+                    .expect("session daemon mutex poisoned")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                write_event(&mut stream, &SessionEvent::SessionList { session_ids })?;
             }
             SessionRequest::HasSession { session_id } => {
                 let exists = self
@@ -558,10 +602,157 @@ fn is_unexpected_eof(error: &anyhow::Error) -> bool {
         .contains("unexpected EOF while reading session request")
 }
 
+fn set_private_socket_permissions(socket_path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = fs::Permissions::from_mode(0o600);
+    fs::set_permissions(socket_path, permissions).with_context(|| {
+        format!(
+            "failed to set private permissions on terminal socket {}",
+            socket_path.display()
+        )
+    })
+}
+
+fn ensure_peer_is_owner(stream: &UnixStream) -> Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+    let expected_uid = unsafe { libc::geteuid() };
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error()).context("failed to read peer credentials");
+    }
+    if credentials.uid != expected_uid {
+        bail!(
+            "rejecting terminal session client from uid {} (expected {})",
+            credentials.uid,
+            expected_uid
+        );
+    }
+    Ok(())
+    }
+}
+
+fn pump_session_events(
+    stream: &mut UnixStream,
+    pending: &mut Vec<u8>,
+    stdout: &mut impl Write,
+) -> Result<bool> {
+    let mut buffer = [0u8; 4096];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(bytes_read) => pending.extend_from_slice(&buffer[..bytes_read]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => return Err(error).context("failed to read terminal session socket"),
+        }
+    }
+
+    while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+        let line = pending.drain(..=newline).collect::<Vec<_>>();
+        let event = serde_json::from_slice::<SessionEvent>(&line[..line.len() - 1])
+            .context("failed to parse session event")?;
+        match event {
+            SessionEvent::Attached => {}
+            SessionEvent::Output { data_b64 } => {
+                let bytes = BASE64
+                    .decode(data_b64)
+                    .context("failed to decode sidecar output")?;
+                stdout
+                    .write_all(&bytes)
+                    .context("failed to write sidecar output")?;
+                stdout.flush().ok();
+            }
+            SessionEvent::Closed => return Ok(true),
+            SessionEvent::Error { message } => return Err(anyhow!(message)),
+            other => bail!("unexpected attach event: {other:?}"),
+        }
+    }
+
+    Ok(false)
+}
+
+struct TerminalModeGuard {
+    fd: i32,
+    original: libc::termios,
+}
+
+impl TerminalModeGuard {
+    fn new() -> Result<Option<Self>> {
+        let stdin = io::stdin();
+        let fd = stdin.as_raw_fd();
+        let is_tty = unsafe { libc::isatty(fd) } == 1;
+        if !is_tty {
+            return Ok(None);
+        }
+
+        let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
+        let get_result = unsafe { libc::tcgetattr(fd, &mut termios) };
+        if get_result != 0 {
+            bail!("failed to read terminal mode");
+        }
+        let original = termios;
+        unsafe {
+            libc::cfmakeraw(&mut termios);
+        }
+        let set_result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
+        if set_result != 0 {
+            bail!("failed to set terminal raw mode");
+        }
+
+        Ok(Some(Self { fd, original }))
+    }
+}
+
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+        }
+    }
+}
+
+fn terminal_size() -> Option<(u16, u16)> {
+    let stdout = io::stdout();
+    let fd = stdout.as_raw_fd();
+    let mut winsize = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut winsize) };
+    if result != 0 || winsize.ws_col == 0 || winsize.ws_row == 0 {
+        return None;
+    }
+    Some((winsize.ws_col, winsize.ws_row))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SessionRequest {
     Ping,
+    ListSessions,
     HasSession {
         session_id: String,
     },
@@ -590,6 +781,7 @@ enum SessionRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SessionEvent {
     Pong,
+    SessionList { session_ids: Vec<String> },
     Exists { exists: bool },
     Ack,
     Attached,
@@ -600,7 +792,7 @@ enum SessionEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::collect_attach_env;
+    use super::{collect_attach_env, terminal_size};
 
     #[test]
     fn collect_attach_env_preserves_terminal_session_identity() {
@@ -614,6 +806,17 @@ mod tests {
         );
         unsafe {
             std::env::remove_var("TASKERS_TERMINAL_SESSION_ID");
+        }
+    }
+
+    #[test]
+    fn terminal_size_helper_returns_none_or_positive_dimensions() {
+        match terminal_size() {
+            Some((cols, rows)) => {
+                assert!(cols > 0);
+                assert!(rows > 0);
+            }
+            None => {}
         }
     }
 }

@@ -11,6 +11,7 @@ use gtk::{EventControllerKey, gdk, gio, glib};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     fs::{File, OpenOptions, create_dir_all, read_to_string, remove_file, write},
     future::pending,
     io::{self, Write},
@@ -47,7 +48,7 @@ use taskers_shell_core::{
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
 use glib::variant::ToVariant;
-use taskers_paths::default_tmux_socket_path as default_terminal_socket_path;
+use taskers_paths::default_terminal_socket_path;
 
 const APP_ID: &str = taskers_paths::APP_ID;
 const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
@@ -1041,10 +1042,13 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         )
     })?;
     if let Some(terminal_session_client) = runtime.terminal_session_client.as_ref() {
+        let live_sessions = terminal_session_client
+            .list_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashSet<_>>();
         initial_model.recover_interrupted_agent_resumes_for_missing_sessions(|session_id| {
-            terminal_session_client
-                .has_session(&session_id.to_string())
-                .unwrap_or(false)
+            live_sessions.contains(&session_id.to_string())
         });
     } else {
         initial_model.recover_interrupted_agent_resumes();
