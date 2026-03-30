@@ -104,6 +104,8 @@ pub struct TaskersHost {
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
     ghostty_host: Option<GhosttyHost>,
+    native_surface_provider: CssProvider,
+    selected_theme_id: String,
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
 }
@@ -196,7 +198,7 @@ impl TaskersHost {
         root.set_hexpand(true);
         root.set_vexpand(true);
         root.set_child(Some(shell_widget));
-        install_native_surface_css();
+        let native_surface_provider = install_native_surface_css("dark");
 
         let pan_sink = event_sink.clone();
         let pan_diagnostics = diagnostics.clone();
@@ -233,6 +235,8 @@ impl TaskersHost {
             event_sink,
             diagnostics,
             ghostty_host,
+            native_surface_provider,
+            selected_theme_id: "dark".into(),
             browser_surfaces: HashMap::new(),
             terminal_surfaces: HashMap::new(),
         }
@@ -244,6 +248,10 @@ impl TaskersHost {
 
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
         let interactive = native_surfaces_interactive(snapshot.drag_mode);
+        if self.selected_theme_id != snapshot.settings.selected_theme_id {
+            self.selected_theme_id = snapshot.settings.selected_theme_id.clone();
+            update_native_surface_css(&self.native_surface_provider, &self.selected_theme_id);
+        }
         emit_diagnostic(
             self.diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -1338,9 +1346,9 @@ fn draw_attention_ring_path(
     ctx.close_path();
 }
 
-fn install_native_surface_css() {
+fn install_native_surface_css(theme_id: &str) -> CssProvider {
     let provider = CssProvider::new();
-    provider.load_from_data(native_surface_css());
+    update_native_surface_css(&provider, theme_id);
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -1348,6 +1356,11 @@ fn install_native_surface_css() {
             STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
+    provider
+}
+
+fn update_native_surface_css(provider: &CssProvider, theme_id: &str) {
+    provider.load_from_data(&native_surface_css(theme_id));
 }
 
 fn native_surface_classes(kind: PaneKind) -> (&'static str, &'static str) {
@@ -1357,28 +1370,40 @@ fn native_surface_classes(kind: PaneKind) -> (&'static str, &'static str) {
     }
 }
 
-fn native_surface_css() -> &'static str {
-    r#"
+fn native_surface_css(theme_id: &str) -> String {
+    format!(
+        r#"
 .native-surface-host,
 .native-surface-widget,
-.terminal-output {
+.terminal-output {{
   margin: 0;
   padding: 0;
   border-radius: 0;
   box-shadow: none;
-}
+}}
 
 .native-surface-terminal,
 .native-surface-terminal-widget,
-.terminal-output {
-  background: #0f1117;
-}
+.terminal-output {{
+  background: {};
+}}
 
 .native-surface-browser,
-.native-surface-browser-widget {
+.native-surface-browser-widget {{
   background: transparent;
+}}
+ "#,
+        terminal_surface_background(theme_id)
+    )
 }
-"#
+
+fn terminal_surface_background(theme_id: &str) -> &'static str {
+    match theme_id {
+        "catppuccin-mocha" => "#1e1e2e",
+        "tokyo-night" => "#1a1b26",
+        "gruvbox-dark" => "#282828",
+        _ => "#0f1117",
+    }
 }
 
 fn connect_ghostty_widget(
@@ -1773,12 +1798,14 @@ mod tests {
     }
 
     #[test]
-    fn native_surface_css_restores_terminal_background_contract() {
-        let css = native_surface_css();
-        assert!(css.contains(".native-surface-terminal"));
-        assert!(css.contains(".native-surface-terminal-widget"));
-        assert!(css.contains(".terminal-output"));
-        assert!(css.contains("background: #0f1117;"));
+    fn native_surface_css_tracks_selected_theme_terminal_background() {
+        let dark = native_surface_css("dark");
+        let gruvbox = native_surface_css("gruvbox-dark");
+        assert!(dark.contains(".native-surface-terminal"));
+        assert!(dark.contains(".native-surface-terminal-widget"));
+        assert!(dark.contains(".terminal-output"));
+        assert!(dark.contains("background: #0f1117;"));
+        assert!(gruvbox.contains("background: #282828;"));
     }
 
     #[test]
