@@ -2,8 +2,8 @@ use std::{
     collections::{BTreeMap, HashMap},
     env, fs,
     io::{self, BufRead, BufReader, Read, Write},
-    os::unix::net::{UnixListener, UnixStream},
     os::unix::io::AsRawFd,
+    os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -215,6 +215,7 @@ pub struct TerminalSessionDaemon {
 struct SessionState {
     pty: Arc<Mutex<PtySession>>,
     transcript: Vec<u8>,
+    needs_redraw: bool,
     clients: HashMap<u64, mpsc::Sender<SessionEvent>>,
 }
 
@@ -333,21 +334,36 @@ impl TerminalSessionDaemon {
         shell_args: Vec<String>,
         env: BTreeMap<String, String>,
     ) -> Result<()> {
-        self.ensure_session(&session_id, cols, rows, cwd, shell_args, env)?;
+        let created = self.ensure_session(&session_id, cols, rows, cwd, shell_args, env)?;
 
         let client_id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel::<SessionEvent>();
-        let transcript = {
+        let (transcript, redraw_after_attach, pty) = {
             let mut sessions = self.sessions.lock().expect("session daemon mutex poisoned");
             let session = sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| anyhow!("session {session_id} was not created"))?;
+            let redraw_after_attach =
+                !created && session.needs_redraw && session.transcript.is_empty();
             session.clients.insert(client_id, tx.clone());
-            session.transcript.clone()
+            if redraw_after_attach {
+                session.needs_redraw = false;
+            }
+            (
+                session.transcript.clone(),
+                redraw_after_attach,
+                Arc::clone(&session.pty),
+            )
         };
 
         tx.send(SessionEvent::Attached).ok();
         queue_output(&tx, &transcript);
+        if redraw_after_attach {
+            let _ = pty
+                .lock()
+                .expect("pty session mutex poisoned")
+                .write_all(b"\x0c");
+        }
 
         let writer_stream = stream
             .try_clone()
@@ -407,6 +423,10 @@ impl TerminalSessionDaemon {
             let mut sessions = self.sessions.lock().expect("session daemon mutex poisoned");
             if let Some(session) = sessions.get_mut(&session_id) {
                 session.clients.remove(&client_id);
+                if session.clients.is_empty() {
+                    session.transcript.clear();
+                    session.needs_redraw = true;
+                }
             }
         }
         drop(tx);
@@ -424,14 +444,14 @@ impl TerminalSessionDaemon {
         cwd: Option<String>,
         shell_args: Vec<String>,
         env: BTreeMap<String, String>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if self
             .sessions
             .lock()
             .expect("session daemon mutex poisoned")
             .contains_key(session_id)
         {
-            return Ok(());
+            return Ok(false);
         }
 
         let spec = build_command_spec(cols, rows, cwd, shell_args, env)?;
@@ -446,11 +466,12 @@ impl TerminalSessionDaemon {
                 SessionState {
                     pty: Arc::clone(&pty),
                     transcript: Vec::new(),
+                    needs_redraw: false,
                     clients: HashMap::new(),
                 },
             );
         self.spawn_reader(session_id.to_string(), reader);
-        Ok(())
+        Ok(true)
     }
 
     fn spawn_reader(&self, session_id: String, mut reader: crate::PtyReader) {
@@ -623,33 +644,33 @@ fn ensure_peer_is_owner(stream: &UnixStream) -> Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-    let expected_uid = unsafe { libc::geteuid() };
-    let mut credentials = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let result = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut credentials as *mut libc::ucred).cast(),
-            &mut len,
-        )
-    };
-    if result != 0 {
-        return Err(io::Error::last_os_error()).context("failed to read peer credentials");
-    }
-    if credentials.uid != expected_uid {
-        bail!(
-            "rejecting terminal session client from uid {} (expected {})",
-            credentials.uid,
-            expected_uid
-        );
-    }
-    Ok(())
+        let expected_uid = unsafe { libc::geteuid() };
+        let mut credentials = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut credentials as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error()).context("failed to read peer credentials");
+        }
+        if credentials.uid != expected_uid {
+            bail!(
+                "rejecting terminal session client from uid {} (expected {})",
+                credentials.uid,
+                expected_uid
+            );
+        }
+        Ok(())
     }
 }
 

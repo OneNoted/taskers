@@ -415,7 +415,9 @@ mod tests {
         );
         assert_eq!(
             paths.terminal_socket_path(),
-            &PathBuf::from(format!("/Users/notes/Library/Caches/{APP_ID}/terminal.sock"))
+            &PathBuf::from(format!(
+                "/Users/notes/Library/Caches/{APP_ID}/terminal.sock"
+            ))
         );
         assert_eq!(
             paths.shell_runtime_dir(),
