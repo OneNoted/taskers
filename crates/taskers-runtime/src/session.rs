@@ -25,6 +25,10 @@ const ATTACH_ENV_KEYS: &[&str] = &[
     "HOME",
     "PATH",
     "SHELL",
+    "TERM",
+    "TERMINFO",
+    "TERMINFO_DIRS",
+    "COLORTERM",
     "TERM_PROGRAM",
     "TASKERS_AGENT_SESSION_ID",
     "TASKERS_CTL_PATH",
@@ -532,6 +536,9 @@ fn build_command_spec(
     let wrapper_path = PathBuf::from(integration_dir).join("taskers-shell-wrapper.sh");
     let mut args = vec![wrapper_path.display().to_string()];
     args.append(&mut shell_args);
+    env_map
+        .entry("TERM".into())
+        .or_insert_with(|| "xterm-256color".into());
 
     Ok(CommandSpec {
         program: "sh".into(),

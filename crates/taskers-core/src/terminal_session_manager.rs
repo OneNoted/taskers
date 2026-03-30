@@ -42,7 +42,12 @@ impl TerminalSessionManager {
             return Ok(());
         };
         for session_id in removed {
-            client.terminate_session(&session_id.to_string())?;
+            if let Err(error) = client.terminate_session(&session_id.to_string()) {
+                eprintln!(
+                    "terminal session cleanup failed for {}: {error:#}",
+                    session_id
+                );
+            }
         }
         Ok(())
     }

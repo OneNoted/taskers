@@ -309,6 +309,7 @@ fn validate_artifact_kind(kind: ArtifactKind) -> Result<()> {
 fn validate_bundle_layout(bundle_root: &Path) -> bool {
     bundle_root.join("bin").join("taskers").is_file()
         && bundle_root.join("bin").join("taskersctl").is_file()
+        && bundle_root.join("bin").join("taskers-terminald").is_file()
         && bundle_root.join("ghostty").is_dir()
         && bundle_root
             .join("ghostty")
@@ -574,10 +575,6 @@ fn launcher_path_looks_installed(current_exe: &Path) -> bool {
         return true;
     }
 
-    if cargo_bin_home().as_deref() == Some(parent) {
-        return true;
-    }
-
     matches!(
         parent,
         p if p == Path::new("/usr/local/bin")
@@ -756,6 +753,7 @@ mod tests {
 
         assert!(installation.executable_path().is_file());
         assert!(installation.taskersctl_path().is_file());
+        assert!(installation.bundle_root.join("bin").join("taskers-terminald").is_file());
         assert!(installation.ghostty_resources_path().is_dir());
         assert!(installation.terminfo_path().is_dir());
     }

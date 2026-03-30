@@ -28,13 +28,17 @@ cargo install taskers --locked
 taskers
 ```
 
-`cargo install taskers` builds and installs the real Linux app binaries
-directly. The first launch only bootstraps the version-matched Ghostty runtime
-assets when needed. The Linux app requires GTK4/libadwaita plus the host
-WebKitGTK 6.0 development packages at install time and the WebKitGTK 6.0
-runtime at launch time. Taskers handles terminal-session persistence itself on
-Linux when the sidecar is available; if it is unavailable, Taskers falls back to
-fresh shells and warns that persistence is unavailable.
+`cargo install taskers` installs the Linux launcher entrypoint. On first launch,
+that launcher ensures the version-matched Linux app bundle is present under the
+user data directory and then starts the bundled `taskers-gtk` host plus its
+helper binaries. The first launch also bootstraps the version-matched Ghostty
+runtime assets when needed.
+
+The Linux app requires GTK4/libadwaita plus the host WebKitGTK 6.0 development
+packages at install time and the WebKitGTK 6.0 runtime at launch time. Taskers
+handles terminal-session persistence itself on Linux through its internal
+terminal sidecar; if the sidecar is unavailable, Taskers falls back to fresh
+shells and warns that persistence is unavailable.
 
 Mainline macOS support is currently not shipped from this repo root.
 
@@ -94,6 +98,13 @@ Install the app into Cargo's bin directory:
 cargo install --path crates/taskers-app --force
 ```
 
+That installs the repo-local binaries directly into Cargo's bin directory:
+
+- `taskers`
+- `taskers-gtk`
+- `taskersctl`
+- `taskers-terminald`
+
 For repo-local verification, prefer the directly installed GTK host:
 
 ```bash
@@ -104,6 +115,9 @@ If plain `taskers` still resolves to `~/.local/bin/taskers`, that is the
 launcher-managed bundle path and can lag behind your repo build. Use
 `taskers-gtk` or the absolute Cargo bin path for feature testing unless you
 intentionally refreshed the launcher-managed release bundle too.
+
+`taskers-terminald` is an internal helper binary used for persistent terminal
+sessions. You normally do not launch it by hand.
 
 Run the headless baseline smoke:
 

@@ -263,10 +263,6 @@ fn launcher_path_looks_installed(current_exe: &Path) -> bool {
         return true;
     }
 
-    if cargo_bin_home().as_deref() == Some(parent) {
-        return true;
-    }
-
     matches!(
         parent,
         p if p == Path::new("/usr/local/bin")
