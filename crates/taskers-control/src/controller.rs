@@ -781,6 +781,11 @@ impl InMemoryController {
                     "terminal debug commands require a live GTK host",
                 ));
             }
+            ControlCommand::Vcs { .. } => {
+                return Err(DomainError::InvalidOperation(
+                    "vcs commands require app runtime support",
+                ));
+            }
             ControlCommand::QueryStatus { query } => match query {
                 ControlQuery::ActiveWindow | ControlQuery::All => (
                     ControlResponse::Status {

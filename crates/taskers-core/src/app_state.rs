@@ -1,13 +1,14 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use taskers_control::{ControlCommand, ControlResponse, InMemoryController};
+use taskers_control::{ControlCommand, ControlResponse, InMemoryController, VcsCommand};
 use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
 use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
 use taskers_runtime::{ShellLaunchSpec, TerminalSessionClient};
 
 use crate::{
-    pane_runtime::RuntimeManager, session_store, terminal_session_manager::TerminalSessionManager,
+    VcsService, pane_runtime::RuntimeManager, session_store,
+    terminal_session_manager::TerminalSessionManager,
 };
 
 #[derive(Clone)]
@@ -18,6 +19,7 @@ pub struct AppState {
     backend: BackendChoice,
     session_path: PathBuf,
     shell_launch: ShellLaunchSpec,
+    vcs: VcsService,
 }
 
 impl AppState {
@@ -48,6 +50,7 @@ impl AppState {
             backend,
             session_path,
             shell_launch,
+            vcs: VcsService::default(),
         };
         state.persist_snapshot()?;
         Ok(state)
@@ -82,6 +85,9 @@ impl AppState {
     }
 
     pub fn dispatch(&self, command: ControlCommand) -> Result<ControlResponse> {
+        if let ControlCommand::Vcs { vcs_command } = command {
+            return self.dispatch_vcs(vcs_command);
+        }
         let response = self
             .controller
             .handle(command)
@@ -91,6 +97,12 @@ impl AppState {
         self.terminal_sessions.sync_model(&model)?;
         self.persist_snapshot()?;
         Ok(response)
+    }
+
+    fn dispatch_vcs(&self, command: VcsCommand) -> Result<ControlResponse> {
+        let model = self.snapshot_model();
+        let result = self.vcs.execute(&model, command)?;
+        Ok(ControlResponse::Vcs { result })
     }
 
     pub fn persist_snapshot(&self) -> Result<()> {
