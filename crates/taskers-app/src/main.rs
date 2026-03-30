@@ -36,7 +36,9 @@ use taskers_ghostty::{
     ensure_runtime_installed,
 };
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
-use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
+use taskers_runtime::{
+    ShellLaunchSpec, TmuxBackend, install_shell_integration, scrub_inherited_terminal_env,
+};
 use taskers_shell_core::{
     BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PixelSize,
     RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
@@ -95,9 +97,11 @@ struct BootstrapContext {
 struct RuntimeBootstrap {
     ghostty_runtime: RuntimeCapability,
     shell_integration: RuntimeCapability,
+    terminal_persistence: RuntimeCapability,
     shell_launch: ShellLaunchSpec,
     host_options: GhosttyHostOptions,
     socket_path: PathBuf,
+    tmux_backend: Option<TmuxBackend>,
     startup_notes: Vec<String>,
 }
 
@@ -1075,6 +1079,7 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         ghostty_runtime: runtime.ghostty_runtime,
         shell_integration: runtime.shell_integration,
         terminal_host,
+        terminal_persistence: runtime.terminal_persistence,
     };
     let app_state = AppState::new(
         initial_model,
@@ -1136,6 +1141,30 @@ fn resolve_runtime_bootstrap(
     shell_launch
         .env
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
+    let tmux_backend = match TmuxBackend::detect() {
+        Ok(backend) => {
+            shell_launch.env.insert(
+                "TASKERS_TMUX_SOCKET".into(),
+                backend.socket_path().display().to_string(),
+            );
+            Some(backend)
+        }
+        Err(error) => {
+            startup_notes.push(format!(
+                "tmux unavailable; terminals will start fresh shells and will not survive Taskers restart ({error})"
+            ));
+            None
+        }
+    };
+    let terminal_persistence = if tmux_backend.is_some() {
+        RuntimeCapability::Ready
+    } else {
+        RuntimeCapability::Fallback {
+            message:
+                "tmux not found; terminals will start fresh shells and will not survive Taskers restart."
+                    .into(),
+        }
+    };
 
     let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch)
         .with_embedded_terminal_appearance(embedded_terminal_appearance);
@@ -1143,9 +1172,11 @@ fn resolve_runtime_bootstrap(
     RuntimeBootstrap {
         ghostty_runtime,
         shell_integration,
+        terminal_persistence,
         shell_launch,
         host_options,
         socket_path,
+        tmux_backend,
         startup_notes,
     }
 }
@@ -1239,6 +1270,7 @@ fn run_internal_surface_probe(
             ghostty_runtime: RuntimeCapability::Ready,
             shell_integration: RuntimeCapability::Ready,
             terminal_host: RuntimeCapability::Ready,
+            terminal_persistence: RuntimeCapability::Ready,
         },
         selected_theme_id,
         selected_shortcut_preset,
@@ -1965,10 +1997,11 @@ fn surface_counts(node: &LayoutNodeSnapshot) -> (usize, usize) {
 
 fn log_runtime_status(diagnostics: Option<&DiagnosticsWriter>, status: &RuntimeStatus) {
     let summary = format!(
-        "runtime status ghostty={} shell={} terminal={}",
+        "runtime status ghostty={} shell={} terminal={} persistence={}",
         status.ghostty_runtime.label(),
         status.shell_integration.label(),
         status.terminal_host.label(),
+        status.terminal_persistence.label(),
     );
     log_diagnostic(
         diagnostics,

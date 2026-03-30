@@ -2322,6 +2322,9 @@ fn render_surface_backdrop(surface: &SurfaceSnapshot, runtime_status: &RuntimeSt
                         if let Some(message) = runtime_status.terminal_host.message() {
                             div { class: "surface-backdrop-note", "{message}" }
                         }
+                        if let Some(message) = runtime_status.terminal_persistence.message() {
+                            div { class: "surface-backdrop-note", "{message}" }
+                        }
                     }
                     if let Some(cwd) = &surface.cwd {
                         div { class: "surface-meta",

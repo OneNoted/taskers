@@ -506,6 +506,7 @@ pub struct RuntimeStatus {
     pub ghostty_runtime: RuntimeCapability,
     pub shell_integration: RuntimeCapability,
     pub terminal_host: RuntimeCapability,
+    pub terminal_persistence: RuntimeCapability,
 }
 
 impl Default for RuntimeStatus {
@@ -517,6 +518,7 @@ impl Default for RuntimeStatus {
             ghostty_runtime: unavailable(),
             shell_integration: unavailable(),
             terminal_host: unavailable(),
+            terminal_persistence: unavailable(),
         }
     }
 }
@@ -4780,6 +4782,7 @@ mod tests {
                 terminal_host: RuntimeCapability::Fallback {
                     message: "Probe failed".into(),
                 },
+                terminal_persistence: RuntimeCapability::Ready,
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
@@ -5898,6 +5901,7 @@ mod tests {
                 ghostty_runtime: RuntimeCapability::Ready,
                 shell_integration: RuntimeCapability::Ready,
                 terminal_host: RuntimeCapability::Ready,
+                terminal_persistence: RuntimeCapability::Ready,
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
