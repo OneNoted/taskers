@@ -3174,6 +3174,16 @@ impl AppModel {
     }
 
     pub fn recover_interrupted_agent_resumes(&mut self) -> usize {
+        self.recover_interrupted_agent_resumes_for_missing_sessions(|_| false)
+    }
+
+    pub fn recover_interrupted_agent_resumes_for_missing_sessions<F>(
+        &mut self,
+        session_exists: F,
+    ) -> usize
+    where
+        F: Fn(SessionId) -> bool,
+    {
         let mut recovered = 0;
 
         for workspace in self.workspaces.values_mut() {
@@ -3184,6 +3194,9 @@ impl AppModel {
                         continue;
                     }
                     if surface.interrupted_agent_resume.is_some() {
+                        continue;
+                    }
+                    if session_exists(surface.session_id) {
                         continue;
                     }
 
@@ -6614,6 +6627,62 @@ mod tests {
         assert_eq!(surface.metadata.agent_command, None);
         assert_eq!(surface.metadata.agent_kind, None);
         assert_eq!(surface.attention, AttentionState::Normal);
+    }
+
+    #[test]
+    fn recover_interrupted_agent_resume_skips_surfaces_with_live_terminal_sessions() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .cloned()
+            .expect("surface");
+
+        model
+            .start_surface_agent_session(workspace_id, pane_id, surface.id, "codex".into())
+            .expect("start agent");
+        model
+            .apply_surface_signal(
+                workspace_id,
+                pane_id,
+                surface.id,
+                SignalEvent::with_metadata(
+                    "shell",
+                    SignalKind::Metadata,
+                    None,
+                    Some(SignalPaneMetadata {
+                        title: Some("codex :: taskers".into()),
+                        agent_title: Some("Codex".into()),
+                        cwd: Some("/tmp/taskers".into()),
+                        repo_name: Some("taskers".into()),
+                        git_branch: Some("main".into()),
+                        ports: Vec::new(),
+                        agent_kind: Some("codex".into()),
+                        agent_active: Some(true),
+                        agent_command: Some("codex --model gpt-5".into()),
+                    }),
+                ),
+            )
+            .expect("metadata signal applied");
+
+        assert_eq!(
+            model.recover_interrupted_agent_resumes_for_missing_sessions(|session_id| {
+                session_id == surface.session_id
+            }),
+            0
+        );
+
+        let surface = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface.id))
+            .expect("surface");
+        assert!(surface.interrupted_agent_resume.is_none());
+        assert!(surface.agent_process.is_some());
+        assert_eq!(surface.metadata.agent_active, true);
     }
 
     #[test]

@@ -14,10 +14,7 @@ pub fn default_session_path() -> PathBuf {
 pub fn load_or_bootstrap(path: &Path, demo: bool) -> Result<AppModel> {
     if path.exists() {
         match load_session(path) {
-            Ok(mut model) => {
-                model.recover_interrupted_agent_resumes();
-                Ok(model)
-            }
+            Ok(model) => Ok(model),
             Err(error) => {
                 backup_incompatible_session(path)?;
                 eprintln!("failed to load session from {}: {}", path.display(), error);

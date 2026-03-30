@@ -1033,12 +1033,21 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         startup_notes.push(note);
     }
     let session_path = default_session_path();
-    let initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
+    let mut initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
         format!(
             "failed to load or bootstrap Taskers session at {}",
             session_path.display()
         )
     })?;
+    if let Some(tmux_backend) = runtime.tmux_backend.as_ref() {
+        initial_model.recover_interrupted_agent_resumes_for_missing_sessions(|session_id| {
+            tmux_backend
+                .has_session(&session_id.to_string())
+                .unwrap_or(false)
+        });
+    } else {
+        initial_model.recover_interrupted_agent_resumes();
+    }
 
     let (ghostty_host, backend_choice, terminal_host, terminal_note) =
         match probe_ghostty_backend_process(GhosttyProbeMode::Surface) {
@@ -1086,6 +1095,7 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         session_path,
         backend_choice,
         runtime.shell_launch,
+        runtime.tmux_backend.clone(),
     )
     .context("failed to initialize Taskers app state")?;
     let core = SharedCore::bootstrap(BootstrapModel {
@@ -1250,6 +1260,7 @@ fn run_internal_surface_probe(
         taskers_probe_session_path(mode),
         BackendChoice::GhosttyEmbedded,
         shell_launch,
+        None,
     ) {
         Ok(app_state) => app_state,
         Err(error) => {

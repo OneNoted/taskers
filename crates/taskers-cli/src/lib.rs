@@ -13,6 +13,8 @@ use taskers_domain::{
     PaneMetadataPatch, ProgressState, SignalEvent, SignalKind, SplitAxis, SurfaceId, WorkspaceId,
     WorkspaceLogEntry,
 };
+use taskers_paths::default_tmux_socket_path;
+use taskers_runtime::TmuxBackend;
 use time::OffsetDateTime;
 
 #[derive(Debug, Parser)]
@@ -122,6 +124,11 @@ enum Command {
     Surface {
         #[command(subcommand)]
         command: SurfaceCommand,
+    },
+    #[command(hide = true)]
+    Tmux {
+        #[command(subcommand)]
+        command: TmuxCommand,
     },
 }
 
@@ -933,6 +940,22 @@ enum SurfaceCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum TmuxCommand {
+    Attach {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        session: String,
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            num_args = 0..
+        )]
+        shell_args: Vec<String>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliSignalKind {
     Metadata,
@@ -1063,6 +1086,17 @@ pub async fn run() -> anyhow::Result<()> {
             eprintln!("serving taskers control API on {}", socket.display());
             serve(listener, controller, pending()).await?;
         }
+        Command::Tmux { command } => match command {
+            TmuxCommand::Attach {
+                socket,
+                session,
+                shell_args,
+            } => {
+                let backend = TmuxBackend::detect_with_socket(resolve_tmux_socket_path(socket))
+                    .map_err(|error| anyhow!("{error}"))?;
+                backend.attach_or_create(&session, &shell_args)?;
+            }
+        },
         Command::Query { query } => match query {
             QueryCommand::Status { socket } => {
                 let client = ControlClient::new(resolve_socket_path(socket));
@@ -2084,6 +2118,12 @@ fn resolve_socket_path(socket: Option<PathBuf>) -> PathBuf {
     socket
         .or_else(|| env::var_os("TASKERS_SOCKET").map(PathBuf::from))
         .unwrap_or_else(default_socket_path)
+}
+
+fn resolve_tmux_socket_path(socket: Option<PathBuf>) -> PathBuf {
+    socket
+        .or_else(|| env::var_os("TASKERS_TMUX_SOCKET").map(PathBuf::from))
+        .unwrap_or_else(default_tmux_socket_path)
 }
 
 async fn send_control_command(

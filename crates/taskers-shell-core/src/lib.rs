@@ -3840,6 +3840,7 @@ fn default_preview_app_state() -> AppState {
         default_session_path_for_preview("taskers-preview-bootstrap"),
         BackendChoice::Mock,
         ShellLaunchSpec::fallback(),
+        None,
     )
     .expect("preview app state")
 }
@@ -4796,6 +4797,7 @@ mod tests {
             default_session_path_for_preview(label),
             BackendChoice::Mock,
             ShellLaunchSpec::fallback(),
+            None,
         )
         .expect("preview app state")
     }
@@ -4846,6 +4848,7 @@ mod tests {
                 }),
                 BackendChoice::Mock,
                 ShellLaunchSpec::fallback(),
+                None,
             )
             .expect("preview app state"),
             ..bootstrap()
@@ -4859,6 +4862,7 @@ mod tests {
                 default_session_path_for_preview(name),
                 super::BackendChoice::Mock,
                 super::ShellLaunchSpec::fallback(),
+                None,
             )
             .expect("preview app state"),
             ..bootstrap()

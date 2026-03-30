@@ -740,6 +740,26 @@ mod tests {
     }
 
     #[test]
+    fn shell_wrapper_routes_terminal_sessions_through_tmux_attach() {
+        let wrapper = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-shell-wrapper.sh"
+        ));
+        assert!(
+            wrapper.contains("TASKERS_TMUX_SOCKET"),
+            "expected wrapper to branch on tmux socket availability"
+        );
+        assert!(
+            wrapper.contains("TASKERS_TERMINAL_SESSION_ID"),
+            "expected wrapper to require terminal session ids for tmux attach"
+        );
+        assert!(
+            wrapper.contains("tmux attach"),
+            "expected wrapper to delegate continuity startup to taskersctl tmux attach"
+        );
+    }
+
+    #[test]
     fn shell_hooks_and_proxy_require_surface_tty_identity() {
         let bash_hooks = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

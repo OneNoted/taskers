@@ -2424,6 +2424,8 @@ dependencies = [
  "serde_json",
  "taskers-control",
  "taskers-domain",
+ "taskers-paths",
+ "taskers-runtime",
  "time",
  "tokio",
 ]

@@ -4,14 +4,15 @@ use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, ControlResponse, InMemoryController};
 use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
 use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
-use taskers_runtime::ShellLaunchSpec;
+use taskers_runtime::{ShellLaunchSpec, TmuxBackend};
 
-use crate::{pane_runtime::RuntimeManager, session_store};
+use crate::{pane_runtime::RuntimeManager, session_store, tmux_manager::TmuxSessionManager};
 
 #[derive(Clone)]
 pub struct AppState {
     controller: InMemoryController,
     runtime: RuntimeManager,
+    tmux_sessions: TmuxSessionManager,
     backend: BackendChoice,
     session_path: PathBuf,
     shell_launch: ShellLaunchSpec,
@@ -23,6 +24,7 @@ impl AppState {
         session_path: PathBuf,
         backend: BackendChoice,
         shell_launch: ShellLaunchSpec,
+        tmux_backend: Option<TmuxBackend>,
     ) -> Result<Self> {
         let controller = InMemoryController::new(model.clone());
         let runtime = RuntimeManager::new(
@@ -34,10 +36,13 @@ impl AppState {
             shell_launch.clone(),
         );
         runtime.sync_model(&model)?;
+        let tmux_sessions = TmuxSessionManager::new(tmux_backend);
+        tmux_sessions.sync_model(&model)?;
 
         let state = Self {
             controller,
             runtime,
+            tmux_sessions,
             backend,
             session_path,
             shell_launch,
@@ -79,7 +84,9 @@ impl AppState {
             .controller
             .handle(command)
             .map_err(|error| anyhow!(error.to_string()))?;
-        self.runtime.sync_model(&self.snapshot_model())?;
+        let model = self.snapshot_model();
+        self.runtime.sync_model(&model)?;
+        self.tmux_sessions.sync_model(&model)?;
         self.persist_snapshot()?;
         Ok(response)
     }
@@ -160,6 +167,10 @@ impl AppState {
                     "TASKERS_AGENT_SESSION_ID".into(),
                     surface.session_id.to_string(),
                 );
+                env.insert(
+                    "TASKERS_TERMINAL_SESSION_ID".into(),
+                    surface.session_id.to_string(),
+                );
                 env
             }
             PaneKind::Browser => BTreeMap::new(),
@@ -207,6 +218,7 @@ mod tests {
             PathBuf::from("/tmp/taskers-session.json"),
             BackendChoice::Mock,
             shell_launch,
+            None,
         )
         .expect("app state");
 
@@ -227,6 +239,7 @@ mod tests {
         );
         assert!(descriptor.env.contains_key("TASKERS_SURFACE_ID"));
         assert!(descriptor.env.contains_key("TASKERS_AGENT_SESSION_ID"));
+        assert!(descriptor.env.contains_key("TASKERS_TERMINAL_SESSION_ID"));
     }
 
     #[test]
@@ -259,6 +272,7 @@ mod tests {
             PathBuf::from("/tmp/taskers-session.json"),
             BackendChoice::Mock,
             shell_launch,
+            None,
         )
         .expect("app state");
 
@@ -297,6 +311,7 @@ mod tests {
             PathBuf::from("/tmp/taskers-session.json"),
             BackendChoice::Mock,
             shell_launch,
+            None,
         )
         .expect("app state");
 
@@ -336,6 +351,7 @@ mod tests {
             PathBuf::from("/tmp/taskers-session.json"),
             BackendChoice::Mock,
             ShellLaunchSpec::fallback(),
+            None,
         )
         .expect("app state");
 
@@ -356,6 +372,7 @@ mod tests {
             PathBuf::from("/tmp/taskers-session.json"),
             BackendChoice::Mock,
             ShellLaunchSpec::fallback(),
+            None,
         )
         .expect("app state");
 
@@ -388,6 +405,7 @@ mod tests {
             PathBuf::from("/tmp/taskers-session.json"),
             BackendChoice::GhosttyEmbedded,
             ShellLaunchSpec::fallback(),
+            None,
         )
         .expect("app state");
 
