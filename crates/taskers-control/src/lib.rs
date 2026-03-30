@@ -11,8 +11,7 @@ pub use protocol::{
     BrowserControlCommand, BrowserGetCommand, BrowserLoadState, BrowserPredicateCommand,
     BrowserTarget, BrowserWaitCondition, ControlCommand, ControlError, ControlErrorCode,
     ControlQuery, ControlResponse, IdentifyContext, IdentifyResult, RequestFrame, ResponseFrame,
-    TerminalDebugCommand, TerminalDebugResult, TerminalRenderStats, VcsCommand,
-    VcsCommandResult, VcsFileEntry, VcsFileStatus, VcsMode, VcsPullRequestInfo, VcsRefEntry,
-    VcsSnapshot,
+    TerminalDebugCommand, TerminalDebugResult, TerminalRenderStats, VcsCommand, VcsCommandResult,
+    VcsFileEntry, VcsFileStatus, VcsMode, VcsPullRequestInfo, VcsRefEntry, VcsSnapshot,
 };
 pub use socket::{bind_socket, serve, serve_with_handler};

@@ -259,6 +259,10 @@ input:focus-visible {{
   backdrop-filter: blur(12px) saturate(1.4);
 }}
 
+.vcs-panel {{
+  gap: 10px;
+}}
+
 .sidebar-top {{
   display: flex;
   align-items: center;
@@ -833,7 +837,8 @@ input:focus-visible {{
 .surface-meta,
 .activity-header,
 .activity-item-shell,
-.shortcut-row {{
+.shortcut-row,
+.workspace-header-actions {{
   display: flex;
   align-items: center;
   gap: 8px;
@@ -850,6 +855,30 @@ input:focus-visible {{
   font-size: 12px;
   letter-spacing: 0.02em;
   color: {text_bright};
+}}
+
+.workspace-header-actions {{
+  margin-left: auto;
+}}
+
+.workspace-header-action {{
+  min-height: 24px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}}
+
+.workspace-header-action-active {{
+  background: {accent_14};
+  color: {text_bright};
+  border-color: {accent_24};
+}}
+
+.workspace-header-action-icon {{
+  flex: 0 0 auto;
+  display: block;
 }}
 
 .pane-action,
@@ -2099,6 +2128,125 @@ input:focus-visible {{
 .notification-count-unread {{
   background: {accent_14};
   color: {text_bright};
+}}
+
+.vcs-refresh-button {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}}
+
+.vcs-panel-error {{
+  font-size: 11px;
+  color: {error};
+  padding: 8px 10px;
+  background: {error_10};
+  border: 1px solid {error_16};
+  border-radius: 6px;
+}}
+
+.vcs-panel-summary {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+
+.vcs-panel-repo-row {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}}
+
+.vcs-actions,
+.vcs-files,
+.vcs-diff {{
+  border-top: 1px solid {border_06};
+  padding-top: 10px;
+}}
+
+.vcs-action-row,
+.vcs-ref-list {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}}
+
+.vcs-inline-form {{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}}
+
+.vcs-input {{
+  flex: 1 1 auto;
+  min-width: 0;
+}}
+
+.vcs-ref-chip {{
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 10px;
+}}
+
+.vcs-ref-chip-active {{
+  background: {accent_14};
+  border-color: {accent_24};
+  color: {text_bright};
+}}
+
+.vcs-file-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}}
+
+.vcs-file-row {{
+  width: 100%;
+  border: 1px solid {border_06};
+  background: {border_03};
+  color: {text_bright};
+  padding: 8px 10px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}}
+
+.vcs-file-row:hover,
+.vcs-file-row-active {{
+  background: {accent_08};
+  border-color: {accent_24};
+}}
+
+.vcs-diff-preview {{
+  margin: 0;
+  padding: 10px;
+  background: {border_03};
+  border: 1px solid {border_06};
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow: auto;
+  max-height: 280px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: {text_subtle};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+
+.vcs-pr-link {{
+  text-decoration: none;
+  padding: 8px 10px;
+  background: {border_03};
+  border: 1px solid {border_06};
+  border-radius: 6px;
+}}
+
+.vcs-pr-link:hover {{
+  background: {accent_08};
+  border-color: {accent_24};
 }}
 
 .agent-session-list {{

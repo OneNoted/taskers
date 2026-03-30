@@ -38,11 +38,8 @@ impl VcsService {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git commit")?;
                 ensure_non_empty(&message, "commit message")?;
-                let _output = run_command(
-                    &target.repo_root,
-                    "git",
-                    &["commit", "-m", message.trim()],
-                )?;
+                let _output =
+                    run_command(&target.repo_root, "git", &["commit", "-m", message.trim()])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
                     message: None,
@@ -52,11 +49,8 @@ impl VcsService {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git branch create")?;
                 ensure_non_empty(&name, "branch name")?;
-                let _output = run_command(
-                    &target.repo_root,
-                    "git",
-                    &["switch", "-c", name.trim()],
-                )?;
+                let _output =
+                    run_command(&target.repo_root, "git", &["switch", "-c", name.trim()])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
                     message: None,
@@ -66,8 +60,7 @@ impl VcsService {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git branch switch")?;
                 ensure_non_empty(&name, "branch name")?;
-                let _output =
-                    run_command(&target.repo_root, "git", &["switch", name.trim()])?;
+                let _output = run_command(&target.repo_root, "git", &["switch", name.trim()])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
                     message: None,
@@ -76,7 +69,8 @@ impl VcsService {
             VcsCommand::GitFetch { surface_id } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git fetch")?;
-                let _output = run_command(&target.repo_root, "git", &["fetch", "--all", "--prune"])?;
+                let _output =
+                    run_command(&target.repo_root, "git", &["fetch", "--all", "--prune"])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
                     message: None,
@@ -107,11 +101,8 @@ impl VcsService {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj describe")?;
                 ensure_non_empty(&message, "change description")?;
-                let _output = run_command(
-                    &target.repo_root,
-                    "jj",
-                    &["describe", "-m", message.trim()],
-                )?;
+                let _output =
+                    run_command(&target.repo_root, "jj", &["describe", "-m", message.trim()])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
                     message: None,
@@ -123,7 +114,9 @@ impl VcsService {
             } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj new")?;
-                let _output = if let Some(message) = message.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let _output = if let Some(message) =
+                    message.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                {
                     run_command(&target.repo_root, "jj", &["new", "-m", message])?
                 } else {
                     run_command(&target.repo_root, "jj", &["new"])?
@@ -160,7 +153,8 @@ impl VcsService {
             VcsCommand::JjFetch { surface_id } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj git fetch")?;
-                let _output = run_command(&target.repo_root, "jj", &["git", "fetch", "--all-remotes"])?;
+                let _output =
+                    run_command(&target.repo_root, "jj", &["git", "fetch", "--all-remotes"])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
                     message: None,
@@ -188,7 +182,11 @@ impl VcsService {
         self.snapshot_from_target(&target, diff_path)
     }
 
-    fn snapshot_from_target(&self, target: &RepoTarget, diff_path: Option<String>) -> Result<VcsSnapshot> {
+    fn snapshot_from_target(
+        &self,
+        target: &RepoTarget,
+        diff_path: Option<String>,
+    ) -> Result<VcsSnapshot> {
         match target.mode {
             VcsMode::Git => self.git_snapshot(target, diff_path),
             VcsMode::Jj => self.jj_snapshot(target, diff_path),
@@ -288,11 +286,21 @@ impl VcsService {
         )?;
         let current = parse_jj_current(&current.stdout);
         let refs = parse_jj_bookmarks(
-            &run_command(&target.repo_root, "jj", &["bookmark", "list", "--color=never"])?.stdout,
+            &run_command(
+                &target.repo_root,
+                "jj",
+                &["bookmark", "list", "--color=never"],
+            )?
+            .stdout,
             current.bookmarks.as_slice(),
         );
         let files = parse_jj_diff_summary(
-            &run_command(&target.repo_root, "jj", &["diff", "--summary", "--color=never"])?.stdout,
+            &run_command(
+                &target.repo_root,
+                "jj",
+                &["diff", "--summary", "--color=never"],
+            )?
+            .stdout,
         );
         let diff_text = diff_path
             .as_deref()
@@ -440,7 +448,11 @@ fn parse_git_status(raw: &str) -> ParsedGitStatus {
         if let Some(rest) = line.strip_prefix("1 ") {
             let mut parts = rest.splitn(9, ' ');
             let xy = parts.next().unwrap_or("..");
-            let path = rest.rsplit_once(' ').map(|(_, path)| path).unwrap_or_default().to_string();
+            let path = rest
+                .rsplit_once(' ')
+                .map(|(_, path)| path)
+                .unwrap_or_default()
+                .to_string();
             if !path.is_empty() {
                 parsed.files.extend(git_file_entries(path, xy, None));
             }
@@ -454,14 +466,20 @@ fn parse_git_status(raw: &str) -> ParsedGitStatus {
             let original = names.next().unwrap_or_default();
             let path = names.next().unwrap_or(original).to_string();
             if !path.is_empty() {
-                parsed.files.extend(git_file_entries(path, xy, Some(VcsFileStatus::Renamed)));
+                parsed
+                    .files
+                    .extend(git_file_entries(path, xy, Some(VcsFileStatus::Renamed)));
             }
             continue;
         }
         if let Some(rest) = line.strip_prefix("u ") {
             let mut parts = rest.splitn(11, ' ');
             let _ = parts.next();
-            let path = rest.rsplit_once(' ').map(|(_, path)| path).unwrap_or_default().to_string();
+            let path = rest
+                .rsplit_once(' ')
+                .map(|(_, path)| path)
+                .unwrap_or_default()
+                .to_string();
             if !path.is_empty() {
                 parsed.files.push(VcsFileEntry {
                     path,
@@ -474,7 +492,11 @@ fn parse_git_status(raw: &str) -> ParsedGitStatus {
     parsed
 }
 
-fn git_file_entries(path: String, xy: &str, override_status: Option<VcsFileStatus>) -> Vec<VcsFileEntry> {
+fn git_file_entries(
+    path: String,
+    xy: &str,
+    override_status: Option<VcsFileStatus>,
+) -> Vec<VcsFileEntry> {
     let chars: Vec<char> = xy.chars().collect();
     let index = chars.first().copied().unwrap_or('.');
     let worktree = chars.get(1).copied().unwrap_or('.');
@@ -655,9 +677,8 @@ fn github_pull_request(repo_root: &Path, head: Option<&str>) -> Result<Option<Vc
 }
 
 fn command_exists(program: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|path| path.join(program).is_file())
-    })
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|path| path.join(program).is_file()))
 }
 
 #[cfg(test)]

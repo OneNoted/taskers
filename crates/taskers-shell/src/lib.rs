@@ -13,8 +13,9 @@ use taskers_core::{
     PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot,
     RuntimeStateSnapshot, RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection,
     ShellSnapshot, ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot,
-    SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot,
-    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    SurfaceId, SurfaceKind, SurfaceSnapshot, VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode,
+    VcsPanelSnapshot, VcsSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary,
+    WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
     WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
 };
 use taskers_shell_core as taskers_core;
@@ -330,7 +331,7 @@ fn app_css(snapshot: &ShellSnapshot) -> String {
     theme::generate_css(
         &theme::resolve_palette(&snapshot.settings.selected_theme_id),
         snapshot.metrics,
-        snapshot.attention_panel_visible,
+        snapshot.attention_panel_visible || snapshot.vcs_panel.visible,
     )
 }
 
@@ -377,6 +378,10 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     let jump_unread = {
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::FocusLatestUnread)
+    };
+    let toggle_vcs_panel = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::ToggleVcsPanel)
     };
     let drag_source = use_signal(|| None::<WorkspaceId>);
     let drag_target = use_signal(|| None::<WorkspaceId>);
@@ -502,6 +507,22 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             }
                         }
                     }
+                    if matches!(snapshot.section, ShellSection::Workspace) {
+                        div { class: "workspace-header-actions",
+                            button {
+                                class: if snapshot.vcs_panel.visible {
+                                    "pane-action workspace-header-action workspace-header-action-active"
+                                } else {
+                                    "pane-action workspace-header-action"
+                                },
+                                r#type: "button",
+                                onclick: toggle_vcs_panel,
+                                title: "Toggle VCS panel",
+                                {icons::git_branch(14, "workspace-header-action-icon")}
+                                span { "VCS" }
+                            }
+                        }
+                    }
                 }
 
                 if matches!(snapshot.section, ShellSection::Workspace) {
@@ -528,7 +549,9 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                 }
             }
 
-            if snapshot.attention_panel_visible {
+            if snapshot.vcs_panel.visible {
+                {render_vcs_panel(&snapshot.vcs_panel, core.clone())}
+            } else if snapshot.attention_panel_visible {
                 aside { class: "attention-panel",
                     div { class: "notification-header",
                         div { class: "sidebar-heading", "Notifications" }
@@ -899,6 +922,372 @@ fn render_workspace_log_entry(entry: &WorkspaceLogEntrySnapshot) -> Element {
             }
             div { class: "workspace-log-message", "{entry.message}" }
         }
+    }
+}
+
+fn render_vcs_panel(panel: &VcsPanelSnapshot, core: SharedCore) -> Element {
+    let commit_message = use_signal(String::new);
+    let branch_name = use_signal(String::new);
+    let bookmark_name = use_signal(String::new);
+    let refresh = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::RefreshVcsPanel)
+    };
+
+    rsx! {
+        aside { class: "attention-panel vcs-panel",
+            div { class: "notification-header",
+                div { class: "sidebar-heading", "Version Control" }
+                button {
+                    class: "notification-jump-button vcs-refresh-button",
+                    r#type: "button",
+                    onclick: refresh,
+                    title: "Refresh repository status",
+                    {icons::refresh(12, "browser-toolbar-icon")}
+                    span { "Refresh" }
+                }
+            }
+
+            if let Some(error) = &panel.error {
+                div { class: "vcs-panel-error", "{error}" }
+            }
+
+            if let Some(snapshot) = &panel.snapshot {
+                section { class: "attention-section",
+                    div { class: "vcs-panel-summary",
+                        div { class: "vcs-panel-repo-row",
+                            span { class: "notification-count-pill notification-count-unread", "{format_vcs_mode(snapshot.mode)}" }
+                            span { class: "workspace-label", "{snapshot.repo_name}" }
+                        }
+                        div { class: "workspace-branch-row",
+                            {icons::git_branch(10, "workspace-branch-icon")}
+                            span { "{snapshot.headline}" }
+                        }
+                        if let Some(detail) = &snapshot.detail {
+                            div { class: "workspace-notification workspace-status", "{detail}" }
+                        }
+                        div { class: "workspace-notification", "{snapshot.summary_text}" }
+                        if let Some(pr) = &snapshot.pull_request {
+                            a {
+                                class: "workspace-pr-row vcs-pr-link",
+                                href: "{pr.url}",
+                                target: "_blank",
+                                rel: "noreferrer noopener",
+                                span { class: "workspace-pr-number",
+                                    if let Some(number) = pr.number {
+                                        "#{number}"
+                                    } else {
+                                        "PR"
+                                    }
+                                }
+                                span { class: "workspace-pr-title",
+                                    "{pr.title.clone().unwrap_or_else(|| pr.url.clone())}"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                {render_vcs_action_panel(snapshot, core.clone(), commit_message, branch_name, bookmark_name)}
+
+                section { class: "attention-section vcs-files",
+                    div { class: "attention-section-title", "Changed files" }
+                    if snapshot.files.is_empty() {
+                        div { class: "notification-empty-subtitle", "No changed files." }
+                    } else {
+                        div { class: "vcs-file-list",
+                            for file in &snapshot.files {
+                                {render_vcs_file_row(file, snapshot.diff_path.as_deref(), core.clone())}
+                            }
+                        }
+                    }
+                }
+
+                section { class: "attention-section vcs-diff",
+                    div { class: "attention-section-title", "Diff preview" }
+                    if let Some(diff) = &snapshot.diff_text {
+                        pre { class: "vcs-diff-preview", "{diff}" }
+                    } else {
+                        div { class: "notification-empty-subtitle", "Select a file to preview its diff." }
+                    }
+                }
+            } else {
+                div { class: "notification-empty",
+                    {icons::git_branch(24, "notification-empty-icon")}
+                    div { class: "notification-empty-title", "No repository selected" }
+                    if let Some(title) = &panel.target_surface_title {
+                        div { class: "notification-empty-subtitle",
+                            "Focused terminal: {title}"
+                        }
+                    } else {
+                        div { class: "notification-empty-subtitle",
+                            "Select a terminal inside a Git or JJ repo to manage version control here."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_vcs_action_panel(
+    snapshot: &VcsSnapshot,
+    core: SharedCore,
+    mut commit_message: Signal<String>,
+    mut branch_name: Signal<String>,
+    mut bookmark_name: Signal<String>,
+) -> Element {
+    let surface_id = snapshot.surface_id;
+    let mode = snapshot.mode;
+    let fetch = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                command: match mode {
+                    VcsMode::Git => VcsCommand::GitFetch { surface_id },
+                    VcsMode::Jj => VcsCommand::JjFetch { surface_id },
+                },
+            });
+        }
+    };
+    let push = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                command: match mode {
+                    VcsMode::Git => VcsCommand::GitPush { surface_id },
+                    VcsMode::Jj => VcsCommand::JjPush { surface_id },
+                },
+            });
+        }
+    };
+
+    rsx! {
+        section { class: "attention-section vcs-actions",
+            div { class: "attention-section-title", "Actions" }
+            div { class: "vcs-action-row",
+                button { class: "pane-action", r#type: "button", onclick: fetch, "Fetch" }
+                if snapshot.mode == VcsMode::Git {
+                    button {
+                        class: "pane-action",
+                        r#type: "button",
+                        onclick: {
+                            let core = core.clone();
+                            move |_| {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::GitPull { surface_id },
+                                });
+                            }
+                        },
+                        "Pull"
+                    }
+                }
+                button { class: "pane-action", r#type: "button", onclick: push, "Push" }
+            }
+
+            if snapshot.mode == VcsMode::Git {
+                form {
+                    class: "vcs-inline-form",
+                    onsubmit: {
+                        let core = core.clone();
+                        move |_| {
+                            let message = commit_message.read().trim().to_string();
+                            if !message.is_empty() {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::GitCommit { surface_id, message },
+                                });
+                                commit_message.set(String::new());
+                            }
+                        }
+                    },
+                    input {
+                        class: "browser-address vcs-input",
+                        r#type: "text",
+                        value: "{commit_message}",
+                        placeholder: "Commit message",
+                        oninput: move |event| commit_message.set(event.value()),
+                    }
+                    button { class: "pane-action", r#type: "submit", "Commit" }
+                }
+                div { class: "vcs-ref-list",
+                    for reference in &snapshot.refs {
+                        button {
+                            class: if reference.active { "pane-action vcs-ref-chip vcs-ref-chip-active" } else { "pane-action vcs-ref-chip" },
+                            r#type: "button",
+                            onclick: {
+                                let core = core.clone();
+                                let name = reference.name.clone();
+                                move |_| {
+                                    core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                        command: VcsCommand::GitSwitchBranch {
+                                            surface_id,
+                                            name: name.clone(),
+                                        },
+                                    });
+                                }
+                            },
+                            "{reference.name}"
+                        }
+                    }
+                }
+                form {
+                    class: "vcs-inline-form",
+                    onsubmit: {
+                        let core = core.clone();
+                        move |_| {
+                            let name = branch_name.read().trim().to_string();
+                            if !name.is_empty() {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::GitCreateBranch { surface_id, name },
+                                });
+                                branch_name.set(String::new());
+                            }
+                        }
+                    },
+                    input {
+                        class: "browser-address vcs-input",
+                        r#type: "text",
+                        value: "{branch_name}",
+                        placeholder: "New branch name",
+                        oninput: move |event| branch_name.set(event.value()),
+                    }
+                    button { class: "pane-action", r#type: "submit", "Create branch" }
+                }
+            } else {
+                form {
+                    class: "vcs-inline-form",
+                    onsubmit: {
+                        let core = core.clone();
+                        move |_| {
+                            let message = commit_message.read().trim().to_string();
+                            if !message.is_empty() {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::JjDescribe { surface_id, message },
+                                });
+                                commit_message.set(String::new());
+                            }
+                        }
+                    },
+                    input {
+                        class: "browser-address vcs-input",
+                        r#type: "text",
+                        value: "{commit_message}",
+                        placeholder: "Change description",
+                        oninput: move |event| commit_message.set(event.value()),
+                    }
+                    button { class: "pane-action", r#type: "submit", "Describe change" }
+                }
+                button {
+                    class: "pane-action",
+                    r#type: "button",
+                    onclick: {
+                        let core = core.clone();
+                        move |_| {
+                            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                command: VcsCommand::JjNew {
+                                    surface_id,
+                                    message: None,
+                                },
+                            });
+                        }
+                    },
+                    "New change"
+                }
+                div { class: "vcs-ref-list",
+                    for reference in &snapshot.refs {
+                        button {
+                            class: if reference.active { "pane-action vcs-ref-chip vcs-ref-chip-active" } else { "pane-action vcs-ref-chip" },
+                            r#type: "button",
+                            onclick: {
+                                let core = core.clone();
+                                let name = reference.name.clone();
+                                move |_| {
+                                    core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                        command: VcsCommand::JjSwitchBookmark {
+                                            surface_id,
+                                            name: name.clone(),
+                                        },
+                                    });
+                                }
+                            },
+                            "{reference.name}"
+                        }
+                    }
+                }
+                form {
+                    class: "vcs-inline-form",
+                    onsubmit: {
+                        let core = core.clone();
+                        move |_| {
+                            let name = bookmark_name.read().trim().to_string();
+                            if !name.is_empty() {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::JjCreateBookmark { surface_id, name },
+                                });
+                                bookmark_name.set(String::new());
+                            }
+                        }
+                    },
+                    input {
+                        class: "browser-address vcs-input",
+                        r#type: "text",
+                        value: "{bookmark_name}",
+                        placeholder: "New bookmark name",
+                        oninput: move |event| bookmark_name.set(event.value()),
+                    }
+                    button { class: "pane-action", r#type: "submit", "Create bookmark" }
+                }
+            }
+        }
+    }
+}
+
+fn render_vcs_file_row(
+    file: &VcsFileEntry,
+    selected_path: Option<&str>,
+    core: SharedCore,
+) -> Element {
+    let selected = selected_path == Some(file.path.as_str());
+    let path = file.path.clone();
+    let onclick = move |_| {
+        core.dispatch_shell_action(ShellAction::ShowVcsDiff {
+            path: Some(path.clone()),
+        });
+    };
+    rsx! {
+        button {
+            class: if selected { "vcs-file-row vcs-file-row-active" } else { "vcs-file-row" },
+            r#type: "button",
+            onclick: onclick,
+            span { class: "workspace-pr-number", "{format_vcs_file_status(file.status, file.staged)}" }
+            span { class: "workspace-pr-title", "{file.path}" }
+        }
+    }
+}
+
+fn format_vcs_mode(mode: VcsMode) -> &'static str {
+    match mode {
+        VcsMode::Git => "Git",
+        VcsMode::Jj => "JJ",
+    }
+}
+
+fn format_vcs_file_status(status: VcsFileStatus, staged: bool) -> &'static str {
+    match (status, staged) {
+        (VcsFileStatus::Added, true) => "A+",
+        (VcsFileStatus::Added, false) => "A",
+        (VcsFileStatus::Deleted, true) => "D+",
+        (VcsFileStatus::Deleted, false) => "D",
+        (VcsFileStatus::Renamed, true) => "R+",
+        (VcsFileStatus::Renamed, false) => "R",
+        (VcsFileStatus::Copied, true) => "C+",
+        (VcsFileStatus::Copied, false) => "C",
+        (VcsFileStatus::Untracked, _) => "??",
+        (VcsFileStatus::Conflicted, _) => "!!",
+        (VcsFileStatus::Changed, true) => "~+",
+        (VcsFileStatus::Changed, false) => "~",
+        (VcsFileStatus::Modified, true) => "M+",
+        (VcsFileStatus::Modified, false) => "M",
     }
 }
 

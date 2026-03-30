@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use taskers_control::{ControlCommand, ControlResponse, VcsCommand, VcsCommandResult, VcsSnapshot};
+use taskers_control::{ControlCommand, ControlResponse, VcsCommandResult};
 use taskers_core::{AppState, default_session_path};
 use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
@@ -18,6 +18,7 @@ use taskers_runtime::ShellLaunchSpec;
 use time::OffsetDateTime;
 use tokio::sync::watch;
 
+pub use taskers_control::{VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode, VcsSnapshot};
 pub use taskers_domain::{
     Direction, PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
     WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
@@ -1392,6 +1393,7 @@ impl TaskersCore {
         let activity = self.activity_snapshot(&model);
         let done_activity = self.done_activity_snapshot(&model);
         let attention_panel_visible = !agents.is_empty() || !activity.is_empty();
+        let right_panel_visible = attention_panel_visible || self.ui.vcs_panel_visible;
         let workspace_id = model
             .active_workspace_id()
             .expect("active workspace should exist");
@@ -1414,7 +1416,7 @@ impl TaskersCore {
         let active_window = workspace
             .active_window_record()
             .expect("active workspace window should exist");
-        let viewport = self.workspace_viewport_frame(attention_panel_visible);
+        let viewport = self.workspace_viewport_frame(right_panel_visible);
         let clamped_viewport = clamped_workspace_viewport(
             workspace,
             viewport.width,
@@ -1514,9 +1516,9 @@ impl TaskersCore {
         }
     }
 
-    fn workspace_viewport_frame(&self, attention_panel_visible: bool) -> Frame {
+    fn workspace_viewport_frame(&self, right_panel_visible: bool) -> Frame {
         let metrics = self.metrics;
-        let activity_width = if attention_panel_visible {
+        let activity_width = if right_panel_visible {
             metrics.activity_width
         } else {
             0
@@ -1553,7 +1555,8 @@ impl TaskersCore {
         let target_surface_id =
             workspace_id.and_then(|workspace_id| self.vcs_target_surface_id(model, workspace_id));
         let target_surface_title = target_surface_id.and_then(|surface_id| {
-            model.workspaces
+            model
+                .workspaces
                 .values()
                 .flat_map(|workspace| workspace.panes.values())
                 .flat_map(|pane| pane.surfaces.values())
@@ -3072,7 +3075,8 @@ impl TaskersCore {
             return false;
         };
         let Some(surface_id) = self.vcs_target_surface_id(&model, workspace_id) else {
-            let changed = self.ui.vcs_snapshot.take().is_some() || self.ui.vcs_error.take().is_some();
+            let changed =
+                self.ui.vcs_snapshot.take().is_some() || self.ui.vcs_error.take().is_some();
             if changed {
                 self.bump_local_revision();
             }
@@ -3181,7 +3185,11 @@ impl TaskersCore {
         }
     }
 
-    fn vcs_target_surface_id(&self, model: &AppModel, workspace_id: WorkspaceId) -> Option<SurfaceId> {
+    fn vcs_target_surface_id(
+        &self,
+        model: &AppModel,
+        workspace_id: WorkspaceId,
+    ) -> Option<SurfaceId> {
         let workspace = model.workspaces.get(&workspace_id)?;
         if let Some(surface_id) = self
             .ui
