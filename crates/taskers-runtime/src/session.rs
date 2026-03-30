@@ -449,12 +449,8 @@ impl TerminalSessionDaemon {
         shell_args: Vec<String>,
         env: BTreeMap<String, String>,
     ) -> Result<bool> {
-        if self
-            .sessions
-            .lock()
-            .expect("session daemon mutex poisoned")
-            .contains_key(session_id)
-        {
+        let mut sessions = self.sessions.lock().expect("session daemon mutex poisoned");
+        if sessions.contains_key(session_id) {
             return Ok(false);
         }
 
@@ -462,18 +458,16 @@ impl TerminalSessionDaemon {
         let spawned = PtySession::spawn(&spec)?;
         let pty = Arc::new(Mutex::new(spawned.session));
         let reader = spawned.reader;
-        self.sessions
-            .lock()
-            .expect("session daemon mutex poisoned")
-            .insert(
-                session_id.into(),
-                SessionState {
-                    pty: Arc::clone(&pty),
-                    transcript: Vec::new(),
-                    needs_redraw: false,
-                    clients: HashMap::new(),
-                },
-            );
+        sessions.insert(
+            session_id.into(),
+            SessionState {
+                pty: Arc::clone(&pty),
+                transcript: Vec::new(),
+                needs_redraw: false,
+                clients: HashMap::new(),
+            },
+        );
+        drop(sessions);
         self.spawn_reader(session_id.to_string(), reader);
         Ok(true)
     }

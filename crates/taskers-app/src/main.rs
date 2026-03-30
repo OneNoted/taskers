@@ -210,6 +210,21 @@ fn safe_eprintln(message: impl std::fmt::Display) {
     let _ = writeln!(stderr, "{message}");
 }
 
+fn push_startup_note(
+    startup_notes: &mut Vec<String>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    note: impl Into<String>,
+) {
+    let note = note.into();
+    if let Some(diagnostics) = diagnostics {
+        log_diagnostic(
+            Some(diagnostics),
+            DiagnosticRecord::new(DiagnosticCategory::Startup, None, note.clone()),
+        );
+    }
+    startup_notes.push(note);
+}
+
 impl TaskersConfig {
     fn load() -> Result<Self> {
         let path = taskers_paths::default_config_path();
@@ -1026,13 +1041,7 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
     let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
     let mut startup_notes = runtime.startup_notes;
     if let Some(note) = config_note {
-        if let Some(diagnostics) = diagnostics {
-            log_diagnostic(
-                Some(diagnostics),
-                DiagnosticRecord::new(DiagnosticCategory::Startup, None, note.clone()),
-            );
-        }
-        startup_notes.push(note);
+        push_startup_note(&mut startup_notes, diagnostics, note);
     }
     let session_path = default_session_path();
     let mut initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
@@ -1042,14 +1051,23 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         )
     })?;
     if let Some(terminal_session_client) = runtime.terminal_session_client.as_ref() {
-        let live_sessions = terminal_session_client
-            .list_sessions()
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<HashSet<_>>();
-        initial_model.recover_interrupted_agent_resumes_for_missing_sessions(|session_id| {
-            live_sessions.contains(&session_id.to_string())
-        });
+        match terminal_session_client.list_sessions() {
+            Ok(live_sessions) => {
+                let live_sessions = live_sessions.into_iter().collect::<HashSet<_>>();
+                initial_model.recover_interrupted_agent_resumes_for_missing_sessions(
+                    |session_id| live_sessions.contains(&session_id.to_string()),
+                );
+            }
+            Err(error) => {
+                push_startup_note(
+                    &mut startup_notes,
+                    diagnostics,
+                    format!(
+                        "Terminal session recovery unavailable; leaving persisted sessions untouched: {error}"
+                    ),
+                );
+            }
+        }
     } else {
         initial_model.recover_interrupted_agent_resumes();
     }
