@@ -5,18 +5,18 @@ use std::{
 
 use anyhow::Result;
 use taskers_domain::{AppModel, PaneKind, SessionId, SurfaceId};
-use taskers_runtime::TmuxBackend;
+use taskers_runtime::TerminalSessionClient;
 
 #[derive(Clone)]
-pub struct TmuxSessionManager {
-    backend: Option<TmuxBackend>,
+pub struct TerminalSessionManager {
+    client: Option<TerminalSessionClient>,
     inner: Arc<Mutex<HashMap<SurfaceId, SessionId>>>,
 }
 
-impl TmuxSessionManager {
-    pub fn new(backend: Option<TmuxBackend>) -> Self {
+impl TerminalSessionManager {
+    pub fn new(client: Option<TerminalSessionClient>) -> Self {
         Self {
-            backend,
+            client,
             inner: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -27,7 +27,7 @@ impl TmuxSessionManager {
             let mut inner = self
                 .inner
                 .lock()
-                .expect("tmux session manager mutex poisoned");
+                .expect("terminal session manager mutex poisoned");
             let removed = inner
                 .iter()
                 .filter_map(|(surface_id, session_id)| {
@@ -38,11 +38,11 @@ impl TmuxSessionManager {
             removed
         };
 
-        let Some(backend) = self.backend.as_ref() else {
+        let Some(client) = self.client.as_ref() else {
             return Ok(());
         };
         for session_id in removed {
-            backend.kill_session(&session_id.to_string())?;
+            client.terminate_session(&session_id.to_string())?;
         }
         Ok(())
     }

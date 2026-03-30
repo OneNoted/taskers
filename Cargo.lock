@@ -2515,6 +2515,8 @@ dependencies = [
  "base64",
  "libc",
  "portable-pty",
+ "serde",
+ "serde_json",
  "taskers-domain",
  "taskers-paths",
 ]

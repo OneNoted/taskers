@@ -110,6 +110,11 @@ impl PtySession {
     pub fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
         self.writer.write_all(data)
     }
+
+    pub fn kill(&mut self) -> Result<()> {
+        self.child.kill()?;
+        Ok(())
+    }
 }
 
 impl PtyReader {

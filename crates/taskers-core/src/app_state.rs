@@ -4,15 +4,15 @@ use anyhow::{Context, Result, anyhow};
 use taskers_control::{ControlCommand, ControlResponse, InMemoryController};
 use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
 use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
-use taskers_runtime::{ShellLaunchSpec, TmuxBackend};
+use taskers_runtime::{ShellLaunchSpec, TerminalSessionClient};
 
-use crate::{pane_runtime::RuntimeManager, session_store, tmux_manager::TmuxSessionManager};
+use crate::{pane_runtime::RuntimeManager, session_store, tmux_manager::TerminalSessionManager};
 
 #[derive(Clone)]
 pub struct AppState {
     controller: InMemoryController,
     runtime: RuntimeManager,
-    tmux_sessions: TmuxSessionManager,
+    terminal_sessions: TerminalSessionManager,
     backend: BackendChoice,
     session_path: PathBuf,
     shell_launch: ShellLaunchSpec,
@@ -24,7 +24,7 @@ impl AppState {
         session_path: PathBuf,
         backend: BackendChoice,
         shell_launch: ShellLaunchSpec,
-        tmux_backend: Option<TmuxBackend>,
+        terminal_session_client: Option<TerminalSessionClient>,
     ) -> Result<Self> {
         let controller = InMemoryController::new(model.clone());
         let runtime = RuntimeManager::new(
@@ -36,13 +36,13 @@ impl AppState {
             shell_launch.clone(),
         );
         runtime.sync_model(&model)?;
-        let tmux_sessions = TmuxSessionManager::new(tmux_backend);
-        tmux_sessions.sync_model(&model)?;
+        let terminal_sessions = TerminalSessionManager::new(terminal_session_client);
+        terminal_sessions.sync_model(&model)?;
 
         let state = Self {
             controller,
             runtime,
-            tmux_sessions,
+            terminal_sessions,
             backend,
             session_path,
             shell_launch,
@@ -86,7 +86,7 @@ impl AppState {
             .map_err(|error| anyhow!(error.to_string()))?;
         let model = self.snapshot_model();
         self.runtime.sync_model(&model)?;
-        self.tmux_sessions.sync_model(&model)?;
+        self.terminal_sessions.sync_model(&model)?;
         self.persist_snapshot()?;
         Ok(response)
     }

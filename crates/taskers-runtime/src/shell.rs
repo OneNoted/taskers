@@ -740,22 +740,22 @@ mod tests {
     }
 
     #[test]
-    fn shell_wrapper_routes_terminal_sessions_through_tmux_attach() {
+    fn shell_wrapper_routes_terminal_sessions_through_sidecar_attach() {
         let wrapper = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/shell/taskers-shell-wrapper.sh"
         ));
         assert!(
-            wrapper.contains("TASKERS_TMUX_SOCKET"),
-            "expected wrapper to branch on tmux socket availability"
+            wrapper.contains("TASKERS_TERMINAL_SOCKET"),
+            "expected wrapper to branch on terminal socket availability"
         );
         assert!(
             wrapper.contains("TASKERS_TERMINAL_SESSION_ID"),
-            "expected wrapper to require terminal session ids for tmux attach"
+            "expected wrapper to require terminal session ids for session attach"
         );
         assert!(
-            wrapper.contains("tmux attach"),
-            "expected wrapper to delegate continuity startup to taskersctl tmux attach"
+            wrapper.contains("session attach"),
+            "expected wrapper to delegate continuity startup to taskersctl session attach"
         );
     }
 

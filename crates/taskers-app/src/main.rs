@@ -4,7 +4,7 @@ compile_error!(
 );
 
 use adw::prelude::*;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{Router, extract::ws::WebSocketUpgrade, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
 use gtk::{EventControllerKey, gdk, gio, glib};
@@ -37,7 +37,7 @@ use taskers_ghostty::{
 };
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{
-    ShellLaunchSpec, TmuxBackend, install_shell_integration, scrub_inherited_terminal_env,
+    ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
 };
 use taskers_shell_core::{
     BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PixelSize,
@@ -47,6 +47,7 @@ use taskers_shell_core::{
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
 use glib::variant::ToVariant;
+use taskers_paths::default_tmux_socket_path as default_terminal_socket_path;
 
 const APP_ID: &str = taskers_paths::APP_ID;
 const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
@@ -101,7 +102,7 @@ struct RuntimeBootstrap {
     shell_launch: ShellLaunchSpec,
     host_options: GhosttyHostOptions,
     socket_path: PathBuf,
-    tmux_backend: Option<TmuxBackend>,
+    terminal_session_client: Option<TerminalSessionClient>,
     startup_notes: Vec<String>,
 }
 
@@ -1039,9 +1040,9 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
             session_path.display()
         )
     })?;
-    if let Some(tmux_backend) = runtime.tmux_backend.as_ref() {
+    if let Some(terminal_session_client) = runtime.terminal_session_client.as_ref() {
         initial_model.recover_interrupted_agent_resumes_for_missing_sessions(|session_id| {
-            tmux_backend
+            terminal_session_client
                 .has_session(&session_id.to_string())
                 .unwrap_or(false)
         });
@@ -1095,7 +1096,7 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         session_path,
         backend_choice,
         runtime.shell_launch,
-        runtime.tmux_backend.clone(),
+        runtime.terminal_session_client.clone(),
     )
     .context("failed to initialize Taskers app state")?;
     let core = SharedCore::bootstrap(BootstrapModel {
@@ -1125,6 +1126,7 @@ fn resolve_runtime_bootstrap(
 
     let mut startup_notes = Vec::new();
     let socket_path = default_socket_path();
+    let terminal_socket_path = default_terminal_socket_path();
     let ghostty_runtime = match ensure_runtime_installed() {
         Ok(Some(runtime)) => {
             startup_notes.push(format!(
@@ -1151,27 +1153,27 @@ fn resolve_runtime_bootstrap(
     shell_launch
         .env
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
-    let tmux_backend = match TmuxBackend::detect() {
-        Ok(backend) => {
+    let terminal_session_client = match ensure_terminal_session_daemon(&terminal_socket_path) {
+        Ok(()) => {
             shell_launch.env.insert(
-                "TASKERS_TMUX_SOCKET".into(),
-                backend.socket_path().display().to_string(),
+                "TASKERS_TERMINAL_SOCKET".into(),
+                terminal_socket_path.display().to_string(),
             );
-            Some(backend)
+            Some(TerminalSessionClient::new(terminal_socket_path))
         }
         Err(error) => {
             startup_notes.push(format!(
-                "tmux unavailable; terminals will start fresh shells and will not survive Taskers restart ({error})"
+                "terminal session sidecar unavailable; terminals will start fresh shells and will not survive Taskers restart ({error})"
             ));
             None
         }
     };
-    let terminal_persistence = if tmux_backend.is_some() {
+    let terminal_persistence = if terminal_session_client.is_some() {
         RuntimeCapability::Ready
     } else {
         RuntimeCapability::Fallback {
             message:
-                "tmux not found; terminals will start fresh shells and will not survive Taskers restart."
+                "Terminal sidecar unavailable; terminals will start fresh shells and will not survive Taskers restart."
                     .into(),
         }
     };
@@ -1186,7 +1188,7 @@ fn resolve_runtime_bootstrap(
         shell_launch,
         host_options,
         socket_path,
-        tmux_backend,
+        terminal_session_client,
         startup_notes,
     }
 }
@@ -2018,6 +2020,37 @@ fn log_runtime_status(diagnostics: Option<&DiagnosticsWriter>, status: &RuntimeS
         diagnostics,
         DiagnosticRecord::new(DiagnosticCategory::Startup, None, summary),
     );
+}
+
+fn ensure_terminal_session_daemon(socket_path: &PathBuf) -> Result<()> {
+    let client = TerminalSessionClient::new(socket_path.clone());
+    if client.ping().is_ok() {
+        return Ok(());
+    }
+
+    let terminald = std::env::current_exe()
+        .context("failed to resolve current executable for terminal sidecar launch")?
+        .with_file_name("taskers-terminald");
+    Command::new(&terminald)
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to launch {}", terminald.display()))?;
+
+    for _ in 0..20 {
+        if client.ping().is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    bail!(
+        "terminal sidecar did not become ready at {}",
+        socket_path.display()
+    )
 }
 
 fn log_diagnostic(diagnostics: Option<&DiagnosticsWriter>, record: DiagnosticRecord) {

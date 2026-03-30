@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "taskersctl"
 path = "src/bin/taskersctl.rs"
 
+[[bin]]
+name = "taskers-terminald"
+path = "src/bin/taskers-terminald.rs"
+
 [dependencies]
 adw.workspace = true
 anyhow.workspace = true

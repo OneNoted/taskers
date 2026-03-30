@@ -32,9 +32,9 @@ taskers
 directly. The first launch only bootstraps the version-matched Ghostty runtime
 assets when needed. The Linux app requires GTK4/libadwaita plus the host
 WebKitGTK 6.0 development packages at install time and the WebKitGTK 6.0
-runtime at launch time. Install `tmux` as well if you want terminal sessions to
-survive Taskers restarts; without it, Taskers falls back to fresh shells and
-warns that persistence is unavailable.
+runtime at launch time. Taskers handles terminal-session persistence itself on
+Linux when the sidecar is available; if it is unavailable, Taskers falls back to
+fresh shells and warns that persistence is unavailable.
 
 Mainline macOS support is currently not shipped from this repo root.
 

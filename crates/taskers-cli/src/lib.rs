@@ -14,7 +14,7 @@ use taskers_domain::{
     WorkspaceLogEntry,
 };
 use taskers_paths::default_tmux_socket_path;
-use taskers_runtime::TmuxBackend;
+use taskers_runtime::TerminalSessionClient;
 use time::OffsetDateTime;
 
 #[derive(Debug, Parser)]
@@ -126,9 +126,9 @@ enum Command {
         command: SurfaceCommand,
     },
     #[command(hide = true)]
-    Tmux {
+    Session {
         #[command(subcommand)]
-        command: TmuxCommand,
+        command: SessionCommand,
     },
 }
 
@@ -941,7 +941,7 @@ enum SurfaceCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum TmuxCommand {
+enum SessionCommand {
     Attach {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -953,6 +953,12 @@ enum TmuxCommand {
             num_args = 0..
         )]
         shell_args: Vec<String>,
+    },
+    Terminate {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(long)]
+        session: String,
     },
 }
 
@@ -1086,15 +1092,18 @@ pub async fn run() -> anyhow::Result<()> {
             eprintln!("serving taskers control API on {}", socket.display());
             serve(listener, controller, pending()).await?;
         }
-        Command::Tmux { command } => match command {
-            TmuxCommand::Attach {
+        Command::Session { command } => match command {
+            SessionCommand::Attach {
                 socket,
                 session,
                 shell_args,
             } => {
-                let backend = TmuxBackend::detect_with_socket(resolve_tmux_socket_path(socket))
-                    .map_err(|error| anyhow!("{error}"))?;
-                backend.attach_or_create(&session, &shell_args)?;
+                let client = TerminalSessionClient::new(resolve_terminal_socket_path(socket));
+                client.attach_or_create(&session, &shell_args)?;
+            }
+            SessionCommand::Terminate { socket, session } => {
+                let client = TerminalSessionClient::new(resolve_terminal_socket_path(socket));
+                client.terminate_session(&session)?;
             }
         },
         Command::Query { query } => match query {
@@ -2120,9 +2129,9 @@ fn resolve_socket_path(socket: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(default_socket_path)
 }
 
-fn resolve_tmux_socket_path(socket: Option<PathBuf>) -> PathBuf {
+fn resolve_terminal_socket_path(socket: Option<PathBuf>) -> PathBuf {
     socket
-        .or_else(|| env::var_os("TASKERS_TMUX_SOCKET").map(PathBuf::from))
+        .or_else(|| env::var_os("TASKERS_TERMINAL_SOCKET").map(PathBuf::from))
         .unwrap_or_else(default_tmux_socket_path)
 }
 
