@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use taskers_control::{ControlCommand, ControlResponse, InMemoryController, VcsCommand};
+use taskers_control::{
+    ControlCommand, ControlResponse, InMemoryController, VcsCommand, VcsCommandResult,
+};
 use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
 use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
 use taskers_runtime::{ShellLaunchSpec, TerminalSessionClient};
@@ -101,7 +103,13 @@ impl AppState {
 
     fn dispatch_vcs(&self, command: VcsCommand) -> Result<ControlResponse> {
         let model = self.snapshot_model();
-        let result = self.vcs.execute(&model, command)?;
+        let result = match self.vcs.execute(&model, command) {
+            Ok(result) => result,
+            Err(error) => VcsCommandResult {
+                snapshot: None,
+                message: Some(error.to_string()),
+            },
+        };
         Ok(ControlResponse::Vcs { result })
     }
 

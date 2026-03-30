@@ -38,72 +38,66 @@ impl VcsService {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git commit")?;
                 ensure_non_empty(&message, "commit message")?;
-                let output = run_command(
+                let _output = run_command(
                     &target.repo_root,
                     "git",
                     &["commit", "-m", message.trim()],
                 )?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message("Committed changes", &output)),
+                    message: None,
                 })
             }
             VcsCommand::GitCreateBranch { surface_id, name } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git branch create")?;
                 ensure_non_empty(&name, "branch name")?;
-                let output = run_command(
+                let _output = run_command(
                     &target.repo_root,
                     "git",
                     &["switch", "-c", name.trim()],
                 )?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message(
-                        format!("Created branch {}", name.trim()),
-                        &output,
-                    )),
+                    message: None,
                 })
             }
             VcsCommand::GitSwitchBranch { surface_id, name } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git branch switch")?;
                 ensure_non_empty(&name, "branch name")?;
-                let output =
+                let _output =
                     run_command(&target.repo_root, "git", &["switch", name.trim()])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message(
-                        format!("Switched to {}", name.trim()),
-                        &output,
-                    )),
+                    message: None,
                 })
             }
             VcsCommand::GitFetch { surface_id } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git fetch")?;
-                let output = run_command(&target.repo_root, "git", &["fetch", "--all", "--prune"])?;
+                let _output = run_command(&target.repo_root, "git", &["fetch", "--all", "--prune"])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message("Fetched remotes", &output)),
+                    message: None,
                 })
             }
             VcsCommand::GitPull { surface_id } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git pull")?;
-                let output = run_command(&target.repo_root, "git", &["pull", "--ff-only"])?;
+                let _output = run_command(&target.repo_root, "git", &["pull", "--ff-only"])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message("Pulled latest changes", &output)),
+                    message: None,
                 })
             }
             VcsCommand::GitPush { surface_id } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Git, "git push")?;
-                let output = run_command(&target.repo_root, "git", &["push"])?;
+                let _output = run_command(&target.repo_root, "git", &["push"])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message("Pushed branch", &output)),
+                    message: None,
                 })
             }
             VcsCommand::JjDescribe {
@@ -113,14 +107,14 @@ impl VcsService {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj describe")?;
                 ensure_non_empty(&message, "change description")?;
-                let output = run_command(
+                let _output = run_command(
                     &target.repo_root,
                     "jj",
                     &["describe", "-m", message.trim()],
                 )?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message("Updated change description", &output)),
+                    message: None,
                 })
             }
             VcsCommand::JjNew {
@@ -129,62 +123,56 @@ impl VcsService {
             } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj new")?;
-                let output = if let Some(message) = message.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let _output = if let Some(message) = message.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                     run_command(&target.repo_root, "jj", &["new", "-m", message])?
                 } else {
                     run_command(&target.repo_root, "jj", &["new"])?
                 };
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message("Created new change", &output)),
+                    message: None,
                 })
             }
             VcsCommand::JjCreateBookmark { surface_id, name } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj bookmark create")?;
                 ensure_non_empty(&name, "bookmark name")?;
-                let output = run_command(
+                let _output = run_command(
                     &target.repo_root,
                     "jj",
                     &["bookmark", "create", name.trim()],
                 )?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message(
-                        format!("Created bookmark {}", name.trim()),
-                        &output,
-                    )),
+                    message: None,
                 })
             }
             VcsCommand::JjSwitchBookmark { surface_id, name } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj edit")?;
                 ensure_non_empty(&name, "bookmark name")?;
-                let output = run_command(&target.repo_root, "jj", &["edit", name.trim()])?;
+                let _output = run_command(&target.repo_root, "jj", &["edit", name.trim()])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message(
-                        format!("Editing bookmark {}", name.trim()),
-                        &output,
-                    )),
+                    message: None,
                 })
             }
             VcsCommand::JjFetch { surface_id } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj git fetch")?;
-                let output = run_command(&target.repo_root, "jj", &["git", "fetch", "--all-remotes"])?;
+                let _output = run_command(&target.repo_root, "jj", &["git", "fetch", "--all-remotes"])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message("Fetched remotes", &output)),
+                    message: None,
                 })
             }
             VcsCommand::JjPush { surface_id } => {
                 let target = self.resolve_target(model, surface_id)?;
                 ensure_mode(target.mode, VcsMode::Jj, "jj git push")?;
-                let output = run_command(&target.repo_root, "jj", &["git", "push"])?;
+                let _output = run_command(&target.repo_root, "jj", &["git", "push"])?;
                 Ok(VcsCommandResult {
                     snapshot: Some(self.snapshot_from_target(&target, None)?),
-                    message: Some(command_message("Pushed bookmark", &output)),
+                    message: None,
                 })
             }
         }
@@ -421,16 +409,6 @@ fn trim_output(stdout: &str, stderr: &str) -> String {
         (false, false) if stdout == stderr => stdout.to_string(),
         (false, false) => format!("{stdout}\n{stderr}"),
         (true, true) => String::new(),
-    }
-}
-
-fn command_message(prefix: impl Into<String>, output: &CommandOutput) -> String {
-    let detail = trim_output(&output.stdout, &output.stderr);
-    let prefix = prefix.into();
-    if detail.is_empty() {
-        prefix
-    } else {
-        format!("{prefix}\n{detail}")
     }
 }
 

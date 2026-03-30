@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use taskers_control::{ControlCommand, ControlResponse};
+use taskers_control::{ControlCommand, ControlResponse, VcsCommand, VcsCommandResult, VcsSnapshot};
 use taskers_core::{AppState, default_session_path};
 use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
@@ -1048,6 +1048,15 @@ pub struct SettingsSnapshot {
     pub notification_preferences: NotificationPreferencesSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VcsPanelSnapshot {
+    pub visible: bool,
+    pub target_surface_id: Option<SurfaceId>,
+    pub target_surface_title: Option<String>,
+    pub snapshot: Option<VcsSnapshot>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellSnapshot {
     pub revision: u64,
@@ -1071,6 +1080,7 @@ pub struct ShellSnapshot {
     pub metrics: LayoutMetrics,
     pub runtime_status: RuntimeStatus,
     pub settings: SettingsSnapshot,
+    pub vcs_panel: VcsPanelSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1262,6 +1272,14 @@ pub enum ShellAction {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    ToggleVcsPanel,
+    RefreshVcsPanel,
+    ShowVcsDiff {
+        path: Option<String>,
+    },
+    RunVcsCommand {
+        command: VcsCommand,
+    },
     SelectTheme {
         theme_id: String,
     },
@@ -1284,6 +1302,11 @@ struct UiState {
     selected_shortcut_preset: ShortcutPreset,
     notification_preferences: NotificationPreferencesSnapshot,
     window_size: PixelSize,
+    vcs_panel_visible: bool,
+    last_terminal_surface_by_workspace: BTreeMap<WorkspaceId, SurfaceId>,
+    vcs_snapshot: Option<VcsSnapshot>,
+    vcs_error: Option<String>,
+    vcs_diff_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1348,6 +1371,11 @@ impl TaskersCore {
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 notification_preferences: bootstrap.notification_preferences,
                 window_size: PixelSize::new(1440, 900),
+                vcs_panel_visible: false,
+                last_terminal_surface_by_workspace: BTreeMap::new(),
+                vcs_snapshot: None,
+                vcs_error: None,
+                vcs_diff_path: None,
             },
             host_commands: VecDeque::new(),
             browser_navigation: BTreeMap::new(),
@@ -1482,6 +1510,7 @@ impl TaskersCore {
             metrics: self.metrics,
             runtime_status: self.runtime_status.clone(),
             settings: self.settings_snapshot(),
+            vcs_panel: self.vcs_panel_snapshot(&model),
         }
     }
 
@@ -1516,6 +1545,33 @@ impl TaskersCore {
                 .collect(),
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
             notification_preferences: self.ui.notification_preferences,
+        }
+    }
+
+    fn vcs_panel_snapshot(&self, model: &AppModel) -> VcsPanelSnapshot {
+        let workspace_id = model.active_workspace_id();
+        let target_surface_id =
+            workspace_id.and_then(|workspace_id| self.vcs_target_surface_id(model, workspace_id));
+        let target_surface_title = target_surface_id.and_then(|surface_id| {
+            model.workspaces
+                .values()
+                .flat_map(|workspace| workspace.panes.values())
+                .flat_map(|pane| pane.surfaces.values())
+                .find(|surface| surface.id == surface_id)
+                .and_then(|surface| {
+                    surface
+                        .metadata
+                        .title
+                        .clone()
+                        .or_else(|| surface.metadata.cwd.clone())
+                })
+        });
+        VcsPanelSnapshot {
+            visible: self.ui.vcs_panel_visible,
+            target_surface_id,
+            target_surface_title,
+            snapshot: self.ui.vcs_snapshot.clone(),
+            error: self.ui.vcs_error.clone(),
         }
     }
 
@@ -2023,6 +2079,7 @@ impl TaskersCore {
                 surface_id,
             } => {
                 self.browser_navigation.remove(&surface_id);
+                self.clear_vcs_surface_target(surface_id);
                 self.close_surface_by_id(pane_id, surface_id)
             }
             HostEvent::SurfaceTitleChanged { surface_id, title } => self.update_surface_metadata(
@@ -2227,6 +2284,10 @@ impl TaskersCore {
                 pane_id,
                 surface_id,
             } => self.dismiss_interrupted_agent_resume(workspace_id, pane_id, surface_id),
+            ShellAction::ToggleVcsPanel => self.toggle_vcs_panel(),
+            ShellAction::RefreshVcsPanel => self.refresh_vcs_panel(),
+            ShellAction::ShowVcsDiff { path } => self.show_vcs_diff(path),
+            ShellAction::RunVcsCommand { command } => self.run_vcs_command(command),
             ShellAction::SelectTheme { theme_id } => {
                 if self.ui.selected_theme_id == theme_id {
                     return false;
@@ -2455,6 +2516,10 @@ impl TaskersCore {
             self.ui.section = ShellSection::Workspace;
             self.bump_local_revision();
             changed = true;
+        }
+        changed |= self.sync_terminal_focus_for_workspace(workspace_id);
+        if self.ui.vcs_panel_visible {
+            changed |= self.refresh_vcs_panel();
         }
         changed
     }
@@ -2722,10 +2787,15 @@ impl TaskersCore {
                 workspace_id,
             });
         }
-        self.dispatch_control(ControlCommand::FocusPane {
+        let mut changed = self.dispatch_control(ControlCommand::FocusPane {
             workspace_id,
             pane_id,
-        })
+        });
+        changed |= self.sync_terminal_focus_for_workspace(workspace_id);
+        if self.ui.vcs_panel_visible {
+            changed |= self.refresh_vcs_panel();
+        }
+        changed
     }
 
     fn focus_surface_by_id(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
@@ -2740,11 +2810,16 @@ impl TaskersCore {
                 workspace_id,
             });
         }
-        self.dispatch_control(ControlCommand::FocusSurface {
+        let mut changed = self.dispatch_control(ControlCommand::FocusSurface {
             workspace_id,
             pane_id,
             surface_id,
-        })
+        });
+        changed |= self.record_terminal_focus(workspace_id, surface_id);
+        if self.ui.vcs_panel_visible {
+            changed |= self.refresh_vcs_panel();
+        }
+        changed
     }
 
     fn close_surface_by_id(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
@@ -2963,7 +3038,180 @@ impl TaskersCore {
     }
 
     fn update_surface_metadata(&mut self, surface_id: SurfaceId, patch: PaneMetadataPatch) -> bool {
-        self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch })
+        let mut changed =
+            self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch });
+        if self.ui.vcs_panel_visible
+            && self
+                .ui
+                .vcs_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.surface_id == surface_id)
+        {
+            changed |= self.refresh_vcs_panel();
+        }
+        changed
+    }
+
+    fn toggle_vcs_panel(&mut self) -> bool {
+        self.ui.vcs_panel_visible = !self.ui.vcs_panel_visible;
+        if !self.ui.vcs_panel_visible {
+            self.bump_local_revision();
+            return true;
+        }
+        let mut changed = self.refresh_vcs_panel();
+        if !changed {
+            self.bump_local_revision();
+            changed = true;
+        }
+        changed
+    }
+
+    fn refresh_vcs_panel(&mut self) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(surface_id) = self.vcs_target_surface_id(&model, workspace_id) else {
+            let changed = self.ui.vcs_snapshot.take().is_some() || self.ui.vcs_error.take().is_some();
+            if changed {
+                self.bump_local_revision();
+            }
+            return changed;
+        };
+        let response = self.dispatch_control_with_response(ControlCommand::Vcs {
+            vcs_command: VcsCommand::Refresh {
+                surface_id,
+                diff_path: self.ui.vcs_diff_path.clone(),
+            },
+        });
+        self.store_vcs_response(response)
+    }
+
+    fn show_vcs_diff(&mut self, path: Option<String>) -> bool {
+        if self.ui.vcs_diff_path == path {
+            return false;
+        }
+        self.ui.vcs_diff_path = path;
+        self.refresh_vcs_panel()
+    }
+
+    fn run_vcs_command(&mut self, command: VcsCommand) -> bool {
+        let response = self.dispatch_control_with_response(ControlCommand::Vcs {
+            vcs_command: command,
+        });
+        self.store_vcs_response(response)
+    }
+
+    fn store_vcs_response(&mut self, response: Option<ControlResponse>) -> bool {
+        let previous_snapshot = self.ui.vcs_snapshot.clone();
+        let previous_error = self.ui.vcs_error.clone();
+        match response {
+            Some(ControlResponse::Vcs { result }) => self.apply_vcs_result(result),
+            Some(_) => {
+                self.ui.vcs_error = Some("unexpected VCS response".into());
+            }
+            None => {
+                self.ui.vcs_error = Some("VCS request failed".into());
+            }
+        }
+        let changed =
+            self.ui.vcs_snapshot != previous_snapshot || self.ui.vcs_error != previous_error;
+        if changed {
+            self.bump_local_revision();
+        }
+        changed
+    }
+
+    fn apply_vcs_result(&mut self, result: VcsCommandResult) {
+        self.ui.vcs_error = None;
+        if let Some(snapshot) = result.snapshot {
+            self.ui.vcs_snapshot = Some(snapshot);
+        } else {
+            self.ui.vcs_snapshot = None;
+            self.ui.vcs_diff_path = None;
+        }
+        if let Some(message) = result.message {
+            self.ui.vcs_error = Some(message);
+        }
+    }
+
+    fn sync_terminal_focus_for_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let Some(surface_id) = workspace
+            .panes
+            .get(&workspace.active_pane)
+            .and_then(|pane| pane.active_surface())
+            .filter(|surface| surface.kind == PaneKind::Terminal)
+            .map(|surface| surface.id)
+        else {
+            return false;
+        };
+        self.record_terminal_focus(workspace_id, surface_id)
+    }
+
+    fn record_terminal_focus(&mut self, workspace_id: WorkspaceId, surface_id: SurfaceId) -> bool {
+        let previous = self
+            .ui
+            .last_terminal_surface_by_workspace
+            .insert(workspace_id, surface_id);
+        if previous == Some(surface_id) {
+            return false;
+        }
+        if self.app_state.snapshot_model().active_workspace_id() == Some(workspace_id) {
+            self.ui.vcs_diff_path = None;
+        }
+        true
+    }
+
+    fn clear_vcs_surface_target(&mut self, surface_id: SurfaceId) {
+        self.ui
+            .last_terminal_surface_by_workspace
+            .retain(|_, tracked_surface_id| *tracked_surface_id != surface_id);
+        if self
+            .ui
+            .vcs_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.surface_id == surface_id)
+        {
+            self.ui.vcs_snapshot = None;
+            self.ui.vcs_diff_path = None;
+        }
+    }
+
+    fn vcs_target_surface_id(&self, model: &AppModel, workspace_id: WorkspaceId) -> Option<SurfaceId> {
+        let workspace = model.workspaces.get(&workspace_id)?;
+        if let Some(surface_id) = self
+            .ui
+            .last_terminal_surface_by_workspace
+            .get(&workspace_id)
+            .copied()
+            .filter(|surface_id| {
+                workspace
+                    .panes
+                    .values()
+                    .flat_map(|pane| pane.surfaces.values())
+                    .any(|surface| surface.id == *surface_id && surface.kind == PaneKind::Terminal)
+            })
+        {
+            return Some(surface_id);
+        }
+        workspace
+            .panes
+            .get(&workspace.active_pane)
+            .and_then(|pane| pane.active_surface())
+            .filter(|surface| surface.kind == PaneKind::Terminal)
+            .map(|surface| surface.id)
+            .or_else(|| {
+                workspace
+                    .panes
+                    .values()
+                    .flat_map(|pane| pane.surfaces.values())
+                    .find(|surface| surface.kind == PaneKind::Terminal)
+                    .map(|surface| surface.id)
+            })
     }
 
     fn move_active_workspace_window(&mut self, direction: Direction) -> bool {
