@@ -274,7 +274,7 @@ fn applyTaskersEmbeddedSurfaceInvariants(
         config.theme = null;
         config.background = .{ .r = 0x0F, .g = 0x11, .b = 0x17 };
         config.@"background-image" = null;
-        config.@"background-opacity" = 1.0;
+        config.@"background-opacity" = 0.0;
         config.@"background-opacity-cells" = false;
         config.@"window-padding-x" = .{ .top_left = 0, .bottom_right = 0 };
         config.@"window-padding-y" = .{ .top_left = 0, .bottom_right = 0 };
@@ -406,7 +406,7 @@ test "taskers embedded appearance enforces taskers background contract" {
 
     try testing.expect(config.theme == null);
     try testing.expectEqual(configpkg.Color{ .r = 0x0F, .g = 0x11, .b = 0x17 }, config.background);
-    try testing.expectEqual(@as(f64, 1.0), config.@"background-opacity");
+    try testing.expectEqual(@as(f64, 0.0), config.@"background-opacity");
     try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".top_left);
     try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".bottom_right);
     try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".top_left);
