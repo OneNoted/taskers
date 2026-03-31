@@ -2499,6 +2499,7 @@ dependencies = [
  "taskers-control",
  "taskers-domain",
  "taskers-ghostty",
+ "taskers-paths",
  "taskers-shell-core",
  "webkit6",
 ]

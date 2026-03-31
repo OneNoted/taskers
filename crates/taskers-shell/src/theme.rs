@@ -1893,6 +1893,21 @@ input:focus-visible {{
   box-shadow: 0 0 0 1px {accent_20};
 }}
 
+.browser-toolbar-badge {{
+  height: 26px;
+  border: 1px solid {accent_24};
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: {accent_12};
+  color: {text_bright};
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}}
+
 .pane-body {{
   flex: 1;
   min-height: 0;

@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use taskers_domain::{
-    AppModel, DomainError, PaneId, PaneKind, SurfaceId, SurfaceRecord, WindowId, WorkspaceId,
+    AppModel, BrowserProfileMode, DomainError, PaneId, PaneKind, SurfaceId, SurfaceRecord,
+    WindowId, WorkspaceId,
 };
 
 use crate::protocol::{
@@ -419,8 +420,22 @@ impl InMemoryController {
                 workspace_id,
                 pane_id,
                 kind,
+                browser_profile_mode,
             } => {
+                let is_browser = matches!(kind, PaneKind::Browser);
                 let surface_id = model.create_surface(workspace_id, pane_id, kind)?;
+                if is_browser {
+                    model.update_surface_metadata(
+                        surface_id,
+                        taskers_domain::PaneMetadataPatch {
+                            browser_profile_mode: Some(
+                                browser_profile_mode
+                                    .unwrap_or(BrowserProfileMode::PersistentDefault),
+                            ),
+                            ..taskers_domain::PaneMetadataPatch::default()
+                        },
+                    )?;
+                }
                 (ControlResponse::SurfaceCreated { surface_id }, true)
             }
             ControlCommand::FocusSurface {
@@ -1036,7 +1051,7 @@ fn normalized_value(value: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use taskers_domain::{AppModel, PaneKind, SignalEvent, SignalKind};
+    use taskers_domain::{AppModel, BrowserProfileMode, PaneKind, SignalEvent, SignalKind};
 
     use crate::{ControlCommand, ControlQuery, ControlResponse};
 
@@ -1094,6 +1109,7 @@ mod tests {
                 workspace_id: source_workspace_id,
                 pane_id: source_pane_id,
                 kind: PaneKind::Browser,
+                browser_profile_mode: Some(BrowserProfileMode::PersistentDefault),
             })
             .expect("create moved surface");
         let moved_surface_id = controller
@@ -1179,6 +1195,7 @@ mod tests {
                 workspace_id: source_workspace_id,
                 pane_id: source_pane_id,
                 kind: PaneKind::Browser,
+                browser_profile_mode: Some(BrowserProfileMode::PersistentDefault),
             })
             .expect("create moved surface");
         let moved_surface_id = controller
@@ -1386,5 +1403,35 @@ mod tests {
         assert_eq!(caller.workspace_id, workspace.id);
         assert_eq!(caller.pane_id, workspace.active_pane);
         assert_eq!(caller.surface_id, surface.id);
+    }
+
+    #[test]
+    fn create_surface_applies_requested_browser_profile_mode() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id: workspace.id,
+                pane_id: workspace.active_pane,
+                kind: PaneKind::Browser,
+                browser_profile_mode: Some(BrowserProfileMode::Ephemeral),
+            })
+            .expect("create browser surface");
+
+        let snapshot = controller.snapshot();
+        let browser_surface = snapshot
+            .model
+            .workspaces
+            .get(&workspace.id)
+            .and_then(|workspace| workspace.panes.get(&workspace.active_pane))
+            .and_then(|pane| pane.active_surface())
+            .expect("browser surface");
+
+        assert_eq!(
+            browser_surface.metadata.browser_profile_mode,
+            BrowserProfileMode::Ephemeral
+        );
     }
 }

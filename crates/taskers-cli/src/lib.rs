@@ -9,9 +9,9 @@ use taskers_control::{
     serve,
 };
 use taskers_domain::{
-    AgentTarget, AppModel, AttentionState, Direction, KEYBOARD_RESIZE_STEP, PaneId, PaneKind,
-    PaneMetadataPatch, ProgressState, SignalEvent, SignalKind, SplitAxis, SurfaceId, WorkspaceId,
-    WorkspaceLogEntry,
+    AgentTarget, AppModel, AttentionState, BrowserProfileMode, Direction, KEYBOARD_RESIZE_STEP,
+    PaneId, PaneKind, PaneMetadataPatch, ProgressState, SignalEvent, SignalKind, SplitAxis,
+    SurfaceId, WorkspaceId, WorkspaceLogEntry,
 };
 use taskers_paths::default_terminal_socket_path;
 use taskers_runtime::TerminalSessionClient;
@@ -439,6 +439,8 @@ enum BrowserCommand {
         pane: Option<PaneId>,
         #[arg(long)]
         url: Option<String>,
+        #[arg(long, default_value_t = false)]
+        ephemeral: bool,
     },
     Navigate {
         #[command(flatten)]
@@ -644,6 +646,12 @@ enum BrowserCommand {
         #[command(flatten)]
         browser: BrowserSurfaceArgs,
     },
+    ClearData {
+        #[command(flatten)]
+        browser: BrowserSurfaceArgs,
+        #[arg(long)]
+        origin_filter: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -797,6 +805,8 @@ enum PaneCommand {
         kind: CliPaneKind,
         #[arg(long)]
         url: Option<String>,
+        #[arg(long, default_value_t = false)]
+        ephemeral: bool,
     },
     Focus {
         #[arg(long)]
@@ -873,6 +883,8 @@ enum SurfaceCommand {
         kind: CliPaneKind,
         #[arg(long)]
         url: Option<String>,
+        #[arg(long, default_value_t = false)]
+        ephemeral: bool,
     },
     Focus {
         #[arg(long)]
@@ -1049,6 +1061,14 @@ impl From<CliPaneKind> for PaneKind {
             CliPaneKind::Terminal => PaneKind::Terminal,
             CliPaneKind::Browser => PaneKind::Browser,
         }
+    }
+}
+
+fn browser_profile_mode(ephemeral: bool) -> BrowserProfileMode {
+    if ephemeral {
+        BrowserProfileMode::Ephemeral
+    } else {
+        BrowserProfileMode::PersistentDefault
     }
 }
 
@@ -1739,9 +1759,13 @@ pub async fn run() -> anyhow::Result<()> {
                 axis,
                 kind,
                 url,
+                ephemeral,
             } => {
                 if url.is_some() && kind != CliPaneKind::Browser {
                     bail!("--url requires --kind browser");
+                }
+                if ephemeral && kind != CliPaneKind::Browser {
+                    bail!("--ephemeral requires --kind browser");
                 }
 
                 let client = ControlClient::new(resolve_socket_path(socket));
@@ -1770,9 +1794,15 @@ pub async fn run() -> anyhow::Result<()> {
                     };
                     let placeholder_surface_id =
                         active_surface_for_pane(&query_model(&client).await?, workspace, pane_id)?;
-                    let surface_id =
-                        create_surface(&client, workspace, pane_id, kind.into(), url.clone())
-                            .await?;
+                    let surface_id = create_surface(
+                        &client,
+                        workspace,
+                        pane_id,
+                        kind.into(),
+                        Some(browser_profile_mode(ephemeral)),
+                        url.clone(),
+                    )
+                    .await?;
                     send_control_command(
                         &client,
                         ControlCommand::CloseSurface {
@@ -1886,6 +1916,7 @@ pub async fn run() -> anyhow::Result<()> {
                             title,
                             cwd,
                             url: None,
+                            browser_profile_mode: None,
                             repo_name: repo,
                             git_branch: branch,
                             ports: None,
@@ -1903,9 +1934,13 @@ pub async fn run() -> anyhow::Result<()> {
                 pane,
                 kind,
                 url,
+                ephemeral,
             } => {
                 if url.is_some() && kind != CliPaneKind::Browser {
                     bail!("--url requires --kind browser");
+                }
+                if ephemeral && kind != CliPaneKind::Browser {
+                    bail!("--ephemeral requires --kind browser");
                 }
 
                 let client = ControlClient::new(resolve_socket_path(socket));
@@ -1915,12 +1950,20 @@ pub async fn run() -> anyhow::Result<()> {
                             workspace_id: workspace,
                             pane_id: pane,
                             kind: PaneKind::Terminal,
+                            browser_profile_mode: None,
                         })
                         .await?;
                     println!("{}", serde_json::to_string_pretty(&response)?);
                 } else {
-                    let surface_id =
-                        create_surface(&client, workspace, pane, kind.into(), url.clone()).await?;
+                    let surface_id = create_surface(
+                        &client,
+                        workspace,
+                        pane,
+                        kind.into(),
+                        Some(browser_profile_mode(ephemeral)),
+                        url.clone(),
+                    )
+                    .await?;
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&serde_json::json!({
@@ -1930,6 +1973,7 @@ pub async fn run() -> anyhow::Result<()> {
                             "surface_id": surface_id,
                             "kind": "browser",
                             "url": url,
+                            "profile_mode": browser_profile_mode(ephemeral),
                         }))?
                     );
                 }
@@ -2247,6 +2291,7 @@ async fn create_surface(
     workspace_id: WorkspaceId,
     pane_id: PaneId,
     kind: PaneKind,
+    browser_profile_mode: Option<BrowserProfileMode>,
     url: Option<String>,
 ) -> anyhow::Result<SurfaceId> {
     let response = send_control_command(
@@ -2255,6 +2300,7 @@ async fn create_surface(
             workspace_id,
             pane_id,
             kind,
+            browser_profile_mode,
         },
     )
     .await?;
@@ -2272,6 +2318,7 @@ async fn create_surface(
                     title: None,
                     cwd: None,
                     url: Some(url),
+                    browser_profile_mode: None,
                     repo_name: None,
                     git_branch: None,
                     ports: None,
@@ -2292,6 +2339,7 @@ async fn handle_browser_cli_command(command: BrowserCommand) -> anyhow::Result<(
             workspace,
             pane,
             url,
+            ephemeral,
         } => {
             let client = ControlClient::new(resolve_socket_path(socket));
             let model = query_model(&client).await?;
@@ -2322,6 +2370,7 @@ async fn handle_browser_cli_command(command: BrowserCommand) -> anyhow::Result<(
                 workspace_id,
                 pane_id,
                 PaneKind::Browser,
+                Some(browser_profile_mode(ephemeral)),
                 url.clone(),
             )
             .await?;
@@ -2342,6 +2391,7 @@ async fn handle_browser_cli_command(command: BrowserCommand) -> anyhow::Result<(
                     "pane_id": pane_id,
                     "surface_id": surface_id,
                     "url": url,
+                    "profile_mode": browser_profile_mode(ephemeral),
                 }))?
             );
         }
@@ -2684,6 +2734,19 @@ async fn handle_browser_cli_command(command: BrowserCommand) -> anyhow::Result<(
         BrowserCommand::IsWebviewFocused { browser } => {
             run_browser_surface_command(&browser, |surface_id| {
                 BrowserControlCommand::IsWebviewFocused { surface_id }
+            })
+            .await?;
+        }
+        BrowserCommand::ClearData {
+            browser,
+            origin_filter,
+        } => {
+            run_browser_surface_command(&browser, move |surface_id| {
+                BrowserControlCommand::ClearData {
+                    surface_id,
+                    origin_filter,
+                    reload: true,
+                }
             })
             .await?;
         }
@@ -3328,6 +3391,7 @@ mod tests {
                 workspace_id: source_workspace_id,
                 pane_id: source_pane_id,
                 kind: PaneKind::Browser,
+                browser_profile_mode: Some(BrowserProfileMode::PersistentDefault),
             })
             .expect("create surface");
         let moved_surface_id = controller

@@ -3,11 +3,11 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use taskers_domain::{
-    AgentTarget, AppModel, AttentionState, Direction, NotificationDeliveryState, NotificationId,
-    PaneContainerId, PaneId, PaneKind, PaneMetadataPatch, PaneTabId, PersistedSession,
-    ProgressState, SignalEvent, SignalKind, SplitAxis, SurfaceId, WindowId, WorkspaceColumnId,
-    WorkspaceId, WorkspaceLogEntry, WorkspaceViewport, WorkspaceWindowId,
-    WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
+    AgentTarget, AppModel, AttentionState, BrowserProfileMode, Direction,
+    NotificationDeliveryState, NotificationId, PaneContainerId, PaneId, PaneKind,
+    PaneMetadataPatch, PaneTabId, PersistedSession, ProgressState, SignalEvent, SignalKind,
+    SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceLogEntry,
+    WorkspaceViewport, WorkspaceWindowId, WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +147,7 @@ pub enum ControlCommand {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
         kind: PaneKind,
+        browser_profile_mode: Option<BrowserProfileMode>,
     },
     FocusSurface {
         workspace_id: WorkspaceId,
@@ -599,6 +600,11 @@ pub enum BrowserControlCommand {
         surface_id: SurfaceId,
         path: Option<String>,
         full_document: bool,
+    },
+    ClearData {
+        surface_id: SurfaceId,
+        origin_filter: Option<String>,
+        reload: bool,
     },
 }
 

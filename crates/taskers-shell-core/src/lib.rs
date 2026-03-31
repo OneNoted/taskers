@@ -20,8 +20,8 @@ use tokio::sync::watch;
 
 pub use taskers_control::{VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode, VcsSnapshot};
 pub use taskers_domain::{
-    Direction, PaneContainerId, PaneId, PaneKind, PaneTabId, PaneTabLayoutNode, SurfaceId,
-    WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowMoveTarget,
+    BrowserProfileMode, Direction, PaneContainerId, PaneId, PaneKind, PaneTabId, PaneTabLayoutNode,
+    SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowMoveTarget,
     WorkspaceWindowTabId,
 };
 
@@ -718,6 +718,7 @@ pub struct SurfaceSnapshot {
     pub activity_label: Option<String>,
     pub status_label: Option<String>,
     pub url: Option<String>,
+    pub browser_profile_mode: BrowserProfileMode,
     pub cwd: Option<String>,
     pub attention: AttentionState,
     pub notification_ring: Option<AttentionRingState>,
@@ -794,6 +795,7 @@ pub enum PaneTabLayoutSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserMountSpec {
     pub url: String,
+    pub profile_mode: BrowserProfileMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -881,6 +883,7 @@ pub struct BrowserSurfaceCatalogEntry {
     pub pane_id: PaneId,
     pub surface_id: SurfaceId,
     pub url: String,
+    pub profile_mode: BrowserProfileMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -980,6 +983,7 @@ pub struct BrowserChromeSnapshot {
     pub surface_id: SurfaceId,
     pub title: String,
     pub url: String,
+    pub profile_mode: BrowserProfileMode,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub devtools_open: bool,
@@ -1163,6 +1167,7 @@ pub enum HostCommand {
     BrowserForward { surface_id: SurfaceId },
     BrowserReload { surface_id: SurfaceId },
     BrowserToggleDevtools { surface_id: SurfaceId },
+    BrowserClearData { surface_id: SurfaceId },
     TerminalSendText { surface_id: SurfaceId, text: String },
 }
 
@@ -1242,12 +1247,14 @@ pub enum ShellAction {
     },
     SplitBrowser {
         pane_id: Option<PaneId>,
+        profile_mode: BrowserProfileMode,
     },
     SplitTerminal {
         pane_id: Option<PaneId>,
     },
     AddBrowserSurface {
         pane_id: Option<PaneId>,
+        profile_mode: BrowserProfileMode,
     },
     AddTerminalSurface {
         pane_id: Option<PaneId>,
@@ -1299,6 +1306,9 @@ pub enum ShellAction {
         surface_id: SurfaceId,
     },
     BrowserReload {
+        surface_id: SurfaceId,
+    },
+    ClearBrowserData {
         surface_id: SurfaceId,
     },
     ToggleBrowserDevtools {
@@ -2033,6 +2043,7 @@ impl TaskersCore {
                 activity_label: surface_activity_label(surface, now),
                 status_label: surface_status_label(surface, now),
                 url: normalized_surface_url(surface),
+                browser_profile_mode: surface.metadata.browser_profile_mode,
                 cwd: normalized_cwd(&surface.metadata),
                 attention: surface.attention.into(),
                 notification_ring: surface_notification_ring(surface),
@@ -2072,6 +2083,7 @@ impl TaskersCore {
             surface_id: surface.id,
             title: display_surface_title(surface),
             url: normalized_surface_url(surface).unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
+            profile_mode: surface.metadata.browser_profile_mode,
             can_go_back: self
                 .browser_navigation
                 .get(&surface.id)
@@ -2100,7 +2112,8 @@ impl TaskersCore {
                     }
                     let descriptor = fallback_surface_descriptor(surface);
                     let mount = mount_spec_from_descriptor(surface, descriptor);
-                    let SurfaceMountSpec::Browser(BrowserMountSpec { url }) = mount else {
+                    let SurfaceMountSpec::Browser(BrowserMountSpec { url, profile_mode }) = mount
+                    else {
                         continue;
                     };
                     catalog.push(BrowserSurfaceCatalogEntry {
@@ -2108,6 +2121,7 @@ impl TaskersCore {
                         pane_id: pane.id,
                         surface_id: surface.id,
                         url,
+                        profile_mode,
                     });
                 }
             }
@@ -2439,18 +2453,30 @@ impl TaskersCore {
                 pane_tab_id,
             } => self.close_pane_tab(pane_container_id, pane_tab_id),
             ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
-            ShellAction::SplitBrowser { pane_id } => {
-                self.split_with_kind_axis(pane_id, PaneKind::Browser, DomainSplitAxis::Horizontal)
-            }
-            ShellAction::SplitTerminal { pane_id } => {
-                self.split_with_kind_axis(pane_id, PaneKind::Terminal, DomainSplitAxis::Horizontal)
-            }
-            ShellAction::AddBrowserSurface { pane_id } => {
-                self.add_surface_to_pane(pane_id, PaneKind::Browser)
-            }
-            ShellAction::AddTerminalSurface { pane_id } => {
-                self.add_surface_to_pane(pane_id, PaneKind::Terminal)
-            }
+            ShellAction::SplitBrowser {
+                pane_id,
+                profile_mode,
+            } => self.split_with_kind_axis(
+                pane_id,
+                PaneKind::Browser,
+                DomainSplitAxis::Horizontal,
+                profile_mode,
+            ),
+            ShellAction::SplitTerminal { pane_id } => self.split_with_kind_axis(
+                pane_id,
+                PaneKind::Terminal,
+                DomainSplitAxis::Horizontal,
+                BrowserProfileMode::PersistentDefault,
+            ),
+            ShellAction::AddBrowserSurface {
+                pane_id,
+                profile_mode,
+            } => self.add_surface_to_pane(pane_id, PaneKind::Browser, profile_mode),
+            ShellAction::AddTerminalSurface { pane_id } => self.add_surface_to_pane(
+                pane_id,
+                PaneKind::Terminal,
+                BrowserProfileMode::PersistentDefault,
+            ),
             ShellAction::FocusPane { pane_id } => self.focus_pane_by_id(pane_id),
             ShellAction::FocusSurface {
                 pane_id,
@@ -2507,6 +2533,9 @@ impl TaskersCore {
             }
             ShellAction::BrowserReload { surface_id } => {
                 self.queue_host_command(HostCommand::BrowserReload { surface_id })
+            }
+            ShellAction::ClearBrowserData { surface_id } => {
+                self.queue_host_command(HostCommand::BrowserClearData { surface_id })
             }
             ShellAction::ToggleBrowserDevtools { surface_id } => {
                 self.queue_host_command(HostCommand::BrowserToggleDevtools { surface_id })
@@ -2605,6 +2634,7 @@ impl TaskersCore {
                     None,
                     PaneKind::Browser,
                     DomainSplitAxis::Horizontal,
+                    BrowserProfileMode::PersistentDefault,
                 ))
             }),
             ShortcutAction::FocusBrowserAddress => false,
@@ -2744,10 +2774,16 @@ impl TaskersCore {
                     None,
                     PaneKind::Terminal,
                     DomainSplitAxis::Horizontal,
+                    BrowserProfileMode::PersistentDefault,
                 ))
             }),
             ShortcutAction::SplitDown => self.run_workspace_shortcut(|core, _| {
-                Some(core.split_with_kind_axis(None, PaneKind::Terminal, DomainSplitAxis::Vertical))
+                Some(core.split_with_kind_axis(
+                    None,
+                    PaneKind::Terminal,
+                    DomainSplitAxis::Vertical,
+                    BrowserProfileMode::PersistentDefault,
+                ))
             }),
         }
     }
@@ -3026,6 +3062,7 @@ impl TaskersCore {
         pane_id: Option<PaneId>,
         kind: PaneKind,
         axis: DomainSplitAxis,
+        browser_profile_mode: BrowserProfileMode,
     ) -> bool {
         let Some((workspace_id, target_pane_id)) = self.resolve_target_pane(pane_id) else {
             return false;
@@ -3059,10 +3096,12 @@ impl TaskersCore {
             .and_then(|workspace| workspace.panes.get(&new_pane_id))
             .map(|pane| pane.active_surface);
 
+        let is_browser = matches!(kind, PaneKind::Browser);
         let created = self.dispatch_control(ControlCommand::CreateSurface {
             workspace_id,
             pane_id: new_pane_id,
             kind,
+            browser_profile_mode: is_browser.then_some(browser_profile_mode),
         });
         if !created {
             return false;
@@ -3078,14 +3117,21 @@ impl TaskersCore {
         true
     }
 
-    fn add_surface_to_pane(&mut self, pane_id: Option<PaneId>, kind: PaneKind) -> bool {
+    fn add_surface_to_pane(
+        &mut self,
+        pane_id: Option<PaneId>,
+        kind: PaneKind,
+        browser_profile_mode: BrowserProfileMode,
+    ) -> bool {
         let Some((workspace_id, target_pane_id)) = self.resolve_target_pane(pane_id) else {
             return false;
         };
+        let is_browser = matches!(kind, PaneKind::Browser);
         self.dispatch_control(ControlCommand::CreateSurface {
             workspace_id,
             pane_id: target_pane_id,
             kind,
+            browser_profile_mode: is_browser.then_some(browser_profile_mode),
         })
     }
 
@@ -4026,7 +4072,10 @@ impl SharedCore {
     }
 
     pub fn split_with_browser(&self) {
-        self.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        self.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
     }
 
     pub fn split_with_terminal(&self) {
@@ -5358,6 +5407,7 @@ fn fallback_surface_descriptor(surface: &SurfaceRecord) -> SurfaceDescriptor {
             .filter(|title| !title.is_empty())
             .map(str::to_string),
         url: normalized_surface_url(surface),
+        browser_profile_mode: surface.metadata.browser_profile_mode,
         command_argv: Vec::new(),
         env: BTreeMap::new(),
     }
@@ -5374,6 +5424,7 @@ fn mount_spec_from_descriptor(
                 .as_deref()
                 .map(resolved_browser_uri)
                 .unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
+            profile_mode: descriptor.browser_profile_mode,
         }),
         PaneKind::Terminal => SurfaceMountSpec::Terminal(TerminalMountSpec {
             title: display_surface_title(surface),
@@ -5457,12 +5508,12 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, DEFAULT_BROWSER_HOME, Direction, HostCommand, HostEvent,
-        LayoutMetrics, NotificationPreferencesSnapshot, RuntimeCapability, RuntimeStatus,
-        SharedCore, ShellAction, ShellDragMode, ShellSection, SurfaceDragSessionSnapshot,
-        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
-        default_session_path_for_preview, display_surface_title, pane_body_frame,
-        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME, Direction,
+        HostCommand, HostEvent, LayoutMetrics, NotificationPreferencesSnapshot, RuntimeCapability,
+        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
+        SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection,
+        default_preview_app_state, default_session_path_for_preview, display_surface_title,
+        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
 
@@ -6528,15 +6579,39 @@ mod tests {
         let core = SharedCore::bootstrap(bootstrap());
         let before = core.snapshot().portal.panes.len();
 
-        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
 
         let snapshot = core.snapshot();
         assert!(snapshot.portal.panes.len() > before);
         assert!(snapshot.portal.panes.iter().any(|plan| {
             matches!(
                 &plan.mount,
-                SurfaceMountSpec::Browser(BrowserMountSpec { url })
+                SurfaceMountSpec::Browser(BrowserMountSpec { url, .. })
                     if url == DEFAULT_BROWSER_HOME
+            )
+        }));
+    }
+
+    #[test]
+    fn split_browser_preserves_requested_profile_mode() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::Ephemeral,
+        });
+
+        let snapshot = core.snapshot();
+        let browser = snapshot.browser_chrome.expect("active browser chrome");
+        assert_eq!(browser.profile_mode, BrowserProfileMode::Ephemeral);
+        assert!(snapshot.portal.panes.iter().any(|plan| {
+            matches!(
+                &plan.mount,
+                SurfaceMountSpec::Browser(BrowserMountSpec { profile_mode, .. })
+                    if *profile_mode == BrowserProfileMode::Ephemeral
             )
         }));
     }
@@ -6577,7 +6652,10 @@ mod tests {
     #[test]
     fn browser_snapshot_and_host_commands_follow_active_browser_surface() {
         let core = SharedCore::bootstrap(bootstrap());
-        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
 
         let snapshot = core.snapshot();
         let browser = snapshot.browser_chrome.expect("active browser chrome");
@@ -6686,6 +6764,7 @@ mod tests {
         let first_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::SplitBrowser {
             pane_id: Some(first_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         core.dispatch_shell_action(ShellAction::CreateWorkspace);
@@ -6693,6 +6772,7 @@ mod tests {
         let second_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::SplitBrowser {
             pane_id: Some(second_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let catalog = core.snapshot().browser_catalog;
@@ -6784,7 +6864,10 @@ mod tests {
     #[test]
     fn browser_navigation_host_events_update_browser_chrome_snapshot() {
         let core = SharedCore::bootstrap(bootstrap());
-        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
 
         let snapshot = core.snapshot();
         let browser = snapshot.browser_chrome.expect("active browser chrome");
@@ -6811,7 +6894,10 @@ mod tests {
     #[test]
     fn explicit_about_blank_browser_urls_are_preserved() {
         let core = SharedCore::bootstrap(bootstrap());
-        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
 
         let browser = core
             .snapshot()
@@ -7149,6 +7235,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
         let snapshot = core.snapshot();
         let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
@@ -7199,6 +7286,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -7240,6 +7328,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -7289,6 +7378,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -7330,6 +7420,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -7380,6 +7471,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();

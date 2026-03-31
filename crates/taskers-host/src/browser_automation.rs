@@ -1,15 +1,18 @@
 use std::{
     path::PathBuf,
+    pin::Pin,
     time::{Duration, Instant},
 };
 
-use gtk::{glib, prelude::*};
+use gtk::{gio, glib, prelude::*};
 use serde_json::{Value as JsonValue, json};
 use taskers_control::{
     BrowserControlCommand, BrowserGetCommand, BrowserPredicateCommand, BrowserTarget,
     BrowserWaitCondition, ControlError,
 };
-use webkit6::{SnapshotOptions, SnapshotRegion, prelude::*};
+use webkit6::{
+    SnapshotOptions, SnapshotRegion, WebsiteData, WebsiteDataManager, WebsiteDataTypes, prelude::*,
+};
 
 use crate::BrowserSurfaceHandle;
 
@@ -213,6 +216,11 @@ impl BrowserSurfaceHandle {
                 full_document,
                 ..
             } => self.screenshot(path, full_document).await,
+            BrowserControlCommand::ClearData {
+                origin_filter,
+                reload,
+                ..
+            } => self.clear_data(origin_filter, reload).await,
         }
     }
 
@@ -334,6 +342,46 @@ return await Promise.resolve((0, eval)(__taskersEval));
                     .unwrap_or(false))
             }
         }
+    }
+
+    pub(crate) async fn clear_data(
+        &self,
+        origin_filter: Option<String>,
+        reload: bool,
+    ) -> Result<JsonValue, ControlError> {
+        let manager = self
+            .network_session
+            .website_data_manager()
+            .ok_or_else(|| ControlError::not_supported("browser data manager is unavailable"))?;
+        let data_types = WebsiteDataTypes::ALL;
+        let website_data = manager
+            .fetch_future(data_types)
+            .await
+            .map_err(map_webkit_error)?;
+        let normalized_filter = origin_filter
+            .as_deref()
+            .and_then(normalize_origin_filter)
+            .map(str::to_string);
+        let matching = website_data
+            .into_iter()
+            .filter(|entry| website_data_matches(entry, normalized_filter.as_deref()))
+            .collect::<Vec<_>>();
+        if !matching.is_empty() {
+            website_data_manager_remove_future(&manager, data_types, matching.clone())
+                .await
+                .map_err(map_webkit_error)?;
+        }
+        if reload {
+            self.reload();
+        }
+        Ok(json!({
+            "surface_id": self.surface_id().to_string(),
+            "status": "browser_data_cleared",
+            "profile_mode": self.profile_mode,
+            "origin_filter": normalized_filter,
+            "cleared_entries": matching.len(),
+            "reloaded": reload,
+        }))
     }
 
     async fn run_helper_action(
@@ -576,6 +624,55 @@ fn screenshot_path(path: Option<String>) -> Result<PathBuf, ControlError> {
             Ok(std::env::temp_dir().join(format!("taskers-browser-{}.png", timestamp)))
         }
     }
+}
+
+fn website_data_manager_remove_future(
+    manager: &WebsiteDataManager,
+    data_types: WebsiteDataTypes,
+    website_data: Vec<WebsiteData>,
+) -> Pin<Box<dyn std::future::Future<Output = Result<(), glib::Error>> + 'static>> {
+    let manager = manager.clone();
+    Box::pin(gio::GioFuture::new(
+        &manager,
+        move |obj, cancellable, send| {
+            let refs = website_data.iter().collect::<Vec<_>>();
+            obj.remove(data_types, &refs, Some(cancellable), move |res| {
+                send.resolve(res);
+            });
+        },
+    ))
+}
+
+fn normalize_origin_filter(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(without_scheme)
+        .trim_matches('.');
+    (!host.is_empty()).then_some(host)
+}
+
+fn website_data_matches(entry: &WebsiteData, origin_filter: Option<&str>) -> bool {
+    let Some(origin_filter) = origin_filter.map(|value| value.to_ascii_lowercase()) else {
+        return true;
+    };
+    let Some(name) = entry.name().map(|value| value.to_ascii_lowercase()) else {
+        return false;
+    };
+    name == origin_filter
+        || name.ends_with(&format!(".{origin_filter}"))
+        || origin_filter.ends_with(&format!(".{name}"))
 }
 
 fn helper_bootstrap_source() -> &'static str {

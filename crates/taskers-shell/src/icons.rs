@@ -39,6 +39,24 @@ pub fn globe(size: u32, class: &str) -> Element {
     }
 }
 
+/// Shield icon for privacy-focused browser actions
+pub fn shield(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }
+        }
+    }
+}
+
 /// Plus icon for add actions
 pub fn plus(size: u32, class: &str) -> Element {
     rsx! {
@@ -188,6 +206,28 @@ pub fn refresh(size: u32, class: &str) -> Element {
             stroke_linejoin: "round",
             polyline { points: "23 4 23 10 17 10" }
             path { d: "M20.49 15a9 9 0 1 1-2.12-9.36L23 10" }
+        }
+    }
+}
+
+/// Trash icon for destructive/clear actions
+pub fn trash(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            polyline { points: "3 6 5 6 21 6" }
+            path { d: "M19 6l-1 14H6L5 6" }
+            path { d: "M10 11v6" }
+            path { d: "M14 11v6" }
+            path { d: "M9 6V4h6v2" }
         }
     }
 }

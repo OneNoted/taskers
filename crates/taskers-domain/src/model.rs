@@ -140,6 +140,20 @@ pub enum PaneKind {
     Browser,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserProfileMode {
+    #[default]
+    PersistentDefault,
+    Ephemeral,
+}
+
+impl BrowserProfileMode {
+    pub fn is_ephemeral(self) -> bool {
+        matches!(self, Self::Ephemeral)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressState {
     /// Progress as permille (0–1000).
@@ -171,6 +185,8 @@ pub struct PaneMetadata {
     pub agent_title: Option<String>,
     pub cwd: Option<String>,
     pub url: Option<String>,
+    #[serde(default)]
+    pub browser_profile_mode: BrowserProfileMode,
     pub repo_name: Option<String>,
     pub git_branch: Option<String>,
     pub ports: Vec<u16>,
@@ -195,6 +211,7 @@ pub struct PaneMetadataPatch {
     pub title: Option<String>,
     pub cwd: Option<String>,
     pub url: Option<String>,
+    pub browser_profile_mode: Option<BrowserProfileMode>,
     pub repo_name: Option<String>,
     pub git_branch: Option<String>,
     pub ports: Option<Vec<u16>>,
@@ -1891,6 +1908,7 @@ impl AppModel {
                 title: Some("Codex".into()),
                 cwd: Some("/home/notes/Projects/taskers".into()),
                 url: None,
+                browser_profile_mode: None,
                 repo_name: Some("taskers".into()),
                 git_branch: Some("main".into()),
                 ports: Some(vec![3000]),
@@ -1916,6 +1934,7 @@ impl AppModel {
                 title: Some("Claude".into()),
                 cwd: Some("/home/notes/Projects/taskers".into()),
                 url: None,
+                browser_profile_mode: None,
                 repo_name: Some("taskers".into()),
                 git_branch: Some("feature/bootstrap".into()),
                 ports: Some(vec![]),
@@ -1951,6 +1970,7 @@ impl AppModel {
                 title: Some("OpenCode".into()),
                 cwd: Some("/home/notes/Documents".into()),
                 url: None,
+                browser_profile_mode: None,
                 repo_name: Some("notes".into()),
                 git_branch: Some("docs".into()),
                 ports: Some(vec![8080, 8081]),
@@ -3048,6 +3068,9 @@ impl AppModel {
         }
         if patch.url.is_some() {
             surface.metadata.url = patch.url;
+        }
+        if let Some(browser_profile_mode) = patch.browser_profile_mode {
+            surface.metadata.browser_profile_mode = browser_profile_mode;
         }
         if patch.repo_name.is_some() {
             surface.metadata.repo_name = patch.repo_name;
@@ -6405,6 +6428,7 @@ mod tests {
                     title: Some("Codex".into()),
                     cwd: None,
                     url: None,
+                    browser_profile_mode: None,
                     repo_name: None,
                     git_branch: None,
                     ports: None,

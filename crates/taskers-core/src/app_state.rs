@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use taskers_control::{
     ControlCommand, ControlResponse, InMemoryController, VcsCommand, VcsCommandResult,
 };
-use taskers_domain::{AppModel, PaneId, PaneKind, SurfaceId, WorkspaceId};
+use taskers_domain::{AppModel, BrowserProfileMode, PaneId, PaneKind, SurfaceId, WorkspaceId};
 use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
 use taskers_runtime::{ShellLaunchSpec, TerminalSessionClient};
 
@@ -205,6 +205,10 @@ impl AppState {
             cwd: surface.metadata.cwd.clone(),
             title: surface.metadata.title.clone(),
             url: surface.metadata.url.clone(),
+            browser_profile_mode: match surface.kind {
+                PaneKind::Browser => surface.metadata.browser_profile_mode,
+                PaneKind::Terminal => BrowserProfileMode::PersistentDefault,
+            },
             command_argv: Vec::new(),
             env,
         })
@@ -216,7 +220,7 @@ mod tests {
     use std::path::PathBuf;
 
     use taskers_control::{ControlCommand, ControlQuery};
-    use taskers_domain::{AppModel, PaneKind, PaneMetadataPatch};
+    use taskers_domain::{AppModel, BrowserProfileMode, PaneKind, PaneMetadataPatch};
     use taskers_ghostty::{BackendChoice, GhosttyHostOptions};
     use taskers_runtime::ShellLaunchSpec;
 
@@ -360,6 +364,7 @@ mod tests {
                     title: Some("Taskers".into()),
                     cwd: None,
                     url: Some("https://example.com".into()),
+                    browser_profile_mode: Some(BrowserProfileMode::Ephemeral),
                     repo_name: None,
                     git_branch: None,
                     ports: None,
@@ -383,6 +388,10 @@ mod tests {
 
         assert_eq!(descriptor.kind, PaneKind::Browser);
         assert_eq!(descriptor.url.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            descriptor.browser_profile_mode,
+            BrowserProfileMode::Ephemeral
+        );
         assert!(descriptor.command_argv.is_empty());
         assert!(descriptor.env.is_empty());
     }

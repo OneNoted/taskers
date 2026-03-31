@@ -88,6 +88,7 @@ Open a browser in a known pane:
 
 ```bash
 taskersctl surface new --workspace <workspace-id> --pane <pane-id> --kind browser --url https://duckduckgo.com/
+taskersctl browser open --workspace <workspace-id> --pane <pane-id> --url https://duckduckgo.com/ --ephemeral
 ```
 
 Inspect the active browser from a Taskers terminal:
@@ -104,6 +105,7 @@ Interact with DOM targets:
 taskersctl browser click --selector 'a[href]'
 taskersctl browser click --ref @e1
 taskersctl browser screenshot
+taskersctl browser clear-data --origin-filter duckduckgo.com
 ```
 
 Use `--selector` when you already know a CSS target. Use `--ref` after a `snapshot` when you want to act on the exact node Taskers returned.
@@ -136,6 +138,7 @@ Create a new browser surface in a pane:
 
 ```bash
 taskersctl surface new --workspace <workspace-id> --pane <pane-id> --kind browser --url https://duckduckgo.com/
+taskersctl surface new --workspace <workspace-id> --pane <pane-id> --kind browser --url https://example.com/ --ephemeral
 ```
 
 ## Hook And Script Integration
@@ -155,3 +158,5 @@ Use `notification` for contextual agent output that should update the live pane/
 - Use `--socket` if you need to target a non-default Taskers control socket.
 - `browser` commands are strict about selectors and refs. Resolve a target with `snapshot` first when in doubt.
 - The browser automation surface is intentionally broader than the rest of the CLI. Start with `snapshot`, `get`, `wait`, and `click`, then expand only as needed.
+- Browser creation commands accept `--ephemeral` for a private in-memory session that does not reuse the shared persistent browser profile.
+- `browser clear-data` removes WebKit site data for the selected browser session. Use `--origin-filter` to target one site when you do not want to clear the whole session.

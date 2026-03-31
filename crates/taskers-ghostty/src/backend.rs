@@ -1,7 +1,7 @@
 use crate::runtime::{runtime_bridge_path, runtime_resources_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use taskers_domain::PaneKind;
+use taskers_domain::{BrowserProfileMode, PaneKind};
 use taskers_runtime::ShellLaunchSpec;
 use thiserror::Error;
 
@@ -46,6 +46,8 @@ pub struct SurfaceDescriptor {
     pub cwd: Option<String>,
     pub title: Option<String>,
     pub url: Option<String>,
+    #[serde(default)]
+    pub browser_profile_mode: BrowserProfileMode,
     #[serde(default)]
     pub command_argv: Vec<String>,
     #[serde(default)]

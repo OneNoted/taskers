@@ -10,6 +10,8 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     f64::consts::{FRAC_PI_2, PI, TAU},
+    fs,
+    path::Path,
     rc::Rc,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -23,10 +25,10 @@ use taskers_core::{
     ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
     TerminalSurfaceCatalogEntry, WorkspaceId,
 };
-use taskers_domain::PaneKind;
+use taskers_domain::{BrowserProfileMode, PaneKind};
 use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
 use taskers_shell_core as taskers_core;
-use webkit6::{LoadEvent, Settings as WebKitSettings, WebView, prelude::*};
+use webkit6::{LoadEvent, NetworkSession, Settings as WebKitSettings, WebView, prelude::*};
 
 pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
@@ -107,6 +109,7 @@ pub struct TaskersHost {
     native_surface_provider: CssProvider,
     selected_theme_id: String,
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
+    persistent_browser_session: Option<NetworkSession>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
 }
 
@@ -116,6 +119,8 @@ pub struct BrowserSurfaceHandle {
     workspace_id: Rc<Cell<WorkspaceId>>,
     pane_id: Rc<Cell<PaneId>>,
     webview: WebView,
+    profile_mode: BrowserProfileMode,
+    network_session: NetworkSession,
     last_load_state: Rc<Cell<Option<BrowserLoadState>>>,
 }
 
@@ -238,6 +243,7 @@ impl TaskersHost {
             native_surface_provider,
             selected_theme_id: "dark".into(),
             browser_surfaces: HashMap::new(),
+            persistent_browser_session: None,
             terminal_surfaces: HashMap::new(),
         }
     }
@@ -299,6 +305,13 @@ impl TaskersHost {
                 self.with_browser_surface(surface_id, "browser devtools toggle", |surface| {
                     surface.toggle_devtools()
                 })
+            }
+            HostCommand::BrowserClearData { surface_id } => {
+                let handle = self.browser_surface_handle(surface_id)?;
+                glib::spawn_future_local(async move {
+                    let _ = handle.clear_data(None, true).await;
+                });
+                Ok(())
             }
             HostCommand::TerminalSendText { surface_id, text } => {
                 let Some(host) = self.ghostty_host.as_ref() else {
@@ -417,6 +430,50 @@ impl TaskersHost {
             })
     }
 
+    fn persistent_browser_session(&mut self) -> NetworkSession {
+        if let Some(session) = self.persistent_browser_session.clone() {
+            return session;
+        }
+
+        let session = match build_persistent_browser_session() {
+            Ok(session) => session,
+            Err(error) => {
+                emit_diagnostic(
+                    self.diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::Startup,
+                        None,
+                        format!(
+                            "failed to initialize persistent browser profile: {error}; using an ephemeral browser session"
+                        ),
+                    ),
+                );
+                build_ephemeral_browser_session()
+            }
+        };
+        self.persistent_browser_session = Some(session.clone());
+        session
+    }
+
+    fn browser_network_session_for(&mut self, profile_mode: BrowserProfileMode) -> NetworkSession {
+        match profile_mode {
+            BrowserProfileMode::PersistentDefault => self.persistent_browser_session(),
+            BrowserProfileMode::Ephemeral => build_ephemeral_browser_session(),
+        }
+    }
+
+    fn remove_browser_surface(&mut self, surface_id: SurfaceId, revision: u64, reason: &str) {
+        if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
+            surface.shell.detach(&self.root);
+            surface.attention_ring.detach(&self.root);
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(DiagnosticCategory::SurfaceLifecycle, Some(revision), reason)
+                    .with_surface(surface_id),
+            );
+        }
+    }
+
     fn sync_browser_surfaces(&mut self, snapshot: &ShellSnapshot, interactive: bool) -> Result<()> {
         let desired = browser_plans(&snapshot.portal);
         let desired_by_id = desired
@@ -438,19 +495,23 @@ impl TaskersHost {
             .collect::<Vec<_>>();
 
         for surface_id in stale {
-            if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
-                surface.shell.detach(&self.root);
-                surface.attention_ring.detach(&self.root);
-                emit_diagnostic(
-                    self.diagnostics.as_ref(),
-                    DiagnosticRecord::new(
-                        DiagnosticCategory::SurfaceLifecycle,
-                        Some(snapshot.revision),
-                        "browser surface removed",
-                    )
-                    .with_surface(surface_id),
-                );
-            }
+            self.remove_browser_surface(surface_id, snapshot.revision, "browser surface removed");
+        }
+
+        let profile_changed = self
+            .browser_surfaces
+            .iter()
+            .filter_map(|(surface_id, surface)| {
+                let entry = catalog_by_id.get(surface_id)?;
+                (surface.profile_mode != entry.profile_mode).then_some(*surface_id)
+            })
+            .collect::<Vec<_>>();
+        for surface_id in profile_changed {
+            self.remove_browser_surface(
+                surface_id,
+                snapshot.revision,
+                "browser surface recreated for profile mode change",
+            );
         }
 
         for entry in snapshot.browser_catalog.iter() {
@@ -466,6 +527,7 @@ impl TaskersHost {
                     self.diagnostics.as_ref(),
                 )?,
                 None => {
+                    let network_session = self.browser_network_session_for(entry.profile_mode);
                     let surface = BrowserSurface::new(
                         &self.root,
                         entry,
@@ -473,6 +535,7 @@ impl TaskersHost {
                         &snapshot.settings.selected_theme_id,
                         snapshot.revision,
                         interactive,
+                        network_session,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                     )?;
@@ -571,6 +634,8 @@ struct BrowserSurface {
     workspace_id: Rc<Cell<WorkspaceId>>,
     pane_id: Rc<Cell<PaneId>>,
     webview: WebView,
+    network_session: NetworkSession,
+    profile_mode: BrowserProfileMode,
     url: String,
     active: bool,
     interactive: bool,
@@ -589,6 +654,7 @@ impl BrowserSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        network_session: NetworkSession,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Result<Self> {
@@ -602,6 +668,7 @@ impl BrowserSurface {
             .hexpand(true)
             .vexpand(true)
             .focusable(true)
+            .network_session(&network_session)
             .settings(&settings)
             .build();
         let (shell_class, widget_class) = native_surface_classes(PaneKind::Browser);
@@ -789,6 +856,8 @@ impl BrowserSurface {
             workspace_id,
             pane_id,
             webview,
+            network_session,
+            profile_mode: entry.profile_mode,
             url,
             active: visible_plan.is_some_and(|plan| plan.active),
             interactive: visible_plan.is_some() && interactive,
@@ -812,6 +881,7 @@ impl BrowserSurface {
     ) -> Result<()> {
         self.workspace_id.set(entry.workspace_id);
         self.pane_id.set(entry.pane_id);
+        self.profile_mode = entry.profile_mode;
         let visible = visible_plan.is_some();
         let effective_interactive = visible && interactive;
         self.shell.set_interactive(effective_interactive);
@@ -919,6 +989,8 @@ impl BrowserSurface {
             workspace_id: self.workspace_id.clone(),
             pane_id: self.pane_id.clone(),
             webview: self.webview.clone(),
+            profile_mode: self.profile_mode,
+            network_session: self.network_session.clone(),
             last_load_state: self.last_load_state.clone(),
         }
     }
@@ -1589,7 +1661,8 @@ fn browser_command_surface_id(command: &BrowserControlCommand) -> SurfaceId {
         | BrowserControlCommand::ScrollIntoView { surface_id, .. }
         | BrowserControlCommand::Get { surface_id, .. }
         | BrowserControlCommand::Is { surface_id, .. }
-        | BrowserControlCommand::Screenshot { surface_id, .. } => *surface_id,
+        | BrowserControlCommand::Screenshot { surface_id, .. }
+        | BrowserControlCommand::ClearData { surface_id, .. } => *surface_id,
     }
 }
 
@@ -1614,6 +1687,38 @@ fn trim_terminal_tail(text: String, tail_lines: Option<usize>) -> String {
     lines[start..].join("\n")
 }
 
+fn build_persistent_browser_session() -> Result<NetworkSession> {
+    let paths = taskers_paths::TaskersPaths::detect();
+    let data_dir = paths.data_dir().join("browser").join("default");
+    let cache_dir = paths.cache_dir().join("browser").join("default");
+    ensure_private_dir(&data_dir)?;
+    ensure_private_dir(&cache_dir)?;
+    let data_dir = data_dir.to_string_lossy().into_owned();
+    let cache_dir = cache_dir.to_string_lossy().into_owned();
+    let session = NetworkSession::new(Some(&data_dir), Some(&cache_dir));
+    session.set_persistent_credential_storage_enabled(false);
+    Ok(session)
+}
+
+fn build_ephemeral_browser_session() -> NetworkSession {
+    let session = NetworkSession::new_ephemeral();
+    session.set_persistent_credential_storage_enabled(false);
+    session
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
 fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
     SurfaceDescriptor {
         cols: spec.cols,
@@ -1622,6 +1727,7 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
         cwd: spec.cwd.clone(),
         title: Some(spec.title.clone()),
         url: None,
+        browser_profile_mode: BrowserProfileMode::PersistentDefault,
         // The current Ghostty bridge is more stable when it controls shell
         // selection itself, so keep command overrides empty until that path is
         // proven across hosts.

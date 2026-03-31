@@ -2189,6 +2189,17 @@ fn render_live_pane(
             event.stop_propagation();
             core.dispatch_shell_action(ShellAction::AddBrowserSurface {
                 pane_id: Some(pane_id),
+                profile_mode: taskers_core::BrowserProfileMode::PersistentDefault,
+            })
+        }
+    };
+    let add_ephemeral_browser_surface = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+                pane_id: Some(pane_id),
+                profile_mode: taskers_core::BrowserProfileMode::Ephemeral,
             })
         }
     };
@@ -2288,6 +2299,9 @@ fn render_live_pane(
                     }
                     button { class: "pane-utility", title: "New browser surface", onclick: add_browser_surface,
                         {icons::globe(14, "pane-utility-icon")}
+                    }
+                    button { class: "pane-utility", title: "New private browser surface", onclick: add_ephemeral_browser_surface,
+                        {icons::shield(14, "pane-utility-icon")}
                     }
                     div { class: "pane-action-separator" }
                     button { class: "pane-utility", title: "Split right", onclick: split_terminal,
@@ -2668,10 +2682,19 @@ fn BrowserToolbar(
         .as_ref()
         .map(|chrome| chrome.devtools_open)
         .unwrap_or(false);
+    let profile_mode = chrome
+        .as_ref()
+        .map(|chrome| chrome.profile_mode)
+        .unwrap_or(surface.browser_profile_mode);
     let devtools_label = if devtools_open {
         "Hide tools"
     } else {
         "Devtools"
+    };
+    let clear_data_title = if profile_mode.is_ephemeral() {
+        "Clear private browser data"
+    } else {
+        "Clear stored browser data"
     };
 
     let navigate = {
@@ -2701,8 +2724,14 @@ fn BrowserToolbar(
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::BrowserReload { surface_id })
     };
-    let toggle_devtools =
-        move |_| core.dispatch_shell_action(ShellAction::ToggleBrowserDevtools { surface_id });
+    let toggle_devtools = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::ToggleBrowserDevtools { surface_id })
+    };
+    let clear_data = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::ClearBrowserData { surface_id })
+    };
 
     rsx! {
         form { class: "browser-toolbar", onsubmit: navigate,
@@ -2736,11 +2765,24 @@ fn BrowserToolbar(
                 placeholder: "Enter URL...",
                 oninput: move |event| address.set(event.value()),
             }
+            if profile_mode.is_ephemeral() {
+                div { class: "browser-toolbar-badge",
+                    {icons::shield(12, "browser-toolbar-icon")}
+                    span { "Private" }
+                }
+            }
             button {
                 r#type: "submit",
                 class: "browser-toolbar-button browser-toolbar-button-primary",
                 title: "Navigate",
                 {icons::arrow_right_circle(14, "browser-toolbar-icon")}
+            }
+            button {
+                r#type: "button",
+                class: "browser-toolbar-button",
+                onclick: clear_data,
+                title: "{clear_data_title}",
+                {icons::trash(14, "browser-toolbar-icon")}
             }
             button {
                 r#type: "button",
@@ -2919,8 +2961,8 @@ mod tests {
         surface_status_text, surface_summary_title,
     };
     use crate::taskers_core::{
-        AttentionRingState, AttentionState, PaneId, RuntimeIdentitySnapshot, RuntimeStateSnapshot,
-        SurfaceId, SurfaceSnapshot, WorkspaceId,
+        AttentionRingState, AttentionState, BrowserProfileMode, PaneId, RuntimeIdentitySnapshot,
+        RuntimeStateSnapshot, SurfaceId, SurfaceSnapshot, WorkspaceId,
     };
 
     fn sample_surface(
@@ -2943,6 +2985,7 @@ mod tests {
             activity_label: activity_label.map(str::to_owned),
             status_label: status_label.map(str::to_owned),
             url: None,
+            browser_profile_mode: BrowserProfileMode::PersistentDefault,
             cwd: None,
             attention: AttentionState::Normal,
             notification_ring: None,

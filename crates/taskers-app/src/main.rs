@@ -1702,7 +1702,8 @@ fn browser_surface_id(command: &BrowserControlCommand) -> taskers_shell_core::Su
         | BrowserControlCommand::ScrollIntoView { surface_id, .. }
         | BrowserControlCommand::Get { surface_id, .. }
         | BrowserControlCommand::Is { surface_id, .. }
-        | BrowserControlCommand::Screenshot { surface_id, .. } => *surface_id,
+        | BrowserControlCommand::Screenshot { surface_id, .. }
+        | BrowserControlCommand::ClearData { surface_id, .. } => *surface_id,
     }
 }
 

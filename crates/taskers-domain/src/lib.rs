@@ -11,7 +11,7 @@ pub use ids::{
 };
 pub use layout::{Direction, LayoutNode, PaneTabLayoutNode, SplitAxis, SplitLayoutNode};
 pub use model::{
-    ActivityItem, AgentTarget, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP,
+    ActivityItem, AgentTarget, AppModel, BrowserProfileMode, DEFAULT_WORKSPACE_WINDOW_GAP,
     DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, DomainError,
     InterruptedAgentResume, KEYBOARD_RESIZE_STEP, MIN_WORKSPACE_WINDOW_HEIGHT,
     MIN_WORKSPACE_WINDOW_WIDTH, NotificationDeliveryState, NotificationItem, PaneContainerRecord,
