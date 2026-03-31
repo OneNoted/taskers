@@ -6,10 +6,10 @@ pub mod signal;
 
 pub use attention::AttentionState;
 pub use ids::{
-    NotificationId, PaneId, SessionId, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId,
-    WorkspaceWindowId, WorkspaceWindowTabId,
+    NotificationId, PaneContainerId, PaneId, PaneTabId, SessionId, SurfaceId, WindowId,
+    WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowTabId,
 };
-pub use layout::{Direction, LayoutNode, SplitAxis};
+pub use layout::{Direction, LayoutNode, PaneTabLayoutNode, SplitAxis, SplitLayoutNode};
 pub use model::{
     ActivityItem, AgentTarget, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP,
     DEFAULT_WORKSPACE_WINDOW_HEIGHT, DEFAULT_WORKSPACE_WINDOW_WIDTH, DomainError,
@@ -20,5 +20,6 @@ pub use model::{
     SurfaceRecord, WindowFrame, WindowRecord, Workspace, WorkspaceAgentState,
     WorkspaceAgentSummary, WorkspaceColumnRecord, WorkspaceLogEntry, WorkspaceSummary,
     WorkspaceViewport, WorkspaceWindowMoveTarget, WorkspaceWindowRecord, WorkspaceWindowTabRecord,
+    PaneContainerRecord, PaneTabRecord,
 };
 pub use signal::{SignalEvent, SignalKind, SignalPaneMetadata};

@@ -4,9 +4,10 @@ use uuid::Uuid;
 
 use taskers_domain::{
     AgentTarget, AppModel, AttentionState, Direction, NotificationDeliveryState, NotificationId,
-    PaneId, PaneKind, PaneMetadataPatch, PersistedSession, ProgressState, SignalEvent, SignalKind,
-    SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceLogEntry,
-    WorkspaceViewport, WorkspaceWindowId, WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
+    PaneContainerId, PaneId, PaneKind, PaneMetadataPatch, PaneTabId, PersistedSession,
+    ProgressState, SignalEvent, SignalKind, SplitAxis, SurfaceId, WindowId, WorkspaceColumnId,
+    WorkspaceId, WorkspaceLogEntry, WorkspaceViewport, WorkspaceWindowId,
+    WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +79,27 @@ pub enum ControlCommand {
         workspace_id: WorkspaceId,
         workspace_window_id: WorkspaceWindowId,
         workspace_window_tab_id: WorkspaceWindowTabId,
+    },
+    CreatePaneTab {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        kind: PaneKind,
+    },
+    FocusPaneTab {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    },
+    MovePaneTab {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        to_index: usize,
+    },
+    ClosePaneTab {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
     },
     FocusPane {
         workspace_id: WorkspaceId,
@@ -750,6 +772,10 @@ pub enum ControlResponse {
     WorkspaceWindowTabCreated {
         pane_id: PaneId,
         workspace_window_tab_id: WorkspaceWindowTabId,
+    },
+    PaneTabCreated {
+        pane_id: PaneId,
+        pane_tab_id: PaneTabId,
     },
     Status {
         session: PersistedSession,

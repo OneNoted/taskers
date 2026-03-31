@@ -252,6 +252,58 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::CreatePaneTab {
+                workspace_id,
+                pane_container_id,
+                kind,
+            } => {
+                let (pane_tab_id, pane_id) =
+                    model.create_pane_tab(workspace_id, pane_container_id, kind)?;
+                (
+                    ControlResponse::PaneTabCreated { pane_id, pane_tab_id },
+                    true,
+                )
+            }
+            ControlCommand::FocusPaneTab {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+            } => {
+                model.focus_pane_tab(workspace_id, pane_container_id, pane_tab_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "pane tab focused".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::MovePaneTab {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                to_index,
+            } => {
+                model.move_pane_tab(workspace_id, pane_container_id, pane_tab_id, to_index)?;
+                (
+                    ControlResponse::Ack {
+                        message: "pane tab moved".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::ClosePaneTab {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+            } => {
+                model.close_pane_tab(workspace_id, pane_container_id, pane_tab_id)?;
+                (
+                    ControlResponse::Ack {
+                        message: "pane tab closed".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::FocusPane {
                 workspace_id,
                 pane_id,
