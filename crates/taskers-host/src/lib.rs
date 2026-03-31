@@ -101,6 +101,32 @@ impl DiagnosticRecord {
     }
 }
 
+fn redacted_browser_url_for_diagnostics(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+
+    if let Some((scheme, remainder)) = without_query.split_once("://") {
+        let mut parts = remainder.splitn(2, '/');
+        let authority = parts.next().unwrap_or_default();
+        let path = parts.next().unwrap_or_default();
+        if path.is_empty() {
+            format!("{scheme}://{authority}")
+        } else {
+            format!("{scheme}://{authority}/...")
+        }
+    } else {
+        without_query.to_string()
+    }
+}
+
 pub struct TaskersHost {
     root: Overlay,
     event_sink: HostEventSink,
@@ -790,7 +816,10 @@ impl BrowserSurface {
                     DiagnosticRecord::new(
                         DiagnosticCategory::BrowserMetadata,
                         None,
-                        format!("browser url observed: {url}"),
+                        format!(
+                            "browser url observed: {}",
+                            redacted_browser_url_for_diagnostics(url.as_str())
+                        ),
                     )
                     .with_surface(url_surface_id),
                 );
@@ -1855,7 +1884,8 @@ fn hidden_frame() -> taskers_core::Frame {
 mod tests {
     use super::{
         browser_plans, host_attention_palette, native_surface_classes, native_surface_css,
-        native_surfaces_interactive, terminal_plans, trim_terminal_tail, workspace_pan_delta,
+        native_surfaces_interactive, redacted_browser_url_for_diagnostics, terminal_plans,
+        trim_terminal_tail, workspace_pan_delta,
     };
     use taskers_domain::PaneKind;
     use taskers_shell_core::{
@@ -1934,5 +1964,19 @@ mod tests {
         assert!(dark_waiting.stroke.blue > dark_waiting.stroke.red);
         assert!(dark_error.stroke.red > dark_error.stroke.green);
         assert_ne!(dark_waiting.stroke.green, gruvbox_waiting.stroke.green);
+    }
+
+    #[test]
+    fn browser_url_diagnostics_strip_query_and_path_details() {
+        assert_eq!(
+            redacted_browser_url_for_diagnostics(
+                "https://example.com/callback?token=secret#fragment"
+            ),
+            "https://example.com/..."
+        );
+        assert_eq!(
+            redacted_browser_url_for_diagnostics("about:blank"),
+            "about:blank"
+        );
     }
 }

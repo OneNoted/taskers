@@ -2435,6 +2435,7 @@ name = "taskers-control"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "libc",
  "serde",
  "serde_json",
  "taskers-domain",
