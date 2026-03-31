@@ -251,6 +251,11 @@ pub enum ControlCommand {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    DismissInterruptedAgentResume {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
     AgentTriggerFlash {
         workspace_id: WorkspaceId,
         pane_id: PaneId,

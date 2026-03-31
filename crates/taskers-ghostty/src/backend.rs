@@ -5,6 +5,14 @@ use taskers_domain::PaneKind;
 use taskers_runtime::ShellLaunchSpec;
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddedTerminalAppearance {
+    #[default]
+    Taskers,
+    Ghostty,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendChoice {
@@ -50,6 +58,8 @@ pub struct GhosttyHostOptions {
     pub command_argv: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub embedded_terminal_appearance: EmbeddedTerminalAppearance,
 }
 
 impl GhosttyHostOptions {
@@ -59,7 +69,16 @@ impl GhosttyHostOptions {
         Self {
             command_argv: shell_launch.program_and_args(),
             env,
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
         }
+    }
+
+    pub fn with_embedded_terminal_appearance(
+        mut self,
+        embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    ) -> Self {
+        self.embedded_terminal_appearance = embedded_terminal_appearance;
+        self
     }
 }
 
@@ -180,7 +199,8 @@ fn embedded_ghostty_notes() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendAvailability, BackendChoice, DefaultBackend, GhosttyHostOptions, TerminalBackend,
+        BackendAvailability, BackendChoice, DefaultBackend, EmbeddedTerminalAppearance,
+        GhosttyHostOptions, TerminalBackend,
     };
     use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
     use taskers_runtime::ShellLaunchSpec;
@@ -237,6 +257,20 @@ mod tests {
         assert_eq!(
             options.env.get("TASKERS_SOCKET").map(String::as_str),
             Some("/tmp/taskers.sock")
+        );
+        assert_eq!(
+            options.embedded_terminal_appearance,
+            EmbeddedTerminalAppearance::Taskers
+        );
+    }
+
+    #[test]
+    fn host_options_allow_overriding_embedded_terminal_appearance() {
+        let options = GhosttyHostOptions::default()
+            .with_embedded_terminal_appearance(EmbeddedTerminalAppearance::Ghostty);
+        assert_eq!(
+            options.embedded_terminal_appearance,
+            EmbeddedTerminalAppearance::Ghostty
         );
     }
 }

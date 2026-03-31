@@ -522,6 +522,14 @@ fn install_runtime_assets(root: &Path) -> Result<()> {
         false,
     )?;
     write_asset(
+        &root.join("taskers-hooks.zsh"),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        )),
+        false,
+    )?;
+    write_asset(
         &zsh_runtime_dir(root).join(".zshenv"),
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -685,6 +693,7 @@ mod tests {
         assert!(root.join("taskers-shell-wrapper.sh").is_file());
         assert!(root.join("taskers-hooks.bash").is_file());
         assert!(root.join("taskers-hooks.fish").is_file());
+        assert!(root.join("taskers-hooks.zsh").is_file());
         assert!(root.join("taskers-codex-notify.sh").is_file());
         assert!(root.join("taskers-claude-hook.sh").is_file());
         assert!(root.join("taskers-agent-codex.sh").is_file());
@@ -727,6 +736,26 @@ mod tests {
         assert!(
             wrapper.contains("TASKERS_TTY_NAME"),
             "expected wrapper to export TASKERS_TTY_NAME"
+        );
+    }
+
+    #[test]
+    fn shell_wrapper_routes_terminal_sessions_through_sidecar_attach() {
+        let wrapper = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-shell-wrapper.sh"
+        ));
+        assert!(
+            wrapper.contains("TASKERS_TERMINAL_SOCKET"),
+            "expected wrapper to branch on terminal socket availability"
+        );
+        assert!(
+            wrapper.contains("TASKERS_TERMINAL_SESSION_ID"),
+            "expected wrapper to require terminal session ids for session attach"
+        );
+        assert!(
+            wrapper.contains("session attach"),
+            "expected wrapper to delegate continuity startup to taskersctl session attach"
         );
     }
 

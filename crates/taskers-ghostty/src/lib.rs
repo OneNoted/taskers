@@ -5,7 +5,7 @@ pub mod runtime;
 
 pub use backend::{
     AdapterError, BackendAvailability, BackendChoice, BackendProbe, DefaultBackend,
-    GhosttyHostOptions, SurfaceDescriptor, TerminalBackend,
+    EmbeddedTerminalAppearance, GhosttyHostOptions, SurfaceDescriptor, TerminalBackend,
 };
 #[cfg(target_os = "linux")]
 pub use bridge::{GhosttyError, GhosttyHost};

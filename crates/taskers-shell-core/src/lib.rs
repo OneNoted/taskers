@@ -506,6 +506,7 @@ pub struct RuntimeStatus {
     pub ghostty_runtime: RuntimeCapability,
     pub shell_integration: RuntimeCapability,
     pub terminal_host: RuntimeCapability,
+    pub terminal_persistence: RuntimeCapability,
 }
 
 impl Default for RuntimeStatus {
@@ -517,6 +518,7 @@ impl Default for RuntimeStatus {
             ghostty_runtime: unavailable(),
             shell_integration: unavailable(),
             terminal_host: unavailable(),
+            terminal_persistence: unavailable(),
         }
     }
 }
@@ -717,6 +719,13 @@ pub struct SurfaceSnapshot {
     pub cwd: Option<String>,
     pub attention: AttentionState,
     pub notification_ring: Option<AttentionRingState>,
+    pub interrupted_agent_resume: Option<InterruptedAgentResumeSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedAgentResumeSnapshot {
+    pub title: String,
+    pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1104,6 +1113,7 @@ pub enum HostCommand {
     BrowserForward { surface_id: SurfaceId },
     BrowserReload { surface_id: SurfaceId },
     BrowserToggleDevtools { surface_id: SurfaceId },
+    TerminalSendText { surface_id: SurfaceId, text: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1238,6 +1248,16 @@ pub enum ShellAction {
         activity_id: ActivityId,
     },
     DismissSurfaceAlert {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    ResumeInterruptedAgent {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    DismissInterruptedAgentResume {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
         surface_id: SurfaceId,
@@ -1779,6 +1799,12 @@ impl TaskersCore {
                 cwd: normalized_cwd(&surface.metadata),
                 attention: surface.attention.into(),
                 notification_ring: surface_notification_ring(surface),
+                interrupted_agent_resume: surface.interrupted_agent_resume.as_ref().map(|resume| {
+                    InterruptedAgentResumeSnapshot {
+                        title: resume.title.clone(),
+                        command: resume.command.clone(),
+                    }
+                }),
             })
             .collect::<Vec<_>>();
         PaneSnapshot {
@@ -2191,6 +2217,16 @@ impl TaskersCore {
                 pane_id,
                 surface_id,
             } => self.dismiss_surface_alert(workspace_id, pane_id, surface_id),
+            ShellAction::ResumeInterruptedAgent {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => self.resume_interrupted_agent(workspace_id, pane_id, surface_id),
+            ShellAction::DismissInterruptedAgentResume {
+                workspace_id,
+                pane_id,
+                surface_id,
+            } => self.dismiss_interrupted_agent_resume(workspace_id, pane_id, surface_id),
             ShellAction::SelectTheme { theme_id } => {
                 if self.ui.selected_theme_id == theme_id {
                     return false;
@@ -2869,6 +2905,50 @@ impl TaskersCore {
         surface_id: SurfaceId,
     ) -> bool {
         self.dispatch_control(ControlCommand::DismissSurfaceAlert {
+            workspace_id,
+            pane_id,
+            surface_id,
+        })
+    }
+
+    fn resume_interrupted_agent(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> bool {
+        let command = self
+            .app_state
+            .snapshot_model()
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.surfaces.get(&surface_id))
+            .and_then(|surface| surface.interrupted_agent_resume.as_ref())
+            .map(|resume| resume.command.clone());
+        let Some(command) = command else {
+            return false;
+        };
+
+        let mut changed = self.dispatch_control(ControlCommand::DismissInterruptedAgentResume {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+        changed |= self.queue_host_command(HostCommand::TerminalSendText {
+            surface_id,
+            text: format!("{command}\n"),
+        });
+        changed
+    }
+
+    fn dismiss_interrupted_agent_resume(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> bool {
+        self.dispatch_control(ControlCommand::DismissInterruptedAgentResume {
             workspace_id,
             pane_id,
             surface_id,
@@ -3760,6 +3840,7 @@ fn default_preview_app_state() -> AppState {
         default_session_path_for_preview("taskers-preview-bootstrap"),
         BackendChoice::Mock,
         ShellLaunchSpec::fallback(),
+        None,
     )
     .expect("preview app state")
 }
@@ -4037,6 +4118,9 @@ fn runtime_label(key: &str) -> String {
 }
 
 fn surface_runtime_state(surface: &SurfaceRecord, now: OffsetDateTime) -> RuntimeStateSnapshot {
+    if surface.interrupted_agent_resume.is_some() {
+        return RuntimeStateSnapshot::Waiting;
+    }
     surface_agent_state(surface, now)
         .map(runtime_state_from_agent_state)
         .unwrap_or(RuntimeStateSnapshot::Idle)
@@ -4148,6 +4232,9 @@ fn display_surface_title(surface: &SurfaceRecord) -> String {
 }
 
 fn surface_activity_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Option<String> {
+    if surface.interrupted_agent_resume.is_some() {
+        return None;
+    }
     let _ = active_agent_surface_state(surface, now)?;
     surface
         .agent_session
@@ -4160,6 +4247,9 @@ fn surface_activity_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Optio
 }
 
 fn surface_status_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Option<String> {
+    if surface.interrupted_agent_resume.is_some() {
+        return Some("Interrupted".into());
+    }
     match active_agent_surface_state(surface, now)? {
         RuntimeStateSnapshot::Waiting => Some("Awaiting response".into()),
         RuntimeStateSnapshot::Working => Some("Working".into()),
@@ -4200,9 +4290,15 @@ fn pane_notification_ring(pane: &taskers_domain::PaneRecord) -> Option<Attention
 
 fn surface_agent_key(surface: &SurfaceRecord) -> Option<String> {
     surface
-        .agent_session
+        .interrupted_agent_resume
         .as_ref()
-        .map(|session| session.kind.clone())
+        .map(|resume| resume.kind.clone())
+        .or_else(|| {
+            surface
+                .agent_session
+                .as_ref()
+                .map(|session| session.kind.clone())
+        })
         .or_else(|| {
             surface
                 .agent_process
@@ -4211,22 +4307,15 @@ fn surface_agent_key(surface: &SurfaceRecord) -> Option<String> {
         })
 }
 
-#[cfg(test)]
-fn normalized_agent_key(value: Option<&str>) -> Option<String> {
-    let normalized = value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase())?;
-    match normalized.as_str() {
-        "shell" => None,
-        "claude code" | "claude-code" => Some("claude".into()),
-        "codex" | "claude" | "opencode" | "aider" => Some(normalized),
-        _ => None,
-    }
-}
-
 fn display_terminal_title(surface: &SurfaceRecord) -> String {
     let context = terminal_context_label(&surface.metadata);
+
+    if let Some(resume) = surface.interrupted_agent_resume.as_ref() {
+        if let Some(context) = context.as_deref() {
+            return format!("{} · {context}", resume.title);
+        }
+        return resume.title.clone();
+    }
 
     if let Some(session) = surface.agent_session.as_ref() {
         if let Some(context) = context.as_deref() {
@@ -4258,6 +4347,20 @@ fn display_terminal_title(surface: &SurfaceRecord) -> String {
     }
 
     "Terminal".into()
+}
+
+#[cfg(test)]
+fn normalized_agent_key(value: Option<&str>) -> Option<String> {
+    let normalized = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())?;
+    match normalized.as_str() {
+        "shell" => None,
+        "claude code" | "claude-code" => Some("claude".into()),
+        "codex" | "claude" | "opencode" | "aider" => Some(normalized),
+        _ => None,
+    }
 }
 
 fn display_browser_title(metadata: &PaneMetadata) -> String {
@@ -4654,8 +4757,8 @@ mod tests {
     use taskers_control::ControlCommand;
     use taskers_core::AppState;
     use taskers_domain::{
-        AppModel, AttentionState as DomainAttentionState, NotificationId, NotificationItem,
-        SignalKind,
+        AppModel, AttentionState as DomainAttentionState, InterruptedAgentResume, NotificationId,
+        NotificationItem, SignalKind,
     };
     use taskers_ghostty::BackendChoice;
     use taskers_runtime::ShellLaunchSpec;
@@ -4680,11 +4783,23 @@ mod tests {
                 terminal_host: RuntimeCapability::Fallback {
                     message: "Probe failed".into(),
                 },
+                terminal_persistence: RuntimeCapability::Ready,
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
             notification_preferences: NotificationPreferencesSnapshot::default(),
         }
+    }
+
+    fn preview_app_state_with_model(model: AppModel, label: &str) -> AppState {
+        AppState::new(
+            model,
+            default_session_path_for_preview(label),
+            BackendChoice::Mock,
+            ShellLaunchSpec::fallback(),
+            None,
+        )
+        .expect("preview app state")
     }
 
     fn bootstrap_with_notification(cleared: bool) -> BootstrapModel {
@@ -4733,6 +4848,7 @@ mod tests {
                 }),
                 BackendChoice::Mock,
                 ShellLaunchSpec::fallback(),
+                None,
             )
             .expect("preview app state"),
             ..bootstrap()
@@ -4746,6 +4862,7 @@ mod tests {
                 default_session_path_for_preview(name),
                 super::BackendChoice::Mock,
                 super::ShellLaunchSpec::fallback(),
+                None,
             )
             .expect("preview app state"),
             ..bootstrap()
@@ -5753,6 +5870,74 @@ mod tests {
     }
 
     #[test]
+    fn resume_interrupted_agent_shell_action_queues_terminal_send_and_clears_prompt() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("surface");
+        let surface = model
+            .workspaces
+            .get_mut(&workspace_id)
+            .and_then(|workspace| workspace.panes.get_mut(&pane_id))
+            .and_then(|pane| pane.surfaces.get_mut(&surface_id))
+            .expect("surface");
+        surface.metadata.cwd = Some("/tmp/taskers".into());
+        surface.metadata.agent_kind = Some("codex".into());
+        surface.metadata.agent_title = Some("Codex".into());
+        surface.metadata.agent_command = Some("codex --model gpt-5".into());
+        surface.attention = DomainAttentionState::WaitingInput;
+        surface.interrupted_agent_resume = Some(InterruptedAgentResume {
+            kind: "codex".into(),
+            title: "Codex".into(),
+            command: "codex --model gpt-5".into(),
+            cwd: Some("/tmp/taskers".into()),
+            captured_at: OffsetDateTime::now_utc(),
+        });
+
+        let core = SharedCore::bootstrap(BootstrapModel {
+            app_state: preview_app_state_with_model(model, "taskers-preview-resume-action"),
+            runtime_status: RuntimeStatus {
+                ghostty_runtime: RuntimeCapability::Ready,
+                shell_integration: RuntimeCapability::Ready,
+                terminal_host: RuntimeCapability::Ready,
+                terminal_persistence: RuntimeCapability::Ready,
+            },
+            selected_theme_id: "dark".into(),
+            selected_shortcut_preset: super::ShortcutPreset::Balanced,
+            notification_preferences: NotificationPreferencesSnapshot::default(),
+        });
+
+        core.dispatch_shell_action(ShellAction::ResumeInterruptedAgent {
+            workspace_id,
+            pane_id,
+            surface_id,
+        });
+
+        assert_eq!(
+            core.drain_host_commands(),
+            vec![HostCommand::TerminalSendText {
+                surface_id,
+                text: "codex --model gpt-5\n".into(),
+            }]
+        );
+
+        let snapshot = core.snapshot();
+        let pane = find_pane(&snapshot.current_workspace.layout, pane_id).expect("pane");
+        let surface = pane
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == surface_id)
+            .expect("surface");
+        assert!(surface.interrupted_agent_resume.is_none());
+        assert_eq!(surface.status_label, None);
+    }
+
+    #[test]
     fn browser_catalog_keeps_background_browser_surfaces() {
         let core = SharedCore::bootstrap(bootstrap());
         let first_workspace_id = core.snapshot().current_workspace.id;
@@ -6738,6 +6923,7 @@ mod tests {
                         ports: Vec::new(),
                         agent_kind: Some("codex".into()),
                         agent_active: Some(true),
+                        agent_command: None,
                     }),
                 ),
             )

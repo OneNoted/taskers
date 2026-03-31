@@ -3,7 +3,4 @@ compile_error!(
     "taskers on crates.io currently supports x86_64 Linux only. Mainline macOS support is not shipped from this repo root."
 );
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    taskers_cli::run().await
-}
+pub mod linux_install;

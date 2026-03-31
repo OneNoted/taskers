@@ -34,6 +34,7 @@ struct EnvPaths {
     taskers_runtime_dir: Option<PathBuf>,
     taskers_session_path: Option<PathBuf>,
     taskers_socket_path: Option<PathBuf>,
+    taskers_terminal_socket_path: Option<PathBuf>,
 }
 
 impl EnvPaths {
@@ -51,6 +52,8 @@ impl EnvPaths {
             taskers_runtime_dir: env::var_os("TASKERS_RUNTIME_DIR").map(PathBuf::from),
             taskers_session_path: env::var_os("TASKERS_SESSION_PATH").map(PathBuf::from),
             taskers_socket_path: env::var_os("TASKERS_SOCKET_PATH").map(PathBuf::from),
+            taskers_terminal_socket_path: env::var_os("TASKERS_TERMINAL_SOCKET_PATH")
+                .map(PathBuf::from),
         }
     }
 }
@@ -64,6 +67,7 @@ pub struct TaskersPaths {
     shell_runtime_dir: PathBuf,
     ghostty_runtime_dir: PathBuf,
     socket_path: PathBuf,
+    terminal_socket_path: PathBuf,
     session_path: PathBuf,
     config_path: PathBuf,
     theme_dir: PathBuf,
@@ -96,6 +100,10 @@ impl TaskersPaths {
                 .taskers_socket_path
                 .clone()
                 .unwrap_or_else(|| socket_path(platform, &cache_dir));
+            let terminal_socket_path = env_paths
+                .taskers_terminal_socket_path
+                .clone()
+                .unwrap_or_else(|| terminal_socket_path(platform, env_paths, &cache_dir));
             let session_path = env_paths
                 .taskers_session_path
                 .clone()
@@ -109,6 +117,7 @@ impl TaskersPaths {
                 shell_runtime_dir,
                 ghostty_runtime_dir,
                 socket_path,
+                terminal_socket_path,
                 session_path,
                 config_path,
             };
@@ -127,6 +136,10 @@ impl TaskersPaths {
             .taskers_socket_path
             .clone()
             .unwrap_or_else(|| socket_path(platform, &cache_dir));
+        let terminal_socket_path = env_paths
+            .taskers_terminal_socket_path
+            .clone()
+            .unwrap_or_else(|| terminal_socket_path(platform, env_paths, &cache_dir));
         let session_path = env_paths
             .taskers_session_path
             .clone()
@@ -142,6 +155,7 @@ impl TaskersPaths {
             shell_runtime_dir,
             ghostty_runtime_dir,
             socket_path,
+            terminal_socket_path,
             session_path,
         }
     }
@@ -174,6 +188,10 @@ impl TaskersPaths {
         &self.socket_path
     }
 
+    pub fn terminal_socket_path(&self) -> &PathBuf {
+        &self.terminal_socket_path
+    }
+
     pub fn session_path(&self) -> &PathBuf {
         &self.session_path
     }
@@ -193,6 +211,10 @@ pub fn default_socket_path() -> PathBuf {
 
 pub fn default_session_path() -> PathBuf {
     TaskersPaths::detect().session_path
+}
+
+pub fn default_terminal_socket_path() -> PathBuf {
+    TaskersPaths::detect().terminal_socket_path
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -326,6 +348,22 @@ fn socket_path(platform: HostPlatform, cache_dir: &PathBuf) -> PathBuf {
     }
 }
 
+fn terminal_socket_path(
+    platform: HostPlatform,
+    env_paths: &EnvPaths,
+    cache_dir: &PathBuf,
+) -> PathBuf {
+    match platform {
+        HostPlatform::Linux => env_paths
+            .xdg_runtime_dir
+            .clone()
+            .map(|path| path.join("taskers").join("terminal.sock"))
+            .unwrap_or_else(|| PathBuf::from("/tmp/taskers-terminal.sock")),
+        HostPlatform::Macos => cache_dir.join("terminal.sock"),
+        HostPlatform::Other => PathBuf::from("/tmp/taskers-terminal.sock"),
+    }
+}
+
 fn home_library_dir(env_paths: &EnvPaths, leaf: &str) -> PathBuf {
     env_paths
         .home
@@ -376,6 +414,12 @@ mod tests {
             &PathBuf::from(format!("/Users/notes/Library/Caches/{APP_ID}/control.sock"))
         );
         assert_eq!(
+            paths.terminal_socket_path(),
+            &PathBuf::from(format!(
+                "/Users/notes/Library/Caches/{APP_ID}/terminal.sock"
+            ))
+        );
+        assert_eq!(
             paths.shell_runtime_dir(),
             &PathBuf::from(format!(
                 "/Users/notes/Library/Caches/{APP_ID}/runtime/shell"
@@ -413,6 +457,10 @@ mod tests {
             &PathBuf::from("/tmp/runtime/taskers/shell")
         );
         assert_eq!(paths.socket_path(), &PathBuf::from("/tmp/taskers.sock"));
+        assert_eq!(
+            paths.terminal_socket_path(),
+            &PathBuf::from("/tmp/runtime/taskers/terminal.sock")
+        );
     }
 
     #[test]
@@ -421,6 +469,7 @@ mod tests {
             taskers_config_path: Some(PathBuf::from("/work/config.json")),
             taskers_session_path: Some(PathBuf::from("/work/session.json")),
             taskers_socket_path: Some(PathBuf::from("/work/control.sock")),
+            taskers_terminal_socket_path: Some(PathBuf::from("/work/terminal.sock")),
             taskers_runtime_dir: Some(PathBuf::from("/work/runtime")),
             taskers_ghostty_runtime_dir: Some(PathBuf::from("/work/ghostty")),
             ..EnvPaths::default()
@@ -430,6 +479,10 @@ mod tests {
         assert_eq!(paths.config_path(), &PathBuf::from("/work/config.json"));
         assert_eq!(paths.session_path(), &PathBuf::from("/work/session.json"));
         assert_eq!(paths.socket_path(), &PathBuf::from("/work/control.sock"));
+        assert_eq!(
+            paths.terminal_socket_path(),
+            &PathBuf::from("/work/terminal.sock")
+        );
         assert_eq!(
             paths.shell_runtime_dir(),
             &PathBuf::from("/work/runtime/shell")

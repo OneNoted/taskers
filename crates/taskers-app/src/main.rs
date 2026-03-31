@@ -1,11 +1,17 @@
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+compile_error!(
+    "taskers on crates.io currently supports x86_64 Linux only. Mainline macOS support is not shipped from this repo root."
+);
+
 use adw::prelude::*;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{Router, extract::ws::WebSocketUpgrade, response::Html, routing::get};
 use clap::{Parser, ValueEnum};
 use gtk::{EventControllerKey, gdk, gio, glib};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     fs::{File, OpenOptions, create_dir_all, read_to_string, remove_file, write},
     future::pending,
     io::{self, Write},
@@ -26,9 +32,14 @@ use taskers_control::{
 };
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
-use taskers_ghostty::{BackendChoice, GhosttyHost, GhosttyHostOptions, ensure_runtime_installed};
+use taskers_ghostty::{
+    BackendChoice, EmbeddedTerminalAppearance, GhosttyHost, GhosttyHostOptions,
+    ensure_runtime_installed,
+};
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
-use taskers_runtime::{ShellLaunchSpec, install_shell_integration, scrub_inherited_terminal_env};
+use taskers_runtime::{
+    ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
+};
 use taskers_shell_core::{
     BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PixelSize,
     RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
@@ -37,6 +48,7 @@ use taskers_shell_core::{
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
 use glib::variant::ToVariant;
+use taskers_paths::default_terminal_socket_path;
 
 const APP_ID: &str = taskers_paths::APP_ID;
 const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
@@ -87,9 +99,11 @@ struct BootstrapContext {
 struct RuntimeBootstrap {
     ghostty_runtime: RuntimeCapability,
     shell_integration: RuntimeCapability,
+    terminal_persistence: RuntimeCapability,
     shell_launch: ShellLaunchSpec,
     host_options: GhosttyHostOptions,
     socket_path: PathBuf,
+    terminal_session_client: Option<TerminalSessionClient>,
     startup_notes: Vec<String>,
 }
 
@@ -121,6 +135,8 @@ struct TaskersConfig {
     selected_shortcut_preset: String,
     #[serde(default)]
     notification_preferences: NotificationPreferencesConfig,
+    #[serde(default)]
+    embedded_terminal_appearance: EmbeddedTerminalAppearance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +157,7 @@ impl Default for TaskersConfig {
             selected_theme_id: default_theme_id(),
             selected_shortcut_preset: default_shortcut_preset_id(),
             notification_preferences: NotificationPreferencesConfig::default(),
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
         }
     }
 }
@@ -193,6 +210,21 @@ fn safe_eprintln(message: impl std::fmt::Display) {
     let _ = writeln!(stderr, "{message}");
 }
 
+fn push_startup_note(
+    startup_notes: &mut Vec<String>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    note: impl Into<String>,
+) {
+    let note = note.into();
+    if let Some(diagnostics) = diagnostics {
+        log_diagnostic(
+            Some(diagnostics),
+            DiagnosticRecord::new(DiagnosticCategory::Startup, None, note.clone()),
+        );
+    }
+    startup_notes.push(note);
+}
+
 impl TaskersConfig {
     fn load() -> Result<Self> {
         let path = taskers_paths::default_config_path();
@@ -224,7 +256,7 @@ impl TaskersConfig {
         ShortcutPreset::parse(&self.selected_shortcut_preset).unwrap_or(ShortcutPreset::PowerUser)
     }
 
-    fn from_settings(settings: &taskers_shell_core::SettingsSnapshot) -> Self {
+    fn from_settings(settings: &taskers_shell_core::SettingsSnapshot, current: &Self) -> Self {
         Self {
             selected_theme_id: settings.selected_theme_id.clone(),
             selected_shortcut_preset: settings
@@ -236,6 +268,7 @@ impl TaskersConfig {
             notification_preferences: NotificationPreferencesConfig::from_snapshot(
                 settings.notification_preferences,
             ),
+            embedded_terminal_appearance: current.embedded_terminal_appearance,
         }
     }
 }
@@ -258,36 +291,89 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     let bootstrap = Rc::new(RefCell::new(Some(bootstrap)));
     let hold_guard = Rc::new(RefCell::new(None));
+    // A unique GTK application can receive activate before its first window is
+    // fully presentable. Track launch-in-progress explicitly so detached
+    // desktop-entry startups do not get mistaken for stale no-window instances.
+    let launch_in_progress = Rc::new(Cell::new(true));
     let bootstrap_for_startup = bootstrap.clone();
     let hold_guard_for_startup = hold_guard.clone();
+    let launch_in_progress_for_startup = launch_in_progress.clone();
     let cli_for_startup = cli.clone();
     app.connect_startup(move |app| {
-        *hold_guard_for_startup.borrow_mut() = Some(app.hold());
-        if let Some(bootstrap) = bootstrap_for_startup.borrow_mut().take() {
-            build_ui(
-                app,
-                bootstrap,
-                hold_guard_for_startup.clone(),
-                cli_for_startup.clone(),
-            );
+        ensure_application_hold(app, &hold_guard_for_startup);
+        let Some(bootstrap) = bootstrap_for_startup.borrow_mut().take() else {
+            launch_in_progress_for_startup.set(false);
+            release_application_hold(&hold_guard_for_startup);
+            app.quit();
+            return;
+        };
+
+        if let Err(error) = build_ui_result(
+            app,
+            bootstrap,
+            hold_guard_for_startup.clone(),
+            cli_for_startup.clone(),
+        ) {
+            safe_eprintln(format!("failed to launch Taskers host: {error:?}"));
+            launch_in_progress_for_startup.set(false);
+            release_application_hold(&hold_guard_for_startup);
+            app.quit();
+            return;
+        }
+
+        let launch_in_progress = launch_in_progress_for_startup.clone();
+        glib::idle_add_local_once(move || launch_in_progress.set(false));
+    });
+    app.connect_activate({
+        let hold_guard = hold_guard.clone();
+        let launch_in_progress = launch_in_progress.clone();
+        move |app| {
+            if present_existing_window(app) || launch_in_progress.get() {
+                return;
+            }
+
+            release_application_hold(&hold_guard);
+            app.quit();
         }
     });
-    app.connect_activate(|app| {
-        if let Some(window) = app.active_window() {
-            window.present();
+    app.connect_window_removed({
+        let hold_guard = hold_guard.clone();
+        move |app, _| {
+            if app.windows().is_empty() {
+                release_application_hold(&hold_guard);
+                app.quit();
+            }
         }
     });
     app.run_with_args::<&str>(&[])
 }
 
-fn build_ui(
+fn present_existing_window(app: &adw::Application) -> bool {
+    let window = app
+        .active_window()
+        .or_else(|| app.windows().into_iter().next());
+    if let Some(window) = window {
+        window.present();
+        true
+    } else {
+        false
+    }
+}
+
+fn ensure_application_hold(
     app: &adw::Application,
-    bootstrap: BootstrapContext,
-    hold_guard: Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>,
-    cli: Cli,
+    hold_guard: &Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>,
 ) {
-    if let Err(error) = build_ui_result(app, bootstrap, hold_guard, cli) {
-        safe_eprintln(format!("failed to launch Taskers host: {error:?}"));
+    if let Ok(mut hold_guard) = hold_guard.try_borrow_mut()
+        && hold_guard.is_none()
+    {
+        *hold_guard = Some(app.hold());
+    }
+}
+
+fn release_application_hold(hold_guard: &Rc<RefCell<Option<gtk::gio::ApplicationHoldGuard>>>) {
+    if let Ok(mut hold_guard) = hold_guard.try_borrow_mut() {
+        drop(hold_guard.take());
     }
 }
 
@@ -337,8 +423,9 @@ fn build_ui_result(
         .default_height(900)
         .build();
     let app_for_close = app.clone();
+    let hold_guard_for_close = hold_guard.clone();
     window.connect_close_request(move |_| {
-        drop(hold_guard.borrow_mut().take());
+        release_application_hold(&hold_guard_for_close);
         app_for_close.quit();
         glib::Propagation::Proceed
     });
@@ -647,8 +734,9 @@ fn persist_settings_if_needed(
     diagnostics: Option<&DiagnosticsWriter>,
 ) {
     let snapshot = core.snapshot();
-    let next = TaskersConfig::from_settings(&snapshot.settings);
-    if *persisted_config.borrow() == next {
+    let current = persisted_config.borrow().clone();
+    let next = TaskersConfig::from_settings(&snapshot.settings, &current);
+    if current == next {
         return;
     }
 
@@ -804,6 +892,54 @@ mod notification_tests {
     }
 }
 
+#[cfg(test)]
+mod config_tests {
+    use super::{NotificationPreferencesConfig, TaskersConfig};
+    use taskers_ghostty::EmbeddedTerminalAppearance;
+    use taskers_shell_core::{NotificationPreferencesSnapshot, SettingsSnapshot};
+
+    #[test]
+    fn taskers_config_defaults_to_taskers_embedded_terminal_appearance() {
+        assert_eq!(
+            TaskersConfig::default().embedded_terminal_appearance,
+            EmbeddedTerminalAppearance::Taskers
+        );
+    }
+
+    #[test]
+    fn taskers_config_from_settings_preserves_embedded_terminal_appearance() {
+        let current = TaskersConfig {
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Ghostty,
+            ..TaskersConfig::default()
+        };
+
+        let settings = SettingsSnapshot {
+            selected_theme_id: "gruvbox-dark".into(),
+            theme_options: Vec::new(),
+            shortcut_presets: Vec::new(),
+            shortcuts: Vec::new(),
+            notification_preferences: NotificationPreferencesSnapshot {
+                alerts_on_waiting: false,
+                alerts_on_error: true,
+                alerts_on_completed: true,
+                suppress_when_visible: false,
+            },
+        };
+
+        let next = TaskersConfig::from_settings(&settings, &current);
+
+        assert_eq!(next.selected_theme_id, "gruvbox-dark");
+        assert_eq!(
+            next.embedded_terminal_appearance,
+            EmbeddedTerminalAppearance::Ghostty
+        );
+        assert_eq!(
+            next.notification_preferences,
+            NotificationPreferencesConfig::from_snapshot(settings.notification_preferences)
+        );
+    }
+}
+
 fn is_modifier_key(key: gdk::Key) -> bool {
     matches!(
         key,
@@ -895,22 +1031,46 @@ fn connect_navigation_shortcuts(
 }
 
 fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
-    let runtime = resolve_runtime_bootstrap();
-    let mut startup_notes = runtime.startup_notes;
-    let config = match TaskersConfig::load() {
-        Ok(config) => config,
-        Err(error) => {
-            startup_notes.push(format!("Taskers config unavailable: {error}"));
-            TaskersConfig::default()
-        }
+    let (config, config_note) = match TaskersConfig::load() {
+        Ok(config) => (config, None),
+        Err(error) => (
+            TaskersConfig::default(),
+            Some(format!("Taskers config unavailable: {error}")),
+        ),
     };
+    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
+    let mut startup_notes = runtime.startup_notes;
+    if let Some(note) = config_note {
+        push_startup_note(&mut startup_notes, diagnostics, note);
+    }
     let session_path = default_session_path();
-    let initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
+    let mut initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
         format!(
             "failed to load or bootstrap Taskers session at {}",
             session_path.display()
         )
     })?;
+    if let Some(terminal_session_client) = runtime.terminal_session_client.as_ref() {
+        match terminal_session_client.list_sessions() {
+            Ok(live_sessions) => {
+                let live_sessions = live_sessions.into_iter().collect::<HashSet<_>>();
+                initial_model.recover_interrupted_agent_resumes_for_missing_sessions(
+                    |session_id| live_sessions.contains(&session_id.to_string()),
+                );
+            }
+            Err(error) => {
+                push_startup_note(
+                    &mut startup_notes,
+                    diagnostics,
+                    format!(
+                        "Terminal session recovery unavailable; leaving persisted sessions untouched: {error}"
+                    ),
+                );
+            }
+        }
+    } else {
+        initial_model.recover_interrupted_agent_resumes();
+    }
 
     let (ghostty_host, backend_choice, terminal_host, terminal_note) =
         match probe_ghostty_backend_process(GhosttyProbeMode::Surface) {
@@ -951,12 +1111,14 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
         ghostty_runtime: runtime.ghostty_runtime,
         shell_integration: runtime.shell_integration,
         terminal_host,
+        terminal_persistence: runtime.terminal_persistence,
     };
     let app_state = AppState::new(
         initial_model,
         session_path,
         backend_choice,
         runtime.shell_launch,
+        runtime.terminal_session_client.clone(),
     )
     .context("failed to initialize Taskers app state")?;
     let core = SharedCore::bootstrap(BootstrapModel {
@@ -979,11 +1141,14 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
     })
 }
 
-fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
+fn resolve_runtime_bootstrap(
+    embedded_terminal_appearance: EmbeddedTerminalAppearance,
+) -> RuntimeBootstrap {
     scrub_inherited_terminal_env();
 
     let mut startup_notes = Vec::new();
     let socket_path = default_socket_path();
+    let terminal_socket_path = default_terminal_socket_path();
     let ghostty_runtime = match ensure_runtime_installed() {
         Ok(Some(runtime)) => {
             startup_notes.push(format!(
@@ -1010,15 +1175,42 @@ fn resolve_runtime_bootstrap() -> RuntimeBootstrap {
     shell_launch
         .env
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
+    let terminal_session_client = match ensure_terminal_session_daemon(&terminal_socket_path) {
+        Ok(()) => {
+            shell_launch.env.insert(
+                "TASKERS_TERMINAL_SOCKET".into(),
+                terminal_socket_path.display().to_string(),
+            );
+            Some(TerminalSessionClient::new(terminal_socket_path))
+        }
+        Err(error) => {
+            startup_notes.push(format!(
+                "terminal session sidecar unavailable; terminals will start fresh shells and will not survive Taskers restart ({error})"
+            ));
+            None
+        }
+    };
+    let terminal_persistence = if terminal_session_client.is_some() {
+        RuntimeCapability::Ready
+    } else {
+        RuntimeCapability::Fallback {
+            message:
+                "Terminal sidecar unavailable; terminals will start fresh shells and will not survive Taskers restart."
+                    .into(),
+        }
+    };
 
-    let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+    let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch)
+        .with_embedded_terminal_appearance(embedded_terminal_appearance);
 
     RuntimeBootstrap {
         ghostty_runtime,
         shell_integration,
+        terminal_persistence,
         shell_launch,
         host_options,
         socket_path,
+        terminal_session_client,
         startup_notes,
     }
 }
@@ -1032,7 +1224,8 @@ fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
 }
 
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
-    let runtime = resolve_runtime_bootstrap();
+    let config = TaskersConfig::load().unwrap_or_default();
+    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
     let host = match GhosttyHost::new_with_options(&runtime.host_options) {
         Ok(host) => {
             let _ = host.tick();
@@ -1048,7 +1241,7 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     };
 
     if matches!(mode, GhosttyProbeMode::Surface) {
-        return run_internal_surface_probe(host, runtime.shell_launch, mode);
+        return run_internal_surface_probe(host, runtime.shell_launch, mode, config);
     }
 
     spin_probe_main_context(Duration::from_millis(350));
@@ -1059,6 +1252,7 @@ fn run_internal_surface_probe(
     host: GhosttyHost,
     shell_launch: ShellLaunchSpec,
     mode: GhosttyProbeMode,
+    config: TaskersConfig,
 ) -> glib::ExitCode {
     if !gtk::is_initialized_main_thread() {
         if let Err(error) = gtk::init() {
@@ -1090,6 +1284,7 @@ fn run_internal_surface_probe(
         taskers_probe_session_path(mode),
         BackendChoice::GhosttyEmbedded,
         shell_launch,
+        None,
     ) {
         Ok(app_state) => app_state,
         Err(error) => {
@@ -1101,16 +1296,20 @@ fn run_internal_surface_probe(
         }
     };
 
+    let selected_theme_id = config.selected_theme_id.clone();
+    let selected_shortcut_preset = config.shortcut_preset();
+    let notification_preferences = config.notification_preferences.to_snapshot();
     let core = SharedCore::bootstrap(BootstrapModel {
         app_state,
         runtime_status: RuntimeStatus {
             ghostty_runtime: RuntimeCapability::Ready,
             shell_integration: RuntimeCapability::Ready,
             terminal_host: RuntimeCapability::Ready,
+            terminal_persistence: RuntimeCapability::Ready,
         },
-        selected_theme_id: "dark".into(),
-        selected_shortcut_preset: ShortcutPreset::PowerUser,
-        notification_preferences: NotificationPreferencesSnapshot::default(),
+        selected_theme_id,
+        selected_shortcut_preset,
+        notification_preferences,
     });
     core.set_window_size(PixelSize::new(
         GHOSTTY_PROBE_WINDOW_SIZE_PX,
@@ -1833,15 +2032,47 @@ fn surface_counts(node: &LayoutNodeSnapshot) -> (usize, usize) {
 
 fn log_runtime_status(diagnostics: Option<&DiagnosticsWriter>, status: &RuntimeStatus) {
     let summary = format!(
-        "runtime status ghostty={} shell={} terminal={}",
+        "runtime status ghostty={} shell={} terminal={} persistence={}",
         status.ghostty_runtime.label(),
         status.shell_integration.label(),
         status.terminal_host.label(),
+        status.terminal_persistence.label(),
     );
     log_diagnostic(
         diagnostics,
         DiagnosticRecord::new(DiagnosticCategory::Startup, None, summary),
     );
+}
+
+fn ensure_terminal_session_daemon(socket_path: &PathBuf) -> Result<()> {
+    let client = TerminalSessionClient::new(socket_path.clone());
+    if client.ping().is_ok() {
+        return Ok(());
+    }
+
+    let terminald = std::env::current_exe()
+        .context("failed to resolve current executable for terminal sidecar launch")?
+        .with_file_name("taskers-terminald");
+    Command::new(&terminald)
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to launch {}", terminald.display()))?;
+
+    for _ in 0..20 {
+        if client.ping().is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    bail!(
+        "terminal sidecar did not become ready at {}",
+        socket_path.display()
+    )
 }
 
 fn log_diagnostic(diagnostics: Option<&DiagnosticsWriter>, record: DiagnosticRecord) {

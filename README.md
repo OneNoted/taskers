@@ -27,13 +27,22 @@ is kept under `taskers-old/` for reference only.
 Linux (`x86_64-unknown-linux-gnu`):
 
 ```bash
+sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev
 cargo install taskers --locked
 taskers
 ```
 
-The first launch downloads the exact version-matched Linux bundle from the
-tagged GitHub release. The Linux app requires GTK4/libadwaita plus the host
-WebKitGTK 6.0 runtime.
+`cargo install taskers` installs the Linux launcher entrypoint. On first launch,
+that launcher ensures the version-matched Linux app bundle is present under the
+user data directory and then starts the bundled `taskers-gtk` host plus its
+helper binaries. The first launch also bootstraps the version-matched Ghostty
+runtime assets when needed.
+
+The Linux app requires GTK4/libadwaita plus the host WebKitGTK 6.0 development
+packages at install time and the WebKitGTK 6.0 runtime at launch time. Taskers
+handles terminal-session persistence itself on Linux through its internal
+terminal sidecar; if the sidecar is unavailable, Taskers falls back to fresh
+shells and warns that persistence is unavailable.
 
 Mainline macOS support is currently not shipped from this repo root.
 
@@ -87,18 +96,32 @@ On Ubuntu 24.04, install the Linux UI dependencies first:
 sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev xvfb
 ```
 
-Install the app into Cargo's bin directory, then run it from there:
+Install the app into Cargo's bin directory:
 
 ```bash
 cargo install --path crates/taskers-app --force
+```
+
+That installs the repo-local binaries directly into Cargo's bin directory:
+
+- `taskers`
+- `taskers-gtk`
+- `taskersctl`
+- `taskers-terminald`
+
+For repo-local verification, prefer the directly installed GTK host:
+
+```bash
 taskers-gtk
 ```
 
-Point the desktop launcher at that Cargo-bin install:
+If plain `taskers` still resolves to `~/.local/bin/taskers`, that is the
+launcher-managed bundle path and can lag behind your repo build. Use
+`taskers-gtk` or the absolute Cargo bin path for feature testing unless you
+intentionally refreshed the launcher-managed release bundle too.
 
-```bash
-bash scripts/install-dev-desktop-entry.sh
-```
+`taskers-terminald` is an internal helper binary used for persistent terminal
+sessions. You normally do not launch it by hand.
 
 Run the headless baseline smoke:
 

@@ -240,12 +240,21 @@ impl ManagedInstallation {
         )?;
 
         let desktop_entry_path = applications_dir.join("dev.taskers.app.desktop");
+        let cargo_bin_home = cargo_bin_home();
+        let legacy_desktop_launcher = cargo_bin_home
+            .as_deref()
+            .map(|path| path.join("taskers-gtk-desktop-launch"));
         let desktop_entry = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/assets/taskers.desktop.in"
         ))
         .replace("{{EXEC}}", &desktop_exec(&desktop_launcher));
-        if should_update_desktop_entry(&desktop_entry_path, &desktop_launcher, &launcher)? {
+        if should_update_desktop_entry(
+            &desktop_entry_path,
+            &desktop_launcher,
+            &launcher,
+            legacy_desktop_launcher.as_deref(),
+        )? {
             fs::write(&desktop_entry_path, desktop_entry)
                 .with_context(|| format!("failed to write {}", applications_dir.display()))?;
         }
@@ -254,6 +263,8 @@ impl ManagedInstallation {
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/taskers.svg")),
         )
         .with_context(|| format!("failed to write {}", icons_dir.display()))?;
+
+        remove_legacy_desktop_integration(legacy_desktop_launcher.as_deref())?;
 
         let notify_path = xdg_bin_home.join("taskers-notify");
         write_executable(
@@ -298,6 +309,7 @@ fn validate_artifact_kind(kind: ArtifactKind) -> Result<()> {
 fn validate_bundle_layout(bundle_root: &Path) -> bool {
     bundle_root.join("bin").join("taskers").is_file()
         && bundle_root.join("bin").join("taskersctl").is_file()
+        && bundle_root.join("bin").join("taskers-terminald").is_file()
         && bundle_root.join("ghostty").is_dir()
         && bundle_root
             .join("ghostty")
@@ -462,7 +474,7 @@ fn shell_single_quote(path: &Path) -> String {
 
 fn desktop_launch_wrapper_contents(target: &Path) -> String {
     format!(
-        "#!/bin/sh\nset -eu\nlog_dir=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/taskers\"\nmkdir -p \"$log_dir\"\nexec /usr/bin/setsid -f {target} --diagnostic-log \"$log_dir/desktop-launch-diagnostics.log\" >>\"$log_dir/desktop-launch.log\" 2>&1\n",
+        "#!/bin/sh\nset -eu\nlog_dir=\"${{XDG_CACHE_HOME:-$HOME/.cache}}/taskers\"\nmkdir -p \"$log_dir\"\n\nfocus_taskers_window_niri_once() {{\n  command -v niri >/dev/null 2>&1 || return 1\n  command -v jq >/dev/null 2>&1 || return 1\n\n  window_id=\"$(niri msg -j windows 2>/dev/null | jq -r 'first(.[] | select(.app_id == \"dev.taskers.app\") | .id) // empty' 2>/dev/null)\"\n  [ -n \"$window_id\" ] || return 1\n  niri msg action focus-window --id \"$window_id\" >/dev/null 2>&1\n}}\n\nfocus_taskers_window_niri_retry() {{\n  command -v niri >/dev/null 2>&1 || return 1\n  command -v jq >/dev/null 2>&1 || return 1\n\n  (\n    i=0\n    while [ \"$i\" -lt 40 ]; do\n      sleep 0.1\n      focus_taskers_window_niri_once >/dev/null 2>&1 || true\n      i=$((i + 1))\n    done\n  ) >/dev/null 2>&1 &\n}}\n\nif focus_taskers_window_niri_once; then\n  focus_taskers_window_niri_retry || true\n  exit 0\nfi\n\n/usr/bin/setsid -f {target} --diagnostic-log \"$log_dir/desktop-launch-diagnostics.log\" >>\"$log_dir/desktop-launch.log\" 2>&1\nfocus_taskers_window_niri_retry || true\n",
         target = shell_single_quote(target),
     )
 }
@@ -471,6 +483,7 @@ fn should_update_desktop_entry(
     path: &Path,
     desktop_launcher: &Path,
     launcher: &Path,
+    legacy_desktop_launcher: Option<&Path>,
 ) -> Result<bool> {
     let Ok(existing) = fs::read_to_string(path) else {
         return Ok(true);
@@ -483,11 +496,27 @@ fn should_update_desktop_entry(
         return Ok(true);
     };
 
-    let managed_execs = [desktop_exec(desktop_launcher), desktop_exec(launcher)];
+    let mut managed_execs = vec![desktop_exec(desktop_launcher), desktop_exec(launcher)];
+    if let Some(legacy_desktop_launcher) = legacy_desktop_launcher {
+        managed_execs.push(desktop_exec(legacy_desktop_launcher));
+    }
 
     Ok(managed_execs
         .iter()
         .any(|candidate| candidate == existing_exec))
+}
+
+fn remove_legacy_desktop_integration(legacy_desktop_launcher: Option<&Path>) -> Result<bool> {
+    let Some(legacy_desktop_launcher) = legacy_desktop_launcher else {
+        return Ok(false);
+    };
+
+    if fs::symlink_metadata(legacy_desktop_launcher).is_err() {
+        return Ok(false);
+    }
+
+    remove_path(legacy_desktop_launcher)?;
+    Ok(true)
 }
 
 fn write_executable(path: &Path, contents: &str) -> Result<()> {
@@ -546,10 +575,6 @@ fn launcher_path_looks_installed(current_exe: &Path) -> bool {
         return true;
     }
 
-    if cargo_bin_home().as_deref() == Some(parent) {
-        return true;
-    }
-
     matches!(
         parent,
         p if p == Path::new("/usr/local/bin")
@@ -559,9 +584,14 @@ fn launcher_path_looks_installed(current_exe: &Path) -> bool {
 }
 
 fn cargo_bin_home() -> Option<PathBuf> {
-    env::var_os("CARGO_HOME")
+    env::var_os("CARGO_INSTALL_ROOT")
         .map(PathBuf::from)
         .map(|path| path.join("bin"))
+        .or_else(|| {
+            env::var_os("CARGO_HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join("bin"))
+        })
         .or_else(|| {
             env::var_os("HOME")
                 .map(PathBuf::from)
@@ -600,8 +630,8 @@ mod tests {
     use super::{
         ArtifactKind, ManagedInstallation, ReleaseArtifact, ReleaseManifest, bundle_root,
         current_target_triple, default_manifest_url, desktop_exec, desktop_launch_wrapper_contents,
-        launcher_path_looks_installed, path_taskers_executable, sha256_path,
-        should_update_desktop_entry,
+        launcher_path_looks_installed, path_taskers_executable, remove_legacy_desktop_integration,
+        sha256_path, should_update_desktop_entry,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -723,6 +753,7 @@ mod tests {
 
         assert!(installation.executable_path().is_file());
         assert!(installation.taskersctl_path().is_file());
+        assert!(installation.bundle_root.join("bin").join("taskers-terminald").is_file());
         assert!(installation.ghostty_resources_path().is_dir());
         assert!(installation.terminfo_path().is_dir());
     }
@@ -764,7 +795,8 @@ mod tests {
 
         let launcher = PathBuf::from("/home/notes/.local/bin/taskers");
         assert!(
-            !should_update_desktop_entry(&desktop_entry, &launcher, &launcher).expect("decision"),
+            !should_update_desktop_entry(&desktop_entry, &launcher, &launcher, None)
+                .expect("decision"),
         );
     }
 
@@ -780,26 +812,46 @@ mod tests {
         .expect("desktop entry");
 
         assert!(
-            should_update_desktop_entry(&desktop_entry, &launcher, &launcher).expect("decision")
+            should_update_desktop_entry(&desktop_entry, &launcher, &launcher, None)
+                .expect("decision")
         );
     }
 
     #[test]
-    fn updates_legacy_launcher_desktop_entry() {
+    fn updates_legacy_dev_desktop_entry() {
         let temp = tempdir().expect("tempdir");
         let desktop_entry = temp.path().join("dev.taskers.app.desktop");
         let desktop_launcher = PathBuf::from("/home/notes/.local/bin/taskers-desktop-launch");
-        let launcher = PathBuf::from("/home/notes/.cargo/bin/taskers");
+        let launcher = PathBuf::from("/home/notes/.local/bin/taskers");
+        let legacy_launcher = PathBuf::from("/home/notes/.cargo/bin/taskers-gtk-desktop-launch");
         fs::write(
             &desktop_entry,
-            format!("[Desktop Entry]\nExec={}\n", desktop_exec(&launcher)),
+            format!("[Desktop Entry]\nExec={}\n", desktop_exec(&legacy_launcher)),
         )
         .expect("desktop entry");
 
         assert!(
-            should_update_desktop_entry(&desktop_entry, &desktop_launcher, &launcher)
-                .expect("decision")
+            should_update_desktop_entry(
+                &desktop_entry,
+                &desktop_launcher,
+                &launcher,
+                Some(&legacy_launcher),
+            )
+            .expect("decision")
         );
+    }
+
+    #[test]
+    fn removes_legacy_desktop_wrapper() {
+        let temp = tempdir().expect("tempdir");
+        let cargo_bin_home = temp.path().join("cargo-bin");
+        fs::create_dir_all(&cargo_bin_home).expect("cargo bin dir");
+
+        let legacy_wrapper = cargo_bin_home.join("taskers-gtk-desktop-launch");
+        fs::write(&legacy_wrapper, "#!/bin/sh\n").expect("legacy wrapper");
+
+        assert!(remove_legacy_desktop_integration(Some(&legacy_wrapper)).expect("cleanup"),);
+        assert!(!legacy_wrapper.exists());
     }
 
     #[test]
@@ -808,6 +860,9 @@ mod tests {
         assert!(contents.contains("desktop-launch-diagnostics.log"));
         assert!(contents.contains("desktop-launch.log"));
         assert!(contents.contains("/usr/bin/setsid -f"));
+        assert!(contents.contains("focus_taskers_window_niri_once"));
+        assert!(contents.contains("focus_taskers_window_niri_retry"));
+        assert!(contents.contains("niri msg action focus-window --id"));
         assert!(contents.contains("'/home/notes/.local/bin/taskers'"));
     }
 }

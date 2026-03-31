@@ -34,6 +34,8 @@ pub enum GhosttyError {
     SurfaceInit,
     #[error("failed to read text from ghostty surface")]
     SurfaceReadText,
+    #[error("failed to write text to ghostty surface")]
+    SurfaceWriteText,
     #[error("surface metadata contains NUL bytes: {0}")]
     InvalidString(&'static str),
     #[error("failed to load ghostty bridge library from {path}: {message}")]
@@ -64,6 +66,7 @@ struct GhosttyBridgeLibrary {
     ) -> *mut c_void,
     surface_grab_focus: unsafe extern "C" fn(*mut c_void) -> c_int,
     surface_has_selection: unsafe extern "C" fn(*mut c_void) -> c_int,
+    surface_send_text: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> c_int,
     surface_read_all_text: unsafe extern "C" fn(*mut c_void, *mut taskers_ghostty_text_s) -> c_int,
     surface_free_text: unsafe extern "C" fn(*mut taskers_ghostty_text_s),
 }
@@ -99,6 +102,12 @@ impl GhosttyHost {
                         .map_err(|_| GhosttyError::InvalidString("env"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let embedded_terminal_appearance =
+                CString::new(match options.embedded_terminal_appearance {
+                    crate::backend::EmbeddedTerminalAppearance::Taskers => "taskers",
+                    crate::backend::EmbeddedTerminalAppearance::Ghostty => "ghostty",
+                })
+                .map_err(|_| GhosttyError::InvalidString("embedded_terminal_appearance"))?;
             let env_entry_ptrs = env_entries
                 .iter()
                 .map(|value| value.as_ptr())
@@ -116,6 +125,7 @@ impl GhosttyHost {
                     env_entry_ptrs.as_ptr()
                 },
                 env_count: env_entry_ptrs.len(),
+                embedded_terminal_appearance: embedded_terminal_appearance.as_ptr(),
             };
 
             let raw = (bridge.host_new)(&host_options);
@@ -259,6 +269,30 @@ impl GhosttyHost {
             Err(GhosttyError::Unavailable)
         }
     }
+
+    pub fn send_surface_text(&self, widget: &Widget, text: &str) -> Result<(), GhosttyError> {
+        #[cfg(taskers_ghostty_bridge)]
+        unsafe {
+            let text =
+                CString::new(text).map_err(|_| GhosttyError::InvalidString("surface_text"))?;
+            let ok = (self.bridge.surface_send_text)(
+                widget.as_ptr().cast(),
+                text.as_ptr(),
+                text.as_bytes().len(),
+            );
+            if ok == 0 {
+                Err(GhosttyError::SurfaceWriteText)
+            } else {
+                Ok(())
+            }
+        }
+
+        #[cfg(not(taskers_ghostty_bridge))]
+        {
+            let _ = (widget, text);
+            Err(GhosttyError::Unavailable)
+        }
+    }
 }
 
 #[cfg(taskers_ghostty_bridge)]
@@ -330,6 +364,14 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
                 path: path.clone(),
                 message: error.to_string(),
             })?;
+        let surface_send_text = *library
+            .get::<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> c_int>(
+                b"taskers_ghostty_surface_send_text\0",
+            )
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
         let surface_read_all_text = *library
             .get::<unsafe extern "C" fn(*mut c_void, *mut taskers_ghostty_text_s) -> c_int>(
                 b"taskers_ghostty_surface_read_all_text\0",
@@ -355,6 +397,7 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
             surface_new,
             surface_grab_focus,
             surface_has_selection,
+            surface_send_text,
             surface_read_all_text,
             surface_free_text,
         })
@@ -374,6 +417,7 @@ struct taskers_ghostty_host_options_s {
     command_argc: usize,
     env_entries: *const *const c_char,
     env_count: usize,
+    embedded_terminal_appearance: *const c_char,
 }
 
 #[cfg(taskers_ghostty_bridge)]

@@ -129,6 +129,7 @@ function taskers__emit_with_metadata --argument kind message
 
     test -n "$TASKERS_META_REPO_NAME"; and set -a argv --repo "$TASKERS_META_REPO_NAME"
     test -n "$TASKERS_META_BRANCH"; and set -a argv --branch "$TASKERS_META_BRANCH"
+    test -n "$TASKERS_ACTIVE_AGENT_COMMAND"; and set -a argv --command "$TASKERS_ACTIVE_AGENT_COMMAND"
     test -n "$message"; and set -a argv --message "$message"
 
     $argv >/dev/null 2>&1 &
@@ -143,6 +144,7 @@ function taskers__emit_metadata_if_changed
         -a "$TASKERS_LAST_META_BRANCH" = "$TASKERS_META_BRANCH" \
         -a "$TASKERS_LAST_META_AGENT" = "$TASKERS_META_AGENT" \
         -a "$TASKERS_LAST_META_TITLE" = "$TASKERS_META_TITLE" \
+        -a "$TASKERS_LAST_META_COMMAND" = "$TASKERS_ACTIVE_AGENT_COMMAND" \
         -a "$TASKERS_LAST_META_AGENT_ACTIVE" = "$agent_active"
         return 0
     end
@@ -152,6 +154,7 @@ function taskers__emit_metadata_if_changed
     set -gx TASKERS_LAST_META_BRANCH "$TASKERS_META_BRANCH"
     set -gx TASKERS_LAST_META_AGENT "$TASKERS_META_AGENT"
     set -gx TASKERS_LAST_META_TITLE "$TASKERS_META_TITLE"
+    set -gx TASKERS_LAST_META_COMMAND "$TASKERS_ACTIVE_AGENT_COMMAND"
     set -gx TASKERS_LAST_META_AGENT_ACTIVE "$agent_active"
     taskers__emit_with_metadata metadata
 end
@@ -162,6 +165,7 @@ function taskers__invalidate_metadata_cache
     set -e TASKERS_LAST_META_BRANCH
     set -e TASKERS_LAST_META_AGENT
     set -e TASKERS_LAST_META_TITLE
+    set -e TASKERS_LAST_META_COMMAND
     set -e TASKERS_LAST_META_AGENT_ACTIVE
 end
 
@@ -169,6 +173,7 @@ function taskers__on_preexec --on-event fish_preexec
     set -l agent (taskers__classify_command "$argv[1]" 2>/dev/null)
     if test -n "$agent"
         set -gx TASKERS_ACTIVE_AGENT_KIND "$agent"
+        set -gx TASKERS_ACTIVE_AGENT_COMMAND "$argv[1]"
         taskers__invalidate_metadata_cache
         taskers__emit_metadata_if_changed
     end
@@ -177,6 +182,7 @@ end
 function taskers__on_postexec --on-event fish_postexec
     if set -q TASKERS_ACTIVE_AGENT_KIND
         set -e TASKERS_ACTIVE_AGENT_KIND
+        set -e TASKERS_ACTIVE_AGENT_COMMAND
         taskers__invalidate_metadata_cache
     end
 
@@ -215,6 +221,7 @@ set -gx TASKERS_LAST_META_REPO_NAME ''
 set -gx TASKERS_LAST_META_BRANCH ''
 set -gx TASKERS_LAST_META_AGENT ''
 set -gx TASKERS_LAST_META_TITLE ''
+set -gx TASKERS_LAST_META_COMMAND ''
 set -gx TASKERS_LAST_META_AGENT_ACTIVE ''
 if not set -q TASKERS_TTY_NAME
     set -l current_tty (tty 2>/dev/null)

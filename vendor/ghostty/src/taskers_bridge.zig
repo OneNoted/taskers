@@ -13,11 +13,23 @@ pub const std_options = @import("main_ghostty.zig").std_options;
 
 var initialized = false;
 
+const EmbeddedTerminalAppearance = enum {
+    taskers,
+    ghostty,
+
+    fn parse(raw: ?[*:0]const u8) EmbeddedTerminalAppearance {
+        const value = raw orelse return .taskers;
+        if (std.mem.eql(u8, std.mem.span(value), "ghostty")) return .ghostty;
+        return .taskers;
+    }
+};
+
 pub const Host = struct {
     core_app: *CoreApp,
     rt_app: GtkRuntimeApp,
     command_argv: []const [:0]u8,
     env_entries: []const [:0]u8,
+    embedded_terminal_appearance: EmbeddedTerminalAppearance,
 };
 
 pub const HostOptions = extern struct {
@@ -25,6 +37,7 @@ pub const HostOptions = extern struct {
     command_argc: usize = 0,
     env_entries: ?[*]const [*:0]const u8 = null,
     env_count: usize = 0,
+    embedded_terminal_appearance: ?[*:0]const u8 = null,
 };
 
 pub const SurfaceOptions = extern struct {
@@ -87,7 +100,12 @@ pub export fn taskers_ghostty_host_new(options: ?*const HostOptions) ?*Host {
         .rt_app = undefined,
         .command_argv = command_argv,
         .env_entries = env_entries,
+        .embedded_terminal_appearance = EmbeddedTerminalAppearance.parse(opts.embedded_terminal_appearance),
     };
+    std.log.info(
+        "Taskers embedded terminal appearance={s}",
+        .{@tagName(host.embedded_terminal_appearance)},
+    );
 
     host.rt_app.init(core_app, .{}) catch |err| {
         std.log.err("failed to initialize Ghostty GTK runtime err={}", .{err});
@@ -97,6 +115,7 @@ pub export fn taskers_ghostty_host_new(options: ?*const HostOptions) ?*Host {
         alloc.destroy(host);
         return null;
     };
+    logConfigDiagnostics(host);
     return host;
 }
 
@@ -154,6 +173,19 @@ pub export fn taskers_ghostty_surface_has_selection(widget: ?*gtk.Widget) c_int 
     return if (core.hasSelection()) 1 else 0;
 }
 
+pub export fn taskers_ghostty_surface_send_text(
+    widget: ?*gtk.Widget,
+    ptr: ?[*]const u8,
+    len: usize,
+) c_int {
+    const widget_ptr = widget orelse return 0;
+    const bytes = ptr orelse return 0;
+    const surface: *Surface = @ptrCast(@alignCast(widget_ptr));
+    const core = surface.core() orelse return 0;
+    _ = core.textCallback(bytes[0..len]) catch return 0;
+    return 1;
+}
+
 pub export fn taskers_ghostty_surface_read_all_text(
     widget: ?*gtk.Widget,
     result: ?*Text,
@@ -202,7 +234,12 @@ fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOpti
     var cloned = try base.get().clone(alloc);
     defer cloned.deinit();
 
-    try applyTaskersEmbeddedSurfaceInvariants(alloc, &cloned, ptr.command_argv);
+    try applyTaskersEmbeddedSurfaceInvariants(
+        alloc,
+        &cloned,
+        ptr.command_argv,
+        ptr.embedded_terminal_appearance,
+    );
     for (ptr.env_entries) |entry| {
         try cloned.env.parseCLI(alloc, entry);
     }
@@ -219,6 +256,7 @@ fn applyTaskersEmbeddedSurfaceInvariants(
     _: std.mem.Allocator,
     config: *configpkg.Config,
     command_argv: []const [:0]const u8,
+    embedded_terminal_appearance: EmbeddedTerminalAppearance,
 ) !void {
     const alloc = config.arenaAlloc();
 
@@ -231,6 +269,35 @@ fn applyTaskersEmbeddedSurfaceInvariants(
     config.@"shell-integration" = .none;
     config.@"shell-integration-features" = .{};
     config.@"linux-cgroup" = .never;
+
+    if (embedded_terminal_appearance == .taskers) {
+        config.theme = null;
+        config.background = .{ .r = 0x0F, .g = 0x11, .b = 0x17 };
+        config.@"background-image" = null;
+        config.@"background-opacity" = 0.0;
+        config.@"background-opacity-cells" = false;
+        config.@"window-padding-x" = .{ .top_left = 0, .bottom_right = 0 };
+        config.@"window-padding-y" = .{ .top_left = 0, .bottom_right = 0 };
+        config.@"window-padding-balance" = false;
+        config.@"window-padding-color" = .background;
+    }
+}
+
+fn logConfigDiagnostics(host: *const Host) void {
+    const app_config: *Config = host.rt_app.app.getConfig();
+    defer app_config.unref();
+    if (!app_config.hasDiagnostics()) return;
+
+    var buf: [4095:0]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    for (app_config.get()._diagnostics.items()) |diag| {
+        writer.end = 0;
+        diag.format(&writer) catch |err| {
+            std.log.warn("failed to format Ghostty config diagnostic err={}", .{err});
+            continue;
+        };
+        std.log.warn("ghostty config diagnostic: {s}", .{buf[0..writer.end]});
+    }
 }
 
 fn duplicateStringList(
@@ -280,7 +347,12 @@ test "taskers embedded config preserves user settings beyond required invariants
     config.@"window-padding-balance" = true;
 
     const command_argv = [_][:0]const u8{ "/opt/taskers-shell-wrapper.sh", "-i" };
-    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, command_argv[0..]);
+    try applyTaskersEmbeddedSurfaceInvariants(
+        testing.allocator,
+        &config,
+        command_argv[0..],
+        .ghostty,
+    );
 
     try testing.expectEqual(@as(f32, 19), config.@"font-size");
     try testing.expectEqual(configpkg.Config.ShellIntegration.none, config.@"shell-integration");
@@ -311,8 +383,34 @@ test "taskers embedded config clears user command when taskers does not provide 
     config.@"font-size" = 17;
     config.command = .{ .shell = try testing.allocator.dupeZ(u8, "echo from-user-config") };
 
-    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, &.{});
+    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, &.{}, .ghostty);
 
     try testing.expectEqual(@as(f32, 17), config.@"font-size");
     try testing.expect(config.command == null);
+}
+
+test "taskers embedded appearance enforces taskers background contract" {
+    const testing = std.testing;
+    var config = try configpkg.Config.default(testing.allocator);
+    defer config.deinit();
+
+    config.theme = .{ .light = "Catppuccin Latte", .dark = "Catppuccin Mocha" };
+    config.background = .{ .r = 0x1E, .g = 0x1E, .b = 0x2E };
+    config.@"background-opacity" = 0.5;
+    config.@"window-padding-x" = .{ .top_left = 7, .bottom_right = 9 };
+    config.@"window-padding-y" = .{ .top_left = 11, .bottom_right = 13 };
+    config.@"window-padding-balance" = true;
+    config.@"window-padding-color" = .extend;
+
+    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, &.{}, .taskers);
+
+    try testing.expect(config.theme == null);
+    try testing.expectEqual(configpkg.Color{ .r = 0x0F, .g = 0x11, .b = 0x17 }, config.background);
+    try testing.expectEqual(@as(f64, 0.0), config.@"background-opacity");
+    try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".top_left);
+    try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".bottom_right);
+    try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".top_left);
+    try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".bottom_right);
+    try testing.expect(!config.@"window-padding-balance");
+    try testing.expectEqual(configpkg.WindowPaddingColor.background, config.@"window-padding-color");
 }
