@@ -9,9 +9,9 @@ use taskers_control::{ControlCommand, ControlResponse, VcsCommandResult};
 use taskers_core::{AppState, default_session_path};
 use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
-    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, NotificationId, PaneKind,
-    PaneMetadata, PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame,
-    Workspace, WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
+    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, NotificationId, PaneMetadata,
+    PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
+    WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
@@ -20,8 +20,9 @@ use tokio::sync::watch;
 
 pub use taskers_control::{VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode, VcsSnapshot};
 pub use taskers_domain::{
-    Direction, PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
-    WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
+    Direction, PaneContainerId, PaneId, PaneKind, PaneTabId, PaneTabLayoutNode, SurfaceId,
+    WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowMoveTarget,
+    WorkspaceWindowTabId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -730,7 +731,7 @@ pub struct InterruptedAgentResumeSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneSnapshot {
+pub struct LivePaneSnapshot {
     pub id: PaneId,
     pub active: bool,
     pub attention: AttentionState,
@@ -749,6 +750,44 @@ pub enum LayoutNodeSnapshot {
         ratio: f32,
         first: Box<LayoutNodeSnapshot>,
         second: Box<LayoutNodeSnapshot>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneTabSnapshot {
+    pub id: PaneTabId,
+    pub active: bool,
+    pub attention: AttentionState,
+    pub runtime: RuntimeIdentitySnapshot,
+    pub title: String,
+    pub pane_count: usize,
+    pub surface_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneSnapshot {
+    pub id: PaneId,
+    pub pane_container_id: PaneContainerId,
+    pub active: bool,
+    pub attention: AttentionState,
+    pub notification_ring: Option<AttentionRingState>,
+    pub active_pane_tab: PaneTabId,
+    pub active_surface: SurfaceId,
+    pub runtime: RuntimeIdentitySnapshot,
+    pub surfaces: Vec<SurfaceSnapshot>,
+    pub pane_tabs: Vec<PaneTabSnapshot>,
+    pub layout: PaneTabLayoutSnapshot,
+    pub focus_flash_token: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneTabLayoutSnapshot {
+    Pane(LivePaneSnapshot),
+    Split {
+        axis: SplitAxis,
+        ratio: f32,
+        first: Box<PaneTabLayoutSnapshot>,
+        second: Box<PaneTabLayoutSnapshot>,
     },
 }
 
@@ -1179,6 +1218,23 @@ pub enum ShellAction {
     CloseWorkspaceWindowTab {
         window_id: WorkspaceWindowId,
         tab_id: WorkspaceWindowTabId,
+    },
+    CreatePaneTab {
+        pane_container_id: PaneContainerId,
+        kind: PaneKind,
+    },
+    FocusPaneTab {
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    },
+    MovePaneTab {
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_index: usize,
+    },
+    ClosePaneTab {
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
     },
     ScrollViewport {
         dx: i32,
@@ -1761,11 +1817,19 @@ impl TaskersCore {
         let active_tab = window
             .active_tab_record()
             .expect("workspace window should have an active tab");
-        let pane_ids = active_tab.layout.leaves();
-        let pane_count = pane_ids.len();
-        let surface_count = pane_ids
+        let pane_container_ids = active_tab.layout.leaves();
+        let pane_count = pane_container_ids
             .iter()
-            .filter_map(|pane_id| workspace.panes.get(pane_id))
+            .filter_map(|pane_container_id| workspace.pane_containers.get(pane_container_id))
+            .flat_map(|pane_container| pane_container.tabs.values())
+            .map(|pane_tab| pane_tab.layout.leaves().len())
+            .sum();
+        let surface_count = pane_container_ids
+            .iter()
+            .filter_map(|pane_container_id| workspace.pane_containers.get(pane_container_id))
+            .flat_map(|pane_container| pane_container.tabs.values())
+            .flat_map(|pane_tab| pane_tab.layout.leaves())
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
             .map(|pane| pane.surfaces.len())
             .sum();
         let title = window_primary_title(workspace, window);
@@ -1800,13 +1864,13 @@ impl TaskersCore {
         node: &taskers_domain::LayoutNode,
     ) -> LayoutNodeSnapshot {
         match node {
-            taskers_domain::LayoutNode::Leaf { pane_id } => LayoutNodeSnapshot::Pane(
+            taskers_domain::LayoutNode::Leaf { leaf_id } => LayoutNodeSnapshot::Pane(
                 self.pane_snapshot(
                     workspace,
                     workspace
-                        .panes
-                        .get(pane_id)
-                        .expect("layout leaf should reference a pane"),
+                        .pane_containers
+                        .get(leaf_id)
+                        .expect("layout leaf should reference a pane container"),
                 ),
             ),
             taskers_domain::LayoutNode::Split {
@@ -1826,8 +1890,122 @@ impl TaskersCore {
     fn pane_snapshot(
         &self,
         workspace: &Workspace,
-        pane: &taskers_domain::PaneRecord,
+        pane_container: &taskers_domain::PaneContainerRecord,
     ) -> PaneSnapshot {
+        let active_pane_tab = pane_container
+            .active_tab_record()
+            .expect("pane container should have an active pane tab");
+        let active_pane = workspace
+            .panes
+            .get(&active_pane_tab.active_pane)
+            .expect("active pane tab should reference a pane");
+        let active_live_pane = self.live_pane_snapshot(workspace, active_pane);
+        let pane_tabs = pane_container
+            .tabs
+            .values()
+            .map(|pane_tab| self.pane_tab_snapshot(workspace, pane_tab, pane_container.active_tab))
+            .collect::<Vec<_>>();
+        let is_active = workspace.active_pane == active_pane.id;
+        let has_unread = pane_container
+            .tabs
+            .values()
+            .flat_map(|pane_tab| pane_tab.layout.leaves())
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .map(taskers_domain::PaneRecord::highest_attention)
+            .max_by_key(|attention| attention.rank())
+            .unwrap_or(taskers_domain::AttentionState::Normal)
+            != taskers_domain::AttentionState::Normal;
+        let explicit_flash_token = pane_container
+            .tabs
+            .values()
+            .flat_map(|pane_tab| pane_tab.layout.leaves())
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .flat_map(|pane| pane.surfaces.values())
+            .filter_map(|surface| workspace.surface_flash_tokens.get(&surface.id))
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let focus_flash_token = if is_active && has_unread {
+            self.revision
+        } else {
+            0
+        };
+        let flash_token = focus_flash_token.max(explicit_flash_token);
+        PaneSnapshot {
+            id: active_pane.id,
+            pane_container_id: pane_container.id,
+            active: is_active,
+            attention: pane_container_attention(workspace, pane_container).into(),
+            notification_ring: pane_container_notification_ring(workspace, pane_container),
+            active_pane_tab: pane_container.active_tab,
+            active_surface: active_live_pane.active_surface,
+            runtime: active_live_pane.runtime.clone(),
+            surfaces: active_live_pane.surfaces.clone(),
+            pane_tabs,
+            layout: self.pane_tab_layout_snapshot(workspace, &active_pane_tab.layout),
+            focus_flash_token: flash_token,
+        }
+    }
+
+    fn pane_tab_snapshot(
+        &self,
+        workspace: &Workspace,
+        pane_tab: &taskers_domain::PaneTabRecord,
+        active_pane_tab_id: PaneTabId,
+    ) -> PaneTabSnapshot {
+        let now = OffsetDateTime::now_utc();
+        let pane_ids = pane_tab.layout.leaves();
+        let pane_count = pane_ids.len();
+        let surface_count = pane_ids
+            .iter()
+            .filter_map(|pane_id| workspace.panes.get(pane_id))
+            .map(|pane| pane.surfaces.len())
+            .sum();
+        PaneTabSnapshot {
+            id: pane_tab.id,
+            active: pane_tab.id == active_pane_tab_id,
+            attention: pane_tab_attention(workspace, pane_tab).into(),
+            runtime: pane_tab_runtime_identity(workspace, pane_tab, now),
+            title: pane_tab_primary_title(workspace, pane_tab),
+            pane_count,
+            surface_count,
+        }
+    }
+
+    fn pane_tab_layout_snapshot(
+        &self,
+        workspace: &Workspace,
+        node: &taskers_domain::PaneTabLayoutNode,
+    ) -> PaneTabLayoutSnapshot {
+        match node {
+            taskers_domain::PaneTabLayoutNode::Leaf { leaf_id } => PaneTabLayoutSnapshot::Pane(
+                self.live_pane_snapshot(
+                    workspace,
+                    workspace
+                        .panes
+                        .get(leaf_id)
+                        .expect("pane tab leaf should reference a pane"),
+                ),
+            ),
+            taskers_domain::PaneTabLayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => PaneTabLayoutSnapshot::Split {
+                axis: SplitAxis::from_domain(*axis),
+                ratio: f32::from(*ratio) / 1000.0,
+                first: Box::new(self.pane_tab_layout_snapshot(workspace, first)),
+                second: Box::new(self.pane_tab_layout_snapshot(workspace, second)),
+            },
+        }
+    }
+
+    fn live_pane_snapshot(
+        &self,
+        workspace: &Workspace,
+        pane: &taskers_domain::PaneRecord,
+    ) -> LivePaneSnapshot {
         let now = OffsetDateTime::now_utc();
         let is_active = workspace.active_pane == pane.id;
         let has_unread = pane.highest_attention() != taskers_domain::AttentionState::Normal;
@@ -1866,7 +2044,7 @@ impl TaskersCore {
                 }),
             })
             .collect::<Vec<_>>();
-        PaneSnapshot {
+        LivePaneSnapshot {
             id: pane.id,
             active: is_active,
             attention: pane.highest_attention().into(),
@@ -1996,9 +2174,55 @@ impl TaskersCore {
         frame: Frame,
     ) -> Vec<PortalSurfacePlan> {
         match node {
-            taskers_domain::LayoutNode::Leaf { pane_id } => workspace
+            taskers_domain::LayoutNode::Leaf { leaf_id } => workspace
+                .pane_containers
+                .get(leaf_id)
+                .and_then(|pane_container| pane_container.active_tab_record())
+                .map(|pane_tab| {
+                    self.collect_pane_tab_surface_plans(
+                        workspace_id,
+                        workspace,
+                        &pane_tab.layout,
+                        pane_container_content_frame(frame, self.metrics),
+                    )
+                })
+                .unwrap_or_default(),
+            taskers_domain::LayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let (first_frame, second_frame) = split_frame(
+                    frame,
+                    SplitAxis::from_domain(*axis),
+                    *ratio,
+                    self.metrics.split_gap,
+                );
+                let mut plans =
+                    self.collect_surface_plans(workspace_id, workspace, first, first_frame);
+                plans.extend(self.collect_surface_plans(
+                    workspace_id,
+                    workspace,
+                    second,
+                    second_frame,
+                ));
+                plans
+            }
+        }
+    }
+
+    fn collect_pane_tab_surface_plans(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace: &Workspace,
+        node: &PaneTabLayoutNode,
+        frame: Frame,
+    ) -> Vec<PortalSurfacePlan> {
+        match node {
+            PaneTabLayoutNode::Leaf { leaf_id } => workspace
                 .panes
-                .get(pane_id)
+                .get(leaf_id)
                 .and_then(|pane| {
                     let active_surface = pane.active_surface()?;
                     Some(PortalSurfacePlan {
@@ -2022,7 +2246,7 @@ impl TaskersCore {
                 })
                 .into_iter()
                 .collect(),
-            taskers_domain::LayoutNode::Split {
+            PaneTabLayoutNode::Split {
                 axis,
                 ratio,
                 first,
@@ -2034,9 +2258,13 @@ impl TaskersCore {
                     *ratio,
                     self.metrics.split_gap,
                 );
-                let mut plans =
-                    self.collect_surface_plans(workspace_id, workspace, first, first_frame);
-                plans.extend(self.collect_surface_plans(
+                let mut plans = self.collect_pane_tab_surface_plans(
+                    workspace_id,
+                    workspace,
+                    first,
+                    first_frame,
+                );
+                plans.extend(self.collect_pane_tab_surface_plans(
                     workspace_id,
                     workspace,
                     second,
@@ -2193,6 +2421,23 @@ impl TaskersCore {
             ShellAction::CloseWorkspaceWindowTab { window_id, tab_id } => {
                 self.close_workspace_window_tab(window_id, tab_id)
             }
+            ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind,
+            } => self.create_pane_tab(pane_container_id, kind),
+            ShellAction::FocusPaneTab {
+                pane_container_id,
+                pane_tab_id,
+            } => self.focus_pane_tab(pane_container_id, pane_tab_id),
+            ShellAction::MovePaneTab {
+                pane_container_id,
+                pane_tab_id,
+                target_index,
+            } => self.move_pane_tab(pane_container_id, pane_tab_id, target_index),
+            ShellAction::ClosePaneTab {
+                pane_container_id,
+                pane_tab_id,
+            } => self.close_pane_tab(pane_container_id, pane_tab_id),
             ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
             ShellAction::SplitBrowser { pane_id } => {
                 self.split_with_kind_axis(pane_id, PaneKind::Browser, DomainSplitAxis::Horizontal)
@@ -2674,6 +2919,72 @@ impl TaskersCore {
             workspace_id,
             workspace_window_id: window_id,
             workspace_window_tab_id: tab_id,
+        })
+    }
+
+    fn create_pane_tab(&mut self, pane_container_id: PaneContainerId, kind: PaneKind) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = self.resolve_workspace_pane_container(&model, pane_container_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CreatePaneTab {
+            workspace_id,
+            pane_container_id,
+            kind,
+        })
+    }
+
+    fn focus_pane_tab(
+        &mut self,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = self.resolve_workspace_pane_container(&model, pane_container_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::FocusPaneTab {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+        })
+    }
+
+    fn move_pane_tab(
+        &mut self,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_index: usize,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = self.resolve_workspace_pane_container(&model, pane_container_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::MovePaneTab {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            to_index: target_index,
+        })
+    }
+
+    fn close_pane_tab(
+        &mut self,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = self.resolve_workspace_pane_container(&model, pane_container_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::ClosePaneTab {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
         })
     }
 
@@ -3557,6 +3868,22 @@ impl TaskersCore {
             })
     }
 
+    fn resolve_workspace_pane_container(
+        &self,
+        model: &AppModel,
+        pane_container_id: PaneContainerId,
+    ) -> Option<WorkspaceId> {
+        model
+            .workspaces
+            .iter()
+            .find_map(|(workspace_id, workspace)| {
+                workspace
+                    .pane_containers
+                    .contains_key(&pane_container_id)
+                    .then_some(*workspace_id)
+            })
+    }
+
     fn resolve_surface_location(
         &self,
         model: &AppModel,
@@ -4170,6 +4497,12 @@ fn pane_body_frame(
         .inset_top(metrics.pane_header_height + tab_strip_height + browser_toolbar_height)
 }
 
+fn pane_container_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
+    frame
+        .inset(metrics.pane_border_width)
+        .inset_top(metrics.pane_header_height)
+}
+
 fn workspace_window_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
     frame
         .inset(metrics.window_border_width)
@@ -4424,11 +4757,19 @@ fn workspace_window_tab_snapshot(
     active_tab_id: WorkspaceWindowTabId,
     now: OffsetDateTime,
 ) -> WorkspaceWindowTabSnapshot {
-    let pane_ids = tab.layout.leaves();
-    let pane_count = pane_ids.len();
-    let surface_count = pane_ids
+    let pane_container_ids = tab.layout.leaves();
+    let pane_count = pane_container_ids
         .iter()
-        .filter_map(|pane_id| workspace.panes.get(pane_id))
+        .filter_map(|pane_container_id| workspace.pane_containers.get(pane_container_id))
+        .flat_map(|pane_container| pane_container.tabs.values())
+        .map(|pane_tab| pane_tab.layout.leaves().len())
+        .sum();
+    let surface_count = pane_container_ids
+        .iter()
+        .filter_map(|pane_container_id| workspace.pane_containers.get(pane_container_id))
+        .flat_map(|pane_container| pane_container.tabs.values())
+        .flat_map(|pane_tab| pane_tab.layout.leaves())
+        .filter_map(|pane_id| workspace.panes.get(&pane_id))
         .map(|pane| pane.surfaces.len())
         .sum();
     WorkspaceWindowTabSnapshot {
@@ -4449,8 +4790,8 @@ fn workspace_window_tab_attention(
     tab.layout
         .leaves()
         .into_iter()
-        .filter_map(|pane_id| workspace.panes.get(&pane_id))
-        .map(|pane| pane.highest_attention())
+        .filter_map(|pane_container_id| workspace.pane_containers.get(&pane_container_id))
+        .map(|pane_container| pane_container_attention(workspace, pane_container))
         .max_by_key(|attention| attention.rank())
         .unwrap_or(taskers_domain::AttentionState::Normal)
         .into()
@@ -4465,17 +4806,26 @@ fn workspace_window_tab_runtime_identity(
         tab.layout
             .leaves()
             .into_iter()
-            .filter_map(|pane_id| workspace.panes.get(&pane_id))
-            .map(|pane| (pane_runtime_identity(pane, now), pane.id == tab.active_pane)),
+            .filter_map(|pane_container_id| workspace.pane_containers.get(&pane_container_id))
+            .map(|pane_container| {
+                (
+                    pane_container_runtime_identity(workspace, pane_container, now),
+                    pane_container
+                        .active_pane()
+                        .is_some_and(|pane_id| pane_id == tab.active_pane),
+                )
+            }),
         fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
     )
 }
 
 fn window_tab_primary_title(workspace: &Workspace, tab: &WorkspaceWindowTabRecord) -> String {
     workspace
-        .panes
-        .get(&tab.active_pane)
-        .and_then(|pane| pane.active_surface())
+        .pane_containers
+        .get(&tab.active_container)
+        .and_then(|pane_container| pane_container.active_pane())
+        .and_then(|pane_id| workspace.panes.get(&pane_id))
+        .and_then(taskers_domain::PaneRecord::active_surface)
         .map(display_surface_title)
         .unwrap_or_else(|| "Workspace window".into())
 }
@@ -4542,6 +4892,91 @@ fn surface_notification_ring(surface: &SurfaceRecord) -> Option<AttentionRingSta
 
 fn pane_notification_ring(pane: &taskers_domain::PaneRecord) -> Option<AttentionRingState> {
     dominant_attention_ring(pane.surfaces.values().filter_map(surface_notification_ring))
+}
+
+fn pane_tab_attention(
+    workspace: &Workspace,
+    pane_tab: &taskers_domain::PaneTabRecord,
+) -> taskers_domain::AttentionState {
+    pane_tab
+        .layout
+        .leaves()
+        .into_iter()
+        .filter_map(|pane_id| workspace.panes.get(&pane_id))
+        .map(taskers_domain::PaneRecord::highest_attention)
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(taskers_domain::AttentionState::Normal)
+}
+
+fn pane_tab_runtime_identity(
+    workspace: &Workspace,
+    pane_tab: &taskers_domain::PaneTabRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    dominant_runtime_identity(
+        pane_tab
+            .layout
+            .leaves()
+            .into_iter()
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .map(|pane| {
+                (
+                    pane_runtime_identity(pane, now),
+                    pane.id == pane_tab.active_pane,
+                )
+            }),
+        fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
+    )
+}
+
+fn pane_tab_primary_title(
+    workspace: &Workspace,
+    pane_tab: &taskers_domain::PaneTabRecord,
+) -> String {
+    workspace
+        .panes
+        .get(&pane_tab.active_pane)
+        .and_then(taskers_domain::PaneRecord::active_surface)
+        .map(display_surface_title)
+        .unwrap_or_else(|| "Pane tab".into())
+}
+
+fn pane_container_attention(
+    workspace: &Workspace,
+    pane_container: &taskers_domain::PaneContainerRecord,
+) -> taskers_domain::AttentionState {
+    pane_container
+        .tabs
+        .values()
+        .map(|pane_tab| pane_tab_attention(workspace, pane_tab))
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(taskers_domain::AttentionState::Normal)
+}
+
+fn pane_container_notification_ring(
+    workspace: &Workspace,
+    pane_container: &taskers_domain::PaneContainerRecord,
+) -> Option<AttentionRingState> {
+    dominant_attention_ring(
+        pane_container
+            .tabs
+            .values()
+            .flat_map(|pane_tab| pane_tab.layout.leaves())
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .filter_map(pane_notification_ring),
+    )
+}
+
+fn pane_container_runtime_identity(
+    workspace: &Workspace,
+    pane_container: &taskers_domain::PaneContainerRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    pane_container
+        .active_pane()
+        .and_then(|pane_id| workspace.panes.get(&pane_id))
+        .map(|pane| pane_runtime_identity(pane, now))
+        .unwrap_or_else(|| fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle))
 }
 
 fn surface_agent_key(surface: &SurfaceRecord) -> Option<String> {
@@ -5128,9 +5563,11 @@ mod tests {
     fn find_pane<'a>(
         node: &'a super::LayoutNodeSnapshot,
         pane_id: taskers_domain::PaneId,
-    ) -> Option<&'a super::PaneSnapshot> {
+    ) -> Option<&'a super::LivePaneSnapshot> {
         match node {
-            super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
+            super::LayoutNodeSnapshot::Pane(pane) => {
+                find_live_pane_in_layout(&pane.layout, pane_id)
+            }
             super::LayoutNodeSnapshot::Split { first, second, .. } => {
                 find_pane(first, pane_id).or_else(|| find_pane(second, pane_id))
             }
@@ -5141,10 +5578,17 @@ mod tests {
         node: &super::LayoutNodeSnapshot,
         pane_id: taskers_domain::PaneId,
         frame: super::Frame,
-        gap: i32,
+        metrics: super::LayoutMetrics,
     ) -> Option<super::Frame> {
         match node {
-            super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(frame),
+            super::LayoutNodeSnapshot::Pane(pane) => {
+                find_live_pane_frame(
+                    &pane.layout,
+                    pane_id,
+                    super::pane_container_content_frame(frame, metrics),
+                    metrics.split_gap,
+                )
+            }
             super::LayoutNodeSnapshot::Split {
                 axis,
                 ratio,
@@ -5152,9 +5596,10 @@ mod tests {
                 second,
             } => {
                 let ratio = (ratio.clamp(0.15, 0.85) * 1000.0).round() as u16;
-                let (first_frame, second_frame) = split_frame(frame, *axis, ratio, gap);
-                find_pane_frame(first, pane_id, first_frame, gap)
-                    .or_else(|| find_pane_frame(second, pane_id, second_frame, gap))
+                let (first_frame, second_frame) =
+                    split_frame(frame, *axis, ratio, metrics.split_gap);
+                find_pane_frame(first, pane_id, first_frame, metrics)
+                    .or_else(|| find_pane_frame(second, pane_id, second_frame, metrics))
             }
         }
     }
@@ -5164,10 +5609,60 @@ mod tests {
         pane_ids: &mut Vec<taskers_domain::PaneId>,
     ) {
         match node {
-            super::LayoutNodeSnapshot::Pane(pane) => pane_ids.push(pane.id),
+            super::LayoutNodeSnapshot::Pane(pane) => {
+                collect_live_pane_ids(&pane.layout, pane_ids);
+            }
             super::LayoutNodeSnapshot::Split { first, second, .. } => {
                 collect_pane_ids(first, pane_ids);
                 collect_pane_ids(second, pane_ids);
+            }
+        }
+    }
+
+    fn find_live_pane_in_layout<'a>(
+        node: &'a super::PaneTabLayoutSnapshot,
+        pane_id: taskers_domain::PaneId,
+    ) -> Option<&'a super::LivePaneSnapshot> {
+        match node {
+            super::PaneTabLayoutSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
+            super::PaneTabLayoutSnapshot::Split { first, second, .. } => {
+                find_live_pane_in_layout(first, pane_id)
+                    .or_else(|| find_live_pane_in_layout(second, pane_id))
+            }
+        }
+    }
+
+    fn find_live_pane_frame(
+        node: &super::PaneTabLayoutSnapshot,
+        pane_id: taskers_domain::PaneId,
+        frame: super::Frame,
+        gap: i32,
+    ) -> Option<super::Frame> {
+        match node {
+            super::PaneTabLayoutSnapshot::Pane(pane) => (pane.id == pane_id).then_some(frame),
+            super::PaneTabLayoutSnapshot::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let ratio = (ratio.clamp(0.15, 0.85) * 1000.0).round() as u16;
+                let (first_frame, second_frame) = split_frame(frame, *axis, ratio, gap);
+                find_live_pane_frame(first, pane_id, first_frame, gap)
+                    .or_else(|| find_live_pane_frame(second, pane_id, second_frame, gap))
+            }
+        }
+    }
+
+    fn collect_live_pane_ids(
+        node: &super::PaneTabLayoutSnapshot,
+        pane_ids: &mut Vec<taskers_domain::PaneId>,
+    ) {
+        match node {
+            super::PaneTabLayoutSnapshot::Pane(pane) => pane_ids.push(pane.id),
+            super::PaneTabLayoutSnapshot::Split { first, second, .. } => {
+                collect_live_pane_ids(first, pane_ids);
+                collect_live_pane_ids(second, pane_ids);
             }
         }
     }
@@ -5585,12 +6080,18 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let second_pane_id = {
             let workspace = model.workspaces.get(&workspace_id).expect("workspace");
-            workspace
-                .windows
-                .get(&workspace.active_window)
-                .expect("window")
-                .active_layout()
-                .expect("layout")
+            let pane_container = workspace
+                .pane_containers
+                .values()
+                .find(|pane_container| pane_container.contains_pane(first_pane_id))
+                .expect("pane container");
+            let pane_tab = pane_container
+                .tabs
+                .values()
+                .find(|pane_tab| pane_tab.layout.contains(first_pane_id))
+                .expect("pane tab");
+            pane_tab
+                .layout
                 .leaves()
                 .into_iter()
                 .find(|pane_id| *pane_id != first_pane_id)
@@ -5952,7 +6453,7 @@ mod tests {
             &active_window.layout,
             workspace.active_pane,
             workspace_window_content_frame(active_window.frame, metrics),
-            metrics.split_gap,
+            metrics,
         )
         .expect("active pane frame");
         let pane_kind = match &active_plan.mount {
@@ -6001,7 +6502,7 @@ mod tests {
             &active_window.layout,
             pane_id,
             workspace_window_content_frame(active_window.frame, metrics),
-            metrics.split_gap,
+            metrics,
         )
         .expect("active pane frame");
         let pane_kind = match &active_plan.mount {
@@ -6062,22 +6563,8 @@ mod tests {
         });
 
         let snapshot = core.snapshot();
-        let pane = match &snapshot.current_workspace.layout {
-            super::LayoutNodeSnapshot::Split { first, second, .. } => {
-                [first.as_ref(), second.as_ref()]
-                    .into_iter()
-                    .find_map(|node| match node {
-                        super::LayoutNodeSnapshot::Pane(pane) => pane
-                            .surfaces
-                            .iter()
-                            .any(|surface| surface.id == browser_surface.surface_id)
-                            .then_some(pane),
-                        _ => None,
-                    })
-                    .expect("browser pane")
-            }
-            super::LayoutNodeSnapshot::Pane(_) => panic!("expected split layout"),
-        };
+        let pane = find_pane(&snapshot.current_workspace.layout, browser_surface.pane_id)
+            .expect("browser pane");
 
         let surface = pane
             .surfaces

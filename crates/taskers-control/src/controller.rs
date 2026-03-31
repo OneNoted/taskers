@@ -260,7 +260,10 @@ impl InMemoryController {
                 let (pane_tab_id, pane_id) =
                     model.create_pane_tab(workspace_id, pane_container_id, kind)?;
                 (
-                    ControlResponse::PaneTabCreated { pane_id, pane_tab_id },
+                    ControlResponse::PaneTabCreated {
+                        pane_id,
+                        pane_tab_id,
+                    },
                     true,
                 )
             }

@@ -1214,6 +1214,7 @@ input:focus-visible {{
 }}
 
 .split-child {{
+  display: flex;
   min-width: 0;
   min-height: 0;
 }}
@@ -1444,6 +1445,11 @@ input:focus-visible {{
   pointer-events: auto;
 }}
 
+.pane-action-cluster-visible {{
+  opacity: 1;
+  pointer-events: auto;
+}}
+
 .pane-tabs {{
   height: {surface_tab_height}px;
   min-height: {surface_tab_height}px;
@@ -1452,6 +1458,21 @@ input:focus-visible {{
   display: flex;
   align-items: center;
   background: {overlay_05};
+}}
+
+.pane-tabs-primary {{
+  flex: 1 1 auto;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  border-bottom: 0;
+  padding: 0;
+  background: transparent;
+}}
+
+.pane-tabs-inline {{
+  flex: 0 0 auto;
+  width: 100%;
 }}
 
 .surface-tabs {{
@@ -1758,6 +1779,22 @@ input:focus-visible {{
 .pane-utility-close:hover {{
   background: {error_10};
   color: {error};
+}}
+
+.live-pane-shell {{
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: {elevated};
+  border: {pane_border_width}px solid {border_10};
+  overflow: hidden;
+}}
+
+.live-pane-shell-active {{
+  border-color: {accent_24};
 }}
 
 .browser-toolbar {{

@@ -6,10 +6,9 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::{
-    AttentionState, Direction, LayoutNode, NotificationId, PaneContainerId, PaneId,
-    PaneTabId, PaneTabLayoutNode, SessionId, SignalEvent, SignalKind, SignalPaneMetadata,
-    SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
-    WorkspaceWindowTabId,
+    AttentionState, Direction, LayoutNode, NotificationId, PaneContainerId, PaneId, PaneTabId,
+    PaneTabLayoutNode, SessionId, SignalEvent, SignalKind, SignalPaneMetadata, SplitAxis,
+    SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowTabId,
 };
 
 pub const SESSION_SCHEMA_VERSION: u32 = 7;
@@ -804,25 +803,6 @@ impl WorkspaceWindowTabRecord {
                 .get(container_id)
                 .is_some_and(|container| container.contains_pane(pane_id))
         })
-    }
-
-    fn focus_container(
-        &mut self,
-        pane_containers: &IndexMap<PaneContainerId, PaneContainerRecord>,
-        container_id: PaneContainerId,
-    ) -> bool {
-        if !self.layout.contains(container_id) {
-            return false;
-        }
-        let Some(container) = pane_containers.get(&container_id) else {
-            return false;
-        };
-        let Some(active_pane) = container.active_pane() else {
-            return false;
-        };
-        self.active_container = container_id;
-        self.active_pane = active_pane;
-        true
     }
 
     fn focus_pane(
@@ -2229,10 +2209,12 @@ impl AppModel {
             .and_then(|workspace| workspace.pane_containers.get(&pane_container_id))
             .and_then(|container| container.tabs.get(&pane_tab_id))
             .map(|pane_tab| pane_tab.layout.leaves())
-            .ok_or(DomainError::MissingPane(self.workspaces
-                .get(&workspace_id)
-                .map(|workspace| workspace.active_pane)
-                .unwrap_or_default()))?;
+            .ok_or(DomainError::MissingPane(
+                self.workspaces
+                    .get(&workspace_id)
+                    .map(|workspace| workspace.active_pane)
+                    .unwrap_or_default(),
+            ))?;
 
         for pane_id in pane_ids {
             if self
@@ -2729,28 +2711,25 @@ impl AppModel {
             .get_mut(&workspace_id)
             .ok_or(DomainError::MissingWorkspace(workspace_id))?;
         let active_window_id = workspace.active_window;
-        let next_pane = workspace
-            .pane_location(workspace.active_pane)
-            .and_then(|(_, window_tab_id, container_id, pane_tab_id)| {
+        let next_pane = workspace.pane_location(workspace.active_pane).and_then(
+            |(_, _window_tab_id, container_id, pane_tab_id)| {
                 let container = workspace.pane_containers.get(&container_id)?;
                 let pane_tab = container.tabs.get(&pane_tab_id)?;
                 pane_tab
                     .layout
                     .focus_neighbor(workspace.active_pane, direction)
-            });
+            },
+        );
         if let Some(next_pane) = next_pane {
             workspace.focus_pane(next_pane);
             return Ok(());
         }
 
-        let next_container = workspace
-            .windows
-            .get(&active_window_id)
-            .and_then(|window| {
-                let active_container = window.active_container()?;
-                let tab = window.active_tab_record()?;
-                tab.layout.focus_neighbor(active_container, direction)
-            });
+        let next_container = workspace.windows.get(&active_window_id).and_then(|window| {
+            let active_container = window.active_container()?;
+            let tab = window.active_tab_record()?;
+            tab.layout.focus_neighbor(active_container, direction)
+        });
         if let Some(next_container) = next_container {
             let next_pane = workspace
                 .pane_containers
@@ -4422,31 +4401,30 @@ impl AppModel {
             .position_for_window(window_id)
             .ok_or(DomainError::MissingWorkspaceWindow(window_id))?;
 
-        let (pane_tab_leaf_count, container_tab_count, window_container_count, window_tab_count) =
-            {
-                let container = workspace
-                    .pane_containers
-                    .get(&container_id)
-                    .ok_or(DomainError::MissingPane(pane_id))?;
-                let pane_tab = container
-                    .tabs
-                    .get(&pane_tab_id)
-                    .ok_or(DomainError::MissingPane(pane_id))?;
-                let window = workspace
-                    .windows
-                    .get(&window_id)
-                    .ok_or(DomainError::MissingWorkspaceWindow(window_id))?;
-                let window_tab = window
-                    .tabs
-                    .get(&window_tab_id)
-                    .ok_or(DomainError::MissingWorkspaceWindowTab(window_tab_id))?;
-                (
-                    pane_tab.layout.leaves().len(),
-                    container.tabs.len(),
-                    window_tab.layout.leaves().len(),
-                    window.tabs.len(),
-                )
-            };
+        let (pane_tab_leaf_count, container_tab_count, window_container_count, window_tab_count) = {
+            let container = workspace
+                .pane_containers
+                .get(&container_id)
+                .ok_or(DomainError::MissingPane(pane_id))?;
+            let pane_tab = container
+                .tabs
+                .get(&pane_tab_id)
+                .ok_or(DomainError::MissingPane(pane_id))?;
+            let window = workspace
+                .windows
+                .get(&window_id)
+                .ok_or(DomainError::MissingWorkspaceWindow(window_id))?;
+            let window_tab = window
+                .tabs
+                .get(&window_tab_id)
+                .ok_or(DomainError::MissingWorkspaceWindowTab(window_tab_id))?;
+            (
+                pane_tab.layout.leaves().len(),
+                container.tabs.len(),
+                window_tab.layout.leaves().len(),
+                window.tabs.len(),
+            )
+        };
 
         if pane_tab_leaf_count <= 1 {
             if container_tab_count > 1 {
@@ -4955,10 +4933,8 @@ fn create_pane_container_bundle(
     (pane, pane_container, pane_id, pane_container_id)
 }
 
-fn prune_missing_layout_leaves<LeafId, F>(
-    layout: &mut crate::SplitLayoutNode<LeafId>,
-    mut keep: F,
-) where
+fn prune_missing_layout_leaves<LeafId, F>(layout: &mut crate::SplitLayoutNode<LeafId>, mut keep: F)
+where
     LeafId: Copy + Eq,
     F: FnMut(LeafId) -> bool,
 {
@@ -5211,10 +5187,22 @@ mod tests {
             .expect("split works");
         let workspace = model.workspaces.get(&workspace_id).expect("workspace");
         let active_window = workspace.active_window_record().expect("window");
+        let (_window_id, _window_tab_id, pane_container_id, pane_tab_id) =
+            workspace.pane_location(new_pane).expect("pane location");
 
         assert_eq!(workspace.active_pane, new_pane);
         assert_eq!(
             active_window.active_layout().expect("layout").leaves(),
+            vec![pane_container_id]
+        );
+        assert_eq!(
+            workspace
+                .pane_containers
+                .get(&pane_container_id)
+                .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+                .expect("pane tab")
+                .layout
+                .leaves(),
             vec![first_pane, new_pane]
         );
     }
@@ -5237,10 +5225,22 @@ mod tests {
 
         let workspace = model.workspaces.get(&workspace_id).expect("workspace");
         let active_window = workspace.active_window_record().expect("window");
+        let (_window_id, _window_tab_id, pane_container_id, pane_tab_id) =
+            workspace.pane_location(upper_pane).expect("pane location");
 
         assert_eq!(workspace.active_pane, upper_pane);
         assert_eq!(
             active_window.active_layout().expect("layout").leaves(),
+            vec![pane_container_id]
+        );
+        assert_eq!(
+            workspace
+                .pane_containers
+                .get(&pane_container_id)
+                .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+                .expect("pane tab")
+                .layout
+                .leaves(),
             vec![left_pane, upper_pane, first_pane]
         );
     }
@@ -5633,9 +5633,21 @@ mod tests {
         let window = workspace.active_window_record().expect("window");
         let source_pane = workspace.panes.get(&source_pane_id).expect("source pane");
         let target_pane = workspace.panes.get(&new_pane_id).expect("new pane");
+        let (_window_id, _window_tab_id, pane_container_id, pane_tab_id) =
+            workspace.pane_location(new_pane_id).expect("pane location");
 
         assert_eq!(
             window.active_layout().expect("layout").leaves(),
+            vec![pane_container_id]
+        );
+        assert_eq!(
+            workspace
+                .pane_containers
+                .get(&pane_container_id)
+                .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+                .expect("pane tab")
+                .layout
+                .leaves(),
             vec![source_pane_id, new_pane_id]
         );
         assert_eq!(
@@ -5682,6 +5694,8 @@ mod tests {
 
         let workspace = model.active_workspace().expect("workspace");
         let target_window = workspace.windows.get(&target_window_id).expect("window");
+        let (_window_id, _window_tab_id, pane_container_id, pane_tab_id) =
+            workspace.pane_location(new_pane_id).expect("pane location");
 
         assert_eq!(workspace.windows.len(), 1);
         assert!(!workspace.panes.contains_key(&source_pane_id));
@@ -5689,6 +5703,16 @@ mod tests {
         assert_eq!(workspace.active_pane, new_pane_id);
         assert_eq!(
             target_window.active_layout().expect("layout").leaves(),
+            vec![pane_container_id]
+        );
+        assert_eq!(
+            workspace
+                .pane_containers
+                .get(&pane_container_id)
+                .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+                .expect("pane tab")
+                .layout
+                .leaves(),
             vec![new_pane_id, target_pane_id]
         );
         assert_eq!(
@@ -5971,12 +5995,25 @@ mod tests {
             .windows
             .get(&target_window_id)
             .expect("target window record");
+        let (_window_id, _window_tab_id, pane_container_id, pane_tab_id) = target_workspace
+            .pane_location(new_pane_id)
+            .expect("pane location");
 
         assert_eq!(model.active_workspace_id(), Some(target_workspace_id));
         assert!(!source_workspace.panes.contains_key(&source_pane_id));
         assert!(source_workspace.panes.contains_key(&anchor_pane_id));
         assert_eq!(
             target_window.active_layout().expect("layout").leaves(),
+            vec![pane_container_id]
+        );
+        assert_eq!(
+            target_workspace
+                .pane_containers
+                .get(&pane_container_id)
+                .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+                .expect("pane tab")
+                .layout
+                .leaves(),
             vec![new_pane_id, target_pane_id]
         );
         assert_eq!(target_workspace.active_pane, new_pane_id);
@@ -6093,7 +6130,14 @@ mod tests {
             .active_column_id()
             .and_then(|column_id| workspace.columns.get(&column_id))
             .expect("column");
-        let LayoutNode::Split { ratio, .. } = window.active_layout().expect("layout") else {
+        let (_window_id, _window_tab_id, pane_container_id, pane_tab_id) =
+            workspace.pane_location(second_pane).expect("pane location");
+        let pane_tab = workspace
+            .pane_containers
+            .get(&pane_container_id)
+            .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+            .expect("pane tab");
+        let PaneTabLayoutNode::Split { ratio, .. } = &pane_tab.layout else {
             panic!("expected split layout");
         };
         assert_eq!(*ratio, 440);

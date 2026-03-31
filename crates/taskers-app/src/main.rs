@@ -41,9 +41,9 @@ use taskers_runtime::{
     ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
 };
 use taskers_shell_core::{
-    BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PixelSize,
-    RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
-    ShortcutPreset, SurfaceKind,
+    BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PaneTabLayoutSnapshot,
+    PixelSize, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection,
+    ShortcutAction, ShortcutPreset, SurfaceKind,
 };
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
@@ -1989,7 +1989,30 @@ fn wait_for_browser_ready(core: &SharedCore, timeout: Duration) -> Option<String
 
 fn first_browser_ready(node: &LayoutNodeSnapshot) -> Option<String> {
     match node {
-        LayoutNodeSnapshot::Pane(pane) => pane
+        LayoutNodeSnapshot::Pane(pane) => first_browser_ready_in_pane_layout(&pane.layout),
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            first_browser_ready(first).or_else(|| first_browser_ready(second))
+        }
+    }
+}
+
+fn surface_counts(node: &LayoutNodeSnapshot) -> (usize, usize) {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) => surface_counts_in_pane_layout(&pane.layout),
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            let (first_browser, first_terminal) = surface_counts(first);
+            let (second_browser, second_terminal) = surface_counts(second);
+            (
+                first_browser + second_browser,
+                first_terminal + second_terminal,
+            )
+        }
+    }
+}
+
+fn first_browser_ready_in_pane_layout(node: &PaneTabLayoutSnapshot) -> Option<String> {
+    match node {
+        PaneTabLayoutSnapshot::Pane(pane) => pane
             .surfaces
             .iter()
             .find(|surface| surface.id == pane.active_surface)
@@ -2004,24 +2027,25 @@ fn first_browser_ready(node: &LayoutNodeSnapshot) -> Option<String> {
                     "surface-present".into()
                 }
             }),
-        LayoutNodeSnapshot::Split { first, second, .. } => {
-            first_browser_ready(first).or_else(|| first_browser_ready(second))
+        PaneTabLayoutSnapshot::Split { first, second, .. } => {
+            first_browser_ready_in_pane_layout(first)
+                .or_else(|| first_browser_ready_in_pane_layout(second))
         }
     }
 }
 
-fn surface_counts(node: &LayoutNodeSnapshot) -> (usize, usize) {
+fn surface_counts_in_pane_layout(node: &PaneTabLayoutSnapshot) -> (usize, usize) {
     match node {
-        LayoutNodeSnapshot::Pane(pane) => pane.surfaces.iter().fold(
+        PaneTabLayoutSnapshot::Pane(pane) => pane.surfaces.iter().fold(
             (0usize, 0usize),
             |(browser_count, terminal_count), surface| match surface.kind {
                 SurfaceKind::Browser => (browser_count + 1, terminal_count),
                 SurfaceKind::Terminal => (browser_count, terminal_count + 1),
             },
         ),
-        LayoutNodeSnapshot::Split { first, second, .. } => {
-            let (first_browser, first_terminal) = surface_counts(first);
-            let (second_browser, second_terminal) = surface_counts(second);
+        PaneTabLayoutSnapshot::Split { first, second, .. } => {
+            let (first_browser, first_terminal) = surface_counts_in_pane_layout(first);
+            let (second_browser, second_terminal) = surface_counts_in_pane_layout(second);
             (
                 first_browser + second_browser,
                 first_terminal + second_terminal,
