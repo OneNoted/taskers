@@ -653,19 +653,19 @@ pub struct LayoutMetrics {
 impl Default for LayoutMetrics {
     fn default() -> Self {
         Self {
-            sidebar_width: 212,
-            activity_width: 280,
-            toolbar_height: 32,
-            workspace_padding: 12,
-            window_border_width: 2,
+            sidebar_width: 200,
+            activity_width: 264,
+            toolbar_height: 28,
+            workspace_padding: 8,
+            window_border_width: 1,
             window_toolbar_height: 20,
             window_body_padding: 0,
-            split_gap: 8,
+            split_gap: 2,
             pane_border_width: 1,
-            pane_header_height: 26,
-            browser_toolbar_height: 34,
-            surface_tab_height: 28,
-            terminal_gutter_x: 6,
+            pane_header_height: 24,
+            browser_toolbar_height: 30,
+            surface_tab_height: 24,
+            terminal_gutter_x: 4,
         }
     }
 }

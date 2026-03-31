@@ -994,12 +994,12 @@ input:focus-visible {{
   border: {window_border_width}px solid {border_08};
   overflow: hidden;
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.32);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.24);
 }}
 
 .workspace-window-shell-active {{
   border-color: {accent_24};
-  box-shadow: 0 4px 20px rgba(0,0,0,0.40);
+  box-shadow: 0 2px 14px rgba(0,0,0,0.32);
 }}
 
 .workspace-window-toolbar {{
@@ -1255,7 +1255,7 @@ input:focus-visible {{
   height: {pane_header_height}px;
   min-height: {pane_header_height}px;
   border-bottom: 1px solid {border_10};
-  padding: 0 8px;
+  padding: 0 6px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1429,7 +1429,7 @@ input:focus-visible {{
   height: {surface_tab_height}px;
   min-height: {surface_tab_height}px;
   border-bottom: 1px solid {border_10};
-  padding: 0 6px;
+  padding: 0 4px;
   display: flex;
   align-items: center;
   background: {overlay_05};
@@ -1453,7 +1453,7 @@ input:focus-visible {{
   gap: 5px;
   min-width: 0;
   max-width: 320px;
-  height: 22px;
+  height: 20px;
   border: 1px solid transparent;
   background: transparent;
   padding: 0 6px;
@@ -2547,7 +2547,7 @@ input:focus-visible {{
 
 @media (max-width: 1180px) {{
   .app-shell {{
-    grid-template-columns: 196px minmax(0, 1fr);
+    grid-template-columns: 184px minmax(0, 1fr);
   }}
 
   .attention-panel {{
