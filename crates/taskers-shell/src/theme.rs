@@ -246,14 +246,14 @@ input:focus-visible {{
 }}
 
 .workspace-sidebar {{
-  border-right: 1px solid {border_04};
+  border-right: 1px solid {border_05};
   padding: 6px;
   gap: 6px;
   backdrop-filter: blur(12px) saturate(1.4);
 }}
 
 .attention-panel {{
-  border-left: 1px solid {border_04};
+  border-left: 1px solid {border_05};
   padding: 10px 12px;
   gap: 8px;
   backdrop-filter: blur(12px) saturate(1.4);
@@ -377,7 +377,7 @@ input:focus-visible {{
 }}
 
 .workspace-button:hover .workspace-tab {{
-  background: {border_04};
+  background: {border_05};
   border-color: {border_08};
 }}
 
@@ -816,13 +816,13 @@ input:focus-visible {{
 .workspace-main-overview .workspace-canvas {{
   background:
     radial-gradient(circle at top left, {accent_08} 0%, transparent 32%),
-    linear-gradient(180deg, {border_04} 0%, {base} 100%);
+    linear-gradient(180deg, {border_05} 0%, {base} 100%);
 }}
 
 .workspace-header {{
   height: {workspace_toolbar_height}px;
   min-height: {workspace_toolbar_height}px;
-  border-bottom: 1px solid {border_07};
+  border-bottom: 1px solid {border_08};
   padding: 0 12px;
   display: flex;
   align-items: center;
@@ -907,7 +907,7 @@ input:focus-visible {{
   display: inline-flex;
   align-items: center;
   color: {text_dim};
-  background: {border_04};
+  background: {border_05};
 }}
 
 .workspace-canvas,
@@ -991,7 +991,7 @@ input:focus-visible {{
   display: flex;
   flex-direction: column;
   background: {surface};
-  border: {window_border_width}px solid {border_07};
+  border: {window_border_width}px solid {border_08};
   overflow: hidden;
   border-radius: 6px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.32);
@@ -1805,7 +1805,7 @@ input:focus-visible {{
   flex: 1;
   min-height: 0;
   padding: 0;
-  background: {border_02};
+  background: {border_03};
   position: relative;
   overflow: hidden;
 }}
@@ -1950,7 +1950,7 @@ input:focus-visible {{
   border-style: solid;
   background:
     linear-gradient(180deg, {overlay_16} 0%, {overlay_03} 100%),
-    {border_02};
+    {border_03};
 }}
 
 .surface-backdrop-copy {{
@@ -2065,7 +2065,7 @@ input:focus-visible {{
 }}
 
 .activity-item-button:hover .activity-item {{
-  background: {border_04};
+  background: {border_05};
 }}
 
 .activity-item-dismiss {{
@@ -2498,7 +2498,7 @@ input:focus-visible {{
 
 .theme-card:hover,
 .preset-card:hover {{
-  background: {border_04};
+  background: {border_05};
   border-color: {border_12};
 }}
 
@@ -2568,11 +2568,9 @@ input:focus-visible {{
         text_muted = p.text_muted.to_hex(),
         text_subtle = p.text_subtle.to_hex(),
         text_dim = p.text_dim.to_hex(),
-        border_02 = rgba(p.border, 0.02),
         border_03 = rgba(p.border, 0.03),
-        border_04 = rgba(p.border, 0.04),
+        border_05 = rgba(p.border, 0.05),
         border_06 = rgba(p.border, 0.06),
-        border_07 = rgba(p.border, 0.07),
         border_08 = rgba(p.border, 0.08),
         border_10 = rgba(p.border, 0.10),
         border_12 = rgba(p.border, 0.12),
