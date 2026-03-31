@@ -957,13 +957,13 @@ input:focus-visible {{
   padding: 16px;
   border: 1px solid transparent;
   background: transparent;
-  border-radius: 8px;
+  border-radius: 6px;
 }}
 
 .workspace-surface-fallback-drop-active {{
   border-color: {accent_20};
   background: {accent_08};
-  border-radius: 8px;
+  border-radius: 6px;
 }}
 
 .workspace-surface-fallback-label {{
@@ -993,7 +993,7 @@ input:focus-visible {{
   background: {surface};
   border: {window_border_width}px solid {border_07};
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: 6px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.32);
 }}
 
@@ -1013,7 +1013,7 @@ input:focus-visible {{
   align-items: center;
   gap: 8px;
   user-select: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: 6px 6px 0 0;
 }}
 
 .workspace-window-toolbar-tabs {{
@@ -1134,7 +1134,7 @@ input:focus-visible {{
   width: 22px;
   height: 22px;
   border: 1px solid {border_10};
-  border-radius: 5px;
+  border-radius: 4px;
   background: {overlay_05};
   color: {text_dim};
   display: inline-flex;
@@ -1792,7 +1792,7 @@ input:focus-visible {{
   background: {overlay_05};
   color: {text_bright};
   font-size: 12px;
-  border-radius: 16px;
+  border-radius: 6px;
 }}
 
 .browser-address:focus {{
@@ -2122,7 +2122,7 @@ input:focus-visible {{
   color: {text_dim};
   padding: 2px 6px;
   background: {border_06};
-  border-radius: 12px;
+  border-radius: 6px;
 }}
 
 .notification-count-unread {{
