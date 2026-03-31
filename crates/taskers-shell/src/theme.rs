@@ -211,6 +211,25 @@ html, body, #main {{
 
 button {{
   font: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+}}
+
+input {{
+  font: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
 }}
 
 button:focus-visible,
@@ -247,15 +266,15 @@ input:focus-visible {{
 
 .workspace-sidebar {{
   border-right: 1px solid {border_05};
-  padding: 6px;
-  gap: 6px;
+  padding: 4px;
+  gap: 4px;
   backdrop-filter: blur(12px) saturate(1.4);
 }}
 
 .attention-panel {{
   border-left: 1px solid {border_05};
-  padding: 10px 12px;
-  gap: 8px;
+  padding: 8px 10px;
+  gap: 6px;
   backdrop-filter: blur(12px) saturate(1.4);
 }}
 
@@ -307,7 +326,7 @@ input:focus-visible {{
   height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
   color: {text_dim};
 }}
@@ -340,7 +359,7 @@ input:focus-visible {{
   min-height: 24px;
   padding: 0;
   font-size: 16px;
-  border-radius: 4px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -369,7 +388,7 @@ input:focus-visible {{
   position: relative;
   padding: 8px 10px 8px 14px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 0;
   display: flex;
   align-items: stretch;
   gap: 0;
@@ -466,7 +485,7 @@ input:focus-visible {{
   align-items: center;
   justify-content: center;
   visibility: hidden;
-  border-radius: 4px;
+  border-radius: 0;
   transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
 }}
 
@@ -678,7 +697,7 @@ input:focus-visible {{
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border-radius: 6px;
+  border-radius: 0;
   box-shadow: 0 2px 8px rgba(0,0,0,0.24), inset 0 1px 0 rgba(255,255,255,0.03);
 }}
 
@@ -704,7 +723,7 @@ input:focus-visible {{
   justify-content: space-between;
   gap: 10px;
   text-align: left;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .settings-toggle-row:hover {{
@@ -762,7 +781,7 @@ input:focus-visible {{
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .status-pill-inline {{
@@ -886,7 +905,7 @@ input:focus-visible {{
 .shortcut-pill {{
   border: 1px solid {border_10};
   background: transparent;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .pane-action,
@@ -894,7 +913,7 @@ input:focus-visible {{
   min-height: 28px;
   padding: 0 10px;
   color: {text_subtle};
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .pane-action:hover {{
@@ -957,13 +976,13 @@ input:focus-visible {{
   padding: 16px;
   border: 1px solid transparent;
   background: transparent;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .workspace-surface-fallback-drop-active {{
   border-color: {accent_20};
   background: {accent_08};
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .workspace-surface-fallback-label {{
@@ -978,7 +997,7 @@ input:focus-visible {{
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .workspace-viewport-overview .workspace-strip-canvas {{
@@ -993,7 +1012,7 @@ input:focus-visible {{
   background: {surface};
   border: {window_border_width}px solid {border_08};
   overflow: hidden;
-  border-radius: 6px;
+  border-radius: 0;
   box-shadow: 0 2px 12px rgba(0,0,0,0.24);
 }}
 
@@ -1013,7 +1032,7 @@ input:focus-visible {{
   align-items: center;
   gap: 8px;
   user-select: none;
-  border-radius: 6px 6px 0 0;
+  border-radius: 0;
 }}
 
 .workspace-window-toolbar-tabs {{
@@ -1051,7 +1070,7 @@ input:focus-visible {{
   padding: 0 3px 0 5px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 0;
   color: {text_subtle};
   overflow: hidden;
 }}
@@ -1115,7 +1134,7 @@ input:focus-visible {{
   width: 18px;
   height: 18px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 0;
   background: transparent;
   color: {text_dim};
   display: inline-flex;
@@ -1134,7 +1153,7 @@ input:focus-visible {{
   width: 22px;
   height: 22px;
   border: 1px solid {border_10};
-  border-radius: 4px;
+  border-radius: 0;
   background: {overlay_05};
   color: {text_dim};
   display: inline-flex;
@@ -1218,7 +1237,7 @@ input:focus-visible {{
   background: {elevated};
   border: {pane_border_width}px solid {border_10};
   overflow: hidden;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .pane-card-active {{
@@ -1244,7 +1263,7 @@ input:focus-visible {{
   pointer-events: none;
   opacity: 0;
   z-index: 10;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .pane-flash-ring-active {{
@@ -1261,7 +1280,7 @@ input:focus-visible {{
   justify-content: space-between;
   gap: 8px;
   background: {surface};
-  border-radius: 6px 6px 0 0;
+  border-radius: 0;
 }}
 
 .pane-toolbar-meta,
@@ -1459,7 +1478,7 @@ input:focus-visible {{
   padding: 0 6px;
   color: {text_muted};
   white-space: nowrap;
-  border-radius: 4px;
+  border-radius: 0;
   overflow: hidden;
 }}
 
@@ -1669,7 +1688,7 @@ input:focus-visible {{
   font-size: 10px;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   line-height: 1;
-  border-radius: 4px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1760,7 +1779,7 @@ input:focus-visible {{
   color: {text_subtle};
   font-size: 11px;
   font-weight: 600;
-  border-radius: 4px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1792,7 +1811,7 @@ input:focus-visible {{
   background: {overlay_05};
   color: {text_bright};
   font-size: 12px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .browser-address:focus {{
@@ -1829,7 +1848,7 @@ input:focus-visible {{
   letter-spacing: 0.08em;
   text-transform: uppercase;
   pointer-events: auto;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .pane-drop-target-active {{
@@ -1886,7 +1905,7 @@ input:focus-visible {{
   border: 1px solid {border_06};
   padding: 12px;
   background: linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .workspace-main-overview .workspace-window-shell {{
@@ -1990,14 +2009,14 @@ input:focus-visible {{
   padding: 4px 8px;
   color: {text_muted};
   font-size: 11px;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .shortcut-pill {{
   padding: 4px 8px;
   color: {text_muted};
   font-size: 11px;
-  border-radius: 4px;
+  border-radius: 0;
   background: {border_06};
   border: 1px solid {border_10};
   box-shadow: 0 1px 0 {border_08};
@@ -2037,7 +2056,7 @@ input:focus-visible {{
   padding: 12px;
   color: {text_dim};
   font-size: 12px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .activity-item {{
@@ -2045,7 +2064,7 @@ input:focus-visible {{
   display: flex;
   flex-direction: column;
   gap: 3px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .activity-item-button {{
@@ -2079,7 +2098,7 @@ input:focus-visible {{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: 0;
   cursor: pointer;
   transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
 }}
@@ -2113,7 +2132,7 @@ input:focus-visible {{
   color: {text_bright};
   font-size: 10px;
   padding: 3px 7px;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .notification-count-pill {{
@@ -2122,7 +2141,7 @@ input:focus-visible {{
   color: {text_dim};
   padding: 2px 6px;
   background: {border_06};
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .notification-count-unread {{
@@ -2142,7 +2161,7 @@ input:focus-visible {{
   padding: 8px 10px;
   background: {error_10};
   border: 1px solid {error_16};
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .vcs-panel-summary {{
@@ -2208,7 +2227,7 @@ input:focus-visible {{
   background: {border_03};
   color: {text_bright};
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2226,7 +2245,7 @@ input:focus-visible {{
   padding: 10px;
   background: {border_03};
   border: 1px solid {border_06};
-  border-radius: 6px;
+  border-radius: 0;
   white-space: pre-wrap;
   overflow: auto;
   max-height: 280px;
@@ -2241,7 +2260,7 @@ input:focus-visible {{
   padding: 8px 10px;
   background: {border_03};
   border: 1px solid {border_06};
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .vcs-pr-link:hover {{
@@ -2300,7 +2319,7 @@ input:focus-visible {{
   padding: 10px;
   background: {border_03};
   transition: background 0.14s ease-in-out;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .workspace-log-list {{
@@ -2317,7 +2336,7 @@ input:focus-visible {{
   display: flex;
   flex-direction: column;
   gap: 4px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .workspace-log-entry-header {{
@@ -2426,7 +2445,7 @@ input:focus-visible {{
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: 0;
   transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
 }}
 
@@ -2493,7 +2512,7 @@ input:focus-visible {{
 .preset-card {{
   border: 1px solid {border_08};
   padding: 10px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .theme-card:hover,
