@@ -4494,7 +4494,7 @@ fn pane_body_frame(
     frame
         .inset(metrics.pane_border_width)
         .inset_horizontal(terminal_gutter_x)
-        .inset_top(metrics.pane_header_height + tab_strip_height + browser_toolbar_height)
+        .inset_top(tab_strip_height + browser_toolbar_height)
 }
 
 fn pane_container_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
@@ -5178,7 +5178,8 @@ fn is_generic_terminal_title(title: &str) -> bool {
 }
 
 fn pane_shows_tab_strip_for_surface_count(surface_count: usize) -> bool {
-    surface_count > 1
+    let _ = surface_count;
+    true
 }
 
 fn format_relative_time(timestamp: OffsetDateTime) -> String {
@@ -5581,14 +5582,12 @@ mod tests {
         metrics: super::LayoutMetrics,
     ) -> Option<super::Frame> {
         match node {
-            super::LayoutNodeSnapshot::Pane(pane) => {
-                find_live_pane_frame(
-                    &pane.layout,
-                    pane_id,
-                    super::pane_container_content_frame(frame, metrics),
-                    metrics.split_gap,
-                )
-            }
+            super::LayoutNodeSnapshot::Pane(pane) => find_live_pane_frame(
+                &pane.layout,
+                pane_id,
+                super::pane_container_content_frame(frame, metrics),
+                metrics.split_gap,
+            ),
             super::LayoutNodeSnapshot::Split {
                 axis,
                 ratio,

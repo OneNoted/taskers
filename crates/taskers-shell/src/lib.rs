@@ -1920,7 +1920,10 @@ fn render_pane(
     };
     let focus_pane = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::FocusPane { pane_id })
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
+        }
     };
     let add_browser_pane_tab = {
         let core = core.clone();
@@ -1942,21 +1945,14 @@ fn render_pane(
             })
         }
     };
-    let split_terminal = {
+    let add_terminal_pane_tab_plus = {
         let core = core.clone();
         move |event: Event<MouseData>| {
             event.stop_propagation();
-            core.dispatch_shell_action(ShellAction::SplitTerminal {
-                pane_id: Some(pane_id),
+            core.dispatch_shell_action(ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind: PaneKind::Terminal,
             })
-        }
-    };
-    let split_down = {
-        let core = core.clone();
-        move |event: Event<MouseData>| {
-            event.stop_propagation();
-            core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
-            core.dispatch_shortcut_action(ShortcutAction::SplitDown);
         }
     };
     let close_pane_tab = {
@@ -1987,6 +1983,9 @@ fn render_pane(
                             for pane_tab in &pane.pane_tabs {
                                 {render_pane_tab(pane, pane_tab, core.clone())}
                             }
+                            button { class: "surface-tab-add", title: "New terminal pane tab", onclick: add_terminal_pane_tab_plus,
+                                {icons::plus(12, "surface-tab-add-icon")}
+                            }
                         }
                     }
                     div { class: "pane-action-cluster pane-action-cluster-visible",
@@ -1995,13 +1994,6 @@ fn render_pane(
                         }
                         button { class: "pane-utility", title: "New browser pane tab", onclick: add_browser_pane_tab,
                             {icons::globe(14, "pane-utility-icon")}
-                        }
-                        div { class: "pane-action-separator" }
-                        button { class: "pane-utility", title: "Split right", onclick: split_terminal,
-                            {icons::split_horizontal(14, "pane-utility-icon")}
-                        }
-                        button { class: "pane-utility", title: "Split down", onclick: split_down,
-                            {icons::split_vertical(14, "pane-utility-icon")}
                         }
                         div { class: "pane-action-separator" }
                         button { class: "pane-utility pane-utility-close", title: "Close pane tab", onclick: close_pane_tab,
@@ -2040,12 +2032,23 @@ fn render_pane_tab(pane: &PaneSnapshot, pane_tab: &PaneTabSnapshot, core: Shared
     } else {
         format!("surface-tab{attention_class}")
     };
+    let focus_core = core.clone();
     let focus_pane_tab = move |event: Event<MouseData>| {
         event.stop_propagation();
-        core.dispatch_shell_action(ShellAction::FocusPaneTab {
+        focus_core.dispatch_shell_action(ShellAction::FocusPaneTab {
             pane_container_id,
             pane_tab_id,
         });
+    };
+    let close_pane_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::ClosePaneTab {
+                pane_container_id,
+                pane_tab_id,
+            });
+        }
     };
     let pane_tab_icon_class = format!(
         "surface-tab-kind-icon {}",
@@ -2059,6 +2062,9 @@ fn render_pane_tab(pane: &PaneSnapshot, pane_tab: &PaneTabSnapshot, core: Shared
                 span { class: "surface-tab-copy",
                     span { class: "surface-tab-primary", "{pane_tab.title}" }
                 }
+            }
+            button { class: "surface-tab-close", title: "Close pane tab", onclick: close_pane_tab,
+                {icons::close(10, "surface-tab-close-icon")}
             }
         }
     }
@@ -2172,7 +2178,10 @@ fn render_live_pane(
 
     let focus_pane = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::FocusPane { pane_id })
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
+        }
     };
     let add_browser_surface = {
         let core = core.clone();
@@ -2190,6 +2199,32 @@ fn render_live_pane(
             core.dispatch_shell_action(ShellAction::AddTerminalSurface {
                 pane_id: Some(pane_id),
             })
+        }
+    };
+    let add_terminal_surface_plus = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::AddTerminalSurface {
+                pane_id: Some(pane_id),
+            })
+        }
+    };
+    let split_terminal = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::SplitTerminal {
+                pane_id: Some(pane_id),
+            })
+        }
+    };
+    let split_down = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
+            core.dispatch_shortcut_action(ShortcutAction::SplitDown);
         }
     };
     let close_surface = {
@@ -2243,6 +2278,9 @@ fn render_live_pane(
                             surface_drop_target,
                         )}
                     }
+                    button { class: "surface-tab-add", title: "New terminal surface", onclick: add_terminal_surface_plus,
+                        {icons::plus(12, "surface-tab-add-icon")}
+                    }
                 }
                 div { class: "{pane_action_cluster_class}",
                     button { class: "pane-utility", title: "New terminal surface", onclick: add_terminal_surface,
@@ -2250,6 +2288,13 @@ fn render_live_pane(
                     }
                     button { class: "pane-utility", title: "New browser surface", onclick: add_browser_surface,
                         {icons::globe(14, "pane-utility-icon")}
+                    }
+                    div { class: "pane-action-separator" }
+                    button { class: "pane-utility", title: "Split right", onclick: split_terminal,
+                        {icons::split_horizontal(14, "pane-utility-icon")}
+                    }
+                    button { class: "pane-utility", title: "Split down", onclick: split_down,
+                        {icons::split_vertical(14, "pane-utility-icon")}
                     }
                     div { class: "pane-action-separator" }
                     button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface,
@@ -2534,6 +2579,16 @@ fn render_surface_tab(
     let swallow_pointer = move |event: Event<PointerData>| {
         event.stop_propagation();
     };
+    let close_surface = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CloseSurface {
+                pane_id,
+                surface_id,
+            });
+        }
+    };
 
     rsx! {
         div {
@@ -2555,6 +2610,14 @@ fn render_surface_tab(
                         span { key: "{surface_id}-runtime-badge", class: "surface-tab-runtime-badge", "{runtime_label}" }
                     }
                 }
+            }
+            button {
+                class: "surface-tab-close",
+                title: "Close surface tab",
+                onpointerdown: swallow_pointer,
+                onpointerup: swallow_pointer,
+                onclick: close_surface,
+                {icons::close(10, "surface-tab-close-icon")}
             }
             if let Some(status_label) = surface_status_text(surface) {
                 if dismissible_status {

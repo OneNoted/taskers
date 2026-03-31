@@ -1679,6 +1679,42 @@ input:focus-visible {{
   filter: brightness(1.08);
 }}
 
+.surface-tab-close {{
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  background: transparent;
+  color: {text_dim};
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}}
+
+.surface-tab-close:hover {{
+  background: {border_08};
+  color: {text_bright};
+}}
+
+.surface-tab-add {{
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 1px solid {border_10};
+  background: {overlay_05};
+  color: {text_dim};
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}}
+
+.surface-tab-add:hover {{
+  background: {overlay_16};
+  color: {text_bright};
+}}
+
 .surface-tab-state.runtime-state-working {{
   background: {busy_16};
 }}
