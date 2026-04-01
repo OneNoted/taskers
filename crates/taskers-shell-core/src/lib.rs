@@ -1122,6 +1122,7 @@ pub struct ShellSnapshot {
     pub overview_mode: bool,
     pub drag_mode: ShellDragMode,
     pub surface_drag: Option<SurfaceDragSessionSnapshot>,
+    pub resize_preview_active: bool,
     pub attention_panel_visible: bool,
     pub workspaces: Vec<WorkspaceSummary>,
     pub current_workspace: WorkspaceViewSnapshot,
@@ -1645,6 +1646,7 @@ impl TaskersCore {
             overview_mode: self.ui.overview_mode,
             drag_mode: self.ui.drag_mode,
             surface_drag: self.ui.surface_drag,
+            resize_preview_active: self.ui.resize_preview.is_some(),
             attention_panel_visible,
             workspaces: self.workspace_summaries(&model),
             current_workspace: WorkspaceViewSnapshot {

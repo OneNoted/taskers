@@ -685,6 +685,7 @@ impl TaskersHost {
             &snapshot.settings.selected_theme_id,
             snapshot.revision,
             interactive,
+            snapshot.resize_preview_active,
         ) {
             Ok(terminal_mutated) => terminal_mutated,
             Err(error) => {
@@ -1249,6 +1250,7 @@ impl TaskersHost {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        resize_preview_active: bool,
     ) -> Result<bool> {
         let desired = terminal_plans(portal);
         let desired_by_id = desired
@@ -1314,6 +1316,7 @@ impl TaskersHost {
                     theme_id,
                     revision,
                     interactive,
+                    resize_preview_active,
                     host.filter(|_| bridge_running),
                     self.diagnostics.as_ref(),
                 ),
@@ -1341,6 +1344,7 @@ impl TaskersHost {
                         theme_id,
                         revision,
                         interactive,
+                        resize_preview_active,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                         host,
@@ -1873,6 +1877,7 @@ struct TerminalSurface {
     visible: bool,
     width_px: i32,
     height_px: i32,
+    resize_frozen: bool,
 }
 
 impl TerminalSurface {
@@ -1883,6 +1888,7 @@ impl TerminalSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        resize_preview_active: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
         host: &GhosttyHost,
@@ -1906,6 +1912,13 @@ impl TerminalSurface {
         let shell = NativeSurfaceShell::new(shell_class, effective_interactive);
         let attention_ring = AttentionRingOverlay::new();
         shell.mount_child(&widget);
+        let initial_width_px = visible_plan.map_or(0, |plan| plan.frame.width);
+        let initial_height_px = visible_plan.map_or(0, |plan| plan.frame.height);
+        let mut resize_frozen = false;
+        if resize_preview_active && visible_plan.is_some() {
+            freeze_terminal_widget(&widget, initial_width_px, initial_height_px);
+            resize_frozen = true;
+        }
         match visible_plan {
             Some(plan) => {
                 shell.show_at(overlay, plan.frame);
@@ -1957,8 +1970,9 @@ impl TerminalSurface {
             active: visible_plan.is_some_and(|plan| plan.active),
             interactive: effective_interactive,
             visible: visible_plan.is_some(),
-            width_px: visible_plan.map_or(0, |plan| plan.frame.width),
-            height_px: visible_plan.map_or(0, |plan| plan.frame.height),
+            width_px: initial_width_px,
+            height_px: initial_height_px,
+            resize_frozen,
         })
     }
 
@@ -1970,6 +1984,7 @@ impl TerminalSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        resize_preview_active: bool,
         host: Option<&GhosttyHost>,
         diagnostics: Option<&DiagnosticsSink>,
     ) {
@@ -1980,6 +1995,15 @@ impl TerminalSurface {
         let effective_interactive = visible && interactive;
         self.widget.set_can_target(effective_interactive);
         self.shell.set_interactive(effective_interactive);
+        if resize_preview_active && visible {
+            if !self.resize_frozen {
+                freeze_terminal_widget(&self.widget, self.width_px, self.height_px);
+                self.resize_frozen = true;
+            }
+        } else if self.resize_frozen {
+            thaw_terminal_widget(&self.widget);
+            self.resize_frozen = false;
+        }
         match visible_plan {
             Some(plan) => {
                 self.shell.show_at(overlay, plan.frame);
@@ -2009,8 +2033,10 @@ impl TerminalSurface {
         self.active = visible_plan.is_some_and(|plan| plan.active);
         self.interactive = effective_interactive;
         self.visible = visible;
-        self.width_px = visible_plan.map_or(0, |plan| plan.frame.width);
-        self.height_px = visible_plan.map_or(0, |plan| plan.frame.height);
+        if !resize_preview_active {
+            self.width_px = visible_plan.map_or(0, |plan| plan.frame.width);
+            self.height_px = visible_plan.map_or(0, |plan| plan.frame.height);
+        }
 
         emit_diagnostic(
             diagnostics,
@@ -2027,6 +2053,24 @@ impl TerminalSurface {
     fn is_focused(&self) -> bool {
         self.focus_state.get() || self.widget.has_focus()
     }
+}
+
+fn freeze_terminal_widget(widget: &Widget, width_px: i32, height_px: i32) {
+    widget.set_hexpand(false);
+    widget.set_vexpand(false);
+    widget.set_halign(Align::Start);
+    widget.set_valign(Align::Start);
+    widget.set_size_request(width_px.max(1), height_px.max(1));
+    widget.queue_allocate();
+}
+
+fn thaw_terminal_widget(widget: &Widget) {
+    widget.set_hexpand(true);
+    widget.set_vexpand(true);
+    widget.set_halign(Align::Fill);
+    widget.set_valign(Align::Fill);
+    widget.set_size_request(-1, -1);
+    widget.queue_allocate();
 }
 
 struct NativeSurfaceShell {
