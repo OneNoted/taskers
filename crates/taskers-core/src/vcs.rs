@@ -446,25 +446,20 @@ fn parse_git_status(raw: &str) -> ParsedGitStatus {
             continue;
         }
         if let Some(rest) = line.strip_prefix("1 ") {
-            let mut parts = rest.splitn(9, ' ');
+            let mut parts = rest.splitn(8, ' ');
             let xy = parts.next().unwrap_or("..");
-            let path = rest
-                .rsplit_once(' ')
-                .map(|(_, path)| path)
-                .unwrap_or_default()
-                .to_string();
+            let path = parts.nth(6).unwrap_or_default().to_string();
             if !path.is_empty() {
                 parsed.files.extend(git_file_entries(path, xy, None));
             }
             continue;
         }
         if let Some(rest) = line.strip_prefix("2 ") {
-            let mut parts = rest.splitn(10, ' ');
+            let mut parts = rest.splitn(9, ' ');
             let xy = parts.next().unwrap_or("..");
-            let paths = parts.nth(8).unwrap_or_default();
+            let paths = parts.nth(7).unwrap_or_default();
             let mut names = paths.split('\t');
-            let original = names.next().unwrap_or_default();
-            let path = names.next().unwrap_or(original).to_string();
+            let path = names.next().unwrap_or_default().to_string();
             if !path.is_empty() {
                 parsed
                     .files
@@ -473,13 +468,9 @@ fn parse_git_status(raw: &str) -> ParsedGitStatus {
             continue;
         }
         if let Some(rest) = line.strip_prefix("u ") {
-            let mut parts = rest.splitn(11, ' ');
+            let mut parts = rest.splitn(10, ' ');
             let _ = parts.next();
-            let path = rest
-                .rsplit_once(' ')
-                .map(|(_, path)| path)
-                .unwrap_or_default()
-                .to_string();
+            let path = parts.nth(8).unwrap_or_default().to_string();
             if !path.is_empty() {
                 parsed.files.push(VcsFileEntry {
                     path,
@@ -689,14 +680,19 @@ mod tests {
     #[test]
     fn parses_git_porcelain_v2_changes() {
         let parsed = parse_git_status(
-            "# branch.oid 1234567890\n# branch.head main\n1 M. N... 100644 100644 100644 abc abc file.txt\n? new.rs\nu UU N... 100644 100644 100644 100644 abc abc abc conflict.rs\n",
+            "# branch.oid 1234567890\n# branch.head main\n1 M. N... 100644 100644 100644 abc abc file with spaces.txt\n2 R. N... 100644 100644 100644 abc def R100 renamed file.txt\toriginal file.txt\n? new.rs\nu UU N... 100644 100644 100644 100644 abc abc abc conflict file.rs\n",
         );
         assert_eq!(parsed.branch.as_deref(), Some("main"));
-        assert_eq!(parsed.files.len(), 3);
+        assert_eq!(parsed.files.len(), 4);
+        assert_eq!(parsed.files[0].path, "file with spaces.txt");
         assert_eq!(parsed.files[0].status, VcsFileStatus::Modified);
         assert!(parsed.files[0].staged);
-        assert_eq!(parsed.files[1].status, VcsFileStatus::Untracked);
-        assert_eq!(parsed.files[2].status, VcsFileStatus::Conflicted);
+        assert_eq!(parsed.files[1].path, "renamed file.txt");
+        assert_eq!(parsed.files[1].status, VcsFileStatus::Renamed);
+        assert!(parsed.files[1].staged);
+        assert_eq!(parsed.files[2].status, VcsFileStatus::Untracked);
+        assert_eq!(parsed.files[3].path, "conflict file.rs");
+        assert_eq!(parsed.files[3].status, VcsFileStatus::Conflicted);
     }
 
     #[test]

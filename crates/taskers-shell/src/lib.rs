@@ -530,7 +530,10 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             }
 
             if snapshot.vcs_panel.visible {
-                {render_vcs_panel(&snapshot.vcs_panel, core.clone())}
+                VcsPanel {
+                    panel: snapshot.vcs_panel.clone(),
+                    core: core.clone(),
+                }
             } else if snapshot.attention_panel_visible {
                 aside { class: "attention-panel",
                     div { class: "notification-header",
@@ -905,7 +908,8 @@ fn render_workspace_log_entry(entry: &WorkspaceLogEntrySnapshot) -> Element {
     }
 }
 
-fn render_vcs_panel(panel: &VcsPanelSnapshot, core: SharedCore) -> Element {
+#[component]
+fn VcsPanel(panel: VcsPanelSnapshot, core: SharedCore) -> Element {
     let commit_message = use_signal(String::new);
     let branch_name = use_signal(String::new);
     let bookmark_name = use_signal(String::new);
