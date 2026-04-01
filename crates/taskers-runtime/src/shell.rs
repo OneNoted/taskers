@@ -866,6 +866,23 @@ mod tests {
     }
 
     #[test]
+    fn bash_shell_hook_marks_prompt_only_once_until_preexec_runs() {
+        let bash_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.bash"
+        ));
+
+        assert!(
+            bash_hooks.contains("TASKERS_OSC133_PROMPT_MARKED"),
+            "expected bash hooks to track whether the prompt is already OSC133-marked"
+        );
+        assert!(
+            bash_hooks.contains("[ \"${TASKERS_OSC133_PROMPT_MARKED:-0}\" = \"1\" ] && return 0"),
+            "expected bash hooks to avoid re-marking an already marked prompt"
+        );
+    }
+
+    #[test]
     fn shell_hooks_invalidate_metadata_cache_after_agent_exit() {
         let bash_hooks = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -637,13 +637,14 @@ fn parse_jj_bookmarks(raw: &str, active: &[String]) -> Vec<VcsRefEntry> {
 fn parse_jj_diff_summary(raw: &str) -> Vec<VcsFileEntry> {
     raw.lines()
         .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
+            if line.trim().is_empty() {
                 return None;
             }
-            let mut parts = line.split_whitespace();
-            let status = parts.next().unwrap_or_default();
-            let path = parts.collect::<Vec<_>>().join(" ");
+            let separator = line.char_indices().find(|(_, ch)| ch.is_whitespace())?.0;
+            let status = line[..separator].trim();
+            let path = line[separator..]
+                .trim_start_matches(char::is_whitespace)
+                .to_string();
             if path.is_empty() {
                 return None;
             }
@@ -717,7 +718,8 @@ mod tests {
     use std::fs;
 
     use super::{
-        jj_diff_preview, parse_git_status, parse_jj_bookmarks, parse_jj_current, resolve_repo_root,
+        jj_diff_preview, parse_git_status, parse_jj_bookmarks, parse_jj_current,
+        parse_jj_diff_summary, resolve_repo_root,
     };
     use taskers_control::VcsFileStatus;
     use taskers_control::VcsMode;
@@ -762,6 +764,16 @@ mod tests {
         assert_eq!(bookmarks.len(), 2);
         assert!(bookmarks[0].active);
         assert!(bookmarks[1].active);
+    }
+
+    #[test]
+    fn parses_jj_diff_summary_without_normalizing_whitespace() {
+        let parsed = parse_jj_diff_summary("M a  b.txt\nA tab\tname.txt\n");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].path, "a  b.txt");
+        assert_eq!(parsed[0].status, VcsFileStatus::Modified);
+        assert_eq!(parsed[1].path, "tab\tname.txt");
+        assert_eq!(parsed[1].status, VcsFileStatus::Added);
     }
 
     #[test]

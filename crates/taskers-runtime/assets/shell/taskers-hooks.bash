@@ -4,6 +4,7 @@ export TASKERS_HOOKS_BASH_LOADED=1
 TASKERS_OSC133_EXECUTING=0
 TASKERS_OSC133_SAVE_PS1=
 TASKERS_OSC133_SAVE_PS2=
+TASKERS_OSC133_PROMPT_MARKED=0
 
 taskers__osc133_enabled() {
   taskers__context_tty_matches
@@ -11,6 +12,7 @@ taskers__osc133_enabled() {
 
 taskers__osc133_mark_prompt() {
   taskers__osc133_enabled || return 0
+  [ "${TASKERS_OSC133_PROMPT_MARKED:-0}" = "1" ] && return 0
   TASKERS_OSC133_SAVE_PS1=$PS1
   TASKERS_OSC133_SAVE_PS2=$PS2
 
@@ -22,6 +24,8 @@ taskers__osc133_mark_prompt() {
     PS1="${PS1//$'\n'/$'\n'$__taskers_mark}"
     PS1="${PS1//\\n/\\n$__taskers_mark}"
   fi
+
+  TASKERS_OSC133_PROMPT_MARKED=1
 }
 
 taskers__osc133_unmark_prompt() {
@@ -33,6 +37,7 @@ taskers__osc133_unmark_prompt() {
     PS2=$TASKERS_OSC133_SAVE_PS2
     TASKERS_OSC133_SAVE_PS2=
   fi
+  TASKERS_OSC133_PROMPT_MARKED=0
 }
 
 taskers__osc133_print() {
