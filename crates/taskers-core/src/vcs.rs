@@ -266,20 +266,7 @@ impl VcsService {
 
     fn jj_snapshot(&self, target: &RepoTarget, diff_path: Option<String>) -> Result<VcsSnapshot> {
         let status = run_command(&target.repo_root, "jj", &["status", "--color=never"])?;
-        let current = run_command(
-            &target.repo_root,
-            "jj",
-            &[
-                "log",
-                "-r",
-                "@",
-                "--no-graph",
-                "-T",
-                "change_id.short(8) ++ \"|\" ++ description.first_line() ++ \"|\" ++ bookmarks",
-                "--color=never",
-            ],
-        )?;
-        let current = parse_jj_current(&current.stdout);
+        let current = load_jj_current(&target.repo_root)?;
         let refs = parse_jj_bookmarks(
             &run_command(
                 &target.repo_root,
@@ -428,6 +415,53 @@ fn trim_output(stdout: &str, stderr: &str) -> String {
     }
 }
 
+fn load_jj_current(repo_root: &Path) -> Result<ParsedJjCurrent> {
+    let change_id = run_command(
+        repo_root,
+        "jj",
+        &[
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "change_id.short(8)",
+            "--color=never",
+        ],
+    )?;
+    let description = run_command(
+        repo_root,
+        "jj",
+        &[
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "description.first_line()",
+            "--color=never",
+        ],
+    )?;
+    let bookmarks = run_command(
+        repo_root,
+        "jj",
+        &[
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            r#"bookmarks.join("\n")"#,
+            "--color=never",
+        ],
+    )?;
+    Ok(parse_jj_current(
+        &change_id.stdout,
+        &description.stdout,
+        &bookmarks.stdout,
+    ))
+}
+
 fn parse_git_status(raw: &str) -> ParsedGitStatus {
     let mut parsed = ParsedGitStatus::default();
     for line in raw.lines() {
@@ -469,9 +503,7 @@ fn parse_git_status(raw: &str) -> ParsedGitStatus {
             let mut names = paths.split('\t');
             let path = names.next().unwrap_or_default().to_string();
             if !path.is_empty() {
-                parsed
-                    .files
-                    .extend(git_file_entries(path, xy, Some(VcsFileStatus::Renamed)));
+                parsed.files.extend(git_file_entries(path, xy, None));
             }
             continue;
         }
@@ -571,14 +603,16 @@ fn git_diff_preview(repo_root: &Path, path: &str) -> Result<String> {
     Ok(combined)
 }
 
-fn parse_jj_current(raw: &str) -> ParsedJjCurrent {
-    let mut parts = raw.trim().splitn(3, '|');
-    let change_id = parts.next().unwrap_or_default().trim().to_string();
-    let description = parts.next().unwrap_or_default().trim().to_string();
-    let bookmarks = parts
-        .next()
-        .unwrap_or_default()
-        .split_whitespace()
+fn parse_jj_current(
+    change_id_raw: &str,
+    description_raw: &str,
+    bookmarks_raw: &str,
+) -> ParsedJjCurrent {
+    let change_id = change_id_raw.trim().to_string();
+    let description = description_raw.trim().to_string();
+    let bookmarks = bookmarks_raw
+        .lines()
+        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
@@ -692,26 +726,33 @@ mod tests {
     #[test]
     fn parses_git_porcelain_v2_changes() {
         let parsed = parse_git_status(
-            "# branch.oid 1234567890\n# branch.head main\n1 M. N... 100644 100644 100644 abc abc file with spaces.txt\n2 R. N... 100644 100644 100644 abc def R100 renamed file.txt\toriginal file.txt\n? new.rs\nu UU N... 100644 100644 100644 100644 abc abc abc conflict file.rs\n",
+            "# branch.oid 1234567890\n# branch.head main\n1 M. N... 100644 100644 100644 abc abc file with spaces.txt\n2 RM N... 100644 100644 100644 abc def R100 renamed file.txt\toriginal file.txt\n? new.rs\nu UU N... 100644 100644 100644 100644 abc abc abc conflict file.rs\n",
         );
         assert_eq!(parsed.branch.as_deref(), Some("main"));
-        assert_eq!(parsed.files.len(), 4);
+        assert_eq!(parsed.files.len(), 5);
         assert_eq!(parsed.files[0].path, "file with spaces.txt");
         assert_eq!(parsed.files[0].status, VcsFileStatus::Modified);
         assert!(parsed.files[0].staged);
         assert_eq!(parsed.files[1].path, "renamed file.txt");
         assert_eq!(parsed.files[1].status, VcsFileStatus::Renamed);
         assert!(parsed.files[1].staged);
-        assert_eq!(parsed.files[2].status, VcsFileStatus::Untracked);
-        assert_eq!(parsed.files[3].path, "conflict file.rs");
-        assert_eq!(parsed.files[3].status, VcsFileStatus::Conflicted);
+        assert_eq!(parsed.files[2].path, "renamed file.txt");
+        assert_eq!(parsed.files[2].status, VcsFileStatus::Modified);
+        assert!(!parsed.files[2].staged);
+        assert_eq!(parsed.files[3].status, VcsFileStatus::Untracked);
+        assert_eq!(parsed.files[4].path, "conflict file.rs");
+        assert_eq!(parsed.files[4].status, VcsFileStatus::Conflicted);
     }
 
     #[test]
     fn parses_jj_current_and_bookmarks() {
-        let current = parse_jj_current("abcd1234|feat: title|main feature-x\n");
+        let current = parse_jj_current(
+            "abcd1234\n",
+            "feat: title | with pipe\n",
+            "main\nfeature-x\n",
+        );
         assert_eq!(current.change_id, "abcd1234");
-        assert_eq!(current.description, "feat: title");
+        assert_eq!(current.description, "feat: title | with pipe");
         assert_eq!(current.bookmarks, vec!["main", "feature-x"]);
 
         let bookmarks = parse_jj_bookmarks(
