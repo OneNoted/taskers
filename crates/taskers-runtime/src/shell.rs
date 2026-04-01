@@ -877,8 +877,12 @@ mod tests {
             "expected bash hooks to track whether the prompt is already OSC133-marked"
         );
         assert!(
-            bash_hooks.contains("[ \"${TASKERS_OSC133_PROMPT_MARKED:-0}\" = \"1\" ] && return 0"),
-            "expected bash hooks to avoid re-marking an already marked prompt"
+            bash_hooks.contains("TASKERS_OSC133_SAVE_PS1:-"),
+            "expected bash hooks to treat saved prompt copies as part of the marked state"
+        );
+        assert!(
+            bash_hooks.contains("TASKERS_OSC133_PROMPT_MARKED=1"),
+            "expected bash hooks to keep the marked state synchronized with the prompt save guards"
         );
     }
 

@@ -4086,6 +4086,18 @@ impl TaskersCore {
     }
 
     fn record_terminal_focus(&mut self, workspace_id: WorkspaceId, surface_id: SurfaceId) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let is_terminal_surface = workspace
+            .panes
+            .values()
+            .flat_map(|pane| pane.surfaces.values())
+            .any(|surface| surface.id == surface_id && surface.kind == PaneKind::Terminal);
+        if !is_terminal_surface {
+            return false;
+        }
         let previous = self
             .ui
             .last_terminal_surface_by_workspace
@@ -8694,6 +8706,41 @@ mod tests {
         core.dispatch_shortcut_action(super::ShortcutAction::FocusLatestUnread);
 
         assert_eq!(core.snapshot().current_workspace.id, second_workspace_id);
+    }
+
+    #[test]
+    fn focusing_browser_surface_keeps_vcs_target_on_last_terminal() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let terminal_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("terminal surface");
+        let browser_surface_id = model
+            .create_surface(workspace_id, pane_id, taskers_domain::PaneKind::Browser)
+            .expect("browser surface");
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-vcs-terminal-target",
+        ));
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id,
+            surface_id: terminal_surface_id,
+        });
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id,
+            surface_id: browser_surface_id,
+        });
+
+        let snapshot = core.snapshot();
+        assert_eq!(
+            snapshot.vcs_panel.target_surface_id,
+            Some(terminal_surface_id)
+        );
     }
 
     #[test]

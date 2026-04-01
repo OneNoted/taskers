@@ -12,7 +12,12 @@ taskers__osc133_enabled() {
 
 taskers__osc133_mark_prompt() {
   taskers__osc133_enabled || return 0
-  [ "${TASKERS_OSC133_PROMPT_MARKED:-0}" = "1" ] && return 0
+  if [ "${TASKERS_OSC133_PROMPT_MARKED:-0}" = "1" ] \
+    || [ -n "${TASKERS_OSC133_SAVE_PS1:-}" ] \
+    || [ -n "${TASKERS_OSC133_SAVE_PS2:-}" ]; then
+    TASKERS_OSC133_PROMPT_MARKED=1
+    return 0
+  fi
   TASKERS_OSC133_SAVE_PS1=$PS1
   TASKERS_OSC133_SAVE_PS2=$PS2
 
