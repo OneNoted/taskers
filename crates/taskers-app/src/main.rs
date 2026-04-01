@@ -108,6 +108,14 @@ struct RuntimeBootstrap {
     startup_notes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct RuntimePathOverrides {
+    root_dir: PathBuf,
+    session_path: PathBuf,
+    socket_path: PathBuf,
+    terminal_socket_path: PathBuf,
+}
+
 enum HostAutomationCommand {
     Browser(BrowserControlCommand),
     TerminalDebug(TerminalDebugCommand),
@@ -281,7 +289,7 @@ fn main() -> glib::ExitCode {
         return run_internal_ghostty_probe(mode);
     }
 
-    let bootstrap = match bootstrap_runtime(None) {
+    let bootstrap = match bootstrap_runtime(None, cli.smoke_script) {
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             safe_eprintln(format!("failed to bootstrap Taskers host: {error:?}"));
@@ -538,7 +546,19 @@ fn build_ui_result(
     });
 
     if let Some(script) = smoke_script {
-        spawn_smoke_script(script, core, diagnostics, quit_after_ms);
+        let (smoke_quit_tx, smoke_quit_rx) = mpsc::channel::<()>();
+        let smoke_app = app.clone();
+        glib::timeout_add_local(Duration::from_millis(16), move || {
+            match smoke_quit_rx.try_recv() {
+                Ok(()) => {
+                    smoke_app.quit();
+                    glib::ControlFlow::Break
+                }
+                Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+        spawn_smoke_script(script, core, diagnostics, quit_after_ms, smoke_quit_tx);
     }
 
     Ok(())
@@ -1031,7 +1051,10 @@ fn connect_navigation_shortcuts(
     window.add_controller(controller);
 }
 
-fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
+fn bootstrap_runtime(
+    diagnostics: Option<&DiagnosticsWriter>,
+    smoke_script: Option<SmokeScript>,
+) -> Result<BootstrapContext> {
     let (config, config_note) = match TaskersConfig::load() {
         Ok(config) => (config, None),
         Err(error) => (
@@ -1039,12 +1062,29 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
             Some(format!("Taskers config unavailable: {error}")),
         ),
     };
-    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
+    let path_overrides = smoke_script
+        .map(|_| smoke_runtime_path_overrides())
+        .transpose()?;
+    let runtime =
+        resolve_runtime_bootstrap(config.embedded_terminal_appearance, path_overrides.as_ref());
     let mut startup_notes = runtime.startup_notes;
     if let Some(note) = config_note {
         push_startup_note(&mut startup_notes, diagnostics, note);
     }
-    let session_path = default_session_path();
+    if let Some(path_overrides) = path_overrides.as_ref() {
+        push_startup_note(
+            &mut startup_notes,
+            diagnostics,
+            format!(
+                "Smoke mode using isolated runtime root {}",
+                path_overrides.root_dir.display()
+            ),
+        );
+    }
+    let session_path = path_overrides
+        .as_ref()
+        .map(|overrides| overrides.session_path.clone())
+        .unwrap_or_else(default_session_path);
     let mut initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
         format!(
             "failed to load or bootstrap Taskers session at {}",
@@ -1144,12 +1184,17 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
 
 fn resolve_runtime_bootstrap(
     embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    path_overrides: Option<&RuntimePathOverrides>,
 ) -> RuntimeBootstrap {
     scrub_inherited_terminal_env();
 
     let mut startup_notes = Vec::new();
-    let socket_path = default_socket_path();
-    let terminal_socket_path = default_terminal_socket_path();
+    let socket_path = path_overrides
+        .map(|overrides| overrides.socket_path.clone())
+        .unwrap_or_else(default_socket_path);
+    let terminal_socket_path = path_overrides
+        .map(|overrides| overrides.terminal_socket_path.clone())
+        .unwrap_or_else(default_terminal_socket_path);
     let ghostty_runtime = match ensure_runtime_installed() {
         Ok(Some(runtime)) => {
             startup_notes.push(format!(
@@ -1216,6 +1261,23 @@ fn resolve_runtime_bootstrap(
     }
 }
 
+fn smoke_runtime_path_overrides() -> Result<RuntimePathOverrides> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let root_dir =
+        std::env::temp_dir().join(format!("taskers-smoke-{}-{timestamp}", std::process::id()));
+    create_dir_all(&root_dir)
+        .with_context(|| format!("failed to create smoke runtime root {}", root_dir.display()))?;
+    Ok(RuntimePathOverrides {
+        session_path: root_dir.join("session.json"),
+        socket_path: root_dir.join("control.sock"),
+        terminal_socket_path: root_dir.join("terminal.sock"),
+        root_dir,
+    })
+}
+
 fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
     std::env::temp_dir().join(format!(
         "taskers-probe-{}-{}.json",
@@ -1226,7 +1288,7 @@ fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
 
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     let config = TaskersConfig::load().unwrap_or_default();
-    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
+    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance, None);
     let host = match GhosttyHost::new_with_options(&runtime.host_options) {
         Ok(host) => {
             let _ = host.tick();
@@ -1874,6 +1936,7 @@ fn spawn_smoke_script(
     core: SharedCore,
     diagnostics: Option<DiagnosticsWriter>,
     quit_after_ms: u64,
+    quit_tx: Sender<()>,
 ) {
     thread::spawn(move || {
         let started_at = Instant::now();
@@ -1895,7 +1958,7 @@ fn spawn_smoke_script(
             ),
         );
         let _ = io::stderr().lock().flush();
-        std::process::exit(0);
+        let _ = quit_tx.send(());
     });
 }
 
@@ -2211,7 +2274,7 @@ fn looks_like_dev_install(path: &Path) -> bool {
 
 #[cfg(test)]
 mod startup_tests {
-    use super::{looks_like_dev_install, should_defer_initial_sync};
+    use super::{looks_like_dev_install, should_defer_initial_sync, smoke_runtime_path_overrides};
     use std::path::Path;
 
     #[test]
@@ -2245,5 +2308,18 @@ mod startup_tests {
         assert!(!looks_like_dev_install(Path::new(
             "/home/notes/.local/share/taskers/releases/0.4.0/x86_64-unknown-linux-gnu/taskers-gtk"
         )));
+    }
+
+    #[test]
+    fn smoke_runtime_paths_are_isolated_from_user_state() {
+        let overrides = smoke_runtime_path_overrides().expect("smoke paths");
+        assert!(overrides.root_dir.starts_with(std::env::temp_dir()));
+        assert!(overrides.session_path.starts_with(&overrides.root_dir));
+        assert!(overrides.socket_path.starts_with(&overrides.root_dir));
+        assert!(
+            overrides
+                .terminal_socket_path
+                .starts_with(&overrides.root_dir)
+        );
     }
 }

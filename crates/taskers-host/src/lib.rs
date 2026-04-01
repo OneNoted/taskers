@@ -33,6 +33,12 @@ use webkit6::{LoadEvent, NetworkSession, Settings as WebKitSettings, WebView, pr
 pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
 
+// Very thin viewport-edge slivers have been enough to trip native GTK/Ghostty
+// rendering during teardown on Linux/NVIDIA. Once a clipped native surface is
+// below this size, hide it until more of the pane is actually visible.
+const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 200;
+const MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX: i32 = 120;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCategory {
     Startup,
@@ -1828,6 +1834,9 @@ fn clip_to_content(
 ) -> Option<PortalSurfacePlan> {
     let clipped_frame = clip_frame_to_content(plan.frame, *content)?;
     let clipped_pane_frame = clip_frame_to_content(plan.pane_frame, *content)?;
+    if clipped_surface_is_too_small(plan.frame, clipped_frame) {
+        return None;
+    }
 
     Some(PortalSurfacePlan {
         frame: clipped_frame,
@@ -1863,6 +1872,17 @@ fn clip_frame_to_content(
     ))
 }
 
+fn clipped_surface_is_too_small(
+    original: taskers_core::Frame,
+    clipped: taskers_core::Frame,
+) -> bool {
+    let clipped_horizontally = clipped.x != original.x || clipped.width != original.width;
+    let clipped_vertically = clipped.y != original.y || clipped.height != original.height;
+
+    (clipped_horizontally && clipped.width < MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX)
+        || (clipped_vertically && clipped.height < MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX)
+}
+
 fn emit_diagnostic(sink: Option<&DiagnosticsSink>, record: DiagnosticRecord) {
     if let Some(sink) = sink {
         sink(record);
@@ -1889,7 +1909,8 @@ mod tests {
     };
     use taskers_domain::PaneKind;
     use taskers_shell_core::{
-        AttentionRingState, BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec,
+        AttentionRingState, BootstrapModel, Frame, PortalSurfacePlan, SharedCore, ShellDragMode,
+        SurfaceMountSpec,
     };
 
     #[test]
@@ -1977,6 +1998,48 @@ mod tests {
         assert_eq!(
             redacted_browser_url_for_diagnostics("about:blank"),
             "about:blank"
+        );
+    }
+
+    #[test]
+    fn drops_horizontally_clipped_sliver_surfaces() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        let snapshot = core.snapshot();
+        let plan = snapshot.portal.panes[0].clone();
+
+        let clipped = super::clip_to_content(
+            &PortalSurfacePlan {
+                frame: Frame::new(0, 0, 720, plan.frame.height),
+                pane_frame: Frame::new(0, 0, 720, plan.pane_frame.height),
+                ..plan
+            },
+            &Frame::new(680, 0, 200, 1200),
+        );
+
+        assert!(
+            clipped.is_none(),
+            "expected narrow clipped sliver to be skipped"
+        );
+    }
+
+    #[test]
+    fn keeps_reasonably_wide_clipped_surfaces() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        let snapshot = core.snapshot();
+        let plan = snapshot.portal.panes[0].clone();
+
+        let clipped = super::clip_to_content(
+            &PortalSurfacePlan {
+                frame: Frame::new(0, 0, 720, plan.frame.height),
+                pane_frame: Frame::new(0, 0, 720, plan.pane_frame.height),
+                ..plan
+            },
+            &Frame::new(360, 0, 360, 1200),
+        );
+
+        assert!(
+            clipped.is_some(),
+            "expected substantial clipped width to remain renderable"
         );
     }
 }

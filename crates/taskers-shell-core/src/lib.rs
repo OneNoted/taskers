@@ -25,6 +25,9 @@ pub use taskers_domain::{
     WorkspaceWindowTabId,
 };
 
+pub const MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX: i32 = 160;
+pub const MIN_RENDERED_NATIVE_SURFACE_HEIGHT_PX: i32 = 96;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivityId {
     pub notification_id: NotificationId,
@@ -2207,12 +2210,19 @@ impl TaskersCore {
                 first,
                 second,
             } => {
-                let (first_frame, second_frame) = split_frame(
-                    frame,
-                    SplitAxis::from_domain(*axis),
-                    *ratio,
-                    self.metrics.split_gap,
-                );
+                let axis = SplitAxis::from_domain(*axis);
+                let (first_frame, second_frame) =
+                    split_frame(frame, axis, *ratio, self.metrics.split_gap);
+                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                    let active_pane = workspace.active_pane;
+                    let render_first = layout_node_contains_pane(workspace, first, active_pane)
+                        || !layout_node_contains_pane(workspace, second, active_pane);
+                    return if render_first {
+                        self.collect_surface_plans(workspace_id, workspace, first, frame)
+                    } else {
+                        self.collect_surface_plans(workspace_id, workspace, second, frame)
+                    };
+                }
                 let mut plans =
                     self.collect_surface_plans(workspace_id, workspace, first, first_frame);
                 plans.extend(self.collect_surface_plans(
@@ -2266,12 +2276,18 @@ impl TaskersCore {
                 first,
                 second,
             } => {
-                let (first_frame, second_frame) = split_frame(
-                    frame,
-                    SplitAxis::from_domain(*axis),
-                    *ratio,
-                    self.metrics.split_gap,
-                );
+                let axis = SplitAxis::from_domain(*axis);
+                let (first_frame, second_frame) =
+                    split_frame(frame, axis, *ratio, self.metrics.split_gap);
+                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                    let active_pane = workspace.active_pane;
+                    let render_first = first.contains(active_pane) || !second.contains(active_pane);
+                    return if render_first {
+                        self.collect_pane_tab_surface_plans(workspace_id, workspace, first, frame)
+                    } else {
+                        self.collect_pane_tab_surface_plans(workspace_id, workspace, second, frame)
+                    };
+                }
                 let mut plans = self.collect_pane_tab_surface_plans(
                     workspace_id,
                     workspace,
@@ -4521,6 +4537,34 @@ fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, F
     }
 }
 
+fn should_collapse_render_split(frame: Frame, axis: SplitAxis, gap: i32) -> bool {
+    match axis {
+        SplitAxis::Horizontal => {
+            frame.width < (MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX * 2 + gap.max(0))
+        }
+        SplitAxis::Vertical => {
+            frame.height < (MIN_RENDERED_NATIVE_SURFACE_HEIGHT_PX * 2 + gap.max(0))
+        }
+    }
+}
+
+fn layout_node_contains_pane(
+    workspace: &Workspace,
+    node: &taskers_domain::LayoutNode,
+    pane_id: PaneId,
+) -> bool {
+    match node {
+        taskers_domain::LayoutNode::Leaf { leaf_id } => workspace
+            .pane_containers
+            .get(leaf_id)
+            .is_some_and(|container| container.contains_pane(pane_id)),
+        taskers_domain::LayoutNode::Split { first, second, .. } => {
+            layout_node_contains_pane(workspace, first, pane_id)
+                || layout_node_contains_pane(workspace, second, pane_id)
+        }
+    }
+}
+
 fn pane_body_frame(
     frame: Frame,
     metrics: LayoutMetrics,
@@ -5509,12 +5553,12 @@ mod tests {
 
     use super::{
         BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME, Direction,
-        HostCommand, HostEvent, LayoutMetrics, NotificationPreferencesSnapshot, RuntimeCapability,
-        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
-        SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection,
-        default_preview_app_state, default_session_path_for_preview, display_surface_title,
-        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
-        workspace_window_content_frame,
+        HostCommand, HostEvent, LayoutMetrics, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
+        NotificationPreferencesSnapshot, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction,
+        ShellDragMode, ShellSection, SurfaceDragSessionSnapshot, SurfaceMountSpec,
+        WorkspaceDirection, default_preview_app_state, default_session_path_for_preview,
+        display_surface_title, pane_body_frame, pane_shows_tab_strip_for_surface_count,
+        resolved_browser_uri, split_frame, workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -6572,6 +6616,41 @@ mod tests {
             ),
             "expected multi-surface panes to reserve tab-strip height"
         );
+    }
+
+    #[test]
+    fn pathological_horizontal_splits_collapse_to_renderable_portal_panes() {
+        let core = SharedCore::bootstrap(bootstrap());
+        for _ in 0..6 {
+            core.split_with_terminal();
+        }
+
+        let snapshot = core.snapshot();
+        let widths = snapshot
+            .portal
+            .panes
+            .iter()
+            .map(|plan| plan.pane_frame.width)
+            .collect::<Vec<_>>();
+        assert!(
+            snapshot.portal.panes.len() < snapshot.current_workspace.pane_count,
+            "expected tiny split branches to be elided from the rendered portal"
+        );
+        assert!(
+            snapshot
+                .portal
+                .panes
+                .iter()
+                .all(|plan| { plan.pane_frame.width >= MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX }),
+            "unexpected rendered pane widths: {widths:?}"
+        );
+        let active_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == snapshot.current_workspace.active_pane)
+            .expect("active pane should remain renderable");
+        assert!(active_plan.pane_frame.width >= MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX);
     }
 
     #[test]
