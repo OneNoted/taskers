@@ -16,7 +16,7 @@ use std::{
     future::pending,
     io::{self, Write},
     net::TcpListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     rc::Rc,
     sync::{
@@ -48,10 +48,11 @@ use taskers_shell_core::{
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
 use glib::variant::ToVariant;
-use taskers_paths::default_terminal_socket_path;
+use taskers_paths::{TaskersPaths, default_terminal_socket_path};
 
 const APP_ID: &str = taskers_paths::APP_ID;
 const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
+const DEV_DIAGNOSTIC_LOG_NAME: &str = "taskers-gtk.latest.log";
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "taskers")]
@@ -2119,7 +2120,7 @@ enum DiagnosticsTarget {
 
 impl DiagnosticsWriter {
     fn from_cli(cli: &Cli) -> Option<Self> {
-        let target = cli
+        let explicit_target = cli
             .diagnostic_log
             .clone()
             .or_else(|| {
@@ -2127,7 +2128,13 @@ impl DiagnosticsWriter {
                     .ok()
                     .filter(|value| !value.is_empty())
             })
-            .or_else(|| cli.smoke_script.map(|_| "stderr".into()))?;
+            .or_else(|| cli.smoke_script.map(|_| "stderr".into()));
+        let auto_target = explicit_target
+            .is_none()
+            .then(default_dev_diagnostic_log_path)
+            .flatten();
+        let target = explicit_target
+            .or_else(|| auto_target.as_ref().map(|path| path.display().to_string()))?;
 
         if target == "stderr" {
             return Some(Self {
@@ -2135,7 +2142,18 @@ impl DiagnosticsWriter {
             });
         }
 
-        match File::create(PathBuf::from(&target)) {
+        let target_path = PathBuf::from(&target);
+        if let Some(parent) = target_path.parent()
+            && let Err(error) = create_dir_all(parent)
+        {
+            safe_eprintln(format!(
+                "taskers diagnostics log directory failed: {} ({error})",
+                parent.display()
+            ));
+            return None;
+        }
+
+        match File::create(&target_path) {
             Ok(file) => Some(Self {
                 target: DiagnosticsTarget::File(Arc::new(Mutex::new(file))),
             }),
@@ -2144,6 +2162,14 @@ impl DiagnosticsWriter {
                 None
             }
         }
+        .inspect(|_| {
+            if auto_target.as_deref() == Some(target_path.as_path()) {
+                safe_eprintln(format!(
+                    "taskers diagnostics logging to {}",
+                    target_path.display()
+                ));
+            }
+        })
     }
 
     fn sink(&self) -> DiagnosticsSink {
@@ -2166,9 +2192,27 @@ impl DiagnosticsWriter {
     }
 }
 
+fn default_dev_diagnostic_log_path() -> Option<PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    looks_like_dev_install(&current_exe).then(|| {
+        TaskersPaths::detect()
+            .state_dir()
+            .join("diagnostics")
+            .join(DEV_DIAGNOSTIC_LOG_NAME)
+    })
+}
+
+fn looks_like_dev_install(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path.contains("/.cargo/bin/taskers-gtk")
+        || path.contains("/target/debug/taskers-gtk")
+        || path.contains("/target/release/taskers-gtk")
+}
+
 #[cfg(test)]
 mod startup_tests {
-    use super::should_defer_initial_sync;
+    use super::{looks_like_dev_install, should_defer_initial_sync};
+    use std::path::Path;
 
     #[test]
     fn initial_sync_waits_for_real_allocation() {
@@ -2180,5 +2224,26 @@ mod startup_tests {
     #[test]
     fn later_resizes_do_not_get_blocked() {
         assert!(!should_defer_initial_sync((1440, 900), 1, 1));
+    }
+
+    #[test]
+    fn cargo_install_binary_uses_dev_diagnostics() {
+        assert!(looks_like_dev_install(Path::new(
+            "/home/notes/.cargo/bin/taskers-gtk"
+        )));
+    }
+
+    #[test]
+    fn target_build_binary_uses_dev_diagnostics() {
+        assert!(looks_like_dev_install(Path::new(
+            "/home/notes/Projects/taskers/target/debug/taskers-gtk"
+        )));
+    }
+
+    #[test]
+    fn launcher_bundle_binary_does_not_use_dev_diagnostics() {
+        assert!(!looks_like_dev_install(Path::new(
+            "/home/notes/.local/share/taskers/releases/0.4.0/x86_64-unknown-linux-gnu/taskers-gtk"
+        )));
     }
 }
