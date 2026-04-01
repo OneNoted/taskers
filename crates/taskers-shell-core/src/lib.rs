@@ -1161,20 +1161,20 @@ pub struct ResizeHandleSnapshot {
 pub enum ResizeHandleTarget {
     WorkspaceColumnEdge {
         workspace_id: WorkspaceId,
-        workspace_column_id: WorkspaceColumnId,
-        initial_width: i32,
+        column_widths: Vec<(WorkspaceColumnId, i32)>,
+        leading_index: usize,
     },
     WorkspaceWindowBottomEdge {
         workspace_id: WorkspaceId,
-        workspace_window_id: WorkspaceWindowId,
-        initial_height: i32,
+        window_heights: Vec<(WorkspaceWindowId, i32)>,
+        upper_index: usize,
     },
     WorkspaceWindowCorner {
         workspace_id: WorkspaceId,
-        workspace_column_id: WorkspaceColumnId,
-        initial_width: i32,
-        workspace_window_id: WorkspaceWindowId,
-        initial_height: i32,
+        column_widths: Vec<(WorkspaceColumnId, i32)>,
+        leading_index: usize,
+        window_heights: Vec<(WorkspaceWindowId, i32)>,
+        upper_index: usize,
     },
     WorkspaceWindowSplit {
         workspace_id: WorkspaceId,
@@ -1197,22 +1197,18 @@ pub enum ResizeHandleTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResizePreview {
-    WorkspaceColumnWidth {
+    WorkspaceColumnWidths {
         workspace_id: WorkspaceId,
-        workspace_column_id: WorkspaceColumnId,
-        width: i32,
+        widths: Vec<(WorkspaceColumnId, i32)>,
     },
-    WorkspaceWindowHeight {
+    WorkspaceWindowHeights {
         workspace_id: WorkspaceId,
-        workspace_window_id: WorkspaceWindowId,
-        height: i32,
+        heights: Vec<(WorkspaceWindowId, i32)>,
     },
     WorkspaceWindowCorner {
         workspace_id: WorkspaceId,
-        workspace_column_id: WorkspaceColumnId,
-        width: i32,
-        workspace_window_id: WorkspaceWindowId,
-        height: i32,
+        column_widths: Vec<(WorkspaceColumnId, i32)>,
+        window_heights: Vec<(WorkspaceWindowId, i32)>,
     },
     WorkspaceWindowSplitRatio {
         workspace_id: WorkspaceId,
@@ -1757,40 +1753,49 @@ impl TaskersCore {
         };
 
         let committed = match preview {
-            ResizePreview::WorkspaceColumnWidth {
+            ResizePreview::WorkspaceColumnWidths {
                 workspace_id,
-                workspace_column_id,
-                width,
-            } => self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
-                workspace_id,
-                workspace_column_id,
-                width,
-            }),
-            ResizePreview::WorkspaceWindowHeight {
-                workspace_id,
-                workspace_window_id,
-                height,
-            } => self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
-                workspace_id,
-                workspace_window_id,
-                height,
-            }),
-            ResizePreview::WorkspaceWindowCorner {
-                workspace_id,
-                workspace_column_id,
-                width,
-                workspace_window_id,
-                height,
-            } => {
+                widths,
+            } => widths.into_iter().all(|(workspace_column_id, width)| {
                 self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
                     workspace_id,
                     workspace_column_id,
                     width,
-                }) && self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                })
+            }),
+            ResizePreview::WorkspaceWindowHeights {
+                workspace_id,
+                heights,
+            } => heights.into_iter().all(|(workspace_window_id, height)| {
+                self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
                     workspace_id,
                     workspace_window_id,
                     height,
                 })
+            }),
+            ResizePreview::WorkspaceWindowCorner {
+                workspace_id,
+                column_widths,
+                window_heights,
+            } => {
+                column_widths
+                    .into_iter()
+                    .all(|(workspace_column_id, width)| {
+                        self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+                            workspace_id,
+                            workspace_column_id,
+                            width,
+                        })
+                    })
+                    && window_heights
+                        .into_iter()
+                        .all(|(workspace_window_id, height)| {
+                            self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                                workspace_id,
+                                workspace_window_id,
+                                height,
+                            })
+                        })
             }
             ResizePreview::WorkspaceWindowSplitRatio {
                 workspace_id,
@@ -2527,6 +2532,16 @@ impl TaskersCore {
     ) -> Vec<ResizeHandleSnapshot> {
         let mut handles = Vec::new();
         let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
+        let column_widths = ordered_columns
+            .iter()
+            .filter_map(|column| {
+                column.window_order.iter().find_map(|window_id| {
+                    window_frames
+                        .get(window_id)
+                        .map(|(_, frame)| (column.id, frame.width))
+                })
+            })
+            .collect::<Vec<_>>();
 
         for (column_index, column) in ordered_columns.iter().enumerate() {
             let window_ids = column
@@ -2534,6 +2549,14 @@ impl TaskersCore {
                 .iter()
                 .copied()
                 .filter(|window_id| workspace.windows.contains_key(window_id))
+                .collect::<Vec<_>>();
+            let window_heights = window_ids
+                .iter()
+                .filter_map(|window_id| {
+                    window_frames
+                        .get(window_id)
+                        .map(|(_, frame)| (*window_id, frame.height))
+                })
                 .collect::<Vec<_>>();
             let has_right_neighbor = column_index + 1 < ordered_columns.len();
 
@@ -2553,8 +2576,8 @@ impl TaskersCore {
                         cursor: ResizeHandleCursor::EastWest,
                         target: ResizeHandleTarget::WorkspaceColumnEdge {
                             workspace_id,
-                            workspace_column_id: column.id,
-                            initial_width: column.width,
+                            column_widths: column_widths.clone(),
+                            leading_index: column_index,
                         },
                     });
                 }
@@ -2566,8 +2589,8 @@ impl TaskersCore {
                         cursor: ResizeHandleCursor::NorthSouth,
                         target: ResizeHandleTarget::WorkspaceWindowBottomEdge {
                             workspace_id,
-                            workspace_window_id: window.id,
-                            initial_height: window.height,
+                            window_heights: window_heights.clone(),
+                            upper_index: window_index,
                         },
                     });
                 }
@@ -2579,10 +2602,10 @@ impl TaskersCore {
                         cursor: ResizeHandleCursor::SouthEast,
                         target: ResizeHandleTarget::WorkspaceWindowCorner {
                             workspace_id,
-                            workspace_column_id: column.id,
-                            initial_width: column.width,
-                            workspace_window_id: window.id,
-                            initial_height: window.height,
+                            column_widths: column_widths.clone(),
+                            leading_index: column_index,
+                            window_heights: window_heights.clone(),
+                            upper_index: window_index,
                         },
                     });
                 }
@@ -4538,29 +4561,37 @@ impl TaskersCore {
 
 fn apply_resize_preview_to_model(model: &mut AppModel, preview: &ResizePreview) {
     match preview {
-        ResizePreview::WorkspaceColumnWidth {
+        ResizePreview::WorkspaceColumnWidths {
             workspace_id,
-            workspace_column_id,
-            width,
+            widths,
         } => {
-            let _ = model.set_workspace_column_width(*workspace_id, *workspace_column_id, *width);
+            for (workspace_column_id, width) in widths {
+                let _ =
+                    model.set_workspace_column_width(*workspace_id, *workspace_column_id, *width);
+            }
         }
-        ResizePreview::WorkspaceWindowHeight {
+        ResizePreview::WorkspaceWindowHeights {
             workspace_id,
-            workspace_window_id,
-            height,
+            heights,
         } => {
-            let _ = model.set_workspace_window_height(*workspace_id, *workspace_window_id, *height);
+            for (workspace_window_id, height) in heights {
+                let _ =
+                    model.set_workspace_window_height(*workspace_id, *workspace_window_id, *height);
+            }
         }
         ResizePreview::WorkspaceWindowCorner {
             workspace_id,
-            workspace_column_id,
-            width,
-            workspace_window_id,
-            height,
+            column_widths,
+            window_heights,
         } => {
-            let _ = model.set_workspace_column_width(*workspace_id, *workspace_column_id, *width);
-            let _ = model.set_workspace_window_height(*workspace_id, *workspace_window_id, *height);
+            for (workspace_column_id, width) in column_widths {
+                let _ =
+                    model.set_workspace_column_width(*workspace_id, *workspace_column_id, *width);
+            }
+            for (workspace_window_id, height) in window_heights {
+                let _ =
+                    model.set_workspace_window_height(*workspace_id, *workspace_window_id, *height);
+            }
         }
         ResizePreview::WorkspaceWindowSplitRatio {
             workspace_id,
@@ -7186,14 +7217,20 @@ mod tests {
 
         let snapshot = core.snapshot();
         let workspace_id = snapshot.current_workspace.id;
-        let column_id = snapshot.current_workspace.columns[0].id;
-        let original_width = snapshot.current_workspace.columns[0].width;
+        let mut widths = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, column.width))
+            .collect::<Vec<_>>();
+        let original_width = widths[0].1;
+        widths[0].1 += 180;
+        widths[1].1 -= 180;
 
         core.dispatch_shell_action(ShellAction::PreviewResize {
-            preview: ResizePreview::WorkspaceColumnWidth {
+            preview: ResizePreview::WorkspaceColumnWidths {
                 workspace_id,
-                workspace_column_id: column_id,
-                width: original_width + 180,
+                widths,
             },
         });
 
@@ -7240,19 +7277,40 @@ mod tests {
             .get(&top_left_column_id)
             .expect("column")
             .width;
-        let height_before = workspace_before
+        let mut column_widths = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, column.width))
+            .collect::<Vec<_>>();
+        let left_column_index = column_widths
+            .iter()
+            .position(|(column_id, _)| *column_id == top_left_column_id)
+            .expect("left column index");
+        column_widths[left_column_index].1 += 120;
+        column_widths[left_column_index + 1].1 -= 120;
+        let mut window_heights = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .find(|column| column.id == top_left_column_id)
+            .expect("left column")
             .windows
-            .get(&top_left_window_id)
-            .expect("window")
-            .height;
+            .iter()
+            .map(|window| (window.id, window.frame.height))
+            .collect::<Vec<_>>();
+        let upper_window_index = window_heights
+            .iter()
+            .position(|(window_id, _)| *window_id == top_left_window_id)
+            .expect("upper window index");
+        window_heights[upper_window_index].1 += 80;
+        window_heights[upper_window_index + 1].1 -= 80;
 
         core.dispatch_shell_action(ShellAction::PreviewResize {
             preview: ResizePreview::WorkspaceWindowCorner {
                 workspace_id,
-                workspace_column_id: top_left_column_id,
-                width: column_before + 120,
-                workspace_window_id: top_left_window_id,
-                height: height_before + 80,
+                column_widths,
+                window_heights,
             },
         });
         core.dispatch_shell_action(ShellAction::CommitResizePreview);
@@ -7276,7 +7334,16 @@ mod tests {
                 .get(&top_left_window_id)
                 .expect("window")
                 .height,
-            height_before + 80
+            snapshot
+                .current_workspace
+                .columns
+                .iter()
+                .find(|column| column.id == top_left_column_id)
+                .expect("left column")
+                .windows[0]
+                .frame
+                .height
+                + 80
         );
     }
 
@@ -7380,12 +7447,24 @@ mod tests {
         let workspace_id = before.current_workspace.id;
         let left_window = window_snapshot(&before, left_window_id);
         let before_width = left_window.frame.width;
+        let mut column_widths = before
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.id,
+                    column.windows.first().expect("column window").frame.width,
+                )
+            })
+            .collect::<Vec<_>>();
+        column_widths[1].1 += column_widths[0].1 - taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH;
+        column_widths[0].1 = taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH;
 
         core.dispatch_shell_action(ShellAction::PreviewResize {
-            preview: ResizePreview::WorkspaceColumnWidth {
+            preview: ResizePreview::WorkspaceColumnWidths {
                 workspace_id,
-                workspace_column_id: left_window.column_id,
-                width: taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH,
+                widths: column_widths,
             },
         });
 
