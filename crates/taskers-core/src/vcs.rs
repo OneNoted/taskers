@@ -286,15 +286,7 @@ impl VcsService {
         );
         let diff_text = diff_path
             .as_deref()
-            .map(|path| {
-                run_command(
-                    &target.repo_root,
-                    "jj",
-                    &["diff", "--color=never", "--", path],
-                )
-                .map(|output| trim_output(&output.stdout, &output.stderr))
-            })
-            .transpose()?;
+            .map(|path| jj_diff_preview(&target.repo_root, path));
         let current_bookmark = current.bookmarks.first().cloned();
         let pull_request = github_pull_request(&target.repo_root, current_bookmark.as_deref())?;
         Ok(VcsSnapshot {
@@ -603,6 +595,12 @@ fn git_diff_preview(repo_root: &Path, path: &str) -> Result<String> {
     Ok(combined)
 }
 
+fn jj_diff_preview(repo_root: &Path, path: &str) -> String {
+    run_command(repo_root, "jj", &["diff", "--color=never", "--", path])
+        .map(|output| trim_output(&output.stdout, &output.stderr))
+        .unwrap_or_default()
+}
+
 fn parse_jj_current(
     change_id_raw: &str,
     description_raw: &str,
@@ -718,7 +716,9 @@ fn command_exists(program: &str) -> bool {
 mod tests {
     use std::fs;
 
-    use super::{parse_git_status, parse_jj_bookmarks, parse_jj_current, resolve_repo_root};
+    use super::{
+        jj_diff_preview, parse_git_status, parse_jj_bookmarks, parse_jj_current, resolve_repo_root,
+    };
     use taskers_control::VcsFileStatus;
     use taskers_control::VcsMode;
     use tempfile::TempDir;
@@ -804,5 +804,11 @@ mod tests {
         let (resolved_root, mode) = resolve_repo_root(&cwd).expect("resolve repo root");
         assert_eq!(resolved_root, git_root);
         assert_eq!(mode, VcsMode::Git);
+    }
+
+    #[test]
+    fn jj_diff_preview_returns_empty_when_preview_fails() {
+        let temp = TempDir::new().expect("tempdir");
+        assert_eq!(jj_diff_preview(temp.path(), "missing.txt"), "");
     }
 }
