@@ -492,6 +492,14 @@ struct ResizeHandleOverlay {
     split_gap: Rc<Cell<i32>>,
 }
 
+#[derive(Clone, Copy)]
+struct DragAnchor {
+    start_abs_x: i32,
+    start_abs_y: i32,
+    pointer_offset_x: i32,
+    pointer_offset_y: i32,
+}
+
 #[derive(Clone)]
 pub struct BrowserSurfaceHandle {
     surface_id: SurfaceId,
@@ -1366,6 +1374,7 @@ impl ResizeHandleOverlay {
         let split_gap_cell = Rc::new(Cell::new(split_gap));
         let active_target = Rc::new(RefCell::new(None::<taskers_core::ResizeHandleTarget>));
         let active_split_gap = Rc::new(Cell::new(split_gap));
+        let drag_anchor = Rc::new(Cell::new(None::<DragAnchor>));
 
         let drag = GestureDrag::new();
         let active_widget = widget.clone();
@@ -1373,12 +1382,21 @@ impl ResizeHandleOverlay {
         let target_for_begin = target.clone();
         let split_gap_for_begin = split_gap_cell.clone();
         let active_split_gap_for_begin = active_split_gap.clone();
+        let drag_anchor_for_begin = drag_anchor.clone();
         let begin_diagnostics = diagnostics.clone();
         let begin_id = handle.id.clone();
-        drag.connect_drag_begin(move |_, _, _| {
+        drag.connect_drag_begin(move |_, start_x, start_y| {
             active_widget.add_css_class("resize-handle-active");
             *active_target_for_begin.borrow_mut() = Some(target_for_begin.borrow().clone());
             active_split_gap_for_begin.set(split_gap_for_begin.get());
+            let pointer_offset_x = start_x.round() as i32;
+            let pointer_offset_y = start_y.round() as i32;
+            drag_anchor_for_begin.set(Some(DragAnchor {
+                start_abs_x: active_widget.margin_start() + pointer_offset_x,
+                start_abs_y: active_widget.margin_top() + pointer_offset_y,
+                pointer_offset_x,
+                pointer_offset_y,
+            }));
             emit_diagnostic(
                 begin_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -1391,11 +1409,17 @@ impl ResizeHandleOverlay {
 
         let preview_target = active_target.clone();
         let preview_split_gap = active_split_gap.clone();
+        let preview_widget = widget.clone();
+        let preview_anchor = drag_anchor.clone();
         let preview_sink = shell_action_sink.clone();
         drag.connect_drag_update(move |_, dx, dy| {
             let Some(target) = preview_target.borrow().as_ref().cloned() else {
                 return;
             };
+            let Some(anchor) = preview_anchor.get() else {
+                return;
+            };
+            let (dx, dy) = corrected_drag_delta(&preview_widget, anchor, dx, dy);
             if let Some(preview) = preview_for_drag(&target, preview_split_gap.get(), dx, dy) {
                 (preview_sink)(taskers_core::ShellAction::PreviewResize { preview });
             }
@@ -1404,16 +1428,21 @@ impl ResizeHandleOverlay {
         let end_widget = widget.clone();
         let end_target = active_target;
         let end_split_gap = active_split_gap;
+        let end_anchor = drag_anchor;
         let end_sink = shell_action_sink;
         let end_diagnostics = diagnostics;
         let end_id = handle.id.clone();
         drag.connect_drag_end(move |_, dx, dy| {
             end_widget.remove_css_class("resize-handle-active");
+            let anchor = end_anchor.take();
             let active_target = end_target.borrow_mut().take();
             let Some(target) = active_target else {
                 (end_sink)(taskers_core::ShellAction::CancelResizePreview);
                 return;
             };
+            let (dx, dy) = anchor
+                .map(|anchor| corrected_drag_delta(&end_widget, anchor, dx, dy))
+                .unwrap_or((dx, dy));
             let preview = preview_for_drag(&target, end_split_gap.get(), dx, dy);
             emit_diagnostic(
                 end_diagnostics.as_ref(),
@@ -2418,6 +2447,15 @@ fn resize_track_pair<Id: Copy>(
     next[leading_index].1 = leading + clamped_delta;
     next[leading_index + 1].1 = trailing - clamped_delta;
     Some(next)
+}
+
+fn corrected_drag_delta(widget: &GtkBox, anchor: DragAnchor, dx: f64, dy: f64) -> (f64, f64) {
+    let pointer_abs_x = widget.margin_start() + anchor.pointer_offset_x + dx.round() as i32;
+    let pointer_abs_y = widget.margin_top() + anchor.pointer_offset_y + dy.round() as i32;
+    (
+        f64::from(pointer_abs_x - anchor.start_abs_x),
+        f64::from(pointer_abs_y - anchor.start_abs_y),
+    )
 }
 
 fn split_ratio_preview(
