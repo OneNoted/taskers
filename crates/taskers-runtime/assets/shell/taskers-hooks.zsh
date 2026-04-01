@@ -1,6 +1,50 @@
 [[ -n "${TASKERS_HOOKS_ZSH_LOADED:-}" ]] && return 0
 export TASKERS_HOOKS_ZSH_LOADED=1
 
+typeset -g TASKERS_OSC133_EXECUTING=0
+typeset -g TASKERS_OSC133_MARK_A=$'%{\e]133;A;redraw=1;cl=line\a%}'
+typeset -g TASKERS_OSC133_MARK_A_SECONDARY=$'%{\e]133;A;k=s\a%}'
+typeset -g TASKERS_OSC133_MARK_B=$'%{\e]133;B\a%}'
+
+taskers__osc133_enabled() {
+  taskers__context_tty_matches
+}
+
+taskers__osc133_mark_prompt() {
+  taskers__osc133_enabled || return 0
+  [[ -o prompt_percent ]] || return 0
+
+  [[ $PS1 == *$TASKERS_OSC133_MARK_A* ]] || PS1=${TASKERS_OSC133_MARK_A}${PS1}
+  [[ $PS1 == *$TASKERS_OSC133_MARK_B* ]] || PS1=${PS1}${TASKERS_OSC133_MARK_B}
+
+  if [[ $PS1 == ${TASKERS_OSC133_MARK_A}$'\n'* ]]; then
+    local rest=${PS1#${TASKERS_OSC133_MARK_A}$'\n'}
+    if [[ $rest == *$'\n'* ]]; then
+      PS1=${TASKERS_OSC133_MARK_A}$'\n'${rest//$'\n'/$'\n'${TASKERS_OSC133_MARK_A_SECONDARY}}
+    fi
+  elif [[ $PS1 == *$'\n'* ]]; then
+    PS1=${PS1//$'\n'/$'\n'${TASKERS_OSC133_MARK_A_SECONDARY}}
+  fi
+
+  [[ $PS2 == *$TASKERS_OSC133_MARK_A_SECONDARY* ]] || PS2=${TASKERS_OSC133_MARK_A_SECONDARY}${PS2}
+  [[ $PS2 == *$TASKERS_OSC133_MARK_B* ]] || PS2=${PS2}${TASKERS_OSC133_MARK_B}
+}
+
+taskers__osc133_unmark_prompt() {
+  [[ -o prompt_percent ]] || return 0
+  PS1=${PS1//$TASKERS_OSC133_MARK_A/}
+  PS1=${PS1//$TASKERS_OSC133_MARK_A_SECONDARY/}
+  PS1=${PS1//$TASKERS_OSC133_MARK_B/}
+  PS2=${PS2//$TASKERS_OSC133_MARK_A_SECONDARY/}
+  PS2=${PS2//$TASKERS_OSC133_MARK_B/}
+}
+
+taskers__osc133_print() {
+  taskers__osc133_enabled || return 0
+  local payload=$1
+  print -rn -- "${payload}"
+}
+
 taskers__repo_root() {
   command -v git >/dev/null 2>&1 || return 0
   git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true
@@ -203,6 +247,10 @@ taskers__invalidate_metadata_cache() {
 }
 
 taskers__preexec() {
+  taskers__osc133_unmark_prompt
+  taskers__osc133_print $'\e]133;C\a'
+  export TASKERS_OSC133_EXECUTING=1
+
   local agent
   agent=$(taskers__classify_command "$1" || true)
   if [[ -n "$agent" ]]; then
@@ -214,6 +262,13 @@ taskers__preexec() {
 }
 
 taskers__precmd() {
+  local status=$?
+  if [[ "${TASKERS_OSC133_EXECUTING:-0}" = "1" ]]; then
+    taskers__osc133_print $'\e]133;D;'"${status}"$'\a'
+    export TASKERS_OSC133_EXECUTING=0
+  fi
+  taskers__osc133_mark_prompt
+
   if [[ -n "${TASKERS_ACTIVE_AGENT_KIND:-}" ]]; then
     unset TASKERS_ACTIVE_AGENT_KIND
     unset TASKERS_ACTIVE_AGENT_COMMAND

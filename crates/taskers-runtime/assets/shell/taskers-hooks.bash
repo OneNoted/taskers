@@ -1,6 +1,45 @@
 [ -n "${TASKERS_HOOKS_BASH_LOADED:-}" ] && return 0
 export TASKERS_HOOKS_BASH_LOADED=1
 
+TASKERS_OSC133_EXECUTING=0
+TASKERS_OSC133_SAVE_PS1=
+TASKERS_OSC133_SAVE_PS2=
+
+taskers__osc133_enabled() {
+  taskers__context_tty_matches
+}
+
+taskers__osc133_mark_prompt() {
+  taskers__osc133_enabled || return 0
+  TASKERS_OSC133_SAVE_PS1=$PS1
+  TASKERS_OSC133_SAVE_PS2=$PS2
+
+  PS1='\[\e]133;A;redraw=1;cl=line\a\]'$PS1'\[\e]133;B\a\]'
+  PS2='\[\e]133;A;k=s\a\]'$PS2'\[\e]133;B\a\]'
+
+  if [[ "${PS1}" == *"\n"* || "${PS1}" == *$'\n'* ]]; then
+    local __taskers_mark=$'\\[\\e]133;A;k=s\\a\\]'
+    PS1="${PS1//$'\n'/$'\n'$__taskers_mark}"
+    PS1="${PS1//\\n/\\n$__taskers_mark}"
+  fi
+}
+
+taskers__osc133_unmark_prompt() {
+  if [ -n "${TASKERS_OSC133_SAVE_PS1:-}" ]; then
+    PS1=$TASKERS_OSC133_SAVE_PS1
+    TASKERS_OSC133_SAVE_PS1=
+  fi
+  if [ -n "${TASKERS_OSC133_SAVE_PS2:-}" ]; then
+    PS2=$TASKERS_OSC133_SAVE_PS2
+    TASKERS_OSC133_SAVE_PS2=
+  fi
+}
+
+taskers__osc133_print() {
+  taskers__osc133_enabled || return 0
+  builtin printf '%b' "$1"
+}
+
 taskers__repo_root() {
   command -v git >/dev/null 2>&1 || return 0
   git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true
@@ -224,6 +263,10 @@ taskers__invalidate_metadata_cache() {
 }
 
 taskers__preexec() {
+  taskers__osc133_unmark_prompt
+  taskers__osc133_print '\e]133;C\a'
+  TASKERS_OSC133_EXECUTING=1
+
   local agent
   agent=$(taskers__classify_command "$1" || true)
   if [ -n "$agent" ]; then
@@ -235,6 +278,12 @@ taskers__preexec() {
 }
 
 taskers__precmd() {
+  if [ "${TASKERS_OSC133_EXECUTING:-0}" = "1" ]; then
+    taskers__osc133_print "\e]133;D;$1\a"
+    TASKERS_OSC133_EXECUTING=0
+  fi
+  taskers__osc133_mark_prompt
+
   if [ -n "${TASKERS_ACTIVE_AGENT_KIND:-}" ]; then
     unset TASKERS_ACTIVE_AGENT_KIND
     unset TASKERS_ACTIVE_AGENT_COMMAND
