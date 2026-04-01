@@ -211,12 +211,7 @@ impl VcsService {
             .filter(|cwd| !cwd.trim().is_empty())
             .ok_or_else(|| anyhow!("terminal has no current working directory"))?;
         let cwd = PathBuf::from(cwd);
-        let repo_root = resolve_git_root(&cwd)?;
-        let mode = if repo_root.join(".jj").is_dir() {
-            VcsMode::Jj
-        } else {
-            VcsMode::Git
-        };
+        let (repo_root, mode) = resolve_repo_root(&cwd)?;
         Ok(RepoTarget {
             surface_id,
             cwd,
@@ -366,9 +361,22 @@ fn ensure_non_empty(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_git_root(cwd: &Path) -> Result<PathBuf> {
-    let output = run_command(cwd, "git", &["rev-parse", "--show-toplevel"])?;
-    Ok(PathBuf::from(output.stdout.trim()))
+fn resolve_repo_root(cwd: &Path) -> Result<(PathBuf, VcsMode)> {
+    for ancestor in cwd.ancestors() {
+        let has_jj = ancestor.join(".jj").is_dir();
+        let git_marker = ancestor.join(".git");
+        let has_git = git_marker.is_dir() || git_marker.is_file();
+
+        if has_jj {
+            return Ok((ancestor.to_path_buf(), VcsMode::Jj));
+        }
+
+        if has_git {
+            return Ok((ancestor.to_path_buf(), VcsMode::Git));
+        }
+    }
+
+    bail!("no git or jj repository found from {}", cwd.display())
 }
 
 fn repo_name(repo_root: &Path) -> String {
@@ -674,8 +682,12 @@ fn command_exists(program: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_git_status, parse_jj_bookmarks, parse_jj_current};
+    use std::fs;
+
+    use super::{parse_git_status, parse_jj_bookmarks, parse_jj_current, resolve_repo_root};
     use taskers_control::VcsFileStatus;
+    use taskers_control::VcsMode;
+    use tempfile::TempDir;
 
     #[test]
     fn parses_git_porcelain_v2_changes() {
@@ -709,5 +721,47 @@ mod tests {
         assert_eq!(bookmarks.len(), 2);
         assert!(bookmarks[0].active);
         assert!(bookmarks[1].active);
+    }
+
+    #[test]
+    fn resolves_jj_repo_root_without_git_metadata() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        let cwd = repo_root.join("nested/work");
+        fs::create_dir_all(repo_root.join(".jj")).expect("jj dir");
+        fs::create_dir_all(&cwd).expect("cwd");
+
+        let (resolved_root, mode) = resolve_repo_root(&cwd).expect("resolve repo root");
+        assert_eq!(resolved_root, repo_root);
+        assert_eq!(mode, VcsMode::Jj);
+    }
+
+    #[test]
+    fn prefers_same_root_jj_marker_over_git_marker() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo_root = temp.path().join("repo");
+        let cwd = repo_root.join("nested/work");
+        fs::create_dir_all(repo_root.join(".jj")).expect("jj dir");
+        fs::create_dir_all(repo_root.join(".git")).expect("git dir");
+        fs::create_dir_all(&cwd).expect("cwd");
+
+        let (resolved_root, mode) = resolve_repo_root(&cwd).expect("resolve repo root");
+        assert_eq!(resolved_root, repo_root);
+        assert_eq!(mode, VcsMode::Jj);
+    }
+
+    #[test]
+    fn prefers_nearest_git_marker_over_parent_jj_repo() {
+        let temp = TempDir::new().expect("tempdir");
+        let outer_root = temp.path().join("outer");
+        let git_root = outer_root.join("nested-git");
+        let cwd = git_root.join("src");
+        fs::create_dir_all(outer_root.join(".jj")).expect("outer jj dir");
+        fs::create_dir_all(git_root.join(".git")).expect("git dir");
+        fs::create_dir_all(&cwd).expect("cwd");
+
+        let (resolved_root, mode) = resolve_repo_root(&cwd).expect("resolve repo root");
+        assert_eq!(resolved_root, git_root);
+        assert_eq!(mode, VcsMode::Git);
     }
 }
