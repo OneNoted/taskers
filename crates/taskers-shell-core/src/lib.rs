@@ -6196,6 +6196,7 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::PixelSize;
     use taskers_control::ControlCommand;
     use taskers_core::AppState;
     use taskers_domain::{
@@ -7360,6 +7361,45 @@ mod tests {
         core.dispatch_shell_action(ShellAction::ToggleOverview);
 
         assert!(core.snapshot().resize_handles.is_empty());
+    }
+
+    #[test]
+    fn wide_three_column_workspace_can_shrink_left_column_below_old_limit() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(2048, 900));
+        let left_window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let before = core.snapshot();
+        let workspace_id = before.current_workspace.id;
+        let left_window = window_snapshot(&before, left_window_id);
+        let before_width = left_window.frame.width;
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidth {
+                workspace_id,
+                workspace_column_id: left_window.column_id,
+                width: taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH,
+            },
+        });
+
+        let after = core.snapshot();
+        let after_width = window_snapshot(&after, left_window_id).frame.width;
+
+        assert!(
+            after_width < before_width,
+            "expected left column to keep shrinking in a three-column layout"
+        );
+        assert!(
+            after_width < 720,
+            "expected left column to shrink below the old hard limit"
+        );
     }
 
     #[test]

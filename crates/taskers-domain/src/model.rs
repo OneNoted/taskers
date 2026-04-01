@@ -15,7 +15,7 @@ pub const SESSION_SCHEMA_VERSION: u32 = 7;
 pub const DEFAULT_WORKSPACE_WINDOW_WIDTH: i32 = 1280;
 pub const DEFAULT_WORKSPACE_WINDOW_HEIGHT: i32 = 860;
 pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 10;
-pub const MIN_WORKSPACE_WINDOW_WIDTH: i32 = 720;
+pub const MIN_WORKSPACE_WINDOW_WIDTH: i32 = 480;
 pub const MIN_WORKSPACE_WINDOW_HEIGHT: i32 = 420;
 pub const KEYBOARD_RESIZE_STEP: i32 = 80;
 const WORKSPACE_LOG_RETENTION: usize = 200;
@@ -5130,12 +5130,12 @@ mod tests {
         assert_eq!(workspace.windows.len(), 3);
         assert_eq!(workspace.columns.len(), 2);
         assert_eq!(workspace.active_pane, stacked_pane);
-        assert_eq!(right_column.width, MIN_WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(right_column.width, DEFAULT_WORKSPACE_WINDOW_WIDTH / 2);
         assert_eq!(right_column.window_order.len(), 2);
         assert_ne!(workspace.active_window, first_window_id);
         assert!(workspace.columns.values().any(|column| {
             column.window_order == vec![first_window_id]
-                && column.width == MIN_WORKSPACE_WINDOW_WIDTH
+                && column.width == DEFAULT_WORKSPACE_WINDOW_WIDTH / 2
         }));
         let upper_window_id = right_column.window_order[0];
         assert_eq!(
