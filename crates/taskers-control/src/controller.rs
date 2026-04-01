@@ -398,6 +398,27 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::SetPaneTabSplitRatio {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path,
+                ratio,
+            } => {
+                model.set_pane_tab_split_ratio(
+                    workspace_id,
+                    pane_container_id,
+                    pane_tab_id,
+                    &path,
+                    ratio,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "pane tab split ratio updated".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::UpdatePaneMetadata { pane_id, patch } => {
                 model.update_pane_metadata(pane_id, patch)?;
                 (

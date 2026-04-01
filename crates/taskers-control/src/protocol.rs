@@ -135,6 +135,13 @@ pub enum ControlCommand {
         path: Vec<bool>,
         ratio: u16,
     },
+    SetPaneTabSplitRatio {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
     UpdatePaneMetadata {
         pane_id: PaneId,
         patch: PaneMetadataPatch,

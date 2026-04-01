@@ -491,11 +491,16 @@ fn build_ui_result(
         let core = core.clone();
         move |event| core.apply_host_event(event)
     });
+    let shell_action_sink = Rc::new({
+        let core = core.clone();
+        move |action| core.dispatch_shell_action(action)
+    });
     let diagnostics_sink = diagnostics.as_ref().map(DiagnosticsWriter::sink);
     let host = Rc::new(RefCell::new(TaskersHost::new(
         &shell_view,
         bootstrap.ghostty_host,
         event_sink,
+        shell_action_sink,
         diagnostics_sink,
     )));
     if let Some(bridge_info) = host.borrow().bridge_info() {
@@ -1501,7 +1506,9 @@ fn run_internal_surface_probe(
     ));
 
     let event_sink = Rc::new(|_| {});
-    let mut taskers_host = TaskersHost::new(&shell_view, Some(host), event_sink, None);
+    let shell_action_sink = Rc::new(|_| {});
+    let mut taskers_host =
+        TaskersHost::new(&shell_view, Some(host), event_sink, shell_action_sink, None);
     let host_widget = taskers_host.widget();
     let window = gtk::Window::builder()
         .default_width(GHOSTTY_PROBE_WINDOW_SIZE_PX)

@@ -114,6 +114,8 @@ pub enum DomainError {
     MissingWorkspaceWindow(WorkspaceWindowId),
     #[error("workspace window tab {0} was not found")]
     MissingWorkspaceWindowTab(WorkspaceWindowTabId),
+    #[error("pane container {0} was not found")]
+    MissingPaneContainer(PaneContainerId),
     #[error("pane {0} was not found")]
     MissingPane(PaneId),
     #[error("surface {0} was not found")]
@@ -3006,6 +3008,27 @@ impl AppModel {
             .active_layout_mut()
             .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
         layout.set_ratio_at_path(path, ratio);
+        Ok(())
+    }
+
+    pub fn set_pane_tab_split_ratio(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: &[bool],
+        ratio: u16,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let pane_tab = workspace
+            .pane_containers
+            .get_mut(&pane_container_id)
+            .and_then(|pane_container| pane_container.tabs.get_mut(&pane_tab_id))
+            .ok_or(DomainError::MissingPaneContainer(pane_container_id))?;
+        pane_tab.layout.set_ratio_at_path(path, ratio);
         Ok(())
     }
 
@@ -6166,6 +6189,41 @@ mod tests {
         assert_eq!(*ratio, 440);
         assert_eq!(column.width, DEFAULT_WORKSPACE_WINDOW_WIDTH + 120);
         assert_eq!(window.height, DEFAULT_WORKSPACE_WINDOW_HEIGHT + 90);
+    }
+
+    #[test]
+    fn setting_pane_tab_split_ratio_updates_target_split() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_pane = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.first().map(|(pane_id, _)| *pane_id))
+            .expect("pane");
+        let second_pane = model
+            .split_pane(workspace_id, Some(first_pane), SplitAxis::Horizontal)
+            .expect("split");
+
+        let (pane_container_id, pane_tab_id) = {
+            let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+            let (_window_id, _window_tab_id, pane_container_id, pane_tab_id) =
+                workspace.pane_location(second_pane).expect("pane location");
+            (pane_container_id, pane_tab_id)
+        };
+
+        model
+            .set_pane_tab_split_ratio(workspace_id, pane_container_id, pane_tab_id, &[], 700)
+            .expect("set split ratio");
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let pane_tab = workspace
+            .pane_containers
+            .get(&pane_container_id)
+            .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+            .expect("pane tab");
+        let PaneTabLayoutNode::Split { ratio, .. } = &pane_tab.layout else {
+            panic!("expected split layout");
+        };
+        assert_eq!(*ratio, 700);
     }
 
     #[test]

@@ -3,7 +3,7 @@ mod browser_automation;
 use anyhow::{Result, anyhow};
 use gtk::{
     Align, Box as GtkBox, CssProvider, DrawingArea, EventControllerFocus, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, Orientation, Overflow, Overlay,
+    EventControllerScrollFlags, GestureClick, GestureDrag, Orientation, Overflow, Overlay,
     STYLE_PROVIDER_PRIORITY_APPLICATION, Widget, glib, prelude::*,
 };
 use std::{
@@ -26,12 +26,15 @@ use taskers_core::{
     ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
     TerminalSurfaceCatalogEntry, WorkspaceId,
 };
-use taskers_domain::{BrowserProfileMode, PaneKind};
+use taskers_domain::{
+    BrowserProfileMode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind,
+};
 use taskers_ghostty::{GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor};
 use taskers_shell_core as taskers_core;
 use webkit6::{LoadEvent, NetworkSession, Settings as WebKitSettings, WebView, prelude::*};
 
 pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
+pub type ShellActionSink = Rc<dyn Fn(taskers_core::ShellAction) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
 
 // Very thin viewport-edge slivers have been enough to trip native GTK/Ghostty
@@ -39,6 +42,8 @@ pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>
 // below this size, hide it until more of the pane is actually visible.
 const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 200;
 const MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX: i32 = 120;
+const MIN_RESIZE_SPLIT_RATIO: u16 = 150;
+const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
 const GHOSTTY_BRIDGE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const GHOSTTY_BRIDGE_FATAL_THRESHOLD: Duration = Duration::from_secs(5);
 const GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -467,6 +472,7 @@ fn redacted_browser_url_for_diagnostics(url: &str) -> String {
 pub struct TaskersHost {
     root: Overlay,
     event_sink: HostEventSink,
+    shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
     ghostty_host: Option<GhosttyHost>,
     ghostty_bridge_info: Option<GhosttyBridgeInfo>,
@@ -477,6 +483,13 @@ pub struct TaskersHost {
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
     persistent_browser_session: Option<NetworkSession>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
+    resize_handles: HashMap<String, ResizeHandleOverlay>,
+}
+
+struct ResizeHandleOverlay {
+    widget: GtkBox,
+    target: Rc<RefCell<taskers_core::ResizeHandleTarget>>,
+    split_gap: Rc<Cell<i32>>,
 }
 
 #[derive(Clone)]
@@ -563,6 +576,7 @@ impl TaskersHost {
         shell_widget: &impl IsA<Widget>,
         ghostty_host: Option<GhosttyHost>,
         event_sink: HostEventSink,
+        shell_action_sink: ShellActionSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Self {
         let ghostty_bridge_info = ghostty_host.as_ref().map(GhosttyHost::bridge_info);
@@ -617,6 +631,7 @@ impl TaskersHost {
         Self {
             root,
             event_sink,
+            shell_action_sink,
             diagnostics,
             ghostty_host,
             ghostty_bridge_info,
@@ -627,6 +642,7 @@ impl TaskersHost {
             browser_surfaces: HashMap::new(),
             persistent_browser_session: None,
             terminal_surfaces: HashMap::new(),
+            resize_handles: HashMap::new(),
         }
     }
 
@@ -671,6 +687,7 @@ impl TaskersHost {
                 return Err(error);
             }
         };
+        self.sync_resize_handles(snapshot);
         if terminal_mutated {
             self.skip_next_ghostty_tick = true;
             emit_diagnostic(
@@ -1052,6 +1069,42 @@ impl TaskersHost {
         Ok(())
     }
 
+    fn sync_resize_handles(&mut self, snapshot: &ShellSnapshot) {
+        let desired_ids = snapshot
+            .resize_handles
+            .iter()
+            .map(|handle| handle.id.clone())
+            .collect::<HashSet<_>>();
+        let stale_ids = self
+            .resize_handles
+            .keys()
+            .filter(|id| !desired_ids.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for handle_id in stale_ids {
+            if let Some(handle) = self.resize_handles.remove(&handle_id) {
+                handle.detach(&self.root);
+            }
+        }
+
+        for handle in &snapshot.resize_handles {
+            match self.resize_handles.get_mut(&handle.id) {
+                Some(existing) => existing.sync(&self.root, handle, snapshot.metrics.split_gap),
+                None => {
+                    let overlay = ResizeHandleOverlay::new(
+                        &self.root,
+                        handle,
+                        snapshot.metrics.split_gap,
+                        self.shell_action_sink.clone(),
+                        self.diagnostics.clone(),
+                    );
+                    self.resize_handles.insert(handle.id.clone(), overlay);
+                }
+            }
+        }
+    }
+
     pub fn browser_surface_handle(
         &self,
         surface_id: SurfaceId,
@@ -1291,6 +1344,117 @@ impl TaskersHost {
         }
 
         Ok(terminal_mutated)
+    }
+}
+
+impl ResizeHandleOverlay {
+    fn new(
+        overlay: &Overlay,
+        handle: &taskers_core::ResizeHandleSnapshot,
+        split_gap: i32,
+        shell_action_sink: ShellActionSink,
+        diagnostics: Option<DiagnosticsSink>,
+    ) -> Self {
+        let widget = GtkBox::new(Orientation::Vertical, 0);
+        widget.add_css_class("resize-handle");
+        widget.add_css_class(resize_handle_class(handle.cursor));
+        widget.set_focusable(false);
+        widget.set_can_target(true);
+        widget.set_cursor_from_name(Some(resize_cursor_name(handle.cursor)));
+
+        let target = Rc::new(RefCell::new(handle.target.clone()));
+        let split_gap_cell = Rc::new(Cell::new(split_gap));
+        let active_target = Rc::new(RefCell::new(None::<taskers_core::ResizeHandleTarget>));
+        let active_split_gap = Rc::new(Cell::new(split_gap));
+
+        let drag = GestureDrag::new();
+        let active_widget = widget.clone();
+        let active_target_for_begin = active_target.clone();
+        let target_for_begin = target.clone();
+        let split_gap_for_begin = split_gap_cell.clone();
+        let active_split_gap_for_begin = active_split_gap.clone();
+        let begin_diagnostics = diagnostics.clone();
+        let begin_id = handle.id.clone();
+        drag.connect_drag_begin(move |_, _, _| {
+            active_widget.add_css_class("resize-handle-active");
+            *active_target_for_begin.borrow_mut() = Some(target_for_begin.borrow().clone());
+            active_split_gap_for_begin.set(split_gap_for_begin.get());
+            emit_diagnostic(
+                begin_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    format!("resize drag begin handle={begin_id}"),
+                ),
+            );
+        });
+
+        let preview_target = active_target.clone();
+        let preview_split_gap = active_split_gap.clone();
+        let preview_sink = shell_action_sink.clone();
+        drag.connect_drag_update(move |_, dx, dy| {
+            let Some(target) = preview_target.borrow().as_ref().cloned() else {
+                return;
+            };
+            if let Some(preview) = preview_for_drag(&target, preview_split_gap.get(), dx, dy) {
+                (preview_sink)(taskers_core::ShellAction::PreviewResize { preview });
+            }
+        });
+
+        let end_widget = widget.clone();
+        let end_target = active_target;
+        let end_split_gap = active_split_gap;
+        let end_sink = shell_action_sink;
+        let end_diagnostics = diagnostics;
+        let end_id = handle.id.clone();
+        drag.connect_drag_end(move |_, dx, dy| {
+            end_widget.remove_css_class("resize-handle-active");
+            let active_target = end_target.borrow_mut().take();
+            let Some(target) = active_target else {
+                (end_sink)(taskers_core::ShellAction::CancelResizePreview);
+                return;
+            };
+            let preview = preview_for_drag(&target, end_split_gap.get(), dx, dy);
+            emit_diagnostic(
+                end_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    format!("resize drag end handle={end_id}"),
+                ),
+            );
+            if let Some(preview) = preview {
+                (end_sink)(taskers_core::ShellAction::PreviewResize { preview });
+                (end_sink)(taskers_core::ShellAction::CommitResizePreview);
+            } else {
+                (end_sink)(taskers_core::ShellAction::CancelResizePreview);
+            }
+        });
+        widget.add_controller(drag);
+        position_widget(overlay, widget.upcast_ref(), handle.frame);
+
+        Self {
+            widget,
+            target,
+            split_gap: split_gap_cell,
+        }
+    }
+
+    fn sync(
+        &mut self,
+        overlay: &Overlay,
+        handle: &taskers_core::ResizeHandleSnapshot,
+        split_gap: i32,
+    ) {
+        *self.target.borrow_mut() = handle.target.clone();
+        self.split_gap.set(split_gap);
+        self.widget
+            .set_cursor_from_name(Some(resize_cursor_name(handle.cursor)));
+        position_widget(overlay, self.widget.upcast_ref(), handle.frame);
+    }
+
+    fn detach(self, overlay: &Overlay) {
+        detach_from_overlay(overlay, self.widget.upcast_ref());
     }
 }
 
@@ -2114,6 +2278,142 @@ fn native_surface_classes(kind: PaneKind) -> (&'static str, &'static str) {
     }
 }
 
+fn resize_handle_class(cursor: taskers_core::ResizeHandleCursor) -> &'static str {
+    match cursor {
+        taskers_core::ResizeHandleCursor::EastWest => "resize-handle-ew",
+        taskers_core::ResizeHandleCursor::NorthSouth => "resize-handle-ns",
+        taskers_core::ResizeHandleCursor::SouthEast => "resize-handle-se",
+    }
+}
+
+fn resize_cursor_name(cursor: taskers_core::ResizeHandleCursor) -> &'static str {
+    match cursor {
+        taskers_core::ResizeHandleCursor::EastWest => "ew-resize",
+        taskers_core::ResizeHandleCursor::NorthSouth => "ns-resize",
+        taskers_core::ResizeHandleCursor::SouthEast => "nwse-resize",
+    }
+}
+
+fn preview_for_drag(
+    target: &taskers_core::ResizeHandleTarget,
+    split_gap: i32,
+    dx: f64,
+    dy: f64,
+) -> Option<taskers_core::ResizePreview> {
+    match target {
+        taskers_core::ResizeHandleTarget::WorkspaceColumnEdge {
+            workspace_id,
+            workspace_column_id,
+            initial_width,
+        } => {
+            let next_width = (*initial_width + dx.round() as i32).max(MIN_WORKSPACE_WINDOW_WIDTH);
+            (next_width != *initial_width).then_some(
+                taskers_core::ResizePreview::WorkspaceColumnWidth {
+                    workspace_id: *workspace_id,
+                    workspace_column_id: *workspace_column_id,
+                    width: next_width,
+                },
+            )
+        }
+        taskers_core::ResizeHandleTarget::WorkspaceWindowBottomEdge {
+            workspace_id,
+            workspace_window_id,
+            initial_height,
+        } => {
+            let next_height =
+                (*initial_height + dy.round() as i32).max(MIN_WORKSPACE_WINDOW_HEIGHT);
+            (next_height != *initial_height).then_some(
+                taskers_core::ResizePreview::WorkspaceWindowHeight {
+                    workspace_id: *workspace_id,
+                    workspace_window_id: *workspace_window_id,
+                    height: next_height,
+                },
+            )
+        }
+        taskers_core::ResizeHandleTarget::WorkspaceWindowCorner {
+            workspace_id,
+            workspace_column_id,
+            initial_width,
+            workspace_window_id,
+            initial_height,
+        } => {
+            let next_width = (*initial_width + dx.round() as i32).max(MIN_WORKSPACE_WINDOW_WIDTH);
+            let next_height =
+                (*initial_height + dy.round() as i32).max(MIN_WORKSPACE_WINDOW_HEIGHT);
+            (next_width != *initial_width || next_height != *initial_height).then_some(
+                taskers_core::ResizePreview::WorkspaceWindowCorner {
+                    workspace_id: *workspace_id,
+                    workspace_column_id: *workspace_column_id,
+                    width: next_width,
+                    workspace_window_id: *workspace_window_id,
+                    height: next_height,
+                },
+            )
+        }
+        taskers_core::ResizeHandleTarget::WorkspaceWindowSplit {
+            workspace_id,
+            workspace_window_id,
+            path,
+            axis,
+            parent_frame,
+            initial_ratio,
+        } => split_ratio_preview(*axis, *parent_frame, *initial_ratio, split_gap, dx, dy).map(
+            |ratio| taskers_core::ResizePreview::WorkspaceWindowSplitRatio {
+                workspace_id: *workspace_id,
+                workspace_window_id: *workspace_window_id,
+                path: path.clone(),
+                ratio,
+            },
+        ),
+        taskers_core::ResizeHandleTarget::PaneTabSplit {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            path,
+            axis,
+            parent_frame,
+            initial_ratio,
+        } => split_ratio_preview(*axis, *parent_frame, *initial_ratio, split_gap, dx, dy).map(
+            |ratio| taskers_core::ResizePreview::PaneTabSplitRatio {
+                workspace_id: *workspace_id,
+                pane_container_id: *pane_container_id,
+                pane_tab_id: *pane_tab_id,
+                path: path.clone(),
+                ratio,
+            },
+        ),
+    }
+}
+
+fn split_ratio_preview(
+    axis: taskers_core::SplitAxis,
+    parent_frame: taskers_core::Frame,
+    initial_ratio: u16,
+    split_gap: i32,
+    dx: f64,
+    dy: f64,
+) -> Option<u16> {
+    let delta = match axis {
+        taskers_core::SplitAxis::Horizontal => dx.round() as i32,
+        taskers_core::SplitAxis::Vertical => dy.round() as i32,
+    };
+    if delta == 0 {
+        return None;
+    }
+
+    let usable = match axis {
+        taskers_core::SplitAxis::Horizontal => parent_frame.width.saturating_sub(split_gap),
+        taskers_core::SplitAxis::Vertical => parent_frame.height.saturating_sub(split_gap),
+    }
+    .max(1);
+    let max_first = usable.saturating_sub(1).max(1);
+    let initial_first = (((usable * i32::from(initial_ratio)) / 1000).max(1)).clamp(1, max_first);
+    let next_first = (initial_first + delta).clamp(1, max_first);
+    let next_ratio = ((f64::from(next_first) / f64::from(usable)) * 1000.0).round() as u16;
+    let next_ratio = next_ratio.clamp(MIN_RESIZE_SPLIT_RATIO, MAX_RESIZE_SPLIT_RATIO);
+    (next_ratio != initial_ratio).then_some(next_ratio)
+}
+
 fn native_surface_css(theme_id: &str) -> String {
     format!(
         r#"
@@ -2135,6 +2435,21 @@ fn native_surface_css(theme_id: &str) -> String {
 .native-surface-browser,
 .native-surface-browser-widget {{
   background: transparent;
+}}
+
+.resize-handle {{
+  background: transparent;
+  border: none;
+  min-width: 1px;
+  min-height: 1px;
+}}
+
+.resize-handle:hover {{
+  background: rgba(255, 255, 255, 0.08);
+}}
+
+.resize-handle-active {{
+  background: rgba(255, 255, 255, 0.16);
 }}
  "#,
         terminal_surface_background(theme_id)
@@ -2541,13 +2856,14 @@ fn hidden_frame() -> taskers_core::Frame {
 mod tests {
     use super::{
         browser_plans, host_attention_palette, native_surface_classes, native_surface_css,
-        native_surfaces_interactive, redacted_browser_url_for_diagnostics, terminal_plans,
-        trim_terminal_tail, workspace_pan_delta,
+        native_surfaces_interactive, preview_for_drag, redacted_browser_url_for_diagnostics,
+        terminal_plans, trim_terminal_tail, workspace_pan_delta,
     };
-    use taskers_domain::PaneKind;
+    use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
-        AttentionRingState, BootstrapModel, Frame, PortalSurfacePlan, SharedCore, ShellDragMode,
-        SurfaceMountSpec,
+        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneTabId, PortalSurfacePlan,
+        ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis, SurfaceMountSpec,
+        WorkspaceColumnId, WorkspaceWindowId,
     };
 
     #[test]
@@ -2678,5 +2994,63 @@ mod tests {
             clipped.is_some(),
             "expected substantial clipped width to remain renderable"
         );
+    }
+
+    #[test]
+    fn preview_for_drag_clamps_workspace_window_dimensions() {
+        let workspace_id = taskers_shell_core::WorkspaceId::new();
+        let workspace_column_id = WorkspaceColumnId::new();
+        let workspace_window_id = WorkspaceWindowId::new();
+        let preview = preview_for_drag(
+            &ResizeHandleTarget::WorkspaceWindowCorner {
+                workspace_id,
+                workspace_column_id,
+                initial_width: MIN_WORKSPACE_WINDOW_WIDTH + 120,
+                workspace_window_id,
+                initial_height: MIN_WORKSPACE_WINDOW_HEIGHT + 90,
+            },
+            2,
+            -480.0,
+            -320.0,
+        )
+        .expect("corner preview");
+
+        assert_eq!(
+            preview,
+            ResizePreview::WorkspaceWindowCorner {
+                workspace_id,
+                workspace_column_id,
+                width: MIN_WORKSPACE_WINDOW_WIDTH,
+                workspace_window_id,
+                height: MIN_WORKSPACE_WINDOW_HEIGHT,
+            }
+        );
+    }
+
+    #[test]
+    fn preview_for_drag_generates_pane_split_ratio_updates() {
+        let workspace_id = taskers_shell_core::WorkspaceId::new();
+        let pane_container_id = PaneContainerId::new();
+        let pane_tab_id = PaneTabId::new();
+        let preview = preview_for_drag(
+            &ResizeHandleTarget::PaneTabSplit {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path: vec![false, true],
+                axis: SplitAxis::Horizontal,
+                parent_frame: Frame::new(0, 0, 1000, 600),
+                initial_ratio: 500,
+            },
+            2,
+            120.0,
+            0.0,
+        )
+        .expect("split preview");
+
+        let ResizePreview::PaneTabSplitRatio { ratio, .. } = preview else {
+            panic!("expected pane split preview");
+        };
+        assert!(ratio > 500);
     }
 }

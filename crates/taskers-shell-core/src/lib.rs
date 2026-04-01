@@ -606,6 +606,14 @@ impl Frame {
         }
     }
 
+    pub const fn right(self) -> i32 {
+        self.x + self.width
+    }
+
+    pub const fn bottom(self) -> i32 {
+        self.y + self.height
+    }
+
     pub fn inset_top(self, amount: i32) -> Self {
         let clamped = amount.clamp(0, self.height.saturating_sub(1));
         Self {
@@ -636,6 +644,9 @@ impl Frame {
         }
     }
 }
+
+const RESIZE_HANDLE_THICKNESS_PX: i32 = 12;
+const RESIZE_CORNER_SIZE_PX: i32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayoutMetrics {
@@ -1124,10 +1135,98 @@ pub struct ShellSnapshot {
     pub browser_catalog: Vec<BrowserSurfaceCatalogEntry>,
     pub terminal_catalog: Vec<TerminalSurfaceCatalogEntry>,
     pub portal: SurfacePortalPlan,
+    pub resize_handles: Vec<ResizeHandleSnapshot>,
     pub metrics: LayoutMetrics,
     pub runtime_status: RuntimeStatus,
     pub settings: SettingsSnapshot,
     pub vcs_panel: VcsPanelSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeHandleCursor {
+    EastWest,
+    NorthSouth,
+    SouthEast,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResizeHandleSnapshot {
+    pub id: String,
+    pub frame: Frame,
+    pub cursor: ResizeHandleCursor,
+    pub target: ResizeHandleTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResizeHandleTarget {
+    WorkspaceColumnEdge {
+        workspace_id: WorkspaceId,
+        workspace_column_id: WorkspaceColumnId,
+        initial_width: i32,
+    },
+    WorkspaceWindowBottomEdge {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        initial_height: i32,
+    },
+    WorkspaceWindowCorner {
+        workspace_id: WorkspaceId,
+        workspace_column_id: WorkspaceColumnId,
+        initial_width: i32,
+        workspace_window_id: WorkspaceWindowId,
+        initial_height: i32,
+    },
+    WorkspaceWindowSplit {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: Vec<bool>,
+        axis: SplitAxis,
+        parent_frame: Frame,
+        initial_ratio: u16,
+    },
+    PaneTabSplit {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: Vec<bool>,
+        axis: SplitAxis,
+        parent_frame: Frame,
+        initial_ratio: u16,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResizePreview {
+    WorkspaceColumnWidth {
+        workspace_id: WorkspaceId,
+        workspace_column_id: WorkspaceColumnId,
+        width: i32,
+    },
+    WorkspaceWindowHeight {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        height: i32,
+    },
+    WorkspaceWindowCorner {
+        workspace_id: WorkspaceId,
+        workspace_column_id: WorkspaceColumnId,
+        width: i32,
+        workspace_window_id: WorkspaceWindowId,
+        height: i32,
+    },
+    WorkspaceWindowSplitRatio {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
+    PaneTabSplitRatio {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1295,6 +1394,11 @@ pub enum ShellAction {
     PreviewSurfaceDragWorkspace {
         workspace_id: WorkspaceId,
     },
+    PreviewResize {
+        preview: ResizePreview,
+    },
+    CommitResizePreview,
+    CancelResizePreview,
     CancelSurfaceDrag,
     EndDrag,
     NavigateBrowser {
@@ -1368,6 +1472,7 @@ struct UiState {
     overview_mode: bool,
     drag_mode: ShellDragMode,
     surface_drag: Option<SurfaceDragSessionSnapshot>,
+    resize_preview: Option<ResizePreview>,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     notification_preferences: NotificationPreferencesSnapshot,
@@ -1437,6 +1542,7 @@ impl TaskersCore {
                 overview_mode: false,
                 drag_mode: ShellDragMode::None,
                 surface_drag: None,
+                resize_preview: None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 notification_preferences: bootstrap.notification_preferences,
@@ -1456,8 +1562,16 @@ impl TaskersCore {
         self.revision
     }
 
+    fn model_for_snapshot(&self) -> AppModel {
+        let mut model = self.app_state.snapshot_model();
+        if let Some(preview) = &self.ui.resize_preview {
+            apply_resize_preview_to_model(&mut model, preview);
+        }
+        model
+    }
+
     fn snapshot(&self) -> ShellSnapshot {
-        let model = self.app_state.snapshot_model();
+        let model = self.model_for_snapshot();
         let agents = self.agent_sessions_snapshot(&model);
         let activity = self.activity_snapshot(&model);
         let done_activity = self.done_activity_snapshot(&model);
@@ -1520,6 +1634,14 @@ impl TaskersCore {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let resize_handles = if matches!(self.ui.section, ShellSection::Workspace)
+            && !self.ui.overview_mode
+            && self.ui.drag_mode == ShellDragMode::None
+        {
+            self.resize_handles_snapshot(workspace_id, workspace, &window_frames)
+        } else {
+            Vec::new()
+        };
 
         ShellSnapshot {
             revision: self.revision,
@@ -1578,6 +1700,7 @@ impl TaskersCore {
                     Vec::new()
                 },
             },
+            resize_handles,
             metrics: self.metrics,
             runtime_status: self.runtime_status.clone(),
             settings: self.settings_snapshot(),
@@ -1617,6 +1740,97 @@ impl TaskersCore {
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
             notification_preferences: self.ui.notification_preferences,
         }
+    }
+
+    fn preview_resize(&mut self, preview: ResizePreview) -> bool {
+        if self.ui.resize_preview.as_ref() == Some(&preview) {
+            return false;
+        }
+        self.ui.resize_preview = Some(preview);
+        self.bump_local_revision();
+        true
+    }
+
+    fn commit_resize_preview(&mut self) -> bool {
+        let Some(preview) = self.ui.resize_preview.clone() else {
+            return false;
+        };
+
+        let committed = match preview {
+            ResizePreview::WorkspaceColumnWidth {
+                workspace_id,
+                workspace_column_id,
+                width,
+            } => self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+                workspace_id,
+                workspace_column_id,
+                width,
+            }),
+            ResizePreview::WorkspaceWindowHeight {
+                workspace_id,
+                workspace_window_id,
+                height,
+            } => self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                workspace_id,
+                workspace_window_id,
+                height,
+            }),
+            ResizePreview::WorkspaceWindowCorner {
+                workspace_id,
+                workspace_column_id,
+                width,
+                workspace_window_id,
+                height,
+            } => {
+                self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+                    workspace_id,
+                    workspace_column_id,
+                    width,
+                }) && self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                    workspace_id,
+                    workspace_window_id,
+                    height,
+                })
+            }
+            ResizePreview::WorkspaceWindowSplitRatio {
+                workspace_id,
+                workspace_window_id,
+                path,
+                ratio,
+            } => self.dispatch_control(ControlCommand::SetWindowSplitRatio {
+                workspace_id,
+                workspace_window_id,
+                path,
+                ratio,
+            }),
+            ResizePreview::PaneTabSplitRatio {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path,
+                ratio,
+            } => self.dispatch_control(ControlCommand::SetPaneTabSplitRatio {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path,
+                ratio,
+            }),
+        };
+
+        if committed {
+            self.ui.resize_preview = None;
+        }
+
+        committed
+    }
+
+    fn cancel_resize_preview(&mut self) -> bool {
+        if self.ui.resize_preview.take().is_none() {
+            return false;
+        }
+        self.bump_local_revision();
+        true
     }
 
     fn vcs_panel_snapshot(&self, model: &AppModel) -> VcsPanelSnapshot {
@@ -2305,6 +2519,318 @@ impl TaskersCore {
         }
     }
 
+    fn resize_handles_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace: &Workspace,
+        window_frames: &BTreeMap<WorkspaceWindowId, (WorkspaceColumnId, Frame)>,
+    ) -> Vec<ResizeHandleSnapshot> {
+        let mut handles = Vec::new();
+        let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
+
+        for (column_index, column) in ordered_columns.iter().enumerate() {
+            let window_ids = column
+                .window_order
+                .iter()
+                .copied()
+                .filter(|window_id| workspace.windows.contains_key(window_id))
+                .collect::<Vec<_>>();
+            let has_right_neighbor = column_index + 1 < ordered_columns.len();
+
+            for (window_index, window_id) in window_ids.iter().enumerate() {
+                let Some(window) = workspace.windows.get(window_id) else {
+                    continue;
+                };
+                let Some((_, frame)) = window_frames.get(window_id) else {
+                    continue;
+                };
+                let has_bottom_neighbor = window_index + 1 < window_ids.len();
+
+                if has_right_neighbor {
+                    handles.push(ResizeHandleSnapshot {
+                        id: format!("workspace-column-edge-{}-{}", column.id, window.id),
+                        frame: workspace_window_edge_handle_frame(*frame, true),
+                        cursor: ResizeHandleCursor::EastWest,
+                        target: ResizeHandleTarget::WorkspaceColumnEdge {
+                            workspace_id,
+                            workspace_column_id: column.id,
+                            initial_width: column.width,
+                        },
+                    });
+                }
+
+                if has_bottom_neighbor {
+                    handles.push(ResizeHandleSnapshot {
+                        id: format!("workspace-window-bottom-{}", window.id),
+                        frame: workspace_window_edge_handle_frame(*frame, false),
+                        cursor: ResizeHandleCursor::NorthSouth,
+                        target: ResizeHandleTarget::WorkspaceWindowBottomEdge {
+                            workspace_id,
+                            workspace_window_id: window.id,
+                            initial_height: window.height,
+                        },
+                    });
+                }
+
+                if has_right_neighbor && has_bottom_neighbor {
+                    handles.push(ResizeHandleSnapshot {
+                        id: format!("workspace-window-corner-{}", window.id),
+                        frame: workspace_window_corner_handle_frame(*frame),
+                        cursor: ResizeHandleCursor::SouthEast,
+                        target: ResizeHandleTarget::WorkspaceWindowCorner {
+                            workspace_id,
+                            workspace_column_id: column.id,
+                            initial_width: column.width,
+                            workspace_window_id: window.id,
+                            initial_height: window.height,
+                        },
+                    });
+                }
+
+                let Some(layout) = window.active_layout() else {
+                    continue;
+                };
+                let mut path = Vec::new();
+                self.collect_window_split_resize_handles(
+                    workspace_id,
+                    workspace,
+                    window.id,
+                    layout,
+                    workspace_window_content_frame(*frame, self.metrics),
+                    window
+                        .active_pane()
+                        .expect("workspace window should have an active pane"),
+                    &mut path,
+                    &mut handles,
+                );
+            }
+        }
+
+        handles
+    }
+
+    fn collect_window_split_resize_handles(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace: &Workspace,
+        workspace_window_id: WorkspaceWindowId,
+        node: &taskers_domain::LayoutNode,
+        frame: Frame,
+        active_pane: PaneId,
+        path: &mut Vec<bool>,
+        handles: &mut Vec<ResizeHandleSnapshot>,
+    ) {
+        match node {
+            taskers_domain::LayoutNode::Leaf { leaf_id } => {
+                let Some(pane_container) = workspace.pane_containers.get(leaf_id) else {
+                    return;
+                };
+                let Some(pane_tab) = pane_container.active_tab_record() else {
+                    return;
+                };
+                let mut pane_path = Vec::new();
+                self.collect_pane_split_resize_handles(
+                    workspace_id,
+                    pane_container.id,
+                    pane_tab.id,
+                    &pane_tab.layout,
+                    pane_container_content_frame(frame, self.metrics),
+                    pane_tab.active_pane,
+                    &mut pane_path,
+                    handles,
+                );
+            }
+            taskers_domain::LayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let axis = SplitAxis::from_domain(*axis);
+                let (first_frame, second_frame) =
+                    split_frame(frame, axis, *ratio, self.metrics.split_gap);
+                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                    let render_first = layout_node_contains_pane(workspace, first, active_pane)
+                        || !layout_node_contains_pane(workspace, second, active_pane);
+                    if render_first {
+                        path.push(false);
+                        self.collect_window_split_resize_handles(
+                            workspace_id,
+                            workspace,
+                            workspace_window_id,
+                            first,
+                            frame,
+                            active_pane,
+                            path,
+                            handles,
+                        );
+                        path.pop();
+                    } else {
+                        path.push(true);
+                        self.collect_window_split_resize_handles(
+                            workspace_id,
+                            workspace,
+                            workspace_window_id,
+                            second,
+                            frame,
+                            active_pane,
+                            path,
+                            handles,
+                        );
+                        path.pop();
+                    }
+                    return;
+                }
+
+                handles.push(ResizeHandleSnapshot {
+                    id: format!(
+                        "workspace-window-split-{}-{}",
+                        workspace_window_id,
+                        resize_path_id(path)
+                    ),
+                    frame: split_resize_handle_frame(frame, axis, *ratio, self.metrics.split_gap),
+                    cursor: split_resize_cursor(axis),
+                    target: ResizeHandleTarget::WorkspaceWindowSplit {
+                        workspace_id,
+                        workspace_window_id,
+                        path: path.clone(),
+                        axis,
+                        parent_frame: frame,
+                        initial_ratio: *ratio,
+                    },
+                });
+
+                path.push(false);
+                self.collect_window_split_resize_handles(
+                    workspace_id,
+                    workspace,
+                    workspace_window_id,
+                    first,
+                    first_frame,
+                    active_pane,
+                    path,
+                    handles,
+                );
+                path.pop();
+
+                path.push(true);
+                self.collect_window_split_resize_handles(
+                    workspace_id,
+                    workspace,
+                    workspace_window_id,
+                    second,
+                    second_frame,
+                    active_pane,
+                    path,
+                    handles,
+                );
+                path.pop();
+            }
+        }
+    }
+
+    fn collect_pane_split_resize_handles(
+        &self,
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        node: &PaneTabLayoutNode,
+        frame: Frame,
+        active_pane: PaneId,
+        path: &mut Vec<bool>,
+        handles: &mut Vec<ResizeHandleSnapshot>,
+    ) {
+        let PaneTabLayoutNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = node
+        else {
+            return;
+        };
+
+        let axis = SplitAxis::from_domain(*axis);
+        let (first_frame, second_frame) = split_frame(frame, axis, *ratio, self.metrics.split_gap);
+        if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+            let render_first = first.contains(active_pane) || !second.contains(active_pane);
+            if render_first {
+                path.push(false);
+                self.collect_pane_split_resize_handles(
+                    workspace_id,
+                    pane_container_id,
+                    pane_tab_id,
+                    first,
+                    frame,
+                    active_pane,
+                    path,
+                    handles,
+                );
+                path.pop();
+            } else {
+                path.push(true);
+                self.collect_pane_split_resize_handles(
+                    workspace_id,
+                    pane_container_id,
+                    pane_tab_id,
+                    second,
+                    frame,
+                    active_pane,
+                    path,
+                    handles,
+                );
+                path.pop();
+            }
+            return;
+        }
+
+        handles.push(ResizeHandleSnapshot {
+            id: format!(
+                "pane-tab-split-{}-{}-{}",
+                pane_container_id,
+                pane_tab_id,
+                resize_path_id(path)
+            ),
+            frame: split_resize_handle_frame(frame, axis, *ratio, self.metrics.split_gap),
+            cursor: split_resize_cursor(axis),
+            target: ResizeHandleTarget::PaneTabSplit {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path: path.clone(),
+                axis,
+                parent_frame: frame,
+                initial_ratio: *ratio,
+            },
+        });
+
+        path.push(false);
+        self.collect_pane_split_resize_handles(
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            first,
+            first_frame,
+            active_pane,
+            path,
+            handles,
+        );
+        path.pop();
+
+        path.push(true);
+        self.collect_pane_split_resize_handles(
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            second,
+            second_frame,
+            active_pane,
+            path,
+            handles,
+        );
+        path.pop();
+    }
+
     fn mount_spec_for_active_surface(
         &self,
         workspace_id: WorkspaceId,
@@ -2391,11 +2917,13 @@ impl TaskersCore {
                 if self.ui.section == section {
                     return false;
                 }
+                self.ui.resize_preview = None;
                 self.ui.section = section;
                 self.bump_local_revision();
                 true
             }
             ShellAction::ToggleOverview => {
+                self.ui.resize_preview = None;
                 self.ui.overview_mode = !self.ui.overview_mode;
                 self.bump_local_revision();
                 true
@@ -2533,6 +3061,9 @@ impl TaskersCore {
             ShellAction::PreviewSurfaceDragWorkspace { workspace_id } => {
                 self.preview_surface_drag_workspace(workspace_id)
             }
+            ShellAction::PreviewResize { preview } => self.preview_resize(preview),
+            ShellAction::CommitResizePreview => self.commit_resize_preview(),
+            ShellAction::CancelResizePreview => self.cancel_resize_preview(),
             ShellAction::CancelSurfaceDrag => self.clear_surface_drag(true),
             ShellAction::EndDrag => self.clear_surface_drag(false),
             ShellAction::NavigateBrowser { surface_id, url } => {
@@ -4003,6 +4534,130 @@ impl TaskersCore {
     fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         self.host_commands.drain(..).collect()
     }
+}
+
+fn apply_resize_preview_to_model(model: &mut AppModel, preview: &ResizePreview) {
+    match preview {
+        ResizePreview::WorkspaceColumnWidth {
+            workspace_id,
+            workspace_column_id,
+            width,
+        } => {
+            let _ = model.set_workspace_column_width(*workspace_id, *workspace_column_id, *width);
+        }
+        ResizePreview::WorkspaceWindowHeight {
+            workspace_id,
+            workspace_window_id,
+            height,
+        } => {
+            let _ = model.set_workspace_window_height(*workspace_id, *workspace_window_id, *height);
+        }
+        ResizePreview::WorkspaceWindowCorner {
+            workspace_id,
+            workspace_column_id,
+            width,
+            workspace_window_id,
+            height,
+        } => {
+            let _ = model.set_workspace_column_width(*workspace_id, *workspace_column_id, *width);
+            let _ = model.set_workspace_window_height(*workspace_id, *workspace_window_id, *height);
+        }
+        ResizePreview::WorkspaceWindowSplitRatio {
+            workspace_id,
+            workspace_window_id,
+            path,
+            ratio,
+        } => {
+            let _ = model.set_window_split_ratio(*workspace_id, *workspace_window_id, path, *ratio);
+        }
+        ResizePreview::PaneTabSplitRatio {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            path,
+            ratio,
+        } => {
+            let _ = model.set_pane_tab_split_ratio(
+                *workspace_id,
+                *pane_container_id,
+                *pane_tab_id,
+                path,
+                *ratio,
+            );
+        }
+    }
+}
+
+fn workspace_window_edge_handle_frame(frame: Frame, right_edge: bool) -> Frame {
+    if right_edge {
+        let center_x = frame.right() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+        Frame::new(
+            center_x - RESIZE_HANDLE_THICKNESS_PX / 2,
+            frame.y,
+            RESIZE_HANDLE_THICKNESS_PX,
+            frame.height.max(1),
+        )
+    } else {
+        let center_y = frame.bottom() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+        Frame::new(
+            frame.x,
+            center_y - RESIZE_HANDLE_THICKNESS_PX / 2,
+            frame.width.max(1),
+            RESIZE_HANDLE_THICKNESS_PX,
+        )
+    }
+}
+
+fn workspace_window_corner_handle_frame(frame: Frame) -> Frame {
+    let center_x = frame.right() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+    let center_y = frame.bottom() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+    Frame::new(
+        center_x - RESIZE_CORNER_SIZE_PX / 2,
+        center_y - RESIZE_CORNER_SIZE_PX / 2,
+        RESIZE_CORNER_SIZE_PX,
+        RESIZE_CORNER_SIZE_PX,
+    )
+}
+
+fn split_resize_handle_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> Frame {
+    let (first_frame, _) = split_frame(frame, axis, ratio, gap);
+    match axis {
+        SplitAxis::Horizontal => {
+            let center_x = first_frame.right() + gap / 2;
+            Frame::new(
+                center_x - RESIZE_HANDLE_THICKNESS_PX / 2,
+                frame.y,
+                RESIZE_HANDLE_THICKNESS_PX,
+                frame.height.max(1),
+            )
+        }
+        SplitAxis::Vertical => {
+            let center_y = first_frame.bottom() + gap / 2;
+            Frame::new(
+                frame.x,
+                center_y - RESIZE_HANDLE_THICKNESS_PX / 2,
+                frame.width.max(1),
+                RESIZE_HANDLE_THICKNESS_PX,
+            )
+        }
+    }
+}
+
+fn split_resize_cursor(axis: SplitAxis) -> ResizeHandleCursor {
+    match axis {
+        SplitAxis::Horizontal => ResizeHandleCursor::EastWest,
+        SplitAxis::Vertical => ResizeHandleCursor::NorthSouth,
+    }
+}
+
+fn resize_path_id(path: &[bool]) -> String {
+    if path.is_empty() {
+        return "root".into();
+    }
+
+    path.iter()
+        .map(|segment| if *segment { '1' } else { '0' })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -5554,11 +6209,12 @@ mod tests {
     use super::{
         BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME, Direction,
         HostCommand, HostEvent, LayoutMetrics, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
-        NotificationPreferencesSnapshot, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction,
-        ShellDragMode, ShellSection, SurfaceDragSessionSnapshot, SurfaceMountSpec,
-        WorkspaceDirection, default_preview_app_state, default_session_path_for_preview,
-        display_surface_title, pane_body_frame, pane_shows_tab_strip_for_surface_count,
-        resolved_browser_uri, split_frame, workspace_window_content_frame,
+        NotificationPreferencesSnapshot, ResizeHandleTarget, ResizePreview, RuntimeCapability,
+        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
+        SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection, WorkspaceWindowSnapshot,
+        default_preview_app_state, default_session_path_for_preview, display_surface_title,
+        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -5640,6 +6296,19 @@ mod tests {
             .expect("preview app state"),
             ..bootstrap()
         }
+    }
+
+    fn window_snapshot(
+        snapshot: &super::ShellSnapshot,
+        window_id: taskers_domain::WorkspaceWindowId,
+    ) -> &WorkspaceWindowSnapshot {
+        snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == window_id)
+            .expect("window snapshot")
     }
 
     fn bootstrap_with_model(model: AppModel, name: &str) -> BootstrapModel {
@@ -6505,6 +7174,192 @@ mod tests {
             active_window.active_pane,
             snapshot.current_workspace.active_pane
         );
+    }
+
+    #[test]
+    fn canceling_resize_preview_restores_column_width_snapshot() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let column_id = snapshot.current_workspace.columns[0].id;
+        let original_width = snapshot.current_workspace.columns[0].width;
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidth {
+                workspace_id,
+                workspace_column_id: column_id,
+                width: original_width + 180,
+            },
+        });
+
+        assert_eq!(
+            core.snapshot().current_workspace.columns[0].width,
+            original_width + 180
+        );
+
+        core.dispatch_shell_action(ShellAction::CancelResizePreview);
+
+        assert_eq!(
+            core.snapshot().current_workspace.columns[0].width,
+            original_width
+        );
+    }
+
+    #[test]
+    fn committing_corner_resize_updates_model_state() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let initial_snapshot = core.snapshot();
+        let top_left_window_id = initial_snapshot.current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow {
+            window_id: top_left_window_id,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let top_left_window = window_snapshot(&snapshot, top_left_window_id);
+        let top_left_column_id = top_left_window.column_id;
+        let model_before = core.inner.lock().app_state.snapshot_model();
+        let workspace_before = model_before
+            .workspaces
+            .get(&workspace_id)
+            .expect("workspace");
+        let column_before = workspace_before
+            .columns
+            .get(&top_left_column_id)
+            .expect("column")
+            .width;
+        let height_before = workspace_before
+            .windows
+            .get(&top_left_window_id)
+            .expect("window")
+            .height;
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceWindowCorner {
+                workspace_id,
+                workspace_column_id: top_left_column_id,
+                width: column_before + 120,
+                workspace_window_id: top_left_window_id,
+                height: height_before + 80,
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        let model_after = core.inner.lock().app_state.snapshot_model();
+        let workspace_after = model_after
+            .workspaces
+            .get(&workspace_id)
+            .expect("workspace");
+        assert_eq!(
+            workspace_after
+                .columns
+                .get(&top_left_column_id)
+                .expect("column")
+                .width,
+            column_before + 120
+        );
+        assert_eq!(
+            workspace_after
+                .windows
+                .get(&top_left_window_id)
+                .expect("window")
+                .height,
+            height_before + 80
+        );
+    }
+
+    #[test]
+    fn pane_split_resize_preview_updates_handle_ratio_and_commits() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::SplitTerminal { pane_id: None });
+
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let active_pane_id = snapshot.current_workspace.active_pane;
+        let model = core.inner.lock().app_state.snapshot_model();
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let window_id = workspace.window_for_pane(active_pane_id).expect("window");
+        let window = workspace.windows.get(&window_id).expect("window");
+        let pane_container_id = window.active_container().expect("active container");
+        let pane_tab_id = workspace
+            .pane_containers
+            .get(&pane_container_id)
+            .and_then(|pane_container| pane_container.tab_for_pane(active_pane_id))
+            .expect("pane tab");
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::PaneTabSplitRatio {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path: Vec::new(),
+                ratio: 700,
+            },
+        });
+
+        let preview_snapshot = core.snapshot();
+        let handle = preview_snapshot
+            .resize_handles
+            .iter()
+            .find(|handle| {
+                matches!(
+                    &handle.target,
+                    ResizeHandleTarget::PaneTabSplit {
+                        pane_container_id: target_container_id,
+                        pane_tab_id: target_tab_id,
+                        path,
+                        initial_ratio,
+                        ..
+                    } if *target_container_id == pane_container_id
+                        && *target_tab_id == pane_tab_id
+                        && path.is_empty()
+                        && *initial_ratio == 700
+                )
+            })
+            .expect("pane split resize handle");
+        assert!(!handle.id.is_empty());
+
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        let committed_model = core.inner.lock().app_state.snapshot_model();
+        let committed_workspace = committed_model
+            .workspaces
+            .get(&workspace_id)
+            .expect("workspace");
+        let pane_tab = committed_workspace
+            .pane_containers
+            .get(&pane_container_id)
+            .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+            .expect("pane tab");
+        let taskers_domain::PaneTabLayoutNode::Split { ratio, .. } = &pane_tab.layout else {
+            panic!("expected split layout");
+        };
+        assert_eq!(*ratio, 700);
+    }
+
+    #[test]
+    fn resize_handles_are_hidden_in_overview_mode() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        assert!(!core.snapshot().resize_handles.is_empty());
+
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+
+        assert!(core.snapshot().resize_handles.is_empty());
     }
 
     #[test]
