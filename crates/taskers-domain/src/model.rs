@@ -826,12 +826,18 @@ impl WorkspaceWindowTabRecord {
 
     fn focus_pane(
         &mut self,
-        pane_containers: &IndexMap<PaneContainerId, PaneContainerRecord>,
+        pane_containers: &mut IndexMap<PaneContainerId, PaneContainerRecord>,
         pane_id: PaneId,
     ) -> bool {
         let Some(container_id) = self.container_for_pane(pane_containers, pane_id) else {
             return false;
         };
+        let Some(container) = pane_containers.get_mut(&container_id) else {
+            return false;
+        };
+        if !container.focus_pane(pane_id) {
+            return false;
+        }
         self.active_container = container_id;
         self.active_pane = pane_id;
         true
@@ -946,7 +952,7 @@ impl WorkspaceWindowRecord {
 
     pub fn focus_pane(
         &mut self,
-        pane_containers: &IndexMap<PaneContainerId, PaneContainerRecord>,
+        pane_containers: &mut IndexMap<PaneContainerId, PaneContainerRecord>,
         pane_id: PaneId,
     ) -> bool {
         let Some(tab_id) = self.tab_for_pane(pane_containers, pane_id) else {
@@ -1221,7 +1227,7 @@ impl Workspace {
             return false;
         };
         if let Some(window) = self.windows.get_mut(&window_id) {
-            let _ = window.focus_pane(&self.pane_containers, pane_id);
+            let _ = window.focus_pane(&mut self.pane_containers, pane_id);
         }
         self.sync_active_from_window(window_id);
         true
@@ -7002,6 +7008,97 @@ mod tests {
                 .iter()
                 .all(|item| item.read_at.is_some())
         );
+    }
+
+    #[test]
+    fn focusing_hidden_pane_activates_its_container_tab() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let (container_id, first_pane_tab_id) = {
+            let workspace = model.active_workspace().expect("workspace");
+            let (_, _, container_id, pane_tab_id) = workspace
+                .pane_location(first_pane_id)
+                .expect("pane location");
+            (container_id, pane_tab_id)
+        };
+        let (second_pane_tab_id, second_pane_id) = model
+            .create_pane_tab(workspace_id, container_id, PaneKind::Terminal)
+            .expect("create pane tab");
+
+        model
+            .focus_pane_tab(workspace_id, container_id, first_pane_tab_id)
+            .expect("focus original pane tab");
+        model
+            .focus_pane(workspace_id, second_pane_id)
+            .expect("focus hidden pane");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let container = workspace
+            .pane_containers
+            .get(&container_id)
+            .expect("pane container");
+        assert_eq!(container.active_tab, second_pane_tab_id);
+        assert_eq!(workspace.active_pane, second_pane_id);
+    }
+
+    #[test]
+    fn opening_notification_surfaces_hidden_pane_tab() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let first_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let (container_id, first_pane_tab_id) = {
+            let workspace = model.active_workspace().expect("workspace");
+            let (_, _, container_id, pane_tab_id) = workspace
+                .pane_location(first_pane_id)
+                .expect("pane location");
+            (container_id, pane_tab_id)
+        };
+        let (second_pane_tab_id, second_pane_id) = model
+            .create_pane_tab(workspace_id, container_id, PaneKind::Terminal)
+            .expect("create pane tab");
+        let second_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&second_pane_id))
+            .and_then(|pane| pane.active_surface())
+            .map(|surface| surface.id)
+            .expect("second surface");
+
+        model
+            .focus_pane_tab(workspace_id, container_id, first_pane_tab_id)
+            .expect("focus original pane tab");
+        model
+            .create_agent_notification(
+                AgentTarget::Surface {
+                    workspace_id,
+                    pane_id: second_pane_id,
+                    surface_id: second_surface_id,
+                },
+                SignalKind::Notification,
+                Some("Heads up".into()),
+                None,
+                None,
+                "Review hidden pane".into(),
+                AttentionState::WaitingInput,
+            )
+            .expect("notification");
+        let notification_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.notifications.last())
+            .map(|notification| notification.id)
+            .expect("notification id");
+
+        model
+            .open_notification(model.active_window, notification_id)
+            .expect("open notification");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let container = workspace
+            .pane_containers
+            .get(&container_id)
+            .expect("pane container");
+        assert_eq!(container.active_tab, second_pane_tab_id);
+        assert_eq!(workspace.active_pane, second_pane_id);
     }
 
     #[test]

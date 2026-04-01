@@ -664,15 +664,21 @@ fn normalize_origin_filter(raw: &str) -> Option<&str> {
 }
 
 fn website_data_matches(entry: &WebsiteData, origin_filter: Option<&str>) -> bool {
+    if origin_filter.is_none() {
+        return true;
+    }
+    let Some(name) = entry.name() else {
+        return false;
+    };
+    website_data_name_matches(&name, origin_filter)
+}
+
+fn website_data_name_matches(name: &str, origin_filter: Option<&str>) -> bool {
     let Some(origin_filter) = origin_filter.map(|value| value.to_ascii_lowercase()) else {
         return true;
     };
-    let Some(name) = entry.name().map(|value| value.to_ascii_lowercase()) else {
-        return false;
-    };
-    name == origin_filter
-        || name.ends_with(&format!(".{origin_filter}"))
-        || origin_filter.ends_with(&format!(".{name}"))
+    let name = name.to_ascii_lowercase();
+    name == origin_filter || name.ends_with(&format!(".{origin_filter}"))
 }
 
 fn helper_bootstrap_source() -> &'static str {
@@ -1088,6 +1094,31 @@ if (!globalThis.__taskersBrowserHelper) {
 
     return { run };
   })();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_origin_filter, website_data_name_matches};
+
+    #[test]
+    fn normalize_origin_filter_strips_scheme_path_port_and_dots() {
+        assert_eq!(
+            normalize_origin_filter("https://foo.example.com:8443/path/to/page/"),
+            Some("foo.example.com")
+        );
+        assert_eq!(normalize_origin_filter("example.com."), Some("example.com"));
+        assert_eq!(normalize_origin_filter("   "), None);
+    }
+
+    #[test]
+    fn website_data_name_matches_only_exact_host_or_subdomains() {
+        assert!(website_data_name_matches("foo.example.com", Some("example.com")));
+        assert!(website_data_name_matches("bar.foo.example.com", Some("foo.example.com")));
+        assert!(website_data_name_matches("foo.example.com", Some("foo.example.com")));
+        assert!(!website_data_name_matches("example.com", Some("foo.example.com")));
+        assert!(!website_data_name_matches("evil-example.com", Some("example.com")));
+        assert!(website_data_name_matches("Anything", None));
+    }
 }
 "#
 }
