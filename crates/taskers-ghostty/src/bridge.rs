@@ -22,6 +22,12 @@ use thiserror::Error;
 use crate::backend::{GhosttyHostOptions, SurfaceDescriptor};
 use crate::runtime::{configure_runtime_environment, runtime_bridge_path};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhosttyBridgeInfo {
+    pub version: String,
+    pub build_id: String,
+}
+
 #[derive(Debug, Error)]
 pub enum GhosttyError {
     #[error("ghostty bridge is unavailable in this build")]
@@ -59,11 +65,16 @@ struct GhosttyBridgeLibrary {
     host_new:
         unsafe extern "C" fn(*const taskers_ghostty_host_options_s) -> *mut taskers_ghostty_host_t,
     host_free: unsafe extern "C" fn(*mut taskers_ghostty_host_t),
+    host_version: unsafe extern "C" fn() -> *const c_char,
+    host_build_id: unsafe extern "C" fn() -> *const c_char,
+    host_begin_shutdown: unsafe extern "C" fn(*mut taskers_ghostty_host_t),
+    host_surface_count: unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> usize,
     host_tick: unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> c_int,
     surface_new: unsafe extern "C" fn(
         *mut taskers_ghostty_host_t,
         *const taskers_ghostty_surface_options_s,
     ) -> *mut c_void,
+    surface_destroy: unsafe extern "C" fn(*mut c_void),
     surface_grab_focus: unsafe extern "C" fn(*mut c_void) -> c_int,
     surface_has_selection: unsafe extern "C" fn(*mut c_void) -> c_int,
     surface_send_text: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> c_int,
@@ -157,6 +168,46 @@ impl GhosttyHost {
         }
     }
 
+    pub fn bridge_info(&self) -> GhosttyBridgeInfo {
+        #[cfg(taskers_ghostty_bridge)]
+        unsafe {
+            let version = std::ffi::CStr::from_ptr((self.bridge.host_version)())
+                .to_string_lossy()
+                .into_owned();
+            let build_id = std::ffi::CStr::from_ptr((self.bridge.host_build_id)())
+                .to_string_lossy()
+                .into_owned();
+            GhosttyBridgeInfo { version, build_id }
+        }
+
+        #[cfg(not(taskers_ghostty_bridge))]
+        {
+            GhosttyBridgeInfo {
+                version: "unavailable".into(),
+                build_id: "unavailable".into(),
+            }
+        }
+    }
+
+    pub fn begin_shutdown(&self) {
+        #[cfg(taskers_ghostty_bridge)]
+        unsafe {
+            (self.bridge.host_begin_shutdown)(self.raw.as_ptr());
+        }
+    }
+
+    pub fn surface_count(&self) -> usize {
+        #[cfg(taskers_ghostty_bridge)]
+        unsafe {
+            (self.bridge.host_surface_count)(self.raw.as_ptr())
+        }
+
+        #[cfg(not(taskers_ghostty_bridge))]
+        {
+            0
+        }
+    }
+
     pub fn create_surface(&self, descriptor: &SurfaceDescriptor) -> Result<Widget, GhosttyError> {
         #[cfg(taskers_ghostty_bridge)]
         unsafe {
@@ -228,6 +279,13 @@ impl GhosttyHost {
         {
             let _ = widget;
             Err(GhosttyError::Unavailable)
+        }
+    }
+
+    pub fn destroy_surface(&self, widget: &Widget) {
+        #[cfg(taskers_ghostty_bridge)]
+        unsafe {
+            (self.bridge.surface_destroy)(widget.as_ptr().cast());
         }
     }
 
@@ -331,6 +389,34 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
                 path: path.clone(),
                 message: error.to_string(),
             })?;
+        let host_version = *library
+            .get::<unsafe extern "C" fn() -> *const c_char>(b"taskers_ghostty_host_version\0")
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+        let host_build_id = *library
+            .get::<unsafe extern "C" fn() -> *const c_char>(b"taskers_ghostty_host_build_id\0")
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+        let host_begin_shutdown = *library
+            .get::<unsafe extern "C" fn(*mut taskers_ghostty_host_t)>(
+                b"taskers_ghostty_host_begin_shutdown\0",
+            )
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+        let host_surface_count = *library
+            .get::<unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> usize>(
+                b"taskers_ghostty_host_surface_count\0",
+            )
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
         let host_tick = *library
             .get::<unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> c_int>(
                 b"taskers_ghostty_host_tick\0",
@@ -344,6 +430,12 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
                 *mut taskers_ghostty_host_t,
                 *const taskers_ghostty_surface_options_s,
             ) -> *mut c_void>(b"taskers_ghostty_surface_new\0")
+            .map_err(|error| GhosttyError::LibraryLoad {
+                path: path.clone(),
+                message: error.to_string(),
+            })?;
+        let surface_destroy = *library
+            .get::<unsafe extern "C" fn(*mut c_void)>(b"taskers_ghostty_surface_destroy\0")
             .map_err(|error| GhosttyError::LibraryLoad {
                 path: path.clone(),
                 message: error.to_string(),
@@ -393,8 +485,13 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
             _library: library,
             host_new,
             host_free,
+            host_version,
+            host_build_id,
+            host_begin_shutdown,
+            host_surface_count,
             host_tick,
             surface_new,
+            surface_destroy,
             surface_grab_focus,
             surface_has_selection,
             surface_send_text,

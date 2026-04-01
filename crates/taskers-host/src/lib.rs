@@ -13,8 +13,9 @@ use std::{
     fs,
     path::Path,
     rc::Rc,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use taskers_control::{
     BrowserControlCommand, BrowserLoadState, ControlError, TerminalDebugCommand,
@@ -26,7 +27,7 @@ use taskers_core::{
     TerminalSurfaceCatalogEntry, WorkspaceId,
 };
 use taskers_domain::{BrowserProfileMode, PaneKind};
-use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
+use taskers_ghostty::{GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor};
 use taskers_shell_core as taskers_core;
 use webkit6::{LoadEvent, NetworkSession, Settings as WebKitSettings, WebView, prelude::*};
 
@@ -38,12 +39,16 @@ pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>
 // below this size, hide it until more of the pane is actually visible.
 const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 200;
 const MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX: i32 = 120;
+const GHOSTTY_BRIDGE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
+const GHOSTTY_BRIDGE_FATAL_THRESHOLD: Duration = Duration::from_secs(5);
+const GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCategory {
     Startup,
     Window,
     Sync,
+    Bridge,
     HostEvent,
     SurfaceLifecycle,
     BrowserMetadata,
@@ -86,6 +91,16 @@ impl DiagnosticRecord {
         self
     }
 
+    fn with_optional_pane(mut self, pane_id: Option<taskers_core::PaneId>) -> Self {
+        self.pane_id = pane_id;
+        self
+    }
+
+    fn with_optional_surface(mut self, surface_id: Option<SurfaceId>) -> Self {
+        self.surface_id = surface_id;
+        self
+    }
+
     pub fn format_line(&self) -> String {
         let revision = self
             .revision
@@ -104,6 +119,322 @@ impl DiagnosticRecord {
             "ts_ms={} category={:?} revision={} pane={} surface={} message={}",
             self.timestamp_ms, self.category, revision, pane, surface, self.message
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhosttyLifecycleState {
+    Starting,
+    Running,
+    ShuttingDown,
+    Failed,
+}
+
+impl GhosttyLifecycleState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::ShuttingDown => "shutting-down",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeHealthSnapshot {
+    pub bridge_info: GhosttyBridgeInfo,
+    pub state: GhosttyLifecycleState,
+    pub surface_count: usize,
+    pub last_tick_duration_ms: Option<u128>,
+    pub last_mutation_duration_ms: Option<u128>,
+    pub last_operation: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeOperationKind {
+    Tick,
+    SurfaceSync,
+    Shutdown,
+    TerminalCommand,
+    TerminalDebug,
+}
+
+impl BridgeOperationKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tick => "tick",
+            Self::SurfaceSync => "surface-sync",
+            Self::Shutdown => "shutdown",
+            Self::TerminalCommand => "terminal-command",
+            Self::TerminalDebug => "terminal-debug",
+        }
+    }
+
+    fn tracks_tick_duration(self) -> bool {
+        matches!(self, Self::Tick)
+    }
+
+    fn tracks_mutation_duration(self) -> bool {
+        matches!(self, Self::SurfaceSync | Self::Shutdown)
+    }
+}
+
+struct BridgeWatchdog {
+    shared: Arc<Mutex<BridgeWatchdogShared>>,
+    stop_tx: mpsc::Sender<()>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+struct BridgeWatchdogShared {
+    next_token: u64,
+    lifecycle_state: GhosttyLifecycleState,
+    active: Option<ActiveBridgeOperation>,
+    last_tick_duration_ms: Option<u128>,
+    last_mutation_duration_ms: Option<u128>,
+    last_operation: Option<CompletedBridgeOperation>,
+}
+
+struct ActiveBridgeOperation {
+    token: u64,
+    kind: BridgeOperationKind,
+    revision: Option<u64>,
+    pane_id: Option<PaneId>,
+    surface_id: Option<SurfaceId>,
+    started_at: Instant,
+    warned: bool,
+    fatal_logged: bool,
+}
+
+struct CompletedBridgeOperation {
+    kind: BridgeOperationKind,
+    duration_ms: u128,
+}
+
+struct BridgeOperationGuard {
+    shared: Arc<Mutex<BridgeWatchdogShared>>,
+    token: u64,
+    kind: BridgeOperationKind,
+    started_at: Instant,
+}
+
+impl BridgeWatchdog {
+    fn new(diagnostics: Option<DiagnosticsSink>) -> Self {
+        let shared = Arc::new(Mutex::new(BridgeWatchdogShared {
+            next_token: 1,
+            lifecycle_state: GhosttyLifecycleState::Starting,
+            active: None,
+            last_tick_duration_ms: None,
+            last_mutation_duration_ms: None,
+            last_operation: None,
+        }));
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let thread_shared = shared.clone();
+        let join_handle = thread::spawn(move || {
+            loop {
+                match stop_rx.recv_timeout(GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+
+                let mut records = Vec::new();
+                {
+                    let mut shared = thread_shared.lock().expect("bridge watchdog lock");
+                    let Some(active) = shared.active.as_mut() else {
+                        continue;
+                    };
+                    let elapsed_ms = active.started_at.elapsed().as_millis();
+                    let mut fatal_transition = None;
+                    if elapsed_ms >= GHOSTTY_BRIDGE_FATAL_THRESHOLD.as_millis()
+                        && !active.fatal_logged
+                    {
+                        active.fatal_logged = true;
+                        fatal_transition = Some((
+                            active.revision,
+                            active.kind.label(),
+                            active.pane_id,
+                            active.surface_id,
+                        ));
+                        records.push(
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                active.revision,
+                                format!(
+                                    "ghostty bridge hang suspected operation={} elapsed_ms={elapsed_ms}",
+                                    active.kind.label()
+                                ),
+                            )
+                            .with_optional_pane(active.pane_id)
+                            .with_optional_surface(active.surface_id),
+                        );
+                    } else if elapsed_ms >= GHOSTTY_BRIDGE_WARN_THRESHOLD.as_millis()
+                        && !active.warned
+                    {
+                        active.warned = true;
+                        records.push(
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                active.revision,
+                                format!(
+                                    "ghostty bridge operation stalled operation={} elapsed_ms={elapsed_ms}",
+                                    active.kind.label()
+                                ),
+                            )
+                            .with_optional_pane(active.pane_id)
+                            .with_optional_surface(active.surface_id),
+                        );
+                    }
+
+                    if let Some((revision, operation, pane_id, surface_id)) = fatal_transition {
+                        let state_changed = shared.lifecycle_state != GhosttyLifecycleState::Failed;
+                        shared.lifecycle_state = GhosttyLifecycleState::Failed;
+                        if state_changed {
+                            records.push(DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                revision,
+                                format!(
+                                    "ghostty lifecycle state={} reason=watchdog observed hung {} operation",
+                                    GhosttyLifecycleState::Failed.label(),
+                                    operation
+                                ),
+                            )
+                            .with_optional_pane(pane_id)
+                            .with_optional_surface(surface_id));
+                        }
+                    }
+                }
+
+                if let Some(diagnostics) = diagnostics.as_ref() {
+                    for record in records {
+                        diagnostics(record);
+                    }
+                }
+            }
+        });
+
+        Self {
+            shared,
+            stop_tx,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    fn begin(
+        &self,
+        kind: BridgeOperationKind,
+        revision: Option<u64>,
+        pane_id: Option<PaneId>,
+        surface_id: Option<SurfaceId>,
+    ) -> BridgeOperationGuard {
+        let started_at = Instant::now();
+        let token = {
+            let mut shared = self.shared.lock().expect("bridge watchdog lock");
+            let token = shared.next_token;
+            shared.next_token += 1;
+            shared.active = Some(ActiveBridgeOperation {
+                token,
+                kind,
+                revision,
+                pane_id,
+                surface_id,
+                started_at,
+                warned: false,
+                fatal_logged: false,
+            });
+            token
+        };
+
+        BridgeOperationGuard {
+            shared: self.shared.clone(),
+            token,
+            kind,
+            started_at,
+        }
+    }
+
+    fn lifecycle_state(&self) -> GhosttyLifecycleState {
+        self.shared
+            .lock()
+            .expect("bridge watchdog lock")
+            .lifecycle_state
+    }
+
+    fn transition_state(
+        &self,
+        diagnostics: Option<&DiagnosticsSink>,
+        state: GhosttyLifecycleState,
+        revision: Option<u64>,
+        reason: impl Into<String>,
+    ) {
+        let reason = reason.into();
+        let changed = {
+            let mut shared = self.shared.lock().expect("bridge watchdog lock");
+            if shared.lifecycle_state == state {
+                false
+            } else {
+                shared.lifecycle_state = state;
+                true
+            }
+        };
+
+        if changed {
+            emit_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    revision,
+                    format!("ghostty lifecycle state={} reason={reason}", state.label()),
+                ),
+            );
+        }
+    }
+
+    fn snapshot(
+        &self,
+        bridge_info: GhosttyBridgeInfo,
+        surface_count: usize,
+    ) -> BridgeHealthSnapshot {
+        let shared = self.shared.lock().expect("bridge watchdog lock");
+        BridgeHealthSnapshot {
+            bridge_info,
+            state: shared.lifecycle_state,
+            surface_count,
+            last_tick_duration_ms: shared.last_tick_duration_ms,
+            last_mutation_duration_ms: shared.last_mutation_duration_ms,
+            last_operation: shared
+                .last_operation
+                .as_ref()
+                .map(|operation| format!("{}:{}ms", operation.kind.label(), operation.duration_ms)),
+        }
+    }
+}
+
+impl Drop for BridgeWatchdog {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for BridgeOperationGuard {
+    fn drop(&mut self) {
+        let duration_ms = self.started_at.elapsed().as_millis();
+        let mut shared = self.shared.lock().expect("bridge watchdog lock");
+        if shared.active.as_ref().map(|active| active.token) == Some(self.token) {
+            shared.active = None;
+        }
+        if self.kind.tracks_tick_duration() {
+            shared.last_tick_duration_ms = Some(duration_ms);
+        }
+        if self.kind.tracks_mutation_duration() {
+            shared.last_mutation_duration_ms = Some(duration_ms);
+        }
+        shared.last_operation = Some(CompletedBridgeOperation {
+            kind: self.kind,
+            duration_ms,
+        });
     }
 }
 
@@ -138,6 +469,9 @@ pub struct TaskersHost {
     event_sink: HostEventSink,
     diagnostics: Option<DiagnosticsSink>,
     ghostty_host: Option<GhosttyHost>,
+    ghostty_bridge_info: Option<GhosttyBridgeInfo>,
+    ghostty_watchdog: Option<BridgeWatchdog>,
+    skip_next_ghostty_tick: bool,
     native_surface_provider: CssProvider,
     selected_theme_id: String,
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
@@ -231,6 +565,10 @@ impl TaskersHost {
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Self {
+        let ghostty_bridge_info = ghostty_host.as_ref().map(GhosttyHost::bridge_info);
+        let ghostty_watchdog = ghostty_bridge_info
+            .as_ref()
+            .map(|_| BridgeWatchdog::new(diagnostics.clone()));
         let root = Overlay::new();
         root.set_hexpand(true);
         root.set_vexpand(true);
@@ -267,11 +605,23 @@ impl TaskersHost {
             ),
         );
 
+        if let Some(watchdog) = ghostty_watchdog.as_ref() {
+            watchdog.transition_state(
+                diagnostics.as_ref(),
+                GhosttyLifecycleState::Running,
+                None,
+                "ghostty host initialized",
+            );
+        }
+
         Self {
             root,
             event_sink,
             diagnostics,
             ghostty_host,
+            ghostty_bridge_info,
+            ghostty_watchdog,
+            skip_next_ghostty_tick: false,
             native_surface_provider,
             selected_theme_id: "dark".into(),
             browser_surfaces: HashMap::new(),
@@ -299,19 +649,179 @@ impl TaskersHost {
             ),
         );
         self.sync_browser_surfaces(snapshot, interactive)?;
-        self.sync_terminal_surfaces(
+        let _bridge_guard = self.begin_bridge_operation(
+            BridgeOperationKind::SurfaceSync,
+            Some(snapshot.revision),
+            None,
+            None,
+        );
+        let terminal_mutated = match self.sync_terminal_surfaces(
             &snapshot.portal,
             &snapshot.terminal_catalog,
             &snapshot.settings.selected_theme_id,
             snapshot.revision,
             interactive,
-        )?;
+        ) {
+            Ok(terminal_mutated) => terminal_mutated,
+            Err(error) => {
+                self.mark_bridge_failed(
+                    Some(snapshot.revision),
+                    format!("terminal surface sync failed: {error}"),
+                );
+                return Err(error);
+            }
+        };
+        if terminal_mutated {
+            self.skip_next_ghostty_tick = true;
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    Some(snapshot.revision),
+                    "deferred ghostty tick after terminal surface mutation",
+                ),
+            );
+        }
         Ok(())
     }
 
-    pub fn tick(&self) {
-        if let Some(host) = &self.ghostty_host {
-            let _ = host.tick();
+    pub fn tick(&mut self, revision: Option<u64>) {
+        if !self.bridge_running() {
+            return;
+        }
+        if self.skip_next_ghostty_tick {
+            self.skip_next_ghostty_tick = false;
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    revision,
+                    "skipping ghostty tick for mutation cooldown",
+                ),
+            );
+            return;
+        }
+
+        let Some(host) = &self.ghostty_host else {
+            return;
+        };
+        let _bridge_guard =
+            self.begin_bridge_operation(BridgeOperationKind::Tick, revision, None, None);
+        if let Err(error) = host.tick() {
+            self.mark_bridge_failed(revision, format!("ghostty tick failed: {error}"));
+        }
+    }
+
+    pub fn bridge_info(&self) -> Option<GhosttyBridgeInfo> {
+        self.ghostty_bridge_info.clone()
+    }
+
+    pub fn bridge_health_snapshot(&self) -> Option<BridgeHealthSnapshot> {
+        let bridge_info = self.ghostty_bridge_info.clone()?;
+        let surface_count = self
+            .ghostty_host
+            .as_ref()
+            .map(GhosttyHost::surface_count)
+            .unwrap_or_default();
+        self.ghostty_watchdog
+            .as_ref()
+            .map(|watchdog| watchdog.snapshot(bridge_info, surface_count))
+    }
+
+    pub fn shutdown(&mut self) {
+        let bridge_was_running = self.bridge_running();
+        if let Some(watchdog) = self.ghostty_watchdog.as_ref() {
+            watchdog.transition_state(
+                self.diagnostics.as_ref(),
+                GhosttyLifecycleState::ShuttingDown,
+                None,
+                "window close requested",
+            );
+        }
+        let _bridge_guard =
+            self.begin_bridge_operation(BridgeOperationKind::Shutdown, None, None, None);
+        self.skip_next_ghostty_tick = false;
+        if bridge_was_running {
+            if let Some(host) = &self.ghostty_host {
+                host.begin_shutdown();
+            }
+        } else {
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    None,
+                    "skipping ghostty shutdown calls because bridge is not running",
+                ),
+            );
+        }
+
+        let terminal_surfaces = self.terminal_surfaces.drain().collect::<Vec<_>>();
+        for (surface_id, surface) in terminal_surfaces {
+            surface.shell.detach(&self.root);
+            surface.attention_ring.detach(&self.root);
+            if bridge_was_running {
+                if let Some(host) = &self.ghostty_host {
+                    host.destroy_surface(&surface.widget);
+                }
+            } else {
+                emit_diagnostic(
+                    self.diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::Bridge,
+                        None,
+                        "skipped terminal surface destroy during shutdown because bridge is not running",
+                    )
+                    .with_surface(surface_id),
+                );
+            }
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::SurfaceLifecycle,
+                    None,
+                    "terminal surface shutdown",
+                )
+                .with_surface(surface_id),
+            );
+        }
+
+        let browser_surfaces = self.browser_surfaces.drain().collect::<Vec<_>>();
+        for (surface_id, surface) in browser_surfaces {
+            surface.shell.detach(&self.root);
+            surface.attention_ring.detach(&self.root);
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::SurfaceLifecycle,
+                    None,
+                    "browser surface shutdown",
+                )
+                .with_surface(surface_id),
+            );
+        }
+
+        if let Some(health) = self.bridge_health_snapshot() {
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    None,
+                    format!(
+                        "ghostty bridge shutdown complete state={} surface_count={} last_tick_ms={} last_mutation_ms={}",
+                        health.state.label(),
+                        health.surface_count,
+                        health
+                            .last_tick_duration_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        health
+                            .last_mutation_duration_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                    ),
+                ),
+            );
         }
     }
 
@@ -346,14 +856,36 @@ impl TaskersHost {
                 Ok(())
             }
             HostCommand::TerminalSendText { surface_id, text } => {
+                if !self.bridge_running() {
+                    emit_diagnostic(
+                        self.diagnostics.as_ref(),
+                        DiagnosticRecord::new(
+                            DiagnosticCategory::Bridge,
+                            None,
+                            "skipping terminal send text because ghostty bridge is not running",
+                        )
+                        .with_surface(surface_id),
+                    );
+                    return Ok(());
+                }
                 let Some(host) = self.ghostty_host.as_ref() else {
                     return Ok(());
                 };
                 let Some(surface) = self.terminal_surfaces.get(&surface_id) else {
                     return Ok(());
                 };
-                host.send_surface_text(&surface.widget, &text)
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                let pane_id = surface.pane_id.get();
+                let widget = surface.widget.clone();
+                let _bridge_guard = self.begin_bridge_operation(
+                    BridgeOperationKind::TerminalCommand,
+                    None,
+                    Some(pane_id),
+                    Some(surface_id),
+                );
+                if let Err(error) = host.send_surface_text(&widget, &text) {
+                    self.mark_bridge_failed(None, format!("terminal send text failed: {error}"));
+                    return Err(anyhow!(error.to_string()));
+                }
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -378,7 +910,7 @@ impl TaskersHost {
     }
 
     pub fn execute_terminal_debug(
-        &self,
+        &mut self,
         command: TerminalDebugCommand,
     ) -> Result<TerminalDebugResult, ControlError> {
         let Some(host) = self.ghostty_host.as_ref() else {
@@ -386,46 +918,116 @@ impl TaskersHost {
                 "terminal debug requires the Ghostty host backend",
             ));
         };
+        if !self.bridge_running() {
+            return Err(ControlError::not_supported(
+                "terminal debug is unavailable because the Ghostty bridge is not running",
+            ));
+        }
 
         let surface_id = terminal_debug_surface_id(&command);
         let surface = self.terminal_surfaces.get(&surface_id).ok_or_else(|| {
             ControlError::not_found(format!("terminal surface {surface_id} not found"))
         })?;
+        let pane_id = surface.pane_id.get();
+        let workspace_id = surface.workspace_id.get();
+        let widget = surface.widget.clone();
+        let focused = surface.is_focused();
+        let visible = surface.visible;
+        let cols = surface.spec.cols;
+        let rows = surface.spec.rows;
+        let width_px = surface.width_px;
+        let height_px = surface.height_px;
 
         match command {
-            TerminalDebugCommand::IsFocused { .. } => Ok(TerminalDebugResult::IsFocused {
-                focused: surface.is_focused(),
-            }),
+            TerminalDebugCommand::IsFocused { .. } => {
+                Ok(TerminalDebugResult::IsFocused { focused })
+            }
             TerminalDebugCommand::ReadText { tail_lines, .. } => {
-                let text = host
-                    .read_surface_text(&surface.widget)
-                    .map_err(|error| ControlError::internal(error.to_string()))?;
+                let _bridge_guard = self.begin_bridge_operation(
+                    BridgeOperationKind::TerminalDebug,
+                    None,
+                    Some(pane_id),
+                    Some(surface_id),
+                );
+                let text = match host.read_surface_text(&widget) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        self.mark_bridge_failed(
+                            None,
+                            format!("terminal debug read failed: {error}"),
+                        );
+                        return Err(ControlError::internal(error.to_string()));
+                    }
+                };
                 Ok(TerminalDebugResult::ReadText {
                     text: trim_terminal_tail(text, tail_lines),
                 })
             }
             TerminalDebugCommand::RenderStats { .. } => {
-                let has_selection = host
-                    .surface_has_selection(&surface.widget)
-                    .map_err(|error| ControlError::internal(error.to_string()))?;
+                let _bridge_guard = self.begin_bridge_operation(
+                    BridgeOperationKind::TerminalDebug,
+                    None,
+                    Some(pane_id),
+                    Some(surface_id),
+                );
+                let has_selection = match host.surface_has_selection(&widget) {
+                    Ok(has_selection) => has_selection,
+                    Err(error) => {
+                        self.mark_bridge_failed(
+                            None,
+                            format!("terminal debug render stats failed: {error}"),
+                        );
+                        return Err(ControlError::internal(error.to_string()));
+                    }
+                };
                 Ok(TerminalDebugResult::RenderStats {
                     stats: TerminalRenderStats {
                         surface_id,
-                        workspace_id: surface.workspace_id.get(),
-                        pane_id: surface.pane_id.get(),
+                        workspace_id,
+                        pane_id,
                         mounted: true,
-                        visible: surface.visible,
-                        focused: surface.is_focused(),
+                        visible,
+                        focused,
                         backend: "ghostty".into(),
-                        cols: surface.spec.cols,
-                        rows: surface.spec.rows,
-                        width_px: surface.width_px,
-                        height_px: surface.height_px,
+                        cols,
+                        rows,
+                        width_px,
+                        height_px,
                         has_selection,
                     },
                 })
             }
         }
+    }
+
+    fn bridge_running(&self) -> bool {
+        self.ghostty_watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.lifecycle_state() == GhosttyLifecycleState::Running)
+    }
+
+    fn begin_bridge_operation(
+        &self,
+        kind: BridgeOperationKind,
+        revision: Option<u64>,
+        pane_id: Option<PaneId>,
+        surface_id: Option<SurfaceId>,
+    ) -> Option<BridgeOperationGuard> {
+        self.ghostty_watchdog
+            .as_ref()
+            .map(|watchdog| watchdog.begin(kind, revision, pane_id, surface_id))
+    }
+
+    fn mark_bridge_failed(&mut self, revision: Option<u64>, reason: impl Into<String>) {
+        if let Some(watchdog) = self.ghostty_watchdog.as_ref() {
+            watchdog.transition_state(
+                self.diagnostics.as_ref(),
+                GhosttyLifecycleState::Failed,
+                revision,
+                reason,
+            );
+        }
+        self.skip_next_ghostty_tick = false;
     }
 
     fn with_browser_surface(
@@ -586,7 +1188,7 @@ impl TaskersHost {
         theme_id: &str,
         revision: u64,
         interactive: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let desired = terminal_plans(portal);
         let desired_by_id = desired
             .into_iter()
@@ -605,10 +1207,29 @@ impl TaskersHost {
             .filter(|surface_id| !desired_ids.contains(surface_id))
             .collect::<Vec<_>>();
 
+        let host = self.ghostty_host.as_ref();
+        let bridge_running = self.bridge_running();
+        let mut terminal_mutated = false;
+
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
                 surface.shell.detach(&self.root);
                 surface.attention_ring.detach(&self.root);
+                if bridge_running {
+                    if let Some(host) = host {
+                        host.destroy_surface(&surface.widget);
+                    }
+                } else {
+                    emit_diagnostic(
+                        self.diagnostics.as_ref(),
+                        DiagnosticRecord::new(
+                            DiagnosticCategory::Bridge,
+                            Some(revision),
+                            "skipped terminal surface destroy because ghostty bridge is not running",
+                        )
+                        .with_surface(surface_id),
+                    );
+                }
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -618,12 +1239,9 @@ impl TaskersHost {
                     )
                     .with_surface(surface_id),
                 );
+                terminal_mutated = true;
             }
         }
-
-        let Some(host) = self.ghostty_host.as_ref() else {
-            return Ok(());
-        };
 
         for entry in catalog {
             let visible_plan = desired_by_id.get(&entry.surface_id);
@@ -635,10 +1253,26 @@ impl TaskersHost {
                     theme_id,
                     revision,
                     interactive,
-                    host,
+                    host.filter(|_| bridge_running),
                     self.diagnostics.as_ref(),
                 ),
                 None => {
+                    if !bridge_running {
+                        emit_diagnostic(
+                            self.diagnostics.as_ref(),
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                Some(revision),
+                                "skipping terminal surface create because ghostty bridge is not running",
+                            )
+                            .with_pane(entry.pane_id)
+                            .with_surface(entry.surface_id),
+                        );
+                        continue;
+                    }
+                    let Some(host) = host else {
+                        continue;
+                    };
                     let surface = TerminalSurface::new(
                         &self.root,
                         entry,
@@ -651,11 +1285,12 @@ impl TaskersHost {
                         host,
                     )?;
                     self.terminal_surfaces.insert(entry.surface_id, surface);
+                    terminal_mutated = true;
                 }
             }
         }
 
-        Ok(())
+        Ok(terminal_mutated)
     }
 }
 
@@ -1142,7 +1777,7 @@ impl TerminalSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
-        host: &GhosttyHost,
+        host: Option<&GhosttyHost>,
         diagnostics: Option<&DiagnosticsSink>,
     ) {
         self.workspace_id.set(entry.workspace_id);
@@ -1171,7 +1806,9 @@ impl TerminalSurface {
             && effective_interactive
             && (!self.active || !self.interactive || !self.visible)
         {
-            let _ = host.focus_surface(&self.widget);
+            if let Some(host) = host {
+                let _ = host.focus_surface(&self.widget);
+            }
         }
         if !visible || !effective_interactive {
             self.focus_state.set(false);

@@ -9,6 +9,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge.zig");
+    println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_build_info.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/include/taskers_ghostty_bridge.h");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt/gtk/Surface.zig");

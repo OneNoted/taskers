@@ -8,10 +8,18 @@ const Config = @import("apprt/gtk/class/config.zig").Config;
 const Surface = @import("apprt/gtk/class/surface.zig").Surface;
 const configpkg = @import("config.zig");
 const state = &@import("global.zig").state;
+const build_info = @import("taskers_bridge_build_info.zig");
 
 pub const std_options = @import("main_ghostty.zig").std_options;
 
 var initialized = false;
+const vendor_version = build_info.version;
+const vendor_fingerprint = build_info.fingerprint;
+const vendor_version_z = cString(vendor_version);
+const bridge_build_id_z = cString(std.fmt.comptimePrint(
+    "ghostty-{s}-{s}",
+    .{ vendor_version, vendor_fingerprint },
+));
 
 const EmbeddedTerminalAppearance = enum {
     taskers,
@@ -30,6 +38,7 @@ pub const Host = struct {
     command_argv: []const [:0]u8,
     env_entries: []const [:0]u8,
     embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    shutting_down: bool = false,
 };
 
 pub const HostOptions = extern struct {
@@ -101,6 +110,7 @@ pub export fn taskers_ghostty_host_new(options: ?*const HostOptions) ?*Host {
         .command_argv = command_argv,
         .env_entries = env_entries,
         .embedded_terminal_appearance = EmbeddedTerminalAppearance.parse(opts.embedded_terminal_appearance),
+        .shutting_down = false,
     };
     std.log.info(
         "Taskers embedded terminal appearance={s}",
@@ -122,6 +132,7 @@ pub export fn taskers_ghostty_host_new(options: ?*const HostOptions) ?*Host {
 pub export fn taskers_ghostty_host_free(host: ?*Host) void {
     const ptr = host orelse return;
     const alloc = state.alloc;
+    ptr.shutting_down = true;
     ptr.rt_app.terminate();
     freeStringList(alloc, ptr.env_entries);
     freeStringList(alloc, ptr.command_argv);
@@ -129,8 +140,27 @@ pub export fn taskers_ghostty_host_free(host: ?*Host) void {
     alloc.destroy(ptr);
 }
 
+pub export fn taskers_ghostty_host_version() [*:0]const u8 {
+    return &vendor_version_z;
+}
+
+pub export fn taskers_ghostty_host_build_id() [*:0]const u8 {
+    return &bridge_build_id_z;
+}
+
+pub export fn taskers_ghostty_host_begin_shutdown(host: ?*Host) void {
+    const ptr = host orelse return;
+    ptr.shutting_down = true;
+}
+
+pub export fn taskers_ghostty_host_surface_count(host: ?*Host) usize {
+    const ptr = host orelse return 0;
+    return ptr.core_app.surfaces.items.len;
+}
+
 pub export fn taskers_ghostty_host_tick(host: ?*Host) c_int {
     const ptr = host orelse return 0;
+    if (ptr.shutting_down) return 1;
     ptr.core_app.tick(&ptr.rt_app) catch |err| {
         std.log.warn("ghostty tick failed err={}", .{err});
         return 0;
@@ -143,6 +173,7 @@ pub export fn taskers_ghostty_surface_new(
     options: ?*const SurfaceOptions,
 ) ?*gtk.Widget {
     const ptr = host orelse return null;
+    if (ptr.shutting_down) return null;
     const opts = options orelse &SurfaceOptions{};
     const surface = Surface.newForApp(ptr.rt_app.app, .{
         .working_directory = if (opts.working_directory) |value| std.mem.span(value) else null,
@@ -157,6 +188,12 @@ pub export fn taskers_ghostty_surface_new(
 
     _ = surface.refSink();
     return surface.as(gtk.Widget);
+}
+
+pub export fn taskers_ghostty_surface_destroy(widget: ?*gtk.Widget) void {
+    const ptr = widget orelse return;
+    const surface: *Surface = @ptrCast(@alignCast(ptr));
+    surface.close();
 }
 
 pub export fn taskers_ghostty_surface_grab_focus(widget: ?*gtk.Widget) c_int {
@@ -323,6 +360,13 @@ fn duplicateStringList(
 fn freeStringList(alloc: std.mem.Allocator, entries: []const [:0]u8) void {
     for (entries) |entry| alloc.free(entry);
     alloc.free(entries);
+}
+
+fn cString(comptime value: []const u8) [value.len:0]u8 {
+    var output: [value.len:0]u8 = undefined;
+    @memcpy(output[0..value.len], value);
+    output[value.len] = 0;
+    return output;
 }
 
 test "taskers embedded config preserves user settings beyond required invariants" {

@@ -386,6 +386,81 @@ fn release_application_hold(hold_guard: &Rc<RefCell<Option<gtk::gio::Application
     }
 }
 
+fn shutdown_host_bridge(host: &Rc<RefCell<TaskersHost>>, diagnostics: Option<&DiagnosticsWriter>) {
+    if let Ok(mut host) = host.try_borrow_mut() {
+        host.shutdown();
+    }
+    quiesce_host_bridge(host, diagnostics, Duration::from_millis(250));
+    if let Ok(host) = host.try_borrow()
+        && let Some(health) = host.bridge_health_snapshot()
+    {
+        log_diagnostic(
+            diagnostics,
+            DiagnosticRecord::new(
+                DiagnosticCategory::Bridge,
+                None,
+                format!(
+                    "ghostty shutdown summary state={} surface_count={}",
+                    health.state.label(),
+                    health.surface_count
+                ),
+            ),
+        );
+    }
+}
+
+fn quiesce_host_bridge(
+    host: &Rc<RefCell<TaskersHost>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    let context = glib::MainContext::default();
+    loop {
+        let Some(health) = host
+            .try_borrow()
+            .ok()
+            .and_then(|host| host.bridge_health_snapshot())
+        else {
+            return;
+        };
+        if health.surface_count == 0 {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    None,
+                    "ghostty bridge quiesced surface_count=0",
+                ),
+            );
+            return;
+        }
+        if Instant::now() >= deadline {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    None,
+                    format!(
+                        "ghostty bridge quiesce timed out surface_count={}",
+                        health.surface_count
+                    ),
+                ),
+            );
+            return;
+        }
+
+        let mut progressed = false;
+        while context.pending() {
+            progressed = true;
+            let _ = context.iteration(false);
+        }
+        if !progressed {
+            thread::sleep(Duration::from_millis(8));
+        }
+    }
+}
+
 fn build_ui_result(
     app: &adw::Application,
     bootstrap: BootstrapContext,
@@ -423,6 +498,37 @@ fn build_ui_result(
         event_sink,
         diagnostics_sink,
     )));
+    if let Some(bridge_info) = host.borrow().bridge_info() {
+        let note = format!(
+            "Ghostty bridge version={} build_id={}",
+            bridge_info.version, bridge_info.build_id
+        );
+        log_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::Startup,
+                Some(core.revision()),
+                note.clone(),
+            ),
+        );
+        safe_eprintln(note);
+    }
+    if let Some(health) = host.borrow().bridge_health_snapshot() {
+        let note = format!(
+            "Ghostty bridge lifecycle={} surface_count={}",
+            health.state.label(),
+            health.surface_count
+        );
+        log_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::Bridge,
+                Some(core.revision()),
+                note.clone(),
+            ),
+        );
+        safe_eprintln(note);
+    }
     let persisted_config = Rc::new(RefCell::new(bootstrap.config.clone()));
 
     let window = adw::ApplicationWindow::builder()
@@ -431,12 +537,27 @@ fn build_ui_result(
         .default_width(1440)
         .default_height(900)
         .build();
+    let shutdown_done = Rc::new(Cell::new(false));
     let app_for_close = app.clone();
+    let host_for_close = host.clone();
     let hold_guard_for_close = hold_guard.clone();
+    let close_diagnostics = diagnostics.clone();
+    let shutdown_done_for_close = shutdown_done.clone();
     window.connect_close_request(move |_| {
+        if !shutdown_done_for_close.replace(true) {
+            shutdown_host_bridge(&host_for_close, close_diagnostics.as_ref());
+        }
         release_application_hold(&hold_guard_for_close);
         app_for_close.quit();
         glib::Propagation::Proceed
+    });
+    let shutdown_done_for_app = shutdown_done.clone();
+    let shutdown_host = host.clone();
+    let shutdown_diagnostics = diagnostics.clone();
+    app.connect_shutdown(move |_| {
+        if !shutdown_done_for_app.replace(true) {
+            shutdown_host_bridge(&shutdown_host, shutdown_diagnostics.as_ref());
+        }
     });
     let host_widget = host.borrow().widget();
     window.set_content(Some(&host_widget));
@@ -1402,7 +1523,7 @@ fn run_internal_surface_probe(
     let deadline = Instant::now() + Duration::from_millis(350);
     let context = glib::MainContext::default();
     while Instant::now() < deadline {
-        taskers_host.tick();
+        taskers_host.tick(None);
         while context.pending() {
             let _ = context.iteration(false);
         }
@@ -1549,7 +1670,7 @@ fn sync_window(
     let width = window.width();
     let height = window.height();
     if should_defer_initial_sync(last_size.get(), width, height) {
-        host.borrow().tick();
+        host.borrow_mut().tick(Some(core.revision()));
         return;
     }
 
@@ -1598,7 +1719,7 @@ fn sync_window(
         last_revision.set(revision);
     }
 
-    host.borrow().tick();
+    host.borrow_mut().tick(Some(core.revision()));
 }
 
 fn should_defer_initial_sync(last_size: (i32, i32), width: i32, height: i32) -> bool {
@@ -1733,7 +1854,7 @@ fn handle_terminal_debug_request(
     command: TerminalDebugCommand,
 ) -> Result<ControlResponse, ControlError> {
     sync_window(window, core, host, last_revision, last_size, diagnostics);
-    let result = host.borrow().execute_terminal_debug(command)?;
+    let result = host.borrow_mut().execute_terminal_debug(command)?;
     sync_window(window, core, host, last_revision, last_size, diagnostics);
     Ok(ControlResponse::TerminalDebug { result })
 }
