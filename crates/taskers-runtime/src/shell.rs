@@ -853,6 +853,19 @@ mod tests {
     }
 
     #[test]
+    fn zsh_shell_hook_avoids_readonly_status_parameter_name() {
+        let zsh_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        ));
+
+        assert!(
+            !zsh_hooks.contains("local status="),
+            "expected zsh hooks to avoid assigning to zsh's readonly status parameter"
+        );
+    }
+
+    #[test]
     fn shell_hooks_invalidate_metadata_cache_after_agent_exit() {
         let bash_hooks = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

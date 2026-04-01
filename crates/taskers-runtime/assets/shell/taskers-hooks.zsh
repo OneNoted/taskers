@@ -262,9 +262,9 @@ taskers__preexec() {
 }
 
 taskers__precmd() {
-  local status=$?
+  local exit_code=$?
   if [[ "${TASKERS_OSC133_EXECUTING:-0}" = "1" ]]; then
-    taskers__osc133_print $'\e]133;D;'"${status}"$'\a'
+    taskers__osc133_print $'\e]133;D;'"${exit_code}"$'\a'
     export TASKERS_OSC133_EXECUTING=0
   fi
   taskers__osc133_mark_prompt
