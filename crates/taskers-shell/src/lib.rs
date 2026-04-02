@@ -282,8 +282,16 @@ fn pane_allows_surface_split(
     dragged.is_some_and(|dragged| dragged.pane_id != pane_id || surface_count > 1)
 }
 
-fn show_live_surface_backdrop(surface_kind: SurfaceKind, overview_mode: bool) -> bool {
-    overview_mode || !matches!(surface_kind, SurfaceKind::Browser)
+fn show_surface_backdrop(
+    surface_kind: SurfaceKind,
+    overview_mode: bool,
+    render_live_surfaces_in_overview: bool,
+) -> bool {
+    if overview_mode {
+        return !render_live_surfaces_in_overview;
+    }
+
+    !matches!(surface_kind, SurfaceKind::Browser)
 }
 
 fn prime_drag_transfer(event: &Event<DragData>, mime: &str, payload: &str) {
@@ -2778,6 +2786,8 @@ fn render_live_pane(
     } else {
         "pane-action-cluster"
     };
+    let render_live_surfaces_in_overview =
+        core.snapshot().settings.render_live_surfaces_in_overview;
 
     let focus_pane = {
         let core = core.clone();
@@ -2928,14 +2938,18 @@ fn render_live_pane(
                 }
             }
             div { class: "pane-body",
-                if show_live_surface_backdrop(active_surface.kind, overview_mode) {
+                if show_surface_backdrop(
+                    active_surface.kind,
+                    overview_mode,
+                    render_live_surfaces_in_overview,
+                ) {
                     {render_surface_backdrop(active_surface, runtime_status)}
                 }
                 if surface_drag_active {
                     div { class: "pane-drop-overlay",
                         {render_surface_pane_drop_target(
                             "pane-drop-target pane-drop-target-center",
-                            "Move here",
+                            "Move",
                             SurfaceDropTarget::AppendToPane { pane_id },
                             core.clone(),
                             surface_drop_target,
@@ -2943,7 +2957,7 @@ fn render_live_pane(
                         if pane_allows_split {
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-left",
-                                "Split ←",
+                                "",
                                 SurfaceDropTarget::SplitPane {
                                     pane_id,
                                     direction: Direction::Left,
@@ -2953,7 +2967,7 @@ fn render_live_pane(
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-right",
-                                "Split →",
+                                "",
                                 SurfaceDropTarget::SplitPane {
                                     pane_id,
                                     direction: Direction::Right,
@@ -2963,7 +2977,7 @@ fn render_live_pane(
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-top",
-                                "Split ↑",
+                                "",
                                 SurfaceDropTarget::SplitPane {
                                     pane_id,
                                     direction: Direction::Up,
@@ -2973,7 +2987,7 @@ fn render_live_pane(
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
-                                "Split ↓",
+                                "",
                                 SurfaceDropTarget::SplitPane {
                                     pane_id,
                                     direction: Direction::Down,
@@ -3571,7 +3585,7 @@ fn render_notification_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        SurfaceDragCandidate, SurfaceKind, attention_ring_class, show_live_surface_backdrop,
+        SurfaceDragCandidate, SurfaceKind, attention_ring_class, show_surface_backdrop,
         surface_drag_threshold_reached, surface_primary_label, surface_runtime_badge_text,
         surface_status_text, surface_summary_title,
     };
@@ -3618,10 +3632,13 @@ mod tests {
     }
 
     #[test]
-    fn live_browser_panes_skip_decorative_backdrop_outside_overview() {
-        assert!(!show_live_surface_backdrop(SurfaceKind::Browser, false));
-        assert!(show_live_surface_backdrop(SurfaceKind::Browser, true));
-        assert!(show_live_surface_backdrop(SurfaceKind::Terminal, false));
+    fn backdrop_switches_between_live_and_abstract_overview_modes() {
+        assert!(!show_surface_backdrop(SurfaceKind::Browser, false, true));
+        assert!(show_surface_backdrop(SurfaceKind::Terminal, false, true));
+        assert!(!show_surface_backdrop(SurfaceKind::Browser, true, true));
+        assert!(!show_surface_backdrop(SurfaceKind::Terminal, true, true));
+        assert!(show_surface_backdrop(SurfaceKind::Browser, true, false));
+        assert!(show_surface_backdrop(SurfaceKind::Terminal, true, false));
     }
 
     #[test]
@@ -3790,6 +3807,20 @@ fn render_settings(settings: &SettingsSnapshot, core: SharedCore) -> Element {
                     )}
                 }
             }
+            section { class: "settings-card",
+                div { class: "sidebar-heading", "Workspace overview" }
+                div { class: "settings-copy",
+                    "Overview mode can either render the real workspace surfaces or fall back to lighter abstraction cards."
+                }
+                div { class: "settings-toggle-list",
+                    {render_overview_surface_preference(
+                        "Render live surfaces",
+                        "Show the actual browser and terminal contents in overview mode. Turn this off to use the lower-cost abstraction cards instead.",
+                        settings.render_live_surfaces_in_overview,
+                        core.clone(),
+                    )}
+                }
+            }
             section { class: "settings-card settings-card-span",
                 div { class: "sidebar-heading", "Shortcut Reference" }
                 div { class: "shortcut-groups",
@@ -3892,6 +3923,34 @@ fn render_notification_preference(
             key,
             enabled: !enabled,
         })
+    };
+    let track_class = if enabled {
+        "toggle-track toggle-track-active"
+    } else {
+        "toggle-track"
+    };
+
+    rsx! {
+        button { class: "settings-toggle-row", onclick: toggle,
+            div { class: "settings-toggle-copy",
+                div { class: "workspace-label", "{label}" }
+                div { class: "settings-copy", "{detail}" }
+            }
+            div { class: "{track_class}",
+                div { class: "toggle-thumb" }
+            }
+        }
+    }
+}
+
+fn render_overview_surface_preference(
+    label: &'static str,
+    detail: &'static str,
+    enabled: bool,
+    core: SharedCore,
+) -> Element {
+    let toggle = move |_| {
+        core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: !enabled })
     };
     let track_class = if enabled {
         "toggle-track toggle-track-active"

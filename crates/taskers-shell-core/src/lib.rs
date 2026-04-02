@@ -535,6 +535,7 @@ pub struct BootstrapModel {
     pub selected_theme_id: String,
     pub selected_shortcut_preset: ShortcutPreset,
     pub notification_preferences: NotificationPreferencesSnapshot,
+    pub render_live_surfaces_in_overview: bool,
 }
 
 impl Default for BootstrapModel {
@@ -545,6 +546,7 @@ impl Default for BootstrapModel {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: ShortcutPreset::Balanced,
             notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
         }
     }
 }
@@ -1124,6 +1126,7 @@ pub struct SettingsSnapshot {
     pub shortcut_presets: Vec<ShortcutPresetSnapshot>,
     pub shortcuts: Vec<ShortcutBindingSnapshot>,
     pub notification_preferences: NotificationPreferencesSnapshot,
+    pub render_live_surfaces_in_overview: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1495,6 +1498,9 @@ pub enum ShellAction {
         key: NotificationPreferenceKey,
         enabled: bool,
     },
+    SetOverviewLiveSurfaces {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1507,6 +1513,7 @@ struct UiState {
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     notification_preferences: NotificationPreferencesSnapshot,
+    render_live_surfaces_in_overview: bool,
     window_size: PixelSize,
     vcs_panel_visible: bool,
     last_terminal_surface_by_workspace: BTreeMap<WorkspaceId, SurfaceId>,
@@ -1577,6 +1584,7 @@ impl TaskersCore {
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 notification_preferences: bootstrap.notification_preferences,
+                render_live_surfaces_in_overview: bootstrap.render_live_surfaces_in_overview,
                 window_size: PixelSize::new(1440, 900),
                 vcs_panel_visible: false,
                 last_terminal_surface_by_workspace: BTreeMap::new(),
@@ -1729,7 +1737,7 @@ impl TaskersCore {
                 window: Frame::new(0, 0, self.ui.window_size.width, self.ui.window_size.height),
                 content: viewport,
                 panes: if matches!(self.ui.section, ShellSection::Workspace)
-                    && !self.ui.overview_mode
+                    && (!self.ui.overview_mode || self.ui.render_live_surfaces_in_overview)
                 {
                     self.collect_workspace_surface_plans(workspace_id, workspace, &window_frames)
                 } else {
@@ -1775,6 +1783,7 @@ impl TaskersCore {
                 .collect(),
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
             notification_preferences: self.ui.notification_preferences,
+            render_live_surfaces_in_overview: self.ui.render_live_surfaces_in_overview,
         }
     }
 
@@ -3230,6 +3239,14 @@ impl TaskersCore {
                     return false;
                 }
                 *changed = enabled;
+                self.bump_local_revision();
+                true
+            }
+            ShellAction::SetOverviewLiveSurfaces { enabled } => {
+                if self.ui.render_live_surfaces_in_overview == enabled {
+                    return false;
+                }
+                self.ui.render_live_surfaces_in_overview = enabled;
                 self.bump_local_revision();
                 true
             }
@@ -6408,6 +6425,7 @@ mod tests {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
             notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
         }
     }
 
@@ -7928,6 +7946,7 @@ mod tests {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
             notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
         });
 
         core.dispatch_shell_action(ShellAction::ResumeInterruptedAgent {
@@ -8283,7 +8302,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_mode_hides_live_portal_surfaces() {
+    fn overview_mode_keeps_live_portal_surfaces_enabled_by_default() {
         let core = SharedCore::bootstrap(bootstrap());
         assert!(!core.snapshot().portal.panes.is_empty());
 
@@ -8291,7 +8310,20 @@ mod tests {
 
         let snapshot = core.snapshot();
         assert!(snapshot.overview_mode);
+        assert!(!snapshot.portal.panes.is_empty());
+    }
+
+    #[test]
+    fn overview_mode_can_hide_live_portal_surfaces_when_disabled() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: false });
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
         assert!(snapshot.portal.panes.is_empty());
+        assert!(!snapshot.settings.render_live_surfaces_in_overview);
     }
 
     #[test]
