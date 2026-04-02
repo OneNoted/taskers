@@ -309,6 +309,7 @@ fn primary_pointer_drag_origin(event: &Event<PointerData>) -> Option<(f64, f64)>
         return None;
     }
     let (start_x, start_y) = pointer_client_position(event);
+    event.prevent_default();
     event.stop_propagation();
     Some((start_x, start_y))
 }

@@ -1073,6 +1073,8 @@ input:focus-visible {{
   border-radius: 0;
   color: {text_subtle};
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .workspace-window-tab:hover {{
@@ -1107,12 +1109,16 @@ input:focus-visible {{
   background: transparent;
   padding: 0;
   color: inherit;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .workspace-window-tab-copy {{
   min-width: 0;
   display: inline-flex;
   align-items: center;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .workspace-window-tab-title {{
@@ -1122,6 +1128,8 @@ input:focus-visible {{
   white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .workspace-window-tab-kind-icon {{
@@ -1489,6 +1497,8 @@ input:focus-visible {{
   padding: 0;
   overflow-x: auto;
   background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab {{
@@ -1505,6 +1515,8 @@ input:focus-visible {{
   white-space: nowrap;
   border-radius: 0;
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab-focus {{
@@ -1519,6 +1531,8 @@ input:focus-visible {{
   color: inherit;
   text-align: left;
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab:hover {{
@@ -1630,6 +1644,8 @@ input:focus-visible {{
   align-items: center;
   gap: 6px;
   flex: 1 1 auto;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab-primary {{
@@ -1640,6 +1656,8 @@ input:focus-visible {{
   color: {text_subtle};
   font-size: 12px;
   flex: 1 1 auto;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab-runtime-badge {{
