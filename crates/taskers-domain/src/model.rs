@@ -2225,6 +2225,110 @@ impl AppModel {
         Ok(())
     }
 
+    pub fn transfer_pane_tab(
+        &mut self,
+        workspace_id: WorkspaceId,
+        source_pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_pane_container_id: PaneContainerId,
+        to_index: usize,
+    ) -> Result<(), DomainError> {
+        if source_pane_container_id == target_pane_container_id {
+            return self.move_pane_tab(
+                workspace_id,
+                source_pane_container_id,
+                pane_tab_id,
+                to_index,
+            );
+        }
+
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let (source_window_id, source_window_tab_id) = workspace
+            .container_location(source_pane_container_id)
+            .ok_or(DomainError::MissingPaneContainer(source_pane_container_id))?;
+        workspace
+            .container_location(target_pane_container_id)
+            .ok_or(DomainError::MissingPaneContainer(target_pane_container_id))?;
+
+        let moved_tab = {
+            let source_container = workspace
+                .pane_containers
+                .get_mut(&source_pane_container_id)
+                .ok_or(DomainError::MissingPaneContainer(source_pane_container_id))?;
+            source_container
+                .remove_tab(pane_tab_id)
+                .ok_or(DomainError::MissingPane(workspace.active_pane))?
+        };
+        let target_active_pane = moved_tab.active_pane;
+
+        {
+            let target_container = workspace
+                .pane_containers
+                .get_mut(&target_pane_container_id)
+                .ok_or(DomainError::MissingPaneContainer(target_pane_container_id))?;
+            target_container.insert_tab(moved_tab, to_index);
+        }
+
+        if workspace
+            .pane_containers
+            .get(&source_pane_container_id)
+            .is_some_and(|container| container.tabs.is_empty())
+        {
+            let remove_source_window_tab = workspace
+                .windows
+                .get(&source_window_id)
+                .and_then(|window| window.tabs.get(&source_window_tab_id))
+                .is_some_and(|window_tab| window_tab.layout.leaves().len() <= 1);
+            if remove_source_window_tab {
+                if let Some(source_window) = workspace.windows.get_mut(&source_window_id) {
+                    let _ = source_window.remove_tab(source_window_tab_id);
+                }
+            } else if let Some(source_window) = workspace.windows.get_mut(&source_window_id)
+                && let Some(source_window_tab) = source_window.tabs.get_mut(&source_window_tab_id)
+            {
+                let _ = close_window_tab_container(source_window_tab, source_pane_container_id);
+            }
+            remove_pane_containers_from_workspace(workspace, &[source_pane_container_id]);
+            if workspace
+                .windows
+                .get(&source_window_id)
+                .is_some_and(|window| window.tabs.is_empty())
+            {
+                let (source_column_id, _source_column_index, source_window_index) = workspace
+                    .position_for_window(source_window_id)
+                    .ok_or(DomainError::MissingWorkspaceWindow(source_window_id))?;
+                let same_column_survived = {
+                    let column = workspace
+                        .columns
+                        .get_mut(&source_column_id)
+                        .ok_or(DomainError::MissingWorkspaceColumn(source_column_id))?;
+                    column.window_order.remove(source_window_index);
+                    if column.window_order.is_empty() {
+                        false
+                    } else {
+                        if !column.window_order.contains(&column.active_window) {
+                            let replacement_index =
+                                source_window_index.min(column.window_order.len() - 1);
+                            column.active_window = column.window_order[replacement_index];
+                        }
+                        true
+                    }
+                };
+                if !same_column_survived {
+                    workspace.columns.shift_remove(&source_column_id);
+                }
+                workspace.windows.shift_remove(&source_window_id);
+            }
+        }
+
+        workspace.normalize();
+        let _ = workspace.focus_pane(target_active_pane);
+        Ok(())
+    }
+
     pub fn close_pane_tab(
         &mut self,
         workspace_id: WorkspaceId,
@@ -7702,6 +7806,111 @@ mod tests {
             Some(2)
         );
         assert_eq!(workspace.active_window, target_window_id);
+    }
+
+    #[test]
+    fn transferring_pane_tab_merges_into_target_container() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let (source_container_id, source_original_tab_id) = {
+            let workspace = model.active_workspace().expect("workspace");
+            let (_, _, container_id, pane_tab_id) = workspace
+                .pane_location(source_pane_id)
+                .expect("pane location");
+            (container_id, pane_tab_id)
+        };
+        let (moved_tab_id, moved_pane_id) = model
+            .create_pane_tab(workspace_id, source_container_id, PaneKind::Terminal)
+            .expect("create pane tab");
+
+        let target_pane_id = model
+            .create_workspace_window(workspace_id, Direction::Right)
+            .expect("create second window");
+        let (target_window_id, _, target_container_id, target_original_tab_id) = {
+            let workspace = model.active_workspace().expect("workspace");
+            workspace
+                .pane_location(target_pane_id)
+                .expect("target pane location")
+        };
+
+        model
+            .transfer_pane_tab(
+                workspace_id,
+                source_container_id,
+                moved_tab_id,
+                target_container_id,
+                usize::MAX,
+            )
+            .expect("transfer pane tab");
+
+        let workspace = model.active_workspace().expect("workspace");
+        let source_container = workspace
+            .pane_containers
+            .get(&source_container_id)
+            .expect("source container");
+        let target_container = workspace
+            .pane_containers
+            .get(&target_container_id)
+            .expect("target container");
+
+        assert_eq!(
+            source_container.tabs.keys().copied().collect::<Vec<_>>(),
+            vec![source_original_tab_id]
+        );
+        assert_eq!(
+            target_container.tabs.keys().copied().collect::<Vec<_>>(),
+            vec![target_original_tab_id, moved_tab_id]
+        );
+        assert_eq!(target_container.active_tab, moved_tab_id);
+        assert_eq!(workspace.active_window, target_window_id);
+        assert_eq!(workspace.active_pane, moved_pane_id);
+    }
+
+    #[test]
+    fn transferring_last_pane_tab_removes_empty_source_window() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let source_window_id = model.active_workspace().expect("workspace").active_window;
+        let source_pane_id = model.active_workspace().expect("workspace").active_pane;
+        let (source_container_id, moved_tab_id) = {
+            let workspace = model.active_workspace().expect("workspace");
+            let (_, _, container_id, pane_tab_id) = workspace
+                .pane_location(source_pane_id)
+                .expect("pane location");
+            (container_id, pane_tab_id)
+        };
+
+        let target_pane_id = model
+            .create_workspace_window(workspace_id, Direction::Right)
+            .expect("create second window");
+        let (target_window_id, _, target_container_id, _) = {
+            let workspace = model.active_workspace().expect("workspace");
+            workspace
+                .pane_location(target_pane_id)
+                .expect("target pane location")
+        };
+
+        model
+            .transfer_pane_tab(
+                workspace_id,
+                source_container_id,
+                moved_tab_id,
+                target_container_id,
+                usize::MAX,
+            )
+            .expect("transfer last pane tab");
+
+        let workspace = model.active_workspace().expect("workspace");
+        assert!(!workspace.windows.contains_key(&source_window_id));
+        assert_eq!(workspace.active_window, target_window_id);
+        assert_eq!(
+            workspace
+                .pane_containers
+                .get(&target_container_id)
+                .map(|container| container.tabs.len()),
+            Some(2)
+        );
     }
 
     #[test]

@@ -1011,7 +1011,20 @@ pub enum ShellDragMode {
     None,
     Window,
     WindowTab,
+    PaneTab,
     Surface,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowTabDragSessionSnapshot {
+    pub window_id: WorkspaceWindowId,
+    pub tab_id: WorkspaceWindowTabId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneTabDragSessionSnapshot {
+    pub pane_container_id: PaneContainerId,
+    pub pane_tab_id: PaneTabId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1020,6 +1033,13 @@ pub struct SurfaceDragSessionSnapshot {
     pub pane_id: PaneId,
     pub surface_id: SurfaceId,
     pub preview_workspace_id: WorkspaceId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragSessionSnapshot {
+    WindowTab(WindowTabDragSessionSnapshot),
+    PaneTab(PaneTabDragSessionSnapshot),
+    Surface(SurfaceDragSessionSnapshot),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1121,6 +1141,7 @@ pub struct ShellSnapshot {
     pub section: ShellSection,
     pub overview_mode: bool,
     pub drag_mode: ShellDragMode,
+    pub drag_session: Option<DragSessionSnapshot>,
     pub surface_drag: Option<SurfaceDragSessionSnapshot>,
     pub resize_preview_active: bool,
     pub attention_panel_visible: bool,
@@ -1336,6 +1357,12 @@ pub enum ShellAction {
         pane_tab_id: PaneTabId,
         target_index: usize,
     },
+    TransferPaneTab {
+        source_pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_pane_container_id: PaneContainerId,
+        target_index: usize,
+    },
     ClosePaneTab {
         pane_container_id: PaneContainerId,
         pane_tab_id: PaneTabId,
@@ -1382,7 +1409,14 @@ pub enum ShellAction {
         target_workspace_id: WorkspaceId,
     },
     BeginWindowDrag,
-    BeginWindowTabDrag,
+    BeginWindowTabDrag {
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    },
+    BeginPaneTabDrag {
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    },
     BeginSurfaceDrag {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
@@ -1468,7 +1502,7 @@ struct UiState {
     section: ShellSection,
     overview_mode: bool,
     drag_mode: ShellDragMode,
-    surface_drag: Option<SurfaceDragSessionSnapshot>,
+    drag_session: Option<DragSessionSnapshot>,
     resize_preview: Option<ResizePreview>,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
@@ -1538,7 +1572,7 @@ impl TaskersCore {
                 section: ShellSection::Workspace,
                 overview_mode: false,
                 drag_mode: ShellDragMode::None,
-                surface_drag: None,
+                drag_session: None,
                 resize_preview: None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
@@ -1645,7 +1679,11 @@ impl TaskersCore {
             section: self.ui.section,
             overview_mode: self.ui.overview_mode,
             drag_mode: self.ui.drag_mode,
-            surface_drag: self.ui.surface_drag,
+            drag_session: self.ui.drag_session,
+            surface_drag: match self.ui.drag_session {
+                Some(DragSessionSnapshot::Surface(session)) => Some(session),
+                _ => None,
+            },
             resize_preview_active: self.ui.resize_preview.is_some(),
             attention_panel_visible,
             workspaces: self.workspace_summaries(&model),
@@ -3017,6 +3055,17 @@ impl TaskersCore {
                 pane_tab_id,
                 target_index,
             } => self.move_pane_tab(pane_container_id, pane_tab_id, target_index),
+            ShellAction::TransferPaneTab {
+                source_pane_container_id,
+                pane_tab_id,
+                target_pane_container_id,
+                target_index,
+            } => self.transfer_pane_tab(
+                source_pane_container_id,
+                pane_tab_id,
+                target_pane_container_id,
+                target_index,
+            ),
             ShellAction::ClosePaneTab {
                 pane_container_id,
                 pane_tab_id,
@@ -3077,7 +3126,13 @@ impl TaskersCore {
                 target_workspace_id,
             ),
             ShellAction::BeginWindowDrag => self.begin_window_drag(),
-            ShellAction::BeginWindowTabDrag => self.begin_window_tab_drag(),
+            ShellAction::BeginWindowTabDrag { window_id, tab_id } => {
+                self.begin_window_tab_drag(window_id, tab_id)
+            }
+            ShellAction::BeginPaneTabDrag {
+                pane_container_id,
+                pane_tab_id,
+            } => self.begin_pane_tab_drag(pane_container_id, pane_tab_id),
             ShellAction::BeginSurfaceDrag {
                 workspace_id,
                 pane_id,
@@ -3577,6 +3632,40 @@ impl TaskersCore {
             pane_tab_id,
             to_index: target_index,
         })
+    }
+
+    fn transfer_pane_tab(
+        &mut self,
+        source_pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_pane_container_id: PaneContainerId,
+        target_index: usize,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(source_workspace_id) =
+            self.resolve_workspace_pane_container(&model, source_pane_container_id)
+        else {
+            return false;
+        };
+        let Some(target_workspace_id) =
+            self.resolve_workspace_pane_container(&model, target_pane_container_id)
+        else {
+            return false;
+        };
+        if source_workspace_id != target_workspace_id {
+            return false;
+        }
+        let changed = self.dispatch_control(ControlCommand::TransferPaneTab {
+            workspace_id: source_workspace_id,
+            source_pane_container_id,
+            pane_tab_id,
+            target_pane_container_id,
+            to_index: target_index,
+        });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
     }
 
     fn close_pane_tab(
@@ -4272,8 +4361,8 @@ impl TaskersCore {
 
     fn begin_window_drag(&mut self) -> bool {
         let mut changed = false;
-        if self.ui.surface_drag.is_some() {
-            self.ui.surface_drag = None;
+        if self.ui.drag_session.is_some() {
+            self.ui.drag_session = None;
             changed = true;
         }
         if self.ui.drag_mode != ShellDragMode::Window {
@@ -4286,14 +4375,51 @@ impl TaskersCore {
         changed
     }
 
-    fn begin_window_tab_drag(&mut self) -> bool {
+    fn begin_window_tab_drag(
+        &mut self,
+        window_id: WorkspaceWindowId,
+        tab_id: WorkspaceWindowTabId,
+    ) -> bool {
+        let next =
+            DragSessionSnapshot::WindowTab(WindowTabDragSessionSnapshot { window_id, tab_id });
         let mut changed = false;
-        if self.ui.surface_drag.is_some() {
-            self.ui.surface_drag = None;
+        if self.ui.drag_session != Some(next) {
+            self.ui.drag_session = Some(next);
             changed = true;
         }
         if self.ui.drag_mode != ShellDragMode::WindowTab {
             self.ui.drag_mode = ShellDragMode::WindowTab;
+            changed = true;
+        }
+        if changed {
+            self.bump_local_revision();
+        }
+        changed
+    }
+
+    fn begin_pane_tab_drag(
+        &mut self,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        if self
+            .resolve_workspace_pane_container(&model, pane_container_id)
+            .is_none()
+        {
+            return false;
+        }
+        let next = DragSessionSnapshot::PaneTab(PaneTabDragSessionSnapshot {
+            pane_container_id,
+            pane_tab_id,
+        });
+        let mut changed = false;
+        if self.ui.drag_session != Some(next) {
+            self.ui.drag_session = Some(next);
+            changed = true;
+        }
+        if self.ui.drag_mode != ShellDragMode::PaneTab {
+            self.ui.drag_mode = ShellDragMode::PaneTab;
             changed = true;
         }
         if changed {
@@ -4318,23 +4444,25 @@ impl TaskersCore {
             surface_id,
             preview_workspace_id: workspace_id,
         };
-        if self.ui.drag_mode == ShellDragMode::Surface && self.ui.surface_drag == Some(next) {
+        if self.ui.drag_mode == ShellDragMode::Surface
+            && self.ui.drag_session == Some(DragSessionSnapshot::Surface(next))
+        {
             return false;
         }
         self.ui.drag_mode = ShellDragMode::Surface;
-        self.ui.surface_drag = Some(next);
+        self.ui.drag_session = Some(DragSessionSnapshot::Surface(next));
         self.bump_local_revision();
         true
     }
 
     fn preview_surface_drag_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
-        let Some(mut session) = self.ui.surface_drag else {
+        let Some(DragSessionSnapshot::Surface(mut session)) = self.ui.drag_session else {
             return false;
         };
         let mut changed = false;
         if session.preview_workspace_id != workspace_id {
             session.preview_workspace_id = workspace_id;
-            self.ui.surface_drag = Some(session);
+            self.ui.drag_session = Some(DragSessionSnapshot::Surface(session));
             self.bump_local_revision();
             changed = true;
         }
@@ -4348,10 +4476,13 @@ impl TaskersCore {
     }
 
     fn clear_surface_drag(&mut self, restore_source_workspace: bool) -> bool {
-        let source_workspace_id = self.ui.surface_drag.map(|session| session.workspace_id);
+        let source_workspace_id = match self.ui.drag_session {
+            Some(DragSessionSnapshot::Surface(session)) => Some(session.workspace_id),
+            _ => None,
+        };
         let mut changed = false;
-        if self.ui.surface_drag.is_some() {
-            self.ui.surface_drag = None;
+        if self.ui.drag_session.is_some() {
+            self.ui.drag_session = None;
             changed = true;
         }
         if self.ui.drag_mode != ShellDragMode::None {
@@ -4387,8 +4518,8 @@ impl TaskersCore {
             self.ui.drag_mode = ShellDragMode::None;
             changed = true;
         }
-        if self.ui.surface_drag.is_some() {
-            self.ui.surface_drag = None;
+        if self.ui.drag_session.is_some() {
+            self.ui.drag_session = None;
             changed = true;
         }
         if changed {

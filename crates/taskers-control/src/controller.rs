@@ -295,6 +295,27 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::TransferPaneTab {
+                workspace_id,
+                source_pane_container_id,
+                pane_tab_id,
+                target_pane_container_id,
+                to_index,
+            } => {
+                model.transfer_pane_tab(
+                    workspace_id,
+                    source_pane_container_id,
+                    pane_tab_id,
+                    target_pane_container_id,
+                    to_index,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "pane tab transferred".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::ClosePaneTab {
                 workspace_id,
                 pane_container_id,

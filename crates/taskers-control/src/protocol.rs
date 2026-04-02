@@ -96,6 +96,13 @@ pub enum ControlCommand {
         pane_tab_id: PaneTabId,
         to_index: usize,
     },
+    TransferPaneTab {
+        workspace_id: WorkspaceId,
+        source_pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_pane_container_id: PaneContainerId,
+        to_index: usize,
+    },
     ClosePaneTab {
         workspace_id: WorkspaceId,
         pane_container_id: PaneContainerId,
