@@ -27,8 +27,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use taskers_control::{
-    BrowserControlCommand, ControlCommand, ControlError, ControlResponse, TerminalDebugCommand,
-    bind_socket, default_socket_path, serve_with_handler,
+    BrowserControlCommand, ControlCommand, ControlError, ControlResponse, ScreenshotCommand,
+    TerminalDebugCommand, bind_socket, default_socket_path, serve_with_handler,
 };
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
@@ -118,6 +118,7 @@ struct RuntimePathOverrides {
 
 enum HostAutomationCommand {
     Browser(BrowserControlCommand),
+    Screenshot(ScreenshotCommand),
     TerminalDebug(TerminalDebugCommand),
 }
 
@@ -1443,14 +1444,14 @@ fn run_internal_surface_probe(
     mode: GhosttyProbeMode,
     config: TaskersConfig,
 ) -> glib::ExitCode {
-    if !gtk::is_initialized_main_thread() {
-        if let Err(error) = gtk::init() {
-            safe_eprintln(format!(
-                "ghostty {} self-probe failed during gtk init: {error}",
-                mode.as_arg()
-            ));
-            return glib::ExitCode::FAILURE;
-        }
+    if !gtk::is_initialized_main_thread()
+        && let Err(error) = gtk::init()
+    {
+        safe_eprintln(format!(
+            "ghostty {} self-probe failed during gtk init: {error}",
+            mode.as_arg()
+        ));
+        return glib::ExitCode::FAILURE;
     }
 
     let settings = WebKitSettings::builder()
@@ -1801,6 +1802,15 @@ async fn handle_host_request(
             )
             .await
         }
+        HostAutomationCommand::Screenshot(command) => handle_screenshot_request(
+            window,
+            core,
+            host,
+            last_revision,
+            last_size,
+            diagnostics,
+            command,
+        ),
         HostAutomationCommand::TerminalDebug(command) => handle_terminal_debug_request(
             window,
             core,
@@ -1864,6 +1874,21 @@ fn handle_terminal_debug_request(
     let result = host.borrow_mut().execute_terminal_debug(command)?;
     sync_window(window, core, host, last_revision, last_size, diagnostics);
     Ok(ControlResponse::TerminalDebug { result })
+}
+
+fn handle_screenshot_request(
+    window: &adw::ApplicationWindow,
+    core: &SharedCore,
+    host: &Rc<RefCell<TaskersHost>>,
+    last_revision: &Rc<Cell<u64>>,
+    last_size: &Rc<Cell<(i32, i32)>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    command: ScreenshotCommand,
+) -> Result<ControlResponse, ControlError> {
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+    let result = host.borrow_mut().execute_screenshot(command)?;
+    sync_window(window, core, host, last_revision, last_size, diagnostics);
+    Ok(ControlResponse::Screenshot { result })
 }
 
 fn browser_surface_id(command: &BrowserControlCommand) -> taskers_shell_core::SurfaceId {
@@ -1933,6 +1958,27 @@ fn spawn_control_server(
                                         .send(HostAutomationRequest {
                                             command: HostAutomationCommand::Browser(
                                                 browser_command,
+                                            ),
+                                            response_tx,
+                                        })
+                                        .map_err(|_| {
+                                            ControlError::internal(
+                                                "host automation bridge is unavailable",
+                                            )
+                                        })?;
+                                    response_rx.await.map_err(|_| {
+                                        ControlError::internal(
+                                            "host automation bridge dropped the response",
+                                        )
+                                    })?
+                                }
+                                ControlCommand::Screenshot { screenshot_command } => {
+                                    let (response_tx, response_rx) =
+                                        tokio::sync::oneshot::channel();
+                                    host_tx
+                                        .send(HostAutomationRequest {
+                                            command: HostAutomationCommand::Screenshot(
+                                                screenshot_command,
                                             ),
                                             response_tx,
                                         })

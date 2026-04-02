@@ -5,8 +5,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use taskers_control::{
     BrowserControlCommand, BrowserGetCommand, BrowserLoadState, BrowserPredicateCommand,
     BrowserTarget, BrowserWaitCondition, ControlClient, ControlCommand, ControlQuery,
-    ControlResponse, InMemoryController, TerminalDebugCommand, bind_socket, default_socket_path,
-    serve,
+    ControlResponse, InMemoryController, ScreenshotCommand, ScreenshotTarget, TerminalDebugCommand,
+    bind_socket, default_socket_path, serve,
 };
 use taskers_domain::{
     AgentTarget, AppModel, AttentionState, BrowserProfileMode, Direction, KEYBOARD_RESIZE_STEP,
@@ -102,6 +102,10 @@ enum Command {
     Browser {
         #[command(subcommand)]
         command: BrowserCommand,
+    },
+    Screenshot {
+        #[command(flatten)]
+        screenshot: ScreenshotArgs,
     },
     Identify {
         #[arg(long)]
@@ -702,6 +706,36 @@ struct TerminalSurfaceArgs {
     pane: Option<PaneId>,
     #[arg(long)]
     surface: Option<SurfaceId>,
+}
+
+#[derive(Debug, Clone, Args)]
+struct ScreenshotArgs {
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Taskers-owned screenshot target. V1 supports surface, pane, workspace_window, and workspace_canvas; app_window capture is deferred."
+    )]
+    target: CliScreenshotTarget,
+    #[arg(long)]
+    workspace: Option<WorkspaceId>,
+    #[arg(long)]
+    pane: Option<PaneId>,
+    #[arg(long)]
+    surface: Option<SurfaceId>,
+    #[arg(long)]
+    out: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliScreenshotTarget {
+    Surface,
+    Pane,
+    #[value(name = "workspace_window", alias = "workspace-window")]
+    WorkspaceWindow,
+    #[value(name = "workspace_canvas", alias = "workspace-canvas")]
+    WorkspaceCanvas,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -1707,6 +1741,9 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Browser { command } => {
             handle_browser_cli_command(command).await?;
         }
+        Command::Screenshot { screenshot } => {
+            handle_screenshot_cli_command(screenshot).await?;
+        }
         Command::Identify {
             socket,
             workspace,
@@ -2249,6 +2286,21 @@ fn resolve_workspace_id_from_model(
         .context("missing workspace id; pass --workspace or run from inside Taskers")
 }
 
+fn resolve_workspace_window_screenshot_target(
+    model: &AppModel,
+    workspace: Option<WorkspaceId>,
+) -> anyhow::Result<ScreenshotTarget> {
+    let workspace_id = resolve_workspace_id_from_model(model, workspace)?;
+    let workspace = model
+        .workspaces
+        .get(&workspace_id)
+        .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+    if !workspace.windows.contains_key(&workspace.active_window) {
+        bail!("workspace {workspace_id} has no active workspace window");
+    }
+    Ok(ScreenshotTarget::WorkspaceWindow { workspace_id })
+}
+
 fn resolve_agent_target(
     model: &AppModel,
     workspace: Option<WorkspaceId>,
@@ -2755,6 +2807,70 @@ async fn handle_browser_cli_command(command: BrowserCommand) -> anyhow::Result<(
     Ok(())
 }
 
+async fn handle_screenshot_cli_command(screenshot: ScreenshotArgs) -> anyhow::Result<()> {
+    let client = ControlClient::new(resolve_socket_path(screenshot.socket.clone()));
+    let command = resolve_screenshot_command(&client, &screenshot).await?;
+    let result = send_screenshot_command(&client, command).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn resolve_screenshot_command(
+    client: &ControlClient,
+    screenshot: &ScreenshotArgs,
+) -> anyhow::Result<ScreenshotCommand> {
+    let model = query_model(client).await?;
+    let target = match screenshot.target {
+        CliScreenshotTarget::Surface => {
+            let (_, _, surface_id) = resolve_terminal_surface(
+                client,
+                &TerminalSurfaceArgs {
+                    socket: screenshot.socket.clone(),
+                    workspace: screenshot.workspace,
+                    pane: screenshot.pane,
+                    surface: screenshot.surface,
+                },
+            )
+            .await?;
+            ScreenshotTarget::Surface { surface_id }
+        }
+        CliScreenshotTarget::Pane => {
+            let workspace_id = resolve_workspace_id_from_model(&model, screenshot.workspace)?;
+            let workspace = model
+                .workspaces
+                .get(&workspace_id)
+                .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+            let pane_id = screenshot
+                .pane
+                .or_else(env_pane_id)
+                .unwrap_or(workspace.active_pane);
+            workspace.panes.get(&pane_id).ok_or_else(|| {
+                anyhow!("pane {pane_id} is not present in workspace {workspace_id}")
+            })?;
+            ScreenshotTarget::Pane {
+                workspace_id,
+                pane_id,
+            }
+        }
+        CliScreenshotTarget::WorkspaceWindow => {
+            resolve_workspace_window_screenshot_target(&model, screenshot.workspace)?
+        }
+        CliScreenshotTarget::WorkspaceCanvas => {
+            let workspace_id = resolve_workspace_id_from_model(&model, screenshot.workspace)?;
+            model
+                .workspaces
+                .get(&workspace_id)
+                .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+            ScreenshotTarget::WorkspaceCanvas { workspace_id }
+        }
+    };
+
+    Ok(ScreenshotCommand::Capture {
+        target,
+        path: screenshot.out.clone(),
+    })
+}
+
 async fn run_browser_surface_command<F>(
     browser: &BrowserSurfaceArgs,
     build: F,
@@ -2840,6 +2956,18 @@ async fn send_terminal_debug_command(
     match response {
         ControlResponse::TerminalDebug { result } => Ok(serde_json::to_value(result)?),
         other => bail!("unexpected terminal debug response: {other:?}"),
+    }
+}
+
+async fn send_screenshot_command(
+    client: &ControlClient,
+    screenshot_command: ScreenshotCommand,
+) -> anyhow::Result<serde_json::Value> {
+    let response =
+        send_control_command(client, ControlCommand::Screenshot { screenshot_command }).await?;
+    match response {
+        ControlResponse::Screenshot { result } => Ok(serde_json::to_value(result)?),
+        other => bail!("unexpected screenshot response: {other:?}"),
     }
 }
 
@@ -3033,6 +3161,7 @@ fn resolve_wait_condition(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_agent_hook(
     socket: Option<PathBuf>,
     workspace: Option<WorkspaceId>,
@@ -3232,15 +3361,18 @@ mod tests {
     };
 
     use taskers_control::{
-        BrowserTarget, BrowserWaitCondition, ControlCommand, InMemoryController, bind_socket, serve,
+        BrowserTarget, BrowserWaitCondition, ControlClient, ControlCommand, InMemoryController,
+        ScreenshotCommand, ScreenshotTarget, bind_socket, serve,
     };
-    use taskers_domain::{AppModel, PaneKind};
+    use taskers_domain::{AppModel, BrowserProfileMode, PaneKind, WorkspaceWindowId};
     use tokio::sync::oneshot;
 
     use super::{
-        CliBrowserLoadState, CliSignalKind, emit_agent_hook, ensure_implicit_notify_target_context,
-        env_pane_id, env_surface_id, env_workspace_id, infer_agent_kind, resolve_browser_target,
-        resolve_wait_condition,
+        CliBrowserLoadState, CliScreenshotTarget, CliSignalKind, ScreenshotArgs, emit_agent_hook,
+        ensure_implicit_notify_target_context, env_pane_id, env_surface_id, env_workspace_id,
+        infer_agent_kind, query_model, resolve_browser_target, resolve_screenshot_command,
+        resolve_wait_condition, resolve_workspace_window_screenshot_target,
+        send_screenshot_command,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -3487,6 +3619,168 @@ mod tests {
 
         shutdown_tx.send(()).expect("shutdown");
         server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
+    }
+
+    #[tokio::test]
+    async fn screenshot_workspace_window_resolves_to_selected_workspace() {
+        let tempdir = unique_temp_dir("taskers-cli-screenshot-window");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("taskers.sock");
+        let listener = bind_socket(&socket_path).expect("listener");
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(listener, controller, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        let client = ControlClient::new(socket_path.clone());
+        let workspace_id = query_model(&client)
+            .await
+            .expect("model")
+            .active_workspace_id()
+            .expect("workspace");
+
+        let command = resolve_screenshot_command(
+            &client,
+            &ScreenshotArgs {
+                socket: Some(socket_path),
+                target: CliScreenshotTarget::WorkspaceWindow,
+                workspace: Some(workspace_id),
+                pane: None,
+                surface: None,
+                out: Some(tempdir.join("window.png").display().to_string()),
+            },
+        )
+        .await
+        .expect("resolve screenshot");
+
+        match command {
+            ScreenshotCommand::Capture {
+                target:
+                    ScreenshotTarget::WorkspaceWindow {
+                        workspace_id: resolved_workspace_id,
+                    },
+                ..
+            } => assert_eq!(resolved_workspace_id, workspace_id),
+            other => panic!("unexpected screenshot command: {other:?}"),
+        }
+
+        shutdown_tx.send(()).expect("shutdown");
+        server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
+    }
+
+    #[tokio::test]
+    async fn screenshot_surface_rejects_non_terminal_surface() {
+        let tempdir = unique_temp_dir("taskers-cli-screenshot-surface");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("taskers.sock");
+        let listener = bind_socket(&socket_path).expect("listener");
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id: workspace.id,
+                pane_id: workspace.active_pane,
+                kind: PaneKind::Browser,
+                browser_profile_mode: Some(BrowserProfileMode::PersistentDefault),
+            })
+            .expect("create browser surface");
+        let browser_surface_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&workspace.id)
+            .and_then(|workspace| workspace.panes.get(&workspace.active_pane))
+            .map(|pane| pane.active_surface)
+            .expect("browser surface");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(listener, controller, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        let client = ControlClient::new(socket_path.clone());
+        let error = resolve_screenshot_command(
+            &client,
+            &ScreenshotArgs {
+                socket: Some(socket_path),
+                target: CliScreenshotTarget::Surface,
+                workspace: Some(workspace.id),
+                pane: Some(workspace.active_pane),
+                surface: Some(browser_surface_id),
+                out: None,
+            },
+        )
+        .await
+        .expect_err("browser surface should not resolve as a terminal screenshot target");
+
+        assert!(
+            error.to_string().contains("not a terminal"),
+            "unexpected error: {error}"
+        );
+
+        shutdown_tx.send(()).expect("shutdown");
+        server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
+    }
+
+    #[test]
+    fn screenshot_workspace_window_errors_when_workspace_has_no_active_window() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let workspace = model.workspaces.get_mut(&workspace_id).expect("workspace");
+        workspace.active_window = WorkspaceWindowId::new();
+        let error = resolve_workspace_window_screenshot_target(&model, Some(workspace_id))
+            .expect_err("workspace without active window should fail");
+
+        assert!(
+            error.to_string().contains("no active workspace window"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn screenshot_bridge_unavailable_does_not_create_output() {
+        let tempdir = unique_temp_dir("taskers-cli-screenshot-unavailable");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("missing.sock");
+        let output_path = tempdir.join("missing.png");
+        let client = ControlClient::new(socket_path);
+
+        let error = send_screenshot_command(
+            &client,
+            ScreenshotCommand::Capture {
+                target: ScreenshotTarget::WorkspaceCanvas {
+                    workspace_id: taskers_domain::WorkspaceId::new(),
+                },
+                path: Some(output_path.display().to_string()),
+            },
+        )
+        .await
+        .expect_err("missing host bridge should fail");
+
+        assert!(
+            !output_path.exists(),
+            "unexpected screenshot artifact at {}",
+            output_path.display()
+        );
+        assert!(
+            error.to_string().contains("No such file")
+                || error.to_string().contains("os error")
+                || error.to_string().contains("connect"),
+            "unexpected error: {error}"
+        );
+
         std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
     }
 

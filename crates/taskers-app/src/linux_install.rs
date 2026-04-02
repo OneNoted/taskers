@@ -36,7 +36,7 @@ pub fn exit_code_from_status(status: ExitStatus) -> i32 {
     {
         use std::os::unix::process::ExitStatusExt;
 
-        return status.signal().map_or(1, |signal| 128 + signal);
+        status.signal().map_or(1, |signal| 128 + signal)
     }
 
     #[cfg(not(unix))]

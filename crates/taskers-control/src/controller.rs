@@ -888,6 +888,11 @@ impl InMemoryController {
                     "browser automation commands require a live GTK host",
                 ));
             }
+            ControlCommand::Screenshot { .. } => {
+                return Err(DomainError::InvalidOperation(
+                    "screenshot commands require a live GTK host",
+                ));
+            }
             ControlCommand::TerminalDebug { .. } => {
                 return Err(DomainError::InvalidOperation(
                     "terminal debug commands require a live GTK host",
@@ -1095,7 +1100,9 @@ fn normalized_value(value: Option<&str>) -> Option<String> {
 mod tests {
     use taskers_domain::{AppModel, BrowserProfileMode, PaneKind, SignalEvent, SignalKind};
 
-    use crate::{ControlCommand, ControlQuery, ControlResponse};
+    use crate::{
+        ControlCommand, ControlQuery, ControlResponse, ScreenshotCommand, ScreenshotTarget,
+    };
 
     use super::InMemoryController;
 
@@ -1300,7 +1307,7 @@ mod tests {
             target_surface.2.metadata.agent_kind.as_deref(),
             Some("codex")
         );
-        assert_eq!(target_surface.2.metadata.agent_active, true);
+        assert!(target_surface.2.metadata.agent_active);
         assert!(
             snapshot
                 .model
@@ -1474,6 +1481,29 @@ mod tests {
         assert_eq!(
             browser_surface.metadata.browser_profile_mode,
             BrowserProfileMode::Ephemeral
+        );
+    }
+
+    #[test]
+    fn screenshot_commands_require_live_host() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+
+        let error = controller
+            .handle(ControlCommand::Screenshot {
+                screenshot_command: ScreenshotCommand::Capture {
+                    target: ScreenshotTarget::WorkspaceCanvas {
+                        workspace_id: workspace.id,
+                    },
+                    path: None,
+                },
+            })
+            .expect_err("screenshot should require live host");
+
+        assert!(
+            error.to_string().contains("live GTK host"),
+            "unexpected error: {error}"
         );
     }
 }
