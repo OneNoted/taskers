@@ -3040,7 +3040,7 @@ fn render_surface_pane_drop_target(
             onpointermove: set_drop_target_move,
             onpointerleave: clear_drop_target,
             onpointerup: drop_surface,
-            "{label}"
+            span { class: "pane-drop-target-copy", "{label}" }
         }
     }
 }

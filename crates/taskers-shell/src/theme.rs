@@ -1840,15 +1840,16 @@ input:focus-visible {{
 }}
 
 .workspace-window-drop-zone-visible {{
-  opacity: 0.45;
+  opacity: 0.72;
   pointer-events: auto;
-  background: {accent_12};
+  background: linear-gradient(180deg, {accent_12} 0%, {accent_08} 100%);
 }}
 
 .workspace-window-drop-zone-active {{
   opacity: 1;
   pointer-events: auto;
-  background: {accent_24};
+  background: linear-gradient(180deg, {accent_20} 0%, {accent_12} 100%);
+  box-shadow: inset 0 0 0 1px {accent_24};
 }}
 
 .workspace-window-drop-zone-left,
@@ -1995,6 +1996,8 @@ input:focus-visible {{
   inset: 0;
   z-index: 8;
   pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0.10) 100%);
 }}
 
 .pane-drop-target {{
@@ -2002,34 +2005,44 @@ input:focus-visible {{
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid {accent_24};
-  background: {accent_12};
+  border: 1px dashed {accent_20};
+  background: rgba(255,255,255,0.02);
   color: {text_bright};
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   pointer-events: auto;
   border-radius: 0;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
 }}
 
 .pane-drop-target-active {{
-  background: {accent_20};
+  background: {accent_12};
   border-style: solid;
+  border-color: {accent_24};
+  box-shadow:
+    inset 0 0 0 1px {accent_20},
+    0 0 0 1px rgba(0,0,0,0.20);
 }}
 
 .pane-drop-target-center {{
-  inset: 18%;
+  inset: 16% 18%;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%),
+    {accent_08};
 }}
 
 .pane-drop-target-edge {{
   z-index: 1;
+  background: rgba(255,255,255,0.015);
 }}
 
 .pane-drop-target-left,
 .pane-drop-target-right {{
-  top: 10px;
-  bottom: 10px;
-  width: 56px;
+  top: 12px;
+  bottom: 12px;
+  width: 30px;
 }}
 
 .pane-drop-target-left {{
@@ -2042,9 +2055,9 @@ input:focus-visible {{
 
 .pane-drop-target-top,
 .pane-drop-target-bottom {{
-  left: 10px;
-  right: 10px;
-  height: 48px;
+  left: 12px;
+  right: 12px;
+  height: 28px;
 }}
 
 .pane-drop-target-top {{
@@ -2053,6 +2066,23 @@ input:focus-visible {{
 
 .pane-drop-target-bottom {{
   bottom: 10px;
+}}
+
+.pane-drop-target-copy {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid {border_10};
+  background: rgba(0,0,0,0.12);
+  color: {text_bright};
+  box-shadow: 0 1px 8px rgba(0,0,0,0.12);
+}}
+
+.pane-drop-target-center .pane-drop-target-copy {{
+  padding: 6px 10px;
+  font-size: 10px;
 }}
 
 .surface-backdrop {{
