@@ -177,6 +177,8 @@ mkdir -p ~/.config/fish/completions
 taskersctl completion fish > ~/.config/fish/completions/taskersctl.fish
 ```
 
+When Taskers is running, the generated scripts also complete live `--workspace`, `--pane`, and `--surface` ids from the current control socket and embedded terminal context.
+
 ## Advanced Notes
 
 - Use `--socket` if you need to target a non-default Taskers control socket.

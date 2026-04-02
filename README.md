@@ -97,6 +97,8 @@ mkdir -p ~/.config/fish/completions
 taskersctl completion fish > ~/.config/fish/completions/taskersctl.fish
 ```
 
+Those generated scripts also complete live `--workspace`, `--pane`, and `--surface` ids when Taskers is running.
+
 ## Develop
 
 On Ubuntu 24.04, install the Linux UI dependencies first:

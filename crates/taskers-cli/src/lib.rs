@@ -117,6 +117,11 @@ enum Command {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
+    #[command(name = "completion-query", hide = true)]
+    CompletionQuery {
+        #[command(flatten)]
+        query: CompletionQueryArgs,
+    },
     Identify {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -151,6 +156,24 @@ enum CompletionShell {
     Bash,
     Fish,
     Zsh,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct CompletionQueryArgs {
+    #[arg(long)]
+    path: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    flag: Option<String>,
+    #[arg(long)]
+    positional: Option<usize>,
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    #[arg(long)]
+    workspace: Option<WorkspaceId>,
+    #[arg(long)]
+    pane: Option<PaneId>,
+    #[arg(long)]
+    surface: Option<SurfaceId>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1235,6 +1258,150 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
+async fn completion_query_candidates(query: &CompletionQueryArgs) -> Vec<String> {
+    let Some(command) = completion_command_for_path(query.path.as_deref().unwrap_or_default())
+    else {
+        return Vec::new();
+    };
+
+    let Some(arg) = completion_arg_for_query(&command, query.flag.as_deref(), query.positional)
+    else {
+        return Vec::new();
+    };
+
+    let mut candidates = completion_static_candidates(arg);
+    let dynamic = completion_dynamic_candidates(
+        arg.get_id().as_str(),
+        query.socket.clone(),
+        query.workspace,
+        query.pane,
+        query.surface,
+    )
+    .await;
+    for candidate in dynamic {
+        push_unique(&mut candidates, candidate);
+    }
+    candidates
+}
+
+fn completion_command_for_path(path: &str) -> Option<clap::Command> {
+    let mut command = cli_command();
+    for segment in path
+        .split_whitespace()
+        .filter(|segment| !segment.is_empty())
+    {
+        let next = {
+            command
+                .get_subcommands()
+                .find(|subcommand| !subcommand.is_hide_set() && subcommand.get_name() == segment)?
+                .clone()
+        };
+        command = next;
+    }
+    Some(command)
+}
+
+fn completion_arg_for_query<'a>(
+    command: &'a clap::Command,
+    flag: Option<&str>,
+    positional: Option<usize>,
+) -> Option<&'a clap::Arg> {
+    if let Some(flag) = flag {
+        if let Some(long) = flag.strip_prefix("--") {
+            return command
+                .get_arguments()
+                .find(|arg| !arg.is_hide_set() && arg.get_long() == Some(long));
+        }
+        if let Some(short) = flag.strip_prefix('-') {
+            let mut chars = short.chars();
+            let short = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            return command
+                .get_arguments()
+                .find(|arg| !arg.is_hide_set() && arg.get_short() == Some(short));
+        }
+    }
+
+    positional.and_then(|index| {
+        command
+            .get_positionals()
+            .filter(|arg| !arg.is_hide_set())
+            .nth(index)
+    })
+}
+
+fn completion_static_candidates(arg: &clap::Arg) -> Vec<String> {
+    arg.get_possible_values()
+        .into_iter()
+        .filter(|value| !value.is_hide_set())
+        .map(|value| value.get_name().to_string())
+        .collect()
+}
+
+async fn completion_dynamic_candidates(
+    arg_id: &str,
+    socket: Option<PathBuf>,
+    workspace: Option<WorkspaceId>,
+    pane: Option<PaneId>,
+    _surface: Option<SurfaceId>,
+) -> Vec<String> {
+    let client = ControlClient::new(resolve_socket_path(socket));
+    let Ok(model) = query_model(&client).await else {
+        return Vec::new();
+    };
+
+    match arg_id {
+        "workspace" => {
+            let mut values = model
+                .workspaces
+                .keys()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            values.sort();
+            values
+        }
+        "pane" => {
+            let Ok(workspace_id) = resolve_workspace_id_from_model(&model, workspace) else {
+                return Vec::new();
+            };
+            let Some(workspace_record) = model.workspaces.get(&workspace_id) else {
+                return Vec::new();
+            };
+            let mut values = workspace_record
+                .panes
+                .keys()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            values.sort();
+            values
+        }
+        "surface" => {
+            let Ok(workspace_id) = resolve_workspace_id_from_model(&model, workspace) else {
+                return Vec::new();
+            };
+            let Some(workspace_record) = model.workspaces.get(&workspace_id) else {
+                return Vec::new();
+            };
+            let pane_id = pane
+                .or_else(env_pane_id)
+                .unwrap_or(workspace_record.active_pane);
+            let Some(pane_record) = workspace_record.panes.get(&pane_id) else {
+                return Vec::new();
+            };
+            let mut values = pane_record
+                .surfaces
+                .keys()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            values.sort();
+            values
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn render_bash_completion(nodes: &[CompletionNode]) -> String {
     format!(
         r#"_taskersctl_subcommands() {{
@@ -1255,9 +1422,25 @@ _taskersctl_value_flags() {{
   esac
 }}
 
+_taskersctl_query_values() {{
+  local path="$1" flag="$2" positional="$3" socket="$4" workspace="$5" pane="$6" surface="$7"
+  local args=(completion-query)
+  [[ -n "$path" ]] && args+=(--path "$path")
+  [[ -n "$flag" ]] && args+=("--flag=$flag")
+  [[ -n "$positional" ]] && args+=(--positional "$positional")
+  [[ -n "$socket" ]] && args+=(--socket "$socket")
+  [[ -n "$workspace" ]] && args+=(--workspace "$workspace")
+  [[ -n "$pane" ]] && args+=(--pane "$pane")
+  [[ -n "$surface" ]] && args+=(--surface "$surface")
+  taskersctl "${{args[@]}}" 2>/dev/null
+}}
+
 _taskersctl() {{
-  local cur path subcommands flags value_flags word expect_value=0
-  local i
+  local cur path subcommands flags value_flags word expect_value=0 expect_flag=""
+  local selected_socket="" selected_workspace="" selected_pane="" selected_surface=""
+  local positionals_used=0
+  local i eq_flag eq_value joined
+  local -a dynamic
   COMPREPLY=()
   cur="${{COMP_WORDS[COMP_CWORD]}}"
   path=""
@@ -1265,22 +1448,37 @@ _taskersctl() {{
   for ((i=1; i<COMP_CWORD; i++)); do
     word="${{COMP_WORDS[i]}}"
     if (( expect_value )); then
+      case "$expect_flag" in
+        --socket) selected_socket="$word" ;;
+        --workspace) selected_workspace="$word" ;;
+        --pane) selected_pane="$word" ;;
+        --surface) selected_surface="$word" ;;
+      esac
       expect_value=0
+      expect_flag=""
       continue
     fi
     [[ -z "$word" ]] && continue
 
     if [[ "$word" == --*=* ]]; then
+      eq_flag="${{word%%=*}}"
+      eq_value="${{word#*=}}"
+      case "$eq_flag" in
+        --socket) selected_socket="$eq_value" ;;
+        --workspace) selected_workspace="$eq_value" ;;
+        --pane) selected_pane="$eq_value" ;;
+        --surface) selected_surface="$eq_value" ;;
+      esac
       value_flags="$(_taskersctl_value_flags "$path")"
       case " $value_flags " in
-        *" ${{word%%=*}} "*) continue ;;
+        *" $eq_flag "*) continue ;;
       esac
     fi
 
     if [[ "$word" == -* ]]; then
       value_flags="$(_taskersctl_value_flags "$path")"
       case " $value_flags " in
-        *" $word "*) expect_value=1 ;;
+        *" $word "*) expect_value=1; expect_flag="$word" ;;
       esac
       continue
     fi
@@ -1288,17 +1486,25 @@ _taskersctl() {{
     subcommands="$(_taskersctl_subcommands "$path")"
     case " $subcommands " in
       *" $word "*) path="${{path:+$path }}$word" ;;
+      *) positionals_used=$((positionals_used + 1)) ;;
     esac
   done
 
-  (( expect_value )) && return 0
+  if (( expect_value )); then
+    mapfile -t dynamic < <(_taskersctl_query_values "$path" "$expect_flag" "" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")
+    joined="${{dynamic[*]}}"
+    COMPREPLY=( $(compgen -W "$joined" -- "$cur") )
+    return 0
+  fi
 
   subcommands="$(_taskersctl_subcommands "$path")"
   flags="$(_taskersctl_flags "$path")"
+  mapfile -t dynamic < <(_taskersctl_query_values "$path" "" "$positionals_used" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")
+  joined="${{dynamic[*]}}"
   if [[ "$cur" == -* ]]; then
     COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
   else
-    COMPREPLY=( $(compgen -W "$subcommands $flags" -- "$cur") )
+    COMPREPLY=( $(compgen -W "$subcommands $flags $joined" -- "$cur") )
   fi
 }}
 
@@ -1332,9 +1538,27 @@ __taskersctl_value_flags() {{
   esac
 }}
 
+__taskersctl_query_values() {{
+  local path="$1" flag="$2" positional="$3" socket="$4" workspace="$5" pane="$6" surface="$7"
+  local -a args
+  args=(completion-query)
+  [[ -n "$path" ]] && args+=(--path "$path")
+  [[ -n "$flag" ]] && args+=("--flag=$flag")
+  [[ -n "$positional" ]] && args+=(--positional "$positional")
+  [[ -n "$socket" ]] && args+=(--socket "$socket")
+  [[ -n "$workspace" ]] && args+=(--workspace "$workspace")
+  [[ -n "$pane" ]] && args+=(--pane "$pane")
+  [[ -n "$surface" ]] && args+=(--surface "$surface")
+  taskersctl $args 2>/dev/null
+}}
+
 _taskersctl() {{
-  local cur path subcommands_text flags_text value_flags_text word expect_value=0
+  local cur path subcommands_text flags_text value_flags_text word expect_value=0 expect_flag=""
+  local selected_socket="" selected_workspace="" selected_pane="" selected_surface=""
+  local positionals_used=0
+  local eq_flag eq_value
   local -a candidates
+  local -a dynamic
   local i
   cur="${{words[CURRENT]}}"
   path=""
@@ -1342,39 +1566,66 @@ _taskersctl() {{
   for ((i=2; i<CURRENT; i++)); do
     word="${{words[i]}}"
     if (( expect_value )); then
+      case "$expect_flag" in
+        --socket) selected_socket="$word" ;;
+        --workspace) selected_workspace="$word" ;;
+        --pane) selected_pane="$word" ;;
+        --surface) selected_surface="$word" ;;
+      esac
       expect_value=0
+      expect_flag=""
       continue
     fi
     [[ -z "$word" ]] && continue
 
     if [[ "$word" == --*=* ]]; then
+      eq_flag="${{word%%=*}}"
+      eq_value="${{word#*=}}"
+      case "$eq_flag" in
+        --socket) selected_socket="$eq_value" ;;
+        --workspace) selected_workspace="$eq_value" ;;
+        --pane) selected_pane="$eq_value" ;;
+        --surface) selected_surface="$eq_value" ;;
+      esac
       value_flags_text="$(__taskersctl_value_flags "$path")"
-      [[ " $value_flags_text " == *" ${{word%%=*}} "* ]] && continue
+      [[ " $value_flags_text " == *" $eq_flag "* ]] && continue
     fi
 
     if [[ "$word" == -* ]]; then
       value_flags_text="$(__taskersctl_value_flags "$path")"
-      [[ " $value_flags_text " == *" $word "* ]] && expect_value=1
+      if [[ " $value_flags_text " == *" $word "* ]]; then
+        expect_value=1
+        expect_flag="$word"
+      fi
       continue
     fi
 
     subcommands_text="$(__taskersctl_subcommands "$path")"
-    [[ " $subcommands_text " == *" $word "* ]] && path="${{path:+$path }}$word"
+    if [[ " $subcommands_text " == *" $word "* ]]; then
+      path="${{path:+$path }}$word"
+    else
+      (( positionals_used += 1 ))
+    fi
   done
 
-  (( expect_value )) && return 0
+  if (( expect_value )); then
+    candidates=("${{(@f)$(__taskersctl_query_values "$path" "$expect_flag" "" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")}}")
+    (( $#candidates )) && compadd -- $candidates
+    return 0
+  fi
 
   subcommands_text="$(__taskersctl_subcommands "$path")"
   flags_text="$(__taskersctl_flags "$path")"
+  dynamic=("${{(@f)$(__taskersctl_query_values "$path" "" "$positionals_used" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")}}")
   if [[ "$cur" == -* ]]; then
     candidates=(${{=flags_text}})
   else
-    candidates=(${{=subcommands_text}} ${{=flags_text}})
+    candidates=(${{=subcommands_text}} ${{=flags_text}} $dynamic)
   fi
   compadd -- $candidates
 }}
 
-compdef _taskersctl taskersctl
+(( $+functions[compdef] )) && compdef _taskersctl taskersctl
 "#,
         subcommands_cases = render_bash_case_body(nodes, |node| &node.subcommands),
         flags_cases = render_bash_case_body(nodes, |node| &node.flags),
@@ -1402,15 +1653,44 @@ function __taskersctl_value_flags
   end
 end
 
+function __taskersctl_query_values
+  set -l args completion-query
+  test -n "$argv[1]"; and set -a args --path "$argv[1]"
+  test -n "$argv[2]"; and set -a args --flag="$argv[2]"
+  test -n "$argv[3]"; and set -a args --positional "$argv[3]"
+  test -n "$argv[4]"; and set -a args --socket "$argv[4]"
+  test -n "$argv[5]"; and set -a args --workspace "$argv[5]"
+  test -n "$argv[6]"; and set -a args --pane "$argv[6]"
+  test -n "$argv[7]"; and set -a args --surface "$argv[7]"
+  taskersctl $args 2>/dev/null
+end
+
 function __taskersctl_complete
   set -l tokens (commandline -opc)
   set -e tokens[1]
   set -l path
   set -l expect_value 0
+  set -l expect_flag
+  set -l selected_socket
+  set -l selected_workspace
+  set -l selected_pane
+  set -l selected_surface
+  set -l positionals_used 0
 
   for word in $tokens
     if test $expect_value -eq 1
+      switch $expect_flag
+        case --socket
+          set selected_socket $word
+        case --workspace
+          set selected_workspace $word
+        case --pane
+          set selected_pane $word
+        case --surface
+          set selected_surface $word
+      end
       set expect_value 0
+      set expect_flag
       continue
     end
     if test -z "$word"
@@ -1419,6 +1699,17 @@ function __taskersctl_complete
 
     if string match -qr '^--[^=]+=.*$' -- $word
       set -l opt (string replace -r '=.*$' '' -- $word)
+      set -l opt_value (string replace -r '^[^=]*=' '' -- $word)
+      switch $opt
+        case --socket
+          set selected_socket $opt_value
+        case --workspace
+          set selected_workspace $opt_value
+        case --pane
+          set selected_pane $opt_value
+        case --surface
+          set selected_surface $opt_value
+      end
       set -l value_flags (__taskersctl_value_flags "$path")
       if contains -- $opt $value_flags
         continue
@@ -1429,6 +1720,7 @@ function __taskersctl_complete
       set -l value_flags (__taskersctl_value_flags "$path")
       if contains -- $word $value_flags
         set expect_value 1
+        set expect_flag $word
       end
       continue
     end
@@ -1440,20 +1732,24 @@ function __taskersctl_complete
       else
         set path "$word"
       end
+    else
+      set positionals_used (math $positionals_used + 1)
     end
   end
 
   if test $expect_value -eq 1
-    return 0
+    __taskersctl_query_values "$path" "$expect_flag" "" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface"
+    return
   end
 
   set -l token (commandline -ct)
   set -l subcommands (__taskersctl_subcommands "$path")
   set -l flags (__taskersctl_flags "$path")
+  set -l dynamic (__taskersctl_query_values "$path" "" "$positionals_used" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")
   if string match -qr '^-' -- $token
     printf '%s\n' $flags
   else
-    printf '%s\n' $subcommands $flags
+    printf '%s\n' $subcommands $flags $dynamic
   end
 end
 
@@ -2132,6 +2428,11 @@ pub async fn run() -> anyhow::Result<()> {
         }
         Command::Completion { shell } => {
             write_completion(shell, io::stdout())?;
+        }
+        Command::CompletionQuery { query } => {
+            for candidate in completion_query_candidates(&query).await {
+                println!("{candidate}");
+            }
         }
         Command::Identify {
             socket,
@@ -3754,14 +4055,15 @@ mod tests {
         BrowserTarget, BrowserWaitCondition, ControlClient, ControlCommand, InMemoryController,
         ScreenshotCommand, ScreenshotTarget, bind_socket, serve,
     };
-    use taskers_domain::{AppModel, BrowserProfileMode, PaneKind, WorkspaceWindowId};
+    use taskers_domain::{AppModel, BrowserProfileMode, PaneKind, SplitAxis, WorkspaceWindowId};
     use tokio::sync::oneshot;
 
     use super::{
-        Cli, CliBrowserLoadState, CliScreenshotTarget, CliSignalKind, CompletionShell,
-        ScreenshotArgs, emit_agent_hook, ensure_implicit_notify_target_context, env_pane_id,
-        env_surface_id, env_workspace_id, infer_agent_kind, query_model, render_completion,
-        resolve_browser_target, resolve_screenshot_command, resolve_wait_condition,
+        Cli, CliBrowserLoadState, CliScreenshotTarget, CliSignalKind, CompletionQueryArgs,
+        CompletionShell, ScreenshotArgs, completion_query_candidates, emit_agent_hook,
+        ensure_implicit_notify_target_context, env_pane_id, env_surface_id, env_workspace_id,
+        infer_agent_kind, query_model, render_completion, resolve_browser_target,
+        resolve_screenshot_command, resolve_wait_condition,
         resolve_workspace_window_screenshot_target, send_screenshot_command,
     };
 
@@ -3817,6 +4119,146 @@ mod tests {
                 "hidden session command leaked into {shell:?} completion"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn completion_query_returns_static_flag_values() {
+        let values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("screenshot".into()),
+            flag: Some("--target".into()),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+
+        assert_eq!(
+            values,
+            vec![
+                "surface".to_string(),
+                "pane".to_string(),
+                "workspace_window".to_string(),
+                "workspace_canvas".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_query_returns_static_positional_values() {
+        let values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("completion".into()),
+            positional: Some(0),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+
+        assert_eq!(
+            values,
+            vec!["bash".to_string(), "fish".to_string(), "zsh".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_query_returns_dynamic_taskers_ids() {
+        let tempdir = unique_temp_dir("taskers-cli-completion-query");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("taskers.sock");
+        let listener = bind_socket(&socket_path).expect("listener");
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+        let workspace_id = workspace.id;
+        let active_pane_id = workspace.active_pane;
+        let initial_surface_id = workspace
+            .panes
+            .get(&active_pane_id)
+            .expect("pane")
+            .active_surface;
+
+        controller
+            .handle(ControlCommand::SplitPane {
+                workspace_id,
+                pane_id: Some(active_pane_id),
+                axis: SplitAxis::Horizontal,
+            })
+            .expect("split pane");
+        let second_pane_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| {
+                workspace
+                    .panes
+                    .keys()
+                    .copied()
+                    .find(|pane_id| *pane_id != active_pane_id)
+            })
+            .expect("second pane");
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id,
+                pane_id: active_pane_id,
+                kind: PaneKind::Browser,
+                browser_profile_mode: Some(BrowserProfileMode::PersistentDefault),
+            })
+            .expect("create surface");
+        let browser_surface_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&active_pane_id))
+            .and_then(|pane| {
+                pane.surfaces
+                    .keys()
+                    .copied()
+                    .find(|surface_id| *surface_id != initial_surface_id)
+            })
+            .expect("browser surface");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(listener, controller, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        let workspace_values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("browser click".into()),
+            flag: Some("--workspace".into()),
+            socket: Some(socket_path.clone()),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+        assert!(workspace_values.contains(&workspace_id.to_string()));
+
+        let pane_values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("browser click".into()),
+            flag: Some("--pane".into()),
+            socket: Some(socket_path.clone()),
+            workspace: Some(workspace_id),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+        assert!(pane_values.contains(&active_pane_id.to_string()));
+        assert!(pane_values.contains(&second_pane_id.to_string()));
+
+        let surface_values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("browser click".into()),
+            flag: Some("--surface".into()),
+            socket: Some(socket_path.clone()),
+            workspace: Some(workspace_id),
+            pane: Some(active_pane_id),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+        assert!(surface_values.contains(&initial_surface_id.to_string()));
+        assert!(surface_values.contains(&browser_surface_id.to_string()));
+
+        shutdown_tx.send(()).expect("shutdown");
+        server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
     }
 
     #[test]
