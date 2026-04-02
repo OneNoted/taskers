@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use serde::{Deserialize, Serialize};
 
-use crate::PaneId;
+use crate::{PaneContainerId, PaneId};
 
 const MIN_SPLIT_RATIO: u16 = 150;
 const MAX_SPLIT_RATIO: u16 = 850;
@@ -26,61 +26,67 @@ pub enum Direction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LayoutNode {
+pub enum SplitLayoutNode<LeafId> {
     Leaf {
-        pane_id: PaneId,
+        leaf_id: LeafId,
     },
     Split {
         axis: SplitAxis,
         ratio: u16,
-        first: Box<LayoutNode>,
-        second: Box<LayoutNode>,
+        first: Box<SplitLayoutNode<LeafId>>,
+        second: Box<SplitLayoutNode<LeafId>>,
     },
 }
 
-impl LayoutNode {
+pub type LayoutNode = SplitLayoutNode<PaneContainerId>;
+pub type PaneTabLayoutNode = SplitLayoutNode<PaneId>;
+
+impl<LeafId> SplitLayoutNode<LeafId>
+where
+    LeafId: Copy + Eq,
+{
     pub fn is_leaf(&self) -> bool {
         matches!(self, Self::Leaf { .. })
     }
 
-    pub fn leaf(pane_id: PaneId) -> Self {
-        Self::Leaf { pane_id }
+    pub fn leaf(leaf_id: LeafId) -> Self {
+        Self::Leaf { leaf_id }
     }
 
     pub fn split_leaf(
         &mut self,
-        target: PaneId,
+        target: LeafId,
         axis: SplitAxis,
-        new_pane: PaneId,
+        new_leaf: LeafId,
         ratio: u16,
     ) -> bool {
         let direction = match axis {
             SplitAxis::Horizontal => Direction::Right,
             SplitAxis::Vertical => Direction::Down,
         };
-        self.split_leaf_with_direction(target, direction, new_pane, ratio)
+        self.split_leaf_with_direction(target, direction, new_leaf, ratio)
     }
 
     pub fn split_leaf_with_direction(
         &mut self,
-        target: PaneId,
+        target: LeafId,
         direction: Direction,
-        new_pane: PaneId,
+        new_leaf: LeafId,
         ratio: u16,
     ) -> bool {
-        let (axis, new_pane_first) = match direction {
+        let (axis, new_leaf_first) = match direction {
             Direction::Left => (SplitAxis::Horizontal, true),
             Direction::Right => (SplitAxis::Horizontal, false),
             Direction::Up => (SplitAxis::Vertical, true),
             Direction::Down => (SplitAxis::Vertical, false),
         };
         match self {
-            Self::Leaf { pane_id } if *pane_id == target => {
-                let existing = *pane_id;
-                let (first, second) = if new_pane_first {
-                    (Self::leaf(new_pane), Self::leaf(existing))
+            Self::Leaf { leaf_id } if *leaf_id == target => {
+                let existing = *leaf_id;
+                let (first, second) = if new_leaf_first {
+                    (Self::leaf(new_leaf), Self::leaf(existing))
                 } else {
-                    (Self::leaf(existing), Self::leaf(new_pane))
+                    (Self::leaf(existing), Self::leaf(new_leaf))
                 };
                 *self = Self::Split {
                     axis,
@@ -92,25 +98,25 @@ impl LayoutNode {
             }
             Self::Leaf { .. } => false,
             Self::Split { first, second, .. } => {
-                first.split_leaf_with_direction(target, direction, new_pane, ratio)
-                    || second.split_leaf_with_direction(target, direction, new_pane, ratio)
+                first.split_leaf_with_direction(target, direction, new_leaf, ratio)
+                    || second.split_leaf_with_direction(target, direction, new_leaf, ratio)
             }
         }
     }
 
-    pub fn remove_leaf(&mut self, target: PaneId) -> bool {
+    pub fn remove_leaf(&mut self, target: LeafId) -> bool {
         match self {
-            Self::Leaf { pane_id } if *pane_id == target => false,
+            Self::Leaf { leaf_id } if *leaf_id == target => false,
             Self::Leaf { .. } => false,
             Self::Split { first, second, .. } => {
-                if let Self::Leaf { pane_id } = first.as_ref()
-                    && *pane_id == target
+                if let Self::Leaf { leaf_id } = first.as_ref()
+                    && *leaf_id == target
                 {
                     *self = *second.clone();
                     return true;
                 }
-                if let Self::Leaf { pane_id } = second.as_ref()
-                    && *pane_id == target
+                if let Self::Leaf { leaf_id } = second.as_ref()
+                    && *leaf_id == target
                 {
                     *self = *first.clone();
                     return true;
@@ -120,16 +126,16 @@ impl LayoutNode {
         }
     }
 
-    pub fn contains(&self, target: PaneId) -> bool {
+    pub fn contains(&self, target: LeafId) -> bool {
         match self {
-            Self::Leaf { pane_id } => *pane_id == target,
+            Self::Leaf { leaf_id } => *leaf_id == target,
             Self::Split { first, second, .. } => first.contains(target) || second.contains(target),
         }
     }
 
-    pub fn leaves(&self) -> Vec<PaneId> {
+    pub fn leaves(&self) -> Vec<LeafId> {
         match self {
-            Self::Leaf { pane_id } => vec![*pane_id],
+            Self::Leaf { leaf_id } => vec![*leaf_id],
             Self::Split { first, second, .. } => {
                 let mut leaves = first.leaves();
                 leaves.extend(second.leaves());
@@ -138,25 +144,25 @@ impl LayoutNode {
         }
     }
 
-    pub fn focus_neighbor(&self, target: PaneId, direction: Direction) -> Option<PaneId> {
+    pub fn focus_neighbor(&self, target: LeafId, direction: Direction) -> Option<LeafId> {
         let leaves = self.collect_leaf_rects();
         let (_, target_rect) = leaves
             .iter()
-            .find(|(pane_id, _)| *pane_id == target)
+            .find(|(leaf_id, _)| *leaf_id == target)
             .copied()?;
 
         leaves
             .into_iter()
-            .filter(|(pane_id, _)| *pane_id != target)
-            .filter_map(|(pane_id, rect)| {
+            .filter(|(leaf_id, _)| *leaf_id != target)
+            .filter_map(|(leaf_id, rect)| {
                 rect.directional_score(target_rect, direction)
-                    .map(|score| (pane_id, score))
+                    .map(|score| (leaf_id, score))
             })
             .min_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(Ordering::Equal))
-            .map(|(pane_id, _)| pane_id)
+            .map(|(leaf_id, _)| leaf_id)
     }
 
-    pub fn resize_leaf(&mut self, target: PaneId, direction: Direction, amount: i32) -> bool {
+    pub fn resize_leaf(&mut self, target: LeafId, direction: Direction, amount: i32) -> bool {
         self.resize_leaf_inner(target, direction, amount.unsigned_abs() as u16)
             .is_some()
     }
@@ -190,12 +196,12 @@ impl LayoutNode {
 
     fn resize_leaf_inner(
         &mut self,
-        target: PaneId,
+        target: LeafId,
         direction: Direction,
         amount: u16,
     ) -> Option<bool> {
         match self {
-            Self::Leaf { pane_id } => (*pane_id == target).then_some(false),
+            Self::Leaf { leaf_id } => (*leaf_id == target).then_some(false),
             Self::Split {
                 axis,
                 ratio,
@@ -222,7 +228,7 @@ impl LayoutNode {
         }
     }
 
-    fn collect_leaf_rects(&self) -> Vec<(PaneId, LayoutRect)> {
+    fn collect_leaf_rects(&self) -> Vec<(LeafId, LayoutRect)> {
         let mut leaves = Vec::new();
         self.collect_leaf_rects_into(
             LayoutRect {
@@ -236,9 +242,9 @@ impl LayoutNode {
         leaves
     }
 
-    fn collect_leaf_rects_into(&self, rect: LayoutRect, out: &mut Vec<(PaneId, LayoutRect)>) {
+    fn collect_leaf_rects_into(&self, rect: LayoutRect, out: &mut Vec<(LeafId, LayoutRect)>) {
         match self {
-            Self::Leaf { pane_id } => out.push((*pane_id, rect)),
+            Self::Leaf { leaf_id } => out.push((*leaf_id, rect)),
             Self::Split {
                 axis,
                 ratio,

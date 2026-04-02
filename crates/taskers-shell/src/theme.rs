@@ -211,6 +211,25 @@ html, body, #main {{
 
 button {{
   font: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+}}
+
+input {{
+  font: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
 }}
 
 button:focus-visible,
@@ -246,17 +265,21 @@ input:focus-visible {{
 }}
 
 .workspace-sidebar {{
-  border-right: 1px solid {border_04};
-  padding: 6px;
-  gap: 6px;
+  border-right: 1px solid {border_05};
+  padding: 4px;
+  gap: 4px;
   backdrop-filter: blur(12px) saturate(1.4);
 }}
 
 .attention-panel {{
-  border-left: 1px solid {border_04};
-  padding: 10px 12px;
-  gap: 8px;
+  border-left: 1px solid {border_05};
+  padding: 8px 10px;
+  gap: 6px;
   backdrop-filter: blur(12px) saturate(1.4);
+}}
+
+.vcs-panel {{
+  gap: 10px;
 }}
 
 .sidebar-top {{
@@ -303,7 +326,7 @@ input:focus-visible {{
   height: 28px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
   color: {text_dim};
 }}
@@ -336,7 +359,7 @@ input:focus-visible {{
   min-height: 24px;
   padding: 0;
   font-size: 16px;
-  border-radius: 4px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -365,7 +388,7 @@ input:focus-visible {{
   position: relative;
   padding: 8px 10px 8px 14px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 0;
   display: flex;
   align-items: stretch;
   gap: 0;
@@ -373,7 +396,7 @@ input:focus-visible {{
 }}
 
 .workspace-button:hover .workspace-tab {{
-  background: {border_04};
+  background: {border_05};
   border-color: {border_08};
 }}
 
@@ -462,7 +485,7 @@ input:focus-visible {{
   align-items: center;
   justify-content: center;
   visibility: hidden;
-  border-radius: 4px;
+  border-radius: 0;
   transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
 }}
 
@@ -674,7 +697,7 @@ input:focus-visible {{
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border-radius: 6px;
+  border-radius: 0;
   box-shadow: 0 2px 8px rgba(0,0,0,0.24), inset 0 1px 0 rgba(255,255,255,0.03);
 }}
 
@@ -700,7 +723,7 @@ input:focus-visible {{
   justify-content: space-between;
   gap: 10px;
   text-align: left;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .settings-toggle-row:hover {{
@@ -758,7 +781,7 @@ input:focus-visible {{
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .status-pill-inline {{
@@ -812,13 +835,13 @@ input:focus-visible {{
 .workspace-main-overview .workspace-canvas {{
   background:
     radial-gradient(circle at top left, {accent_08} 0%, transparent 32%),
-    linear-gradient(180deg, {border_04} 0%, {base} 100%);
+    linear-gradient(180deg, {border_05} 0%, {base} 100%);
 }}
 
 .workspace-header {{
   height: {workspace_toolbar_height}px;
   min-height: {workspace_toolbar_height}px;
-  border-bottom: 1px solid {border_07};
+  border-bottom: 1px solid {border_08};
   padding: 0 12px;
   display: flex;
   align-items: center;
@@ -833,7 +856,8 @@ input:focus-visible {{
 .surface-meta,
 .activity-header,
 .activity-item-shell,
-.shortcut-row {{
+.shortcut-row,
+.workspace-header-actions {{
   display: flex;
   align-items: center;
   gap: 8px;
@@ -852,12 +876,36 @@ input:focus-visible {{
   color: {text_bright};
 }}
 
+.workspace-header-actions {{
+  margin-left: auto;
+}}
+
+.workspace-header-action {{
+  min-height: 24px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}}
+
+.workspace-header-action-active {{
+  background: {accent_14};
+  color: {text_bright};
+  border-color: {accent_24};
+}}
+
+.workspace-header-action-icon {{
+  flex: 0 0 auto;
+  display: block;
+}}
+
 .pane-action,
 .activity-action,
 .shortcut-pill {{
   border: 1px solid {border_10};
   background: transparent;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .pane-action,
@@ -865,7 +913,7 @@ input:focus-visible {{
   min-height: 28px;
   padding: 0 10px;
   color: {text_subtle};
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .pane-action:hover {{
@@ -878,7 +926,7 @@ input:focus-visible {{
   display: inline-flex;
   align-items: center;
   color: {text_dim};
-  background: {border_04};
+  background: {border_05};
 }}
 
 .workspace-canvas,
@@ -928,13 +976,13 @@ input:focus-visible {{
   padding: 16px;
   border: 1px solid transparent;
   background: transparent;
-  border-radius: 8px;
+  border-radius: 0;
 }}
 
 .workspace-surface-fallback-drop-active {{
   border-color: {accent_20};
   background: {accent_08};
-  border-radius: 8px;
+  border-radius: 0;
 }}
 
 .workspace-surface-fallback-label {{
@@ -949,7 +997,7 @@ input:focus-visible {{
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .workspace-viewport-overview .workspace-strip-canvas {{
@@ -962,15 +1010,15 @@ input:focus-visible {{
   display: flex;
   flex-direction: column;
   background: {surface};
-  border: {window_border_width}px solid {border_07};
+  border: {window_border_width}px solid {border_08};
   overflow: hidden;
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.32);
+  border-radius: 0;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.24);
 }}
 
 .workspace-window-shell-active {{
   border-color: {accent_24};
-  box-shadow: 0 4px 20px rgba(0,0,0,0.40);
+  box-shadow: 0 2px 14px rgba(0,0,0,0.32);
 }}
 
 .workspace-window-toolbar {{
@@ -984,7 +1032,7 @@ input:focus-visible {{
   align-items: center;
   gap: 8px;
   user-select: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: 0;
 }}
 
 .workspace-window-toolbar-tabs {{
@@ -1022,7 +1070,7 @@ input:focus-visible {{
   padding: 0 3px 0 5px;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 0;
   color: {text_subtle};
   overflow: hidden;
 }}
@@ -1086,7 +1134,7 @@ input:focus-visible {{
   width: 18px;
   height: 18px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 0;
   background: transparent;
   color: {text_dim};
   display: inline-flex;
@@ -1105,7 +1153,7 @@ input:focus-visible {{
   width: 22px;
   height: 22px;
   border: 1px solid {border_10};
-  border-radius: 5px;
+  border-radius: 0;
   background: {overlay_05};
   color: {text_dim};
   display: inline-flex;
@@ -1166,6 +1214,7 @@ input:focus-visible {{
 }}
 
 .split-child {{
+  display: flex;
   min-width: 0;
   min-height: 0;
 }}
@@ -1189,7 +1238,7 @@ input:focus-visible {{
   background: {elevated};
   border: {pane_border_width}px solid {border_10};
   overflow: hidden;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .pane-card-active {{
@@ -1215,7 +1264,7 @@ input:focus-visible {{
   pointer-events: none;
   opacity: 0;
   z-index: 10;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .pane-flash-ring-active {{
@@ -1226,13 +1275,13 @@ input:focus-visible {{
   height: {pane_header_height}px;
   min-height: {pane_header_height}px;
   border-bottom: 1px solid {border_10};
-  padding: 0 8px;
+  padding: 0 6px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   background: {surface};
-  border-radius: 6px 6px 0 0;
+  border-radius: 0;
 }}
 
 .pane-toolbar-meta,
@@ -1396,14 +1445,34 @@ input:focus-visible {{
   pointer-events: auto;
 }}
 
+.pane-action-cluster-visible {{
+  opacity: 1;
+  pointer-events: auto;
+}}
+
 .pane-tabs {{
   height: {surface_tab_height}px;
   min-height: {surface_tab_height}px;
   border-bottom: 1px solid {border_10};
-  padding: 0 6px;
+  padding: 0 4px;
   display: flex;
   align-items: center;
   background: {overlay_05};
+}}
+
+.pane-tabs-primary {{
+  flex: 1 1 auto;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  border-bottom: 0;
+  padding: 0;
+  background: transparent;
+}}
+
+.pane-tabs-inline {{
+  flex: 0 0 auto;
+  width: 100%;
 }}
 
 .surface-tabs {{
@@ -1424,13 +1493,13 @@ input:focus-visible {{
   gap: 5px;
   min-width: 0;
   max-width: 320px;
-  height: 22px;
+  height: 20px;
   border: 1px solid transparent;
   background: transparent;
   padding: 0 6px;
   color: {text_muted};
   white-space: nowrap;
-  border-radius: 4px;
+  border-radius: 0;
   overflow: hidden;
 }}
 
@@ -1610,6 +1679,42 @@ input:focus-visible {{
   filter: brightness(1.08);
 }}
 
+.surface-tab-close {{
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  background: transparent;
+  color: {text_dim};
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}}
+
+.surface-tab-close:hover {{
+  background: {border_08};
+  color: {text_bright};
+}}
+
+.surface-tab-add {{
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 1px solid {border_10};
+  background: {overlay_05};
+  color: {text_dim};
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}}
+
+.surface-tab-add:hover {{
+  background: {overlay_16};
+  color: {text_bright};
+}}
+
 .surface-tab-state.runtime-state-working {{
   background: {busy_16};
 }}
@@ -1640,7 +1745,7 @@ input:focus-visible {{
   font-size: 10px;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   line-height: 1;
-  border-radius: 4px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1712,6 +1817,22 @@ input:focus-visible {{
   color: {error};
 }}
 
+.live-pane-shell {{
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: {elevated};
+  border: {pane_border_width}px solid {border_10};
+  overflow: hidden;
+}}
+
+.live-pane-shell-active {{
+  border-color: {accent_24};
+}}
+
 .browser-toolbar {{
   height: {browser_toolbar_height}px;
   min-height: {browser_toolbar_height}px;
@@ -1731,7 +1852,7 @@ input:focus-visible {{
   color: {text_subtle};
   font-size: 11px;
   font-weight: 600;
-  border-radius: 4px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1763,7 +1884,7 @@ input:focus-visible {{
   background: {overlay_05};
   color: {text_bright};
   font-size: 12px;
-  border-radius: 16px;
+  border-radius: 0;
 }}
 
 .browser-address:focus {{
@@ -1772,11 +1893,26 @@ input:focus-visible {{
   box-shadow: 0 0 0 1px {accent_20};
 }}
 
+.browser-toolbar-badge {{
+  height: 26px;
+  border: 1px solid {accent_24};
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: {accent_12};
+  color: {text_bright};
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}}
+
 .pane-body {{
   flex: 1;
   min-height: 0;
   padding: 0;
-  background: {border_02};
+  background: {border_03};
   position: relative;
   overflow: hidden;
 }}
@@ -1800,7 +1936,7 @@ input:focus-visible {{
   letter-spacing: 0.08em;
   text-transform: uppercase;
   pointer-events: auto;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .pane-drop-target-active {{
@@ -1857,7 +1993,7 @@ input:focus-visible {{
   border: 1px solid {border_06};
   padding: 12px;
   background: linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .workspace-main-overview .workspace-window-shell {{
@@ -1921,7 +2057,7 @@ input:focus-visible {{
   border-style: solid;
   background:
     linear-gradient(180deg, {overlay_16} 0%, {overlay_03} 100%),
-    {border_02};
+    {border_03};
 }}
 
 .surface-backdrop-copy {{
@@ -1961,14 +2097,14 @@ input:focus-visible {{
   padding: 4px 8px;
   color: {text_muted};
   font-size: 11px;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .shortcut-pill {{
   padding: 4px 8px;
   color: {text_muted};
   font-size: 11px;
-  border-radius: 4px;
+  border-radius: 0;
   background: {border_06};
   border: 1px solid {border_10};
   box-shadow: 0 1px 0 {border_08};
@@ -2008,7 +2144,7 @@ input:focus-visible {{
   padding: 12px;
   color: {text_dim};
   font-size: 12px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .activity-item {{
@@ -2016,7 +2152,7 @@ input:focus-visible {{
   display: flex;
   flex-direction: column;
   gap: 3px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .activity-item-button {{
@@ -2036,7 +2172,7 @@ input:focus-visible {{
 }}
 
 .activity-item-button:hover .activity-item {{
-  background: {border_04};
+  background: {border_05};
 }}
 
 .activity-item-dismiss {{
@@ -2050,7 +2186,7 @@ input:focus-visible {{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: 0;
   cursor: pointer;
   transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
 }}
@@ -2084,7 +2220,7 @@ input:focus-visible {{
   color: {text_bright};
   font-size: 10px;
   padding: 3px 7px;
-  border-radius: 4px;
+  border-radius: 0;
 }}
 
 .notification-count-pill {{
@@ -2093,12 +2229,131 @@ input:focus-visible {{
   color: {text_dim};
   padding: 2px 6px;
   background: {border_06};
-  border-radius: 12px;
+  border-radius: 0;
 }}
 
 .notification-count-unread {{
   background: {accent_14};
   color: {text_bright};
+}}
+
+.vcs-refresh-button {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}}
+
+.vcs-panel-error {{
+  font-size: 11px;
+  color: {error};
+  padding: 8px 10px;
+  background: {error_10};
+  border: 1px solid {error_16};
+  border-radius: 0;
+}}
+
+.vcs-panel-summary {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+
+.vcs-panel-repo-row {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}}
+
+.vcs-actions,
+.vcs-files,
+.vcs-diff {{
+  border-top: 1px solid {border_06};
+  padding-top: 10px;
+}}
+
+.vcs-action-row,
+.vcs-ref-list {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}}
+
+.vcs-inline-form {{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}}
+
+.vcs-input {{
+  flex: 1 1 auto;
+  min-width: 0;
+}}
+
+.vcs-ref-chip {{
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 10px;
+}}
+
+.vcs-ref-chip-active {{
+  background: {accent_14};
+  border-color: {accent_24};
+  color: {text_bright};
+}}
+
+.vcs-file-list {{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}}
+
+.vcs-file-row {{
+  width: 100%;
+  border: 1px solid {border_06};
+  background: {border_03};
+  color: {text_bright};
+  padding: 8px 10px;
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}}
+
+.vcs-file-row:hover,
+.vcs-file-row-active {{
+  background: {accent_08};
+  border-color: {accent_24};
+}}
+
+.vcs-diff-preview {{
+  margin: 0;
+  padding: 10px;
+  background: {border_03};
+  border: 1px solid {border_06};
+  border-radius: 0;
+  white-space: pre-wrap;
+  overflow: auto;
+  max-height: 280px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: {text_subtle};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+
+.vcs-pr-link {{
+  text-decoration: none;
+  padding: 8px 10px;
+  background: {border_03};
+  border: 1px solid {border_06};
+  border-radius: 0;
+}}
+
+.vcs-pr-link:hover {{
+  background: {accent_08};
+  border-color: {accent_24};
 }}
 
 .agent-session-list {{
@@ -2152,7 +2407,7 @@ input:focus-visible {{
   padding: 10px;
   background: {border_03};
   transition: background 0.14s ease-in-out;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .workspace-log-list {{
@@ -2169,7 +2424,7 @@ input:focus-visible {{
   display: flex;
   flex-direction: column;
   gap: 4px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .workspace-log-entry-header {{
@@ -2278,7 +2533,7 @@ input:focus-visible {{
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: 0;
   transition: background 0.14s ease-in-out, color 0.14s ease-in-out;
 }}
 
@@ -2345,12 +2600,12 @@ input:focus-visible {{
 .preset-card {{
   border: 1px solid {border_08};
   padding: 10px;
-  border-radius: 6px;
+  border-radius: 0;
 }}
 
 .theme-card:hover,
 .preset-card:hover {{
-  background: {border_04};
+  background: {border_05};
   border-color: {border_12};
 }}
 
@@ -2399,7 +2654,7 @@ input:focus-visible {{
 
 @media (max-width: 1180px) {{
   .app-shell {{
-    grid-template-columns: 196px minmax(0, 1fr);
+    grid-template-columns: 184px minmax(0, 1fr);
   }}
 
   .attention-panel {{
@@ -2420,11 +2675,9 @@ input:focus-visible {{
         text_muted = p.text_muted.to_hex(),
         text_subtle = p.text_subtle.to_hex(),
         text_dim = p.text_dim.to_hex(),
-        border_02 = rgba(p.border, 0.02),
         border_03 = rgba(p.border, 0.03),
-        border_04 = rgba(p.border, 0.04),
+        border_05 = rgba(p.border, 0.05),
         border_06 = rgba(p.border, 0.06),
-        border_07 = rgba(p.border, 0.07),
         border_08 = rgba(p.border, 0.08),
         border_10 = rgba(p.border, 0.10),
         border_12 = rgba(p.border, 0.12),

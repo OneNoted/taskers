@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 
 const SKIP_DESKTOP_INTEGRATION_ENV: &str = "TASKERS_SKIP_DESKTOP_INTEGRATION";
+const RELEASE_EXECUTABLE_NAMES: &[&str] = &["taskers", "taskers-gtk"];
 
 pub fn run(args: &[OsString]) -> Result<ExitStatus> {
     install_linux_user_assets()?;
@@ -78,6 +79,8 @@ pub fn install_linux_user_assets() -> Result<()> {
     let legacy_desktop_launcher = cargo_bin_home
         .as_deref()
         .map(|path| path.join("taskers-gtk-desktop-launch"));
+    let launcher_release_execs =
+        launcher_managed_release_execs(&taskers_paths::default_release_install_root());
     let desktop_entry = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/assets/taskers.desktop.in"
@@ -88,6 +91,7 @@ pub fn install_linux_user_assets() -> Result<()> {
         &desktop_launcher,
         &launcher,
         legacy_desktop_launcher.as_deref(),
+        &launcher_release_execs,
     )? {
         fs::write(&desktop_entry_path, desktop_entry)
             .with_context(|| format!("failed to write {}", desktop_entry_path.display()))?;
@@ -172,6 +176,7 @@ fn should_update_desktop_entry(
     desktop_launcher: &Path,
     launcher: &Path,
     legacy_desktop_launcher: Option<&Path>,
+    launcher_release_execs: &[String],
 ) -> Result<bool> {
     let Ok(existing) = fs::read_to_string(path) else {
         return Ok(true);
@@ -188,10 +193,36 @@ fn should_update_desktop_entry(
     if let Some(legacy_desktop_launcher) = legacy_desktop_launcher {
         managed_execs.push(desktop_exec(legacy_desktop_launcher));
     }
+    managed_execs.extend(launcher_release_execs.iter().cloned());
 
     Ok(managed_execs
         .iter()
         .any(|candidate| candidate == existing_exec))
+}
+
+fn launcher_managed_release_execs(release_root: &Path) -> Vec<String> {
+    let mut execs = Vec::new();
+    let Ok(versions) = fs::read_dir(release_root) else {
+        return execs;
+    };
+
+    for version in versions.flatten() {
+        let Ok(targets) = fs::read_dir(version.path()) else {
+            continue;
+        };
+
+        for target in targets.flatten() {
+            let bin_dir = target.path().join("bin");
+            for executable_name in RELEASE_EXECUTABLE_NAMES {
+                let executable = bin_dir.join(executable_name);
+                if executable.is_file() {
+                    execs.push(desktop_exec(&executable));
+                }
+            }
+        }
+    }
+
+    execs
 }
 
 fn remove_legacy_desktop_integration(legacy_desktop_launcher: Option<&Path>) -> Result<bool> {
@@ -332,8 +363,8 @@ fn remove_path(path: &Path) -> Result<()> {
 mod tests {
     use super::{
         desktop_exec, desktop_launch_wrapper_contents, exit_code_from_status,
-        launcher_path_looks_installed, path_taskers_executable, remove_legacy_desktop_integration,
-        should_update_desktop_entry,
+        launcher_managed_release_execs, launcher_path_looks_installed, path_taskers_executable,
+        remove_legacy_desktop_integration, should_update_desktop_entry,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -401,7 +432,7 @@ mod tests {
 
         let launcher = PathBuf::from("/home/notes/.local/bin/taskers");
         assert!(
-            !should_update_desktop_entry(&desktop_entry, &launcher, &launcher, None)
+            !should_update_desktop_entry(&desktop_entry, &launcher, &launcher, None, &[])
                 .expect("decision"),
         );
     }
@@ -418,7 +449,7 @@ mod tests {
         .expect("desktop entry");
 
         assert!(
-            should_update_desktop_entry(&desktop_entry, &launcher, &launcher, None)
+            should_update_desktop_entry(&desktop_entry, &launcher, &launcher, None, &[])
                 .expect("decision")
         );
     }
@@ -442,6 +473,40 @@ mod tests {
                 &desktop_launcher,
                 &launcher,
                 Some(&legacy_launcher),
+                &[],
+            )
+            .expect("decision")
+        );
+    }
+
+    #[test]
+    fn updates_launcher_managed_release_desktop_entry() {
+        let temp = tempdir().expect("tempdir");
+        let desktop_entry = temp.path().join("dev.taskers.app.desktop");
+        let desktop_launcher = PathBuf::from("/home/notes/.local/bin/taskers-desktop-launch");
+        let launcher = PathBuf::from("/home/notes/.cargo/bin/taskers");
+        let release_root = temp.path().join("releases");
+        let release_exec = release_root
+            .join("0.4.0")
+            .join("x86_64-unknown-linux-gnu")
+            .join("bin")
+            .join("taskers-gtk");
+        fs::create_dir_all(release_exec.parent().expect("bin dir")).expect("create release dir");
+        fs::write(&release_exec, "#!/bin/sh\n").expect("release executable");
+        fs::write(
+            &desktop_entry,
+            format!("[Desktop Entry]\nExec={}\n", desktop_exec(&release_exec)),
+        )
+        .expect("desktop entry");
+
+        let release_execs = launcher_managed_release_execs(&release_root);
+        assert!(
+            should_update_desktop_entry(
+                &desktop_entry,
+                &desktop_launcher,
+                &launcher,
+                None,
+                &release_execs,
             )
             .expect("decision")
         );

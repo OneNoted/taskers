@@ -16,7 +16,7 @@ use std::{
     future::pending,
     io::{self, Write},
     net::TcpListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     rc::Rc,
     sync::{
@@ -41,17 +41,18 @@ use taskers_runtime::{
     ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
 };
 use taskers_shell_core::{
-    BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PixelSize,
-    RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
-    ShortcutPreset, SurfaceKind,
+    BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PaneTabLayoutSnapshot,
+    PixelSize, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection,
+    ShortcutAction, ShortcutPreset, SurfaceKind,
 };
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
 use glib::variant::ToVariant;
-use taskers_paths::default_terminal_socket_path;
+use taskers_paths::{TaskersPaths, default_terminal_socket_path};
 
 const APP_ID: &str = taskers_paths::APP_ID;
 const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
+const DEV_DIAGNOSTIC_LOG_NAME: &str = "taskers-gtk.latest.log";
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "taskers")]
@@ -105,6 +106,14 @@ struct RuntimeBootstrap {
     socket_path: PathBuf,
     terminal_session_client: Option<TerminalSessionClient>,
     startup_notes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimePathOverrides {
+    root_dir: PathBuf,
+    session_path: PathBuf,
+    socket_path: PathBuf,
+    terminal_socket_path: PathBuf,
 }
 
 enum HostAutomationCommand {
@@ -280,7 +289,7 @@ fn main() -> glib::ExitCode {
         return run_internal_ghostty_probe(mode);
     }
 
-    let bootstrap = match bootstrap_runtime(None) {
+    let bootstrap = match bootstrap_runtime(None, cli.smoke_script) {
         Ok(bootstrap) => bootstrap,
         Err(error) => {
             safe_eprintln(format!("failed to bootstrap Taskers host: {error:?}"));
@@ -377,6 +386,81 @@ fn release_application_hold(hold_guard: &Rc<RefCell<Option<gtk::gio::Application
     }
 }
 
+fn shutdown_host_bridge(host: &Rc<RefCell<TaskersHost>>, diagnostics: Option<&DiagnosticsWriter>) {
+    if let Ok(mut host) = host.try_borrow_mut() {
+        host.shutdown();
+    }
+    quiesce_host_bridge(host, diagnostics, Duration::from_millis(250));
+    if let Ok(host) = host.try_borrow()
+        && let Some(health) = host.bridge_health_snapshot()
+    {
+        log_diagnostic(
+            diagnostics,
+            DiagnosticRecord::new(
+                DiagnosticCategory::Bridge,
+                None,
+                format!(
+                    "ghostty shutdown summary state={} surface_count={}",
+                    health.state.label(),
+                    health.surface_count
+                ),
+            ),
+        );
+    }
+}
+
+fn quiesce_host_bridge(
+    host: &Rc<RefCell<TaskersHost>>,
+    diagnostics: Option<&DiagnosticsWriter>,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    let context = glib::MainContext::default();
+    loop {
+        let Some(health) = host
+            .try_borrow()
+            .ok()
+            .and_then(|host| host.bridge_health_snapshot())
+        else {
+            return;
+        };
+        if health.surface_count == 0 {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    None,
+                    "ghostty bridge quiesced surface_count=0",
+                ),
+            );
+            return;
+        }
+        if Instant::now() >= deadline {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    None,
+                    format!(
+                        "ghostty bridge quiesce timed out surface_count={}",
+                        health.surface_count
+                    ),
+                ),
+            );
+            return;
+        }
+
+        let mut progressed = false;
+        while context.pending() {
+            progressed = true;
+            let _ = context.iteration(false);
+        }
+        if !progressed {
+            thread::sleep(Duration::from_millis(8));
+        }
+    }
+}
+
 fn build_ui_result(
     app: &adw::Application,
     bootstrap: BootstrapContext,
@@ -407,13 +491,49 @@ fn build_ui_result(
         let core = core.clone();
         move |event| core.apply_host_event(event)
     });
+    let shell_action_sink = Rc::new({
+        let core = core.clone();
+        move |action| core.dispatch_shell_action(action)
+    });
     let diagnostics_sink = diagnostics.as_ref().map(DiagnosticsWriter::sink);
     let host = Rc::new(RefCell::new(TaskersHost::new(
         &shell_view,
         bootstrap.ghostty_host,
         event_sink,
+        shell_action_sink,
         diagnostics_sink,
     )));
+    if let Some(bridge_info) = host.borrow().bridge_info() {
+        let note = format!(
+            "Ghostty bridge version={} build_id={}",
+            bridge_info.version, bridge_info.build_id
+        );
+        log_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::Startup,
+                Some(core.revision()),
+                note.clone(),
+            ),
+        );
+        safe_eprintln(note);
+    }
+    if let Some(health) = host.borrow().bridge_health_snapshot() {
+        let note = format!(
+            "Ghostty bridge lifecycle={} surface_count={}",
+            health.state.label(),
+            health.surface_count
+        );
+        log_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(
+                DiagnosticCategory::Bridge,
+                Some(core.revision()),
+                note.clone(),
+            ),
+        );
+        safe_eprintln(note);
+    }
     let persisted_config = Rc::new(RefCell::new(bootstrap.config.clone()));
 
     let window = adw::ApplicationWindow::builder()
@@ -422,12 +542,27 @@ fn build_ui_result(
         .default_width(1440)
         .default_height(900)
         .build();
+    let shutdown_done = Rc::new(Cell::new(false));
     let app_for_close = app.clone();
+    let host_for_close = host.clone();
     let hold_guard_for_close = hold_guard.clone();
+    let close_diagnostics = diagnostics.clone();
+    let shutdown_done_for_close = shutdown_done.clone();
     window.connect_close_request(move |_| {
+        if !shutdown_done_for_close.replace(true) {
+            shutdown_host_bridge(&host_for_close, close_diagnostics.as_ref());
+        }
         release_application_hold(&hold_guard_for_close);
         app_for_close.quit();
         glib::Propagation::Proceed
+    });
+    let shutdown_done_for_app = shutdown_done.clone();
+    let shutdown_host = host.clone();
+    let shutdown_diagnostics = diagnostics.clone();
+    app.connect_shutdown(move |_| {
+        if !shutdown_done_for_app.replace(true) {
+            shutdown_host_bridge(&shutdown_host, shutdown_diagnostics.as_ref());
+        }
     });
     let host_widget = host.borrow().widget();
     window.set_content(Some(&host_widget));
@@ -537,7 +672,19 @@ fn build_ui_result(
     });
 
     if let Some(script) = smoke_script {
-        spawn_smoke_script(script, core, diagnostics, quit_after_ms);
+        let (smoke_quit_tx, smoke_quit_rx) = mpsc::channel::<()>();
+        let smoke_app = app.clone();
+        glib::timeout_add_local(Duration::from_millis(16), move || {
+            match smoke_quit_rx.try_recv() {
+                Ok(()) => {
+                    smoke_app.quit();
+                    glib::ControlFlow::Break
+                }
+                Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+        spawn_smoke_script(script, core, diagnostics, quit_after_ms, smoke_quit_tx);
     }
 
     Ok(())
@@ -1030,7 +1177,10 @@ fn connect_navigation_shortcuts(
     window.add_controller(controller);
 }
 
-fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<BootstrapContext> {
+fn bootstrap_runtime(
+    diagnostics: Option<&DiagnosticsWriter>,
+    smoke_script: Option<SmokeScript>,
+) -> Result<BootstrapContext> {
     let (config, config_note) = match TaskersConfig::load() {
         Ok(config) => (config, None),
         Err(error) => (
@@ -1038,12 +1188,29 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
             Some(format!("Taskers config unavailable: {error}")),
         ),
     };
-    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
+    let path_overrides = smoke_script
+        .map(|_| smoke_runtime_path_overrides())
+        .transpose()?;
+    let runtime =
+        resolve_runtime_bootstrap(config.embedded_terminal_appearance, path_overrides.as_ref());
     let mut startup_notes = runtime.startup_notes;
     if let Some(note) = config_note {
         push_startup_note(&mut startup_notes, diagnostics, note);
     }
-    let session_path = default_session_path();
+    if let Some(path_overrides) = path_overrides.as_ref() {
+        push_startup_note(
+            &mut startup_notes,
+            diagnostics,
+            format!(
+                "Smoke mode using isolated runtime root {}",
+                path_overrides.root_dir.display()
+            ),
+        );
+    }
+    let session_path = path_overrides
+        .as_ref()
+        .map(|overrides| overrides.session_path.clone())
+        .unwrap_or_else(default_session_path);
     let mut initial_model = load_or_bootstrap(&session_path, false).with_context(|| {
         format!(
             "failed to load or bootstrap Taskers session at {}",
@@ -1143,12 +1310,17 @@ fn bootstrap_runtime(diagnostics: Option<&DiagnosticsWriter>) -> Result<Bootstra
 
 fn resolve_runtime_bootstrap(
     embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    path_overrides: Option<&RuntimePathOverrides>,
 ) -> RuntimeBootstrap {
     scrub_inherited_terminal_env();
 
     let mut startup_notes = Vec::new();
-    let socket_path = default_socket_path();
-    let terminal_socket_path = default_terminal_socket_path();
+    let socket_path = path_overrides
+        .map(|overrides| overrides.socket_path.clone())
+        .unwrap_or_else(default_socket_path);
+    let terminal_socket_path = path_overrides
+        .map(|overrides| overrides.terminal_socket_path.clone())
+        .unwrap_or_else(default_terminal_socket_path);
     let ghostty_runtime = match ensure_runtime_installed() {
         Ok(Some(runtime)) => {
             startup_notes.push(format!(
@@ -1215,6 +1387,23 @@ fn resolve_runtime_bootstrap(
     }
 }
 
+fn smoke_runtime_path_overrides() -> Result<RuntimePathOverrides> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    let root_dir =
+        std::env::temp_dir().join(format!("taskers-smoke-{}-{timestamp}", std::process::id()));
+    create_dir_all(&root_dir)
+        .with_context(|| format!("failed to create smoke runtime root {}", root_dir.display()))?;
+    Ok(RuntimePathOverrides {
+        session_path: root_dir.join("session.json"),
+        socket_path: root_dir.join("control.sock"),
+        terminal_socket_path: root_dir.join("terminal.sock"),
+        root_dir,
+    })
+}
+
 fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
     std::env::temp_dir().join(format!(
         "taskers-probe-{}-{}.json",
@@ -1225,7 +1414,7 @@ fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
 
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     let config = TaskersConfig::load().unwrap_or_default();
-    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance);
+    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance, None);
     let host = match GhosttyHost::new_with_options(&runtime.host_options) {
         Ok(host) => {
             let _ = host.tick();
@@ -1317,7 +1506,9 @@ fn run_internal_surface_probe(
     ));
 
     let event_sink = Rc::new(|_| {});
-    let mut taskers_host = TaskersHost::new(&shell_view, Some(host), event_sink, None);
+    let shell_action_sink = Rc::new(|_| {});
+    let mut taskers_host =
+        TaskersHost::new(&shell_view, Some(host), event_sink, shell_action_sink, None);
     let host_widget = taskers_host.widget();
     let window = gtk::Window::builder()
         .default_width(GHOSTTY_PROBE_WINDOW_SIZE_PX)
@@ -1339,7 +1530,7 @@ fn run_internal_surface_probe(
     let deadline = Instant::now() + Duration::from_millis(350);
     let context = glib::MainContext::default();
     while Instant::now() < deadline {
-        taskers_host.tick();
+        taskers_host.tick(None);
         while context.pending() {
             let _ = context.iteration(false);
         }
@@ -1486,7 +1677,7 @@ fn sync_window(
     let width = window.width();
     let height = window.height();
     if should_defer_initial_sync(last_size.get(), width, height) {
-        host.borrow().tick();
+        host.borrow_mut().tick(Some(core.revision()));
         return;
     }
 
@@ -1535,7 +1726,7 @@ fn sync_window(
         last_revision.set(revision);
     }
 
-    host.borrow().tick();
+    host.borrow_mut().tick(Some(core.revision()));
 }
 
 fn should_defer_initial_sync(last_size: (i32, i32), width: i32, height: i32) -> bool {
@@ -1670,7 +1861,7 @@ fn handle_terminal_debug_request(
     command: TerminalDebugCommand,
 ) -> Result<ControlResponse, ControlError> {
     sync_window(window, core, host, last_revision, last_size, diagnostics);
-    let result = host.borrow().execute_terminal_debug(command)?;
+    let result = host.borrow_mut().execute_terminal_debug(command)?;
     sync_window(window, core, host, last_revision, last_size, diagnostics);
     Ok(ControlResponse::TerminalDebug { result })
 }
@@ -1702,7 +1893,8 @@ fn browser_surface_id(command: &BrowserControlCommand) -> taskers_shell_core::Su
         | BrowserControlCommand::ScrollIntoView { surface_id, .. }
         | BrowserControlCommand::Get { surface_id, .. }
         | BrowserControlCommand::Is { surface_id, .. }
-        | BrowserControlCommand::Screenshot { surface_id, .. } => *surface_id,
+        | BrowserControlCommand::Screenshot { surface_id, .. }
+        | BrowserControlCommand::ClearData { surface_id, .. } => *surface_id,
     }
 }
 
@@ -1872,6 +2064,7 @@ fn spawn_smoke_script(
     core: SharedCore,
     diagnostics: Option<DiagnosticsWriter>,
     quit_after_ms: u64,
+    quit_tx: Sender<()>,
 ) {
     thread::spawn(move || {
         let started_at = Instant::now();
@@ -1893,7 +2086,7 @@ fn spawn_smoke_script(
             ),
         );
         let _ = io::stderr().lock().flush();
-        std::process::exit(0);
+        let _ = quit_tx.send(());
     });
 }
 
@@ -1989,7 +2182,30 @@ fn wait_for_browser_ready(core: &SharedCore, timeout: Duration) -> Option<String
 
 fn first_browser_ready(node: &LayoutNodeSnapshot) -> Option<String> {
     match node {
-        LayoutNodeSnapshot::Pane(pane) => pane
+        LayoutNodeSnapshot::Pane(pane) => first_browser_ready_in_pane_layout(&pane.layout),
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            first_browser_ready(first).or_else(|| first_browser_ready(second))
+        }
+    }
+}
+
+fn surface_counts(node: &LayoutNodeSnapshot) -> (usize, usize) {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) => surface_counts_in_pane_layout(&pane.layout),
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            let (first_browser, first_terminal) = surface_counts(first);
+            let (second_browser, second_terminal) = surface_counts(second);
+            (
+                first_browser + second_browser,
+                first_terminal + second_terminal,
+            )
+        }
+    }
+}
+
+fn first_browser_ready_in_pane_layout(node: &PaneTabLayoutSnapshot) -> Option<String> {
+    match node {
+        PaneTabLayoutSnapshot::Pane(pane) => pane
             .surfaces
             .iter()
             .find(|surface| surface.id == pane.active_surface)
@@ -2004,24 +2220,25 @@ fn first_browser_ready(node: &LayoutNodeSnapshot) -> Option<String> {
                     "surface-present".into()
                 }
             }),
-        LayoutNodeSnapshot::Split { first, second, .. } => {
-            first_browser_ready(first).or_else(|| first_browser_ready(second))
+        PaneTabLayoutSnapshot::Split { first, second, .. } => {
+            first_browser_ready_in_pane_layout(first)
+                .or_else(|| first_browser_ready_in_pane_layout(second))
         }
     }
 }
 
-fn surface_counts(node: &LayoutNodeSnapshot) -> (usize, usize) {
+fn surface_counts_in_pane_layout(node: &PaneTabLayoutSnapshot) -> (usize, usize) {
     match node {
-        LayoutNodeSnapshot::Pane(pane) => pane.surfaces.iter().fold(
+        PaneTabLayoutSnapshot::Pane(pane) => pane.surfaces.iter().fold(
             (0usize, 0usize),
             |(browser_count, terminal_count), surface| match surface.kind {
                 SurfaceKind::Browser => (browser_count + 1, terminal_count),
                 SurfaceKind::Terminal => (browser_count, terminal_count + 1),
             },
         ),
-        LayoutNodeSnapshot::Split { first, second, .. } => {
-            let (first_browser, first_terminal) = surface_counts(first);
-            let (second_browser, second_terminal) = surface_counts(second);
+        PaneTabLayoutSnapshot::Split { first, second, .. } => {
+            let (first_browser, first_terminal) = surface_counts_in_pane_layout(first);
+            let (second_browser, second_terminal) = surface_counts_in_pane_layout(second);
             (
                 first_browser + second_browser,
                 first_terminal + second_terminal,
@@ -2094,7 +2311,7 @@ enum DiagnosticsTarget {
 
 impl DiagnosticsWriter {
     fn from_cli(cli: &Cli) -> Option<Self> {
-        let target = cli
+        let explicit_target = cli
             .diagnostic_log
             .clone()
             .or_else(|| {
@@ -2102,7 +2319,13 @@ impl DiagnosticsWriter {
                     .ok()
                     .filter(|value| !value.is_empty())
             })
-            .or_else(|| cli.smoke_script.map(|_| "stderr".into()))?;
+            .or_else(|| cli.smoke_script.map(|_| "stderr".into()));
+        let auto_target = explicit_target
+            .is_none()
+            .then(default_dev_diagnostic_log_path)
+            .flatten();
+        let target = explicit_target
+            .or_else(|| auto_target.as_ref().map(|path| path.display().to_string()))?;
 
         if target == "stderr" {
             return Some(Self {
@@ -2110,7 +2333,18 @@ impl DiagnosticsWriter {
             });
         }
 
-        match File::create(PathBuf::from(&target)) {
+        let target_path = PathBuf::from(&target);
+        if let Some(parent) = target_path.parent()
+            && let Err(error) = create_dir_all(parent)
+        {
+            safe_eprintln(format!(
+                "taskers diagnostics log directory failed: {} ({error})",
+                parent.display()
+            ));
+            return None;
+        }
+
+        match File::create(&target_path) {
             Ok(file) => Some(Self {
                 target: DiagnosticsTarget::File(Arc::new(Mutex::new(file))),
             }),
@@ -2119,6 +2353,14 @@ impl DiagnosticsWriter {
                 None
             }
         }
+        .inspect(|_| {
+            if auto_target.as_deref() == Some(target_path.as_path()) {
+                safe_eprintln(format!(
+                    "taskers diagnostics logging to {}",
+                    target_path.display()
+                ));
+            }
+        })
     }
 
     fn sink(&self) -> DiagnosticsSink {
@@ -2141,9 +2383,27 @@ impl DiagnosticsWriter {
     }
 }
 
+fn default_dev_diagnostic_log_path() -> Option<PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    looks_like_dev_install(&current_exe).then(|| {
+        TaskersPaths::detect()
+            .state_dir()
+            .join("diagnostics")
+            .join(DEV_DIAGNOSTIC_LOG_NAME)
+    })
+}
+
+fn looks_like_dev_install(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path.contains("/.cargo/bin/taskers-gtk")
+        || path.contains("/target/debug/taskers-gtk")
+        || path.contains("/target/release/taskers-gtk")
+}
+
 #[cfg(test)]
 mod startup_tests {
-    use super::should_defer_initial_sync;
+    use super::{looks_like_dev_install, should_defer_initial_sync, smoke_runtime_path_overrides};
+    use std::path::Path;
 
     #[test]
     fn initial_sync_waits_for_real_allocation() {
@@ -2155,5 +2415,39 @@ mod startup_tests {
     #[test]
     fn later_resizes_do_not_get_blocked() {
         assert!(!should_defer_initial_sync((1440, 900), 1, 1));
+    }
+
+    #[test]
+    fn cargo_install_binary_uses_dev_diagnostics() {
+        assert!(looks_like_dev_install(Path::new(
+            "/home/notes/.cargo/bin/taskers-gtk"
+        )));
+    }
+
+    #[test]
+    fn target_build_binary_uses_dev_diagnostics() {
+        assert!(looks_like_dev_install(Path::new(
+            "/home/notes/Projects/taskers/target/debug/taskers-gtk"
+        )));
+    }
+
+    #[test]
+    fn launcher_bundle_binary_does_not_use_dev_diagnostics() {
+        assert!(!looks_like_dev_install(Path::new(
+            "/home/notes/.local/share/taskers/releases/0.4.0/x86_64-unknown-linux-gnu/taskers-gtk"
+        )));
+    }
+
+    #[test]
+    fn smoke_runtime_paths_are_isolated_from_user_state() {
+        let overrides = smoke_runtime_path_overrides().expect("smoke paths");
+        assert!(overrides.root_dir.starts_with(std::env::temp_dir()));
+        assert!(overrides.session_path.starts_with(&overrides.root_dir));
+        assert!(overrides.socket_path.starts_with(&overrides.root_dir));
+        assert!(
+            overrides
+                .terminal_socket_path
+                .starts_with(&overrides.root_dir)
+        );
     }
 }

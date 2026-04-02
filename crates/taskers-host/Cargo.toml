@@ -16,5 +16,6 @@ serde_json.workspace = true
 taskers-control.workspace = true
 taskers-domain.workspace = true
 taskers-ghostty.workspace = true
+taskers-paths.workspace = true
 taskers-shell-core.workspace = true
 webkit6.workspace = true

@@ -8,7 +8,7 @@ pub use backend::{
     EmbeddedTerminalAppearance, GhosttyHostOptions, SurfaceDescriptor, TerminalBackend,
 };
 #[cfg(target_os = "linux")]
-pub use bridge::{GhosttyError, GhosttyHost};
+pub use bridge::{GhosttyBridgeInfo, GhosttyError, GhosttyHost};
 pub use runtime::{
     RuntimeBootstrap, RuntimeBootstrapError, configure_runtime_environment,
     ensure_runtime_installed,

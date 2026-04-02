@@ -2735,22 +2735,25 @@ pub const Surface = extern struct {
     }
 
     fn ecFocusEnter(_: *gtk.EventControllerFocus, self: *Self) callconv(.c) void {
+        self.updateFocus(true);
+    }
+
+    fn ecFocusLeave(_: *gtk.EventControllerFocus, self: *Self) callconv(.c) void {
+        self.updateFocus(false);
+    }
+
+    fn updateFocus(self: *Self, focused: bool) void {
         const priv = self.private();
-        priv.focused = true;
-        priv.im_context.as(gtk.IMContext).focusIn();
+        priv.focused = focused;
+
+        const ctx = priv.im_context.as(gtk.IMContext);
+        if (focused) ctx.focusIn() else ctx.focusOut();
+
         _ = glib.idleAddOnce(idleFocus, self.ref());
         self.as(gobject.Object).notifyByPspec(properties.focused.impl.param_spec);
 
         // Bell stops ringing as soon as we gain focus
-        self.setBellRinging(false);
-    }
-
-    fn ecFocusLeave(_: *gtk.EventControllerFocus, self: *Self) callconv(.c) void {
-        const priv = self.private();
-        priv.focused = false;
-        priv.im_context.as(gtk.IMContext).focusOut();
-        _ = glib.idleAddOnce(idleFocus, self.ref());
-        self.as(gobject.Object).notifyByPspec(properties.focused.impl.param_spec);
+        if (focused) self.setBellRinging(false);
     }
 
     /// The focus callback must be triggered on an idle loop source because
@@ -3329,10 +3332,13 @@ pub const Surface = extern struct {
 
         // Store our cached size
         const priv = self.private();
-        priv.size = .{
+        const new_size: apprt.SurfaceSize = .{
             .width = @intCast(width),
             .height = @intCast(height),
         };
+        const changed =
+            priv.size.width != new_size.width or priv.size.height != new_size.height;
+        priv.size = new_size;
 
         // If our surface is realize, we send callbacks.
         if (priv.core_surface) |surface| {
@@ -3342,12 +3348,14 @@ pub const Surface = extern struct {
                 log.warn("error in content scale callback err={}", .{err});
             };
 
-            surface.sizeCallback(priv.size) catch |err| {
-                log.warn("error in size callback err={}", .{err});
-            };
+            if (changed) {
+                surface.sizeCallback(new_size) catch |err| {
+                    log.warn("error in size callback err={}", .{err});
+                };
 
-            // Setup our resize overlay if configured
-            self.resizeOverlaySchedule();
+                // Setup our resize overlay if configured
+                self.resizeOverlaySchedule();
+            }
 
             return;
         }
@@ -3431,6 +3439,8 @@ pub const Surface = extern struct {
             .{},
             null,
         );
+
+        self.updateFocus(priv.focused);
     }
 
     fn resizeOverlaySchedule(self: *Self) void {

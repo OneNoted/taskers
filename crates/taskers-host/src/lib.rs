@@ -3,16 +3,19 @@ mod browser_automation;
 use anyhow::{Result, anyhow};
 use gtk::{
     Align, Box as GtkBox, CssProvider, DrawingArea, EventControllerFocus, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, Orientation, Overflow, Overlay,
+    EventControllerScrollFlags, GestureClick, GestureDrag, Orientation, Overflow, Overlay,
     STYLE_PROVIDER_PRIORITY_APPLICATION, Widget, glib, prelude::*,
 };
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     f64::consts::{FRAC_PI_2, PI, TAU},
+    fs,
+    path::Path,
     rc::Rc,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use taskers_control::{
     BrowserControlCommand, BrowserLoadState, ControlError, TerminalDebugCommand,
@@ -23,19 +26,34 @@ use taskers_core::{
     ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
     TerminalSurfaceCatalogEntry, WorkspaceId,
 };
-use taskers_domain::PaneKind;
-use taskers_ghostty::{GhosttyHost, SurfaceDescriptor};
+use taskers_domain::{
+    BrowserProfileMode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind,
+};
+use taskers_ghostty::{GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor};
 use taskers_shell_core as taskers_core;
-use webkit6::{LoadEvent, Settings as WebKitSettings, WebView, prelude::*};
+use webkit6::{LoadEvent, NetworkSession, Settings as WebKitSettings, WebView, prelude::*};
 
 pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
+pub type ShellActionSink = Rc<dyn Fn(taskers_core::ShellAction) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
+
+// Very thin viewport-edge slivers have been enough to trip native GTK/Ghostty
+// rendering during teardown on Linux/NVIDIA. Once a clipped native surface is
+// below this size, hide it until more of the pane is actually visible.
+const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 200;
+const MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX: i32 = 120;
+const MIN_RESIZE_SPLIT_RATIO: u16 = 150;
+const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
+const GHOSTTY_BRIDGE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
+const GHOSTTY_BRIDGE_FATAL_THRESHOLD: Duration = Duration::from_secs(5);
+const GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCategory {
     Startup,
     Window,
     Sync,
+    Bridge,
     HostEvent,
     SurfaceLifecycle,
     BrowserMetadata,
@@ -78,6 +96,16 @@ impl DiagnosticRecord {
         self
     }
 
+    fn with_optional_pane(mut self, pane_id: Option<taskers_core::PaneId>) -> Self {
+        self.pane_id = pane_id;
+        self
+    }
+
+    fn with_optional_surface(mut self, surface_id: Option<SurfaceId>) -> Self {
+        self.surface_id = surface_id;
+        self
+    }
+
     pub fn format_line(&self) -> String {
         let revision = self
             .revision
@@ -99,15 +127,377 @@ impl DiagnosticRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhosttyLifecycleState {
+    Starting,
+    Running,
+    ShuttingDown,
+    Failed,
+}
+
+impl GhosttyLifecycleState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::ShuttingDown => "shutting-down",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgeHealthSnapshot {
+    pub bridge_info: GhosttyBridgeInfo,
+    pub state: GhosttyLifecycleState,
+    pub surface_count: usize,
+    pub last_tick_duration_ms: Option<u128>,
+    pub last_mutation_duration_ms: Option<u128>,
+    pub last_operation: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeOperationKind {
+    Tick,
+    SurfaceSync,
+    Shutdown,
+    TerminalCommand,
+    TerminalDebug,
+}
+
+impl BridgeOperationKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tick => "tick",
+            Self::SurfaceSync => "surface-sync",
+            Self::Shutdown => "shutdown",
+            Self::TerminalCommand => "terminal-command",
+            Self::TerminalDebug => "terminal-debug",
+        }
+    }
+
+    fn tracks_tick_duration(self) -> bool {
+        matches!(self, Self::Tick)
+    }
+
+    fn tracks_mutation_duration(self) -> bool {
+        matches!(self, Self::SurfaceSync | Self::Shutdown)
+    }
+}
+
+struct BridgeWatchdog {
+    shared: Arc<Mutex<BridgeWatchdogShared>>,
+    stop_tx: mpsc::Sender<()>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+struct BridgeWatchdogShared {
+    next_token: u64,
+    lifecycle_state: GhosttyLifecycleState,
+    active: Option<ActiveBridgeOperation>,
+    last_tick_duration_ms: Option<u128>,
+    last_mutation_duration_ms: Option<u128>,
+    last_operation: Option<CompletedBridgeOperation>,
+}
+
+struct ActiveBridgeOperation {
+    token: u64,
+    kind: BridgeOperationKind,
+    revision: Option<u64>,
+    pane_id: Option<PaneId>,
+    surface_id: Option<SurfaceId>,
+    started_at: Instant,
+    warned: bool,
+    fatal_logged: bool,
+}
+
+struct CompletedBridgeOperation {
+    kind: BridgeOperationKind,
+    duration_ms: u128,
+}
+
+struct BridgeOperationGuard {
+    shared: Arc<Mutex<BridgeWatchdogShared>>,
+    token: u64,
+    kind: BridgeOperationKind,
+    started_at: Instant,
+}
+
+impl BridgeWatchdog {
+    fn new(diagnostics: Option<DiagnosticsSink>) -> Self {
+        let shared = Arc::new(Mutex::new(BridgeWatchdogShared {
+            next_token: 1,
+            lifecycle_state: GhosttyLifecycleState::Starting,
+            active: None,
+            last_tick_duration_ms: None,
+            last_mutation_duration_ms: None,
+            last_operation: None,
+        }));
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let thread_shared = shared.clone();
+        let join_handle = thread::spawn(move || {
+            loop {
+                match stop_rx.recv_timeout(GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+
+                let mut records = Vec::new();
+                {
+                    let mut shared = thread_shared.lock().expect("bridge watchdog lock");
+                    let Some(active) = shared.active.as_mut() else {
+                        continue;
+                    };
+                    let elapsed_ms = active.started_at.elapsed().as_millis();
+                    let mut fatal_transition = None;
+                    if elapsed_ms >= GHOSTTY_BRIDGE_FATAL_THRESHOLD.as_millis()
+                        && !active.fatal_logged
+                    {
+                        active.fatal_logged = true;
+                        fatal_transition = Some((
+                            active.revision,
+                            active.kind.label(),
+                            active.pane_id,
+                            active.surface_id,
+                        ));
+                        records.push(
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                active.revision,
+                                format!(
+                                    "ghostty bridge hang suspected operation={} elapsed_ms={elapsed_ms}",
+                                    active.kind.label()
+                                ),
+                            )
+                            .with_optional_pane(active.pane_id)
+                            .with_optional_surface(active.surface_id),
+                        );
+                    } else if elapsed_ms >= GHOSTTY_BRIDGE_WARN_THRESHOLD.as_millis()
+                        && !active.warned
+                    {
+                        active.warned = true;
+                        records.push(
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                active.revision,
+                                format!(
+                                    "ghostty bridge operation stalled operation={} elapsed_ms={elapsed_ms}",
+                                    active.kind.label()
+                                ),
+                            )
+                            .with_optional_pane(active.pane_id)
+                            .with_optional_surface(active.surface_id),
+                        );
+                    }
+
+                    if let Some((revision, operation, pane_id, surface_id)) = fatal_transition {
+                        let state_changed = shared.lifecycle_state != GhosttyLifecycleState::Failed;
+                        shared.lifecycle_state = GhosttyLifecycleState::Failed;
+                        if state_changed {
+                            records.push(DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                revision,
+                                format!(
+                                    "ghostty lifecycle state={} reason=watchdog observed hung {} operation",
+                                    GhosttyLifecycleState::Failed.label(),
+                                    operation
+                                ),
+                            )
+                            .with_optional_pane(pane_id)
+                            .with_optional_surface(surface_id));
+                        }
+                    }
+                }
+
+                if let Some(diagnostics) = diagnostics.as_ref() {
+                    for record in records {
+                        diagnostics(record);
+                    }
+                }
+            }
+        });
+
+        Self {
+            shared,
+            stop_tx,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    fn begin(
+        &self,
+        kind: BridgeOperationKind,
+        revision: Option<u64>,
+        pane_id: Option<PaneId>,
+        surface_id: Option<SurfaceId>,
+    ) -> BridgeOperationGuard {
+        let started_at = Instant::now();
+        let token = {
+            let mut shared = self.shared.lock().expect("bridge watchdog lock");
+            let token = shared.next_token;
+            shared.next_token += 1;
+            shared.active = Some(ActiveBridgeOperation {
+                token,
+                kind,
+                revision,
+                pane_id,
+                surface_id,
+                started_at,
+                warned: false,
+                fatal_logged: false,
+            });
+            token
+        };
+
+        BridgeOperationGuard {
+            shared: self.shared.clone(),
+            token,
+            kind,
+            started_at,
+        }
+    }
+
+    fn lifecycle_state(&self) -> GhosttyLifecycleState {
+        self.shared
+            .lock()
+            .expect("bridge watchdog lock")
+            .lifecycle_state
+    }
+
+    fn transition_state(
+        &self,
+        diagnostics: Option<&DiagnosticsSink>,
+        state: GhosttyLifecycleState,
+        revision: Option<u64>,
+        reason: impl Into<String>,
+    ) {
+        let reason = reason.into();
+        let changed = {
+            let mut shared = self.shared.lock().expect("bridge watchdog lock");
+            if shared.lifecycle_state == state {
+                false
+            } else {
+                shared.lifecycle_state = state;
+                true
+            }
+        };
+
+        if changed {
+            emit_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    revision,
+                    format!("ghostty lifecycle state={} reason={reason}", state.label()),
+                ),
+            );
+        }
+    }
+
+    fn snapshot(
+        &self,
+        bridge_info: GhosttyBridgeInfo,
+        surface_count: usize,
+    ) -> BridgeHealthSnapshot {
+        let shared = self.shared.lock().expect("bridge watchdog lock");
+        BridgeHealthSnapshot {
+            bridge_info,
+            state: shared.lifecycle_state,
+            surface_count,
+            last_tick_duration_ms: shared.last_tick_duration_ms,
+            last_mutation_duration_ms: shared.last_mutation_duration_ms,
+            last_operation: shared
+                .last_operation
+                .as_ref()
+                .map(|operation| format!("{}:{}ms", operation.kind.label(), operation.duration_ms)),
+        }
+    }
+}
+
+impl Drop for BridgeWatchdog {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for BridgeOperationGuard {
+    fn drop(&mut self) {
+        let duration_ms = self.started_at.elapsed().as_millis();
+        let mut shared = self.shared.lock().expect("bridge watchdog lock");
+        if shared.active.as_ref().map(|active| active.token) == Some(self.token) {
+            shared.active = None;
+        }
+        if self.kind.tracks_tick_duration() {
+            shared.last_tick_duration_ms = Some(duration_ms);
+        }
+        if self.kind.tracks_mutation_duration() {
+            shared.last_mutation_duration_ms = Some(duration_ms);
+        }
+        shared.last_operation = Some(CompletedBridgeOperation {
+            kind: self.kind,
+            duration_ms,
+        });
+    }
+}
+
+fn redacted_browser_url_for_diagnostics(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+
+    if let Some((scheme, remainder)) = without_query.split_once("://") {
+        let mut parts = remainder.splitn(2, '/');
+        let authority = parts.next().unwrap_or_default();
+        let path = parts.next().unwrap_or_default();
+        if path.is_empty() {
+            format!("{scheme}://{authority}")
+        } else {
+            format!("{scheme}://{authority}/...")
+        }
+    } else {
+        without_query.to_string()
+    }
+}
+
 pub struct TaskersHost {
     root: Overlay,
     event_sink: HostEventSink,
+    shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
     ghostty_host: Option<GhosttyHost>,
+    ghostty_bridge_info: Option<GhosttyBridgeInfo>,
+    ghostty_watchdog: Option<BridgeWatchdog>,
+    skip_next_ghostty_tick: bool,
     native_surface_provider: CssProvider,
     selected_theme_id: String,
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
+    persistent_browser_session: Option<NetworkSession>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
+    resize_handles: HashMap<String, ResizeHandleOverlay>,
+}
+
+struct ResizeHandleOverlay {
+    widget: GtkBox,
+    target: Rc<RefCell<taskers_core::ResizeHandleTarget>>,
+    split_gap: Rc<Cell<i32>>,
+}
+
+#[derive(Clone, Copy)]
+struct DragAnchor {
+    start_abs_x: i32,
+    start_abs_y: i32,
+    pointer_offset_x: i32,
+    pointer_offset_y: i32,
 }
 
 #[derive(Clone)]
@@ -116,6 +506,8 @@ pub struct BrowserSurfaceHandle {
     workspace_id: Rc<Cell<WorkspaceId>>,
     pane_id: Rc<Cell<PaneId>>,
     webview: WebView,
+    profile_mode: BrowserProfileMode,
+    network_session: NetworkSession,
     last_load_state: Rc<Cell<Option<BrowserLoadState>>>,
 }
 
@@ -192,8 +584,13 @@ impl TaskersHost {
         shell_widget: &impl IsA<Widget>,
         ghostty_host: Option<GhosttyHost>,
         event_sink: HostEventSink,
+        shell_action_sink: ShellActionSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Self {
+        let ghostty_bridge_info = ghostty_host.as_ref().map(GhosttyHost::bridge_info);
+        let ghostty_watchdog = ghostty_bridge_info
+            .as_ref()
+            .map(|_| BridgeWatchdog::new(diagnostics.clone()));
         let root = Overlay::new();
         root.set_hexpand(true);
         root.set_vexpand(true);
@@ -230,15 +627,30 @@ impl TaskersHost {
             ),
         );
 
+        if let Some(watchdog) = ghostty_watchdog.as_ref() {
+            watchdog.transition_state(
+                diagnostics.as_ref(),
+                GhosttyLifecycleState::Running,
+                None,
+                "ghostty host initialized",
+            );
+        }
+
         Self {
             root,
             event_sink,
+            shell_action_sink,
             diagnostics,
             ghostty_host,
+            ghostty_bridge_info,
+            ghostty_watchdog,
+            skip_next_ghostty_tick: false,
             native_surface_provider,
             selected_theme_id: "dark".into(),
             browser_surfaces: HashMap::new(),
+            persistent_browser_session: None,
             terminal_surfaces: HashMap::new(),
+            resize_handles: HashMap::new(),
         }
     }
 
@@ -261,19 +673,181 @@ impl TaskersHost {
             ),
         );
         self.sync_browser_surfaces(snapshot, interactive)?;
-        self.sync_terminal_surfaces(
+        let _bridge_guard = self.begin_bridge_operation(
+            BridgeOperationKind::SurfaceSync,
+            Some(snapshot.revision),
+            None,
+            None,
+        );
+        let terminal_mutated = match self.sync_terminal_surfaces(
             &snapshot.portal,
             &snapshot.terminal_catalog,
             &snapshot.settings.selected_theme_id,
             snapshot.revision,
             interactive,
-        )?;
+            snapshot.resize_preview_active,
+        ) {
+            Ok(terminal_mutated) => terminal_mutated,
+            Err(error) => {
+                self.mark_bridge_failed(
+                    Some(snapshot.revision),
+                    format!("terminal surface sync failed: {error}"),
+                );
+                return Err(error);
+            }
+        };
+        self.sync_resize_handles(snapshot);
+        if terminal_mutated {
+            self.skip_next_ghostty_tick = true;
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    Some(snapshot.revision),
+                    "deferred ghostty tick after terminal surface mutation",
+                ),
+            );
+        }
         Ok(())
     }
 
-    pub fn tick(&self) {
-        if let Some(host) = &self.ghostty_host {
-            let _ = host.tick();
+    pub fn tick(&mut self, revision: Option<u64>) {
+        if !self.bridge_running() {
+            return;
+        }
+        if self.skip_next_ghostty_tick {
+            self.skip_next_ghostty_tick = false;
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    revision,
+                    "skipping ghostty tick for mutation cooldown",
+                ),
+            );
+            return;
+        }
+
+        let Some(host) = &self.ghostty_host else {
+            return;
+        };
+        let _bridge_guard =
+            self.begin_bridge_operation(BridgeOperationKind::Tick, revision, None, None);
+        if let Err(error) = host.tick() {
+            self.mark_bridge_failed(revision, format!("ghostty tick failed: {error}"));
+        }
+    }
+
+    pub fn bridge_info(&self) -> Option<GhosttyBridgeInfo> {
+        self.ghostty_bridge_info.clone()
+    }
+
+    pub fn bridge_health_snapshot(&self) -> Option<BridgeHealthSnapshot> {
+        let bridge_info = self.ghostty_bridge_info.clone()?;
+        let surface_count = self
+            .ghostty_host
+            .as_ref()
+            .map(GhosttyHost::surface_count)
+            .unwrap_or_default();
+        self.ghostty_watchdog
+            .as_ref()
+            .map(|watchdog| watchdog.snapshot(bridge_info, surface_count))
+    }
+
+    pub fn shutdown(&mut self) {
+        let bridge_was_running = self.bridge_running();
+        if let Some(watchdog) = self.ghostty_watchdog.as_ref() {
+            watchdog.transition_state(
+                self.diagnostics.as_ref(),
+                GhosttyLifecycleState::ShuttingDown,
+                None,
+                "window close requested",
+            );
+        }
+        let _bridge_guard =
+            self.begin_bridge_operation(BridgeOperationKind::Shutdown, None, None, None);
+        self.skip_next_ghostty_tick = false;
+        if bridge_was_running {
+            if let Some(host) = &self.ghostty_host {
+                host.begin_shutdown();
+            }
+        } else {
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    None,
+                    "skipping ghostty shutdown calls because bridge is not running",
+                ),
+            );
+        }
+
+        let terminal_surfaces = self.terminal_surfaces.drain().collect::<Vec<_>>();
+        for (surface_id, surface) in terminal_surfaces {
+            surface.shell.detach(&self.root);
+            surface.attention_ring.detach(&self.root);
+            if bridge_was_running {
+                if let Some(host) = &self.ghostty_host {
+                    host.destroy_surface(&surface.widget);
+                }
+            } else {
+                emit_diagnostic(
+                    self.diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::Bridge,
+                        None,
+                        "skipped terminal surface destroy during shutdown because bridge is not running",
+                    )
+                    .with_surface(surface_id),
+                );
+            }
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::SurfaceLifecycle,
+                    None,
+                    "terminal surface shutdown",
+                )
+                .with_surface(surface_id),
+            );
+        }
+
+        let browser_surfaces = self.browser_surfaces.drain().collect::<Vec<_>>();
+        for (surface_id, surface) in browser_surfaces {
+            surface.shell.detach(&self.root);
+            surface.attention_ring.detach(&self.root);
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::SurfaceLifecycle,
+                    None,
+                    "browser surface shutdown",
+                )
+                .with_surface(surface_id),
+            );
+        }
+
+        if let Some(health) = self.bridge_health_snapshot() {
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Bridge,
+                    None,
+                    format!(
+                        "ghostty bridge shutdown complete state={} surface_count={} last_tick_ms={} last_mutation_ms={}",
+                        health.state.label(),
+                        health.surface_count,
+                        health
+                            .last_tick_duration_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        health
+                            .last_mutation_duration_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                    ),
+                ),
+            );
         }
     }
 
@@ -300,15 +874,44 @@ impl TaskersHost {
                     surface.toggle_devtools()
                 })
             }
+            HostCommand::BrowserClearData { surface_id } => {
+                let handle = self.browser_surface_handle(surface_id)?;
+                glib::spawn_future_local(async move {
+                    let _ = handle.clear_data(None, true).await;
+                });
+                Ok(())
+            }
             HostCommand::TerminalSendText { surface_id, text } => {
+                if !self.bridge_running() {
+                    emit_diagnostic(
+                        self.diagnostics.as_ref(),
+                        DiagnosticRecord::new(
+                            DiagnosticCategory::Bridge,
+                            None,
+                            "skipping terminal send text because ghostty bridge is not running",
+                        )
+                        .with_surface(surface_id),
+                    );
+                    return Ok(());
+                }
                 let Some(host) = self.ghostty_host.as_ref() else {
                     return Ok(());
                 };
                 let Some(surface) = self.terminal_surfaces.get(&surface_id) else {
                     return Ok(());
                 };
-                host.send_surface_text(&surface.widget, &text)
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                let pane_id = surface.pane_id.get();
+                let widget = surface.widget.clone();
+                let _bridge_guard = self.begin_bridge_operation(
+                    BridgeOperationKind::TerminalCommand,
+                    None,
+                    Some(pane_id),
+                    Some(surface_id),
+                );
+                if let Err(error) = host.send_surface_text(&widget, &text) {
+                    self.mark_bridge_failed(None, format!("terminal send text failed: {error}"));
+                    return Err(anyhow!(error.to_string()));
+                }
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -333,7 +936,7 @@ impl TaskersHost {
     }
 
     pub fn execute_terminal_debug(
-        &self,
+        &mut self,
         command: TerminalDebugCommand,
     ) -> Result<TerminalDebugResult, ControlError> {
         let Some(host) = self.ghostty_host.as_ref() else {
@@ -341,46 +944,116 @@ impl TaskersHost {
                 "terminal debug requires the Ghostty host backend",
             ));
         };
+        if !self.bridge_running() {
+            return Err(ControlError::not_supported(
+                "terminal debug is unavailable because the Ghostty bridge is not running",
+            ));
+        }
 
         let surface_id = terminal_debug_surface_id(&command);
         let surface = self.terminal_surfaces.get(&surface_id).ok_or_else(|| {
             ControlError::not_found(format!("terminal surface {surface_id} not found"))
         })?;
+        let pane_id = surface.pane_id.get();
+        let workspace_id = surface.workspace_id.get();
+        let widget = surface.widget.clone();
+        let focused = surface.is_focused();
+        let visible = surface.visible;
+        let cols = surface.spec.cols;
+        let rows = surface.spec.rows;
+        let width_px = surface.width_px;
+        let height_px = surface.height_px;
 
         match command {
-            TerminalDebugCommand::IsFocused { .. } => Ok(TerminalDebugResult::IsFocused {
-                focused: surface.is_focused(),
-            }),
+            TerminalDebugCommand::IsFocused { .. } => {
+                Ok(TerminalDebugResult::IsFocused { focused })
+            }
             TerminalDebugCommand::ReadText { tail_lines, .. } => {
-                let text = host
-                    .read_surface_text(&surface.widget)
-                    .map_err(|error| ControlError::internal(error.to_string()))?;
+                let _bridge_guard = self.begin_bridge_operation(
+                    BridgeOperationKind::TerminalDebug,
+                    None,
+                    Some(pane_id),
+                    Some(surface_id),
+                );
+                let text = match host.read_surface_text(&widget) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        self.mark_bridge_failed(
+                            None,
+                            format!("terminal debug read failed: {error}"),
+                        );
+                        return Err(ControlError::internal(error.to_string()));
+                    }
+                };
                 Ok(TerminalDebugResult::ReadText {
                     text: trim_terminal_tail(text, tail_lines),
                 })
             }
             TerminalDebugCommand::RenderStats { .. } => {
-                let has_selection = host
-                    .surface_has_selection(&surface.widget)
-                    .map_err(|error| ControlError::internal(error.to_string()))?;
+                let _bridge_guard = self.begin_bridge_operation(
+                    BridgeOperationKind::TerminalDebug,
+                    None,
+                    Some(pane_id),
+                    Some(surface_id),
+                );
+                let has_selection = match host.surface_has_selection(&widget) {
+                    Ok(has_selection) => has_selection,
+                    Err(error) => {
+                        self.mark_bridge_failed(
+                            None,
+                            format!("terminal debug render stats failed: {error}"),
+                        );
+                        return Err(ControlError::internal(error.to_string()));
+                    }
+                };
                 Ok(TerminalDebugResult::RenderStats {
                     stats: TerminalRenderStats {
                         surface_id,
-                        workspace_id: surface.workspace_id.get(),
-                        pane_id: surface.pane_id.get(),
+                        workspace_id,
+                        pane_id,
                         mounted: true,
-                        visible: surface.visible,
-                        focused: surface.is_focused(),
+                        visible,
+                        focused,
                         backend: "ghostty".into(),
-                        cols: surface.spec.cols,
-                        rows: surface.spec.rows,
-                        width_px: surface.width_px,
-                        height_px: surface.height_px,
+                        cols,
+                        rows,
+                        width_px,
+                        height_px,
                         has_selection,
                     },
                 })
             }
         }
+    }
+
+    fn bridge_running(&self) -> bool {
+        self.ghostty_watchdog
+            .as_ref()
+            .is_some_and(|watchdog| watchdog.lifecycle_state() == GhosttyLifecycleState::Running)
+    }
+
+    fn begin_bridge_operation(
+        &self,
+        kind: BridgeOperationKind,
+        revision: Option<u64>,
+        pane_id: Option<PaneId>,
+        surface_id: Option<SurfaceId>,
+    ) -> Option<BridgeOperationGuard> {
+        self.ghostty_watchdog
+            .as_ref()
+            .map(|watchdog| watchdog.begin(kind, revision, pane_id, surface_id))
+    }
+
+    fn mark_bridge_failed(&mut self, revision: Option<u64>, reason: impl Into<String>) {
+        if let Some(watchdog) = self.ghostty_watchdog.as_ref() {
+            watchdog.transition_state(
+                self.diagnostics.as_ref(),
+                GhosttyLifecycleState::Failed,
+                revision,
+                reason,
+            );
+        }
+        self.skip_next_ghostty_tick = false;
     }
 
     fn with_browser_surface(
@@ -405,6 +1078,42 @@ impl TaskersHost {
         Ok(())
     }
 
+    fn sync_resize_handles(&mut self, snapshot: &ShellSnapshot) {
+        let desired_ids = snapshot
+            .resize_handles
+            .iter()
+            .map(|handle| handle.id.clone())
+            .collect::<HashSet<_>>();
+        let stale_ids = self
+            .resize_handles
+            .keys()
+            .filter(|id| !desired_ids.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for handle_id in stale_ids {
+            if let Some(handle) = self.resize_handles.remove(&handle_id) {
+                handle.detach(&self.root);
+            }
+        }
+
+        for handle in &snapshot.resize_handles {
+            match self.resize_handles.get_mut(&handle.id) {
+                Some(existing) => existing.sync(&self.root, handle, snapshot.metrics.split_gap),
+                None => {
+                    let overlay = ResizeHandleOverlay::new(
+                        &self.root,
+                        handle,
+                        snapshot.metrics.split_gap,
+                        self.shell_action_sink.clone(),
+                        self.diagnostics.clone(),
+                    );
+                    self.resize_handles.insert(handle.id.clone(), overlay);
+                }
+            }
+        }
+    }
+
     pub fn browser_surface_handle(
         &self,
         surface_id: SurfaceId,
@@ -415,6 +1124,50 @@ impl TaskersHost {
             .ok_or_else(|| {
                 ControlError::not_found(format!("browser surface {surface_id} not found"))
             })
+    }
+
+    fn persistent_browser_session(&mut self) -> NetworkSession {
+        if let Some(session) = self.persistent_browser_session.clone() {
+            return session;
+        }
+
+        let session = match build_persistent_browser_session() {
+            Ok(session) => session,
+            Err(error) => {
+                emit_diagnostic(
+                    self.diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::Startup,
+                        None,
+                        format!(
+                            "failed to initialize persistent browser profile: {error}; using an ephemeral browser session"
+                        ),
+                    ),
+                );
+                build_ephemeral_browser_session()
+            }
+        };
+        self.persistent_browser_session = Some(session.clone());
+        session
+    }
+
+    fn browser_network_session_for(&mut self, profile_mode: BrowserProfileMode) -> NetworkSession {
+        match profile_mode {
+            BrowserProfileMode::PersistentDefault => self.persistent_browser_session(),
+            BrowserProfileMode::Ephemeral => build_ephemeral_browser_session(),
+        }
+    }
+
+    fn remove_browser_surface(&mut self, surface_id: SurfaceId, revision: u64, reason: &str) {
+        if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
+            surface.shell.detach(&self.root);
+            surface.attention_ring.detach(&self.root);
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(DiagnosticCategory::SurfaceLifecycle, Some(revision), reason)
+                    .with_surface(surface_id),
+            );
+        }
     }
 
     fn sync_browser_surfaces(&mut self, snapshot: &ShellSnapshot, interactive: bool) -> Result<()> {
@@ -438,19 +1191,23 @@ impl TaskersHost {
             .collect::<Vec<_>>();
 
         for surface_id in stale {
-            if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
-                surface.shell.detach(&self.root);
-                surface.attention_ring.detach(&self.root);
-                emit_diagnostic(
-                    self.diagnostics.as_ref(),
-                    DiagnosticRecord::new(
-                        DiagnosticCategory::SurfaceLifecycle,
-                        Some(snapshot.revision),
-                        "browser surface removed",
-                    )
-                    .with_surface(surface_id),
-                );
-            }
+            self.remove_browser_surface(surface_id, snapshot.revision, "browser surface removed");
+        }
+
+        let profile_changed = self
+            .browser_surfaces
+            .iter()
+            .filter_map(|(surface_id, surface)| {
+                let entry = catalog_by_id.get(surface_id)?;
+                (surface.profile_mode != entry.profile_mode).then_some(*surface_id)
+            })
+            .collect::<Vec<_>>();
+        for surface_id in profile_changed {
+            self.remove_browser_surface(
+                surface_id,
+                snapshot.revision,
+                "browser surface recreated for profile mode change",
+            );
         }
 
         for entry in snapshot.browser_catalog.iter() {
@@ -466,6 +1223,7 @@ impl TaskersHost {
                     self.diagnostics.as_ref(),
                 )?,
                 None => {
+                    let network_session = self.browser_network_session_for(entry.profile_mode);
                     let surface = BrowserSurface::new(
                         &self.root,
                         entry,
@@ -473,6 +1231,7 @@ impl TaskersHost {
                         &snapshot.settings.selected_theme_id,
                         snapshot.revision,
                         interactive,
+                        network_session,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                     )?;
@@ -491,7 +1250,8 @@ impl TaskersHost {
         theme_id: &str,
         revision: u64,
         interactive: bool,
-    ) -> Result<()> {
+        resize_preview_active: bool,
+    ) -> Result<bool> {
         let desired = terminal_plans(portal);
         let desired_by_id = desired
             .into_iter()
@@ -510,10 +1270,29 @@ impl TaskersHost {
             .filter(|surface_id| !desired_ids.contains(surface_id))
             .collect::<Vec<_>>();
 
+        let host = self.ghostty_host.as_ref();
+        let bridge_running = self.bridge_running();
+        let mut terminal_mutated = false;
+
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
                 surface.shell.detach(&self.root);
                 surface.attention_ring.detach(&self.root);
+                if bridge_running {
+                    if let Some(host) = host {
+                        host.destroy_surface(&surface.widget);
+                    }
+                } else {
+                    emit_diagnostic(
+                        self.diagnostics.as_ref(),
+                        DiagnosticRecord::new(
+                            DiagnosticCategory::Bridge,
+                            Some(revision),
+                            "skipped terminal surface destroy because ghostty bridge is not running",
+                        )
+                        .with_surface(surface_id),
+                    );
+                }
                 emit_diagnostic(
                     self.diagnostics.as_ref(),
                     DiagnosticRecord::new(
@@ -523,12 +1302,9 @@ impl TaskersHost {
                     )
                     .with_surface(surface_id),
                 );
+                terminal_mutated = true;
             }
         }
-
-        let Some(host) = self.ghostty_host.as_ref() else {
-            return Ok(());
-        };
 
         for entry in catalog {
             let visible_plan = desired_by_id.get(&entry.surface_id);
@@ -540,10 +1316,27 @@ impl TaskersHost {
                     theme_id,
                     revision,
                     interactive,
-                    host,
+                    resize_preview_active,
+                    host.filter(|_| bridge_running),
                     self.diagnostics.as_ref(),
                 ),
                 None => {
+                    if !bridge_running {
+                        emit_diagnostic(
+                            self.diagnostics.as_ref(),
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                Some(revision),
+                                "skipping terminal surface create because ghostty bridge is not running",
+                            )
+                            .with_pane(entry.pane_id)
+                            .with_surface(entry.surface_id),
+                        );
+                        continue;
+                    }
+                    let Some(host) = host else {
+                        continue;
+                    };
                     let surface = TerminalSurface::new(
                         &self.root,
                         entry,
@@ -551,16 +1344,150 @@ impl TaskersHost {
                         theme_id,
                         revision,
                         interactive,
+                        resize_preview_active,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
                         host,
                     )?;
                     self.terminal_surfaces.insert(entry.surface_id, surface);
+                    terminal_mutated = true;
                 }
             }
         }
 
-        Ok(())
+        Ok(terminal_mutated)
+    }
+}
+
+impl ResizeHandleOverlay {
+    fn new(
+        overlay: &Overlay,
+        handle: &taskers_core::ResizeHandleSnapshot,
+        split_gap: i32,
+        shell_action_sink: ShellActionSink,
+        diagnostics: Option<DiagnosticsSink>,
+    ) -> Self {
+        let widget = GtkBox::new(Orientation::Vertical, 0);
+        widget.add_css_class("resize-handle");
+        widget.add_css_class(resize_handle_class(handle.cursor));
+        widget.set_focusable(false);
+        widget.set_can_target(true);
+        widget.set_cursor_from_name(Some(resize_cursor_name(handle.cursor)));
+
+        let target = Rc::new(RefCell::new(handle.target.clone()));
+        let split_gap_cell = Rc::new(Cell::new(split_gap));
+        let active_target = Rc::new(RefCell::new(None::<taskers_core::ResizeHandleTarget>));
+        let active_split_gap = Rc::new(Cell::new(split_gap));
+        let drag_anchor = Rc::new(Cell::new(None::<DragAnchor>));
+
+        let drag = GestureDrag::new();
+        let active_widget = widget.clone();
+        let active_target_for_begin = active_target.clone();
+        let target_for_begin = target.clone();
+        let split_gap_for_begin = split_gap_cell.clone();
+        let active_split_gap_for_begin = active_split_gap.clone();
+        let drag_anchor_for_begin = drag_anchor.clone();
+        let begin_diagnostics = diagnostics.clone();
+        let begin_id = handle.id.clone();
+        drag.connect_drag_begin(move |_, start_x, start_y| {
+            active_widget.add_css_class("resize-handle-active");
+            *active_target_for_begin.borrow_mut() = Some(target_for_begin.borrow().clone());
+            active_split_gap_for_begin.set(split_gap_for_begin.get());
+            let pointer_offset_x = start_x.round() as i32;
+            let pointer_offset_y = start_y.round() as i32;
+            drag_anchor_for_begin.set(Some(DragAnchor {
+                start_abs_x: active_widget.margin_start() + pointer_offset_x,
+                start_abs_y: active_widget.margin_top() + pointer_offset_y,
+                pointer_offset_x,
+                pointer_offset_y,
+            }));
+            emit_diagnostic(
+                begin_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    format!("resize drag begin handle={begin_id}"),
+                ),
+            );
+        });
+
+        let preview_target = active_target.clone();
+        let preview_split_gap = active_split_gap.clone();
+        let preview_widget = widget.clone();
+        let preview_anchor = drag_anchor.clone();
+        let preview_sink = shell_action_sink.clone();
+        drag.connect_drag_update(move |_, dx, dy| {
+            let Some(target) = preview_target.borrow().as_ref().cloned() else {
+                return;
+            };
+            let Some(anchor) = preview_anchor.get() else {
+                return;
+            };
+            let (dx, dy) = corrected_drag_delta(&preview_widget, anchor, dx, dy);
+            if let Some(preview) = preview_for_drag(&target, preview_split_gap.get(), dx, dy) {
+                (preview_sink)(taskers_core::ShellAction::PreviewResize { preview });
+            }
+        });
+
+        let end_widget = widget.clone();
+        let end_target = active_target;
+        let end_split_gap = active_split_gap;
+        let end_anchor = drag_anchor;
+        let end_sink = shell_action_sink;
+        let end_diagnostics = diagnostics;
+        let end_id = handle.id.clone();
+        drag.connect_drag_end(move |_, dx, dy| {
+            end_widget.remove_css_class("resize-handle-active");
+            let anchor = end_anchor.take();
+            let active_target = end_target.borrow_mut().take();
+            let Some(target) = active_target else {
+                (end_sink)(taskers_core::ShellAction::CancelResizePreview);
+                return;
+            };
+            let (dx, dy) = anchor
+                .map(|anchor| corrected_drag_delta(&end_widget, anchor, dx, dy))
+                .unwrap_or((dx, dy));
+            let preview = preview_for_drag(&target, end_split_gap.get(), dx, dy);
+            emit_diagnostic(
+                end_diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::HostEvent,
+                    None,
+                    format!("resize drag end handle={end_id}"),
+                ),
+            );
+            if let Some(preview) = preview {
+                (end_sink)(taskers_core::ShellAction::PreviewResize { preview });
+                (end_sink)(taskers_core::ShellAction::CommitResizePreview);
+            } else {
+                (end_sink)(taskers_core::ShellAction::CancelResizePreview);
+            }
+        });
+        widget.add_controller(drag);
+        position_widget(overlay, widget.upcast_ref(), handle.frame);
+
+        Self {
+            widget,
+            target,
+            split_gap: split_gap_cell,
+        }
+    }
+
+    fn sync(
+        &mut self,
+        overlay: &Overlay,
+        handle: &taskers_core::ResizeHandleSnapshot,
+        split_gap: i32,
+    ) {
+        *self.target.borrow_mut() = handle.target.clone();
+        self.split_gap.set(split_gap);
+        self.widget
+            .set_cursor_from_name(Some(resize_cursor_name(handle.cursor)));
+        position_widget(overlay, self.widget.upcast_ref(), handle.frame);
+    }
+
+    fn detach(self, overlay: &Overlay) {
+        detach_from_overlay(overlay, self.widget.upcast_ref());
     }
 }
 
@@ -571,6 +1498,8 @@ struct BrowserSurface {
     workspace_id: Rc<Cell<WorkspaceId>>,
     pane_id: Rc<Cell<PaneId>>,
     webview: WebView,
+    network_session: NetworkSession,
+    profile_mode: BrowserProfileMode,
     url: String,
     active: bool,
     interactive: bool,
@@ -589,6 +1518,7 @@ impl BrowserSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        network_session: NetworkSession,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Result<Self> {
@@ -602,6 +1532,7 @@ impl BrowserSurface {
             .hexpand(true)
             .vexpand(true)
             .focusable(true)
+            .network_session(&network_session)
             .settings(&settings)
             .build();
         let (shell_class, widget_class) = native_surface_classes(PaneKind::Browser);
@@ -723,7 +1654,10 @@ impl BrowserSurface {
                     DiagnosticRecord::new(
                         DiagnosticCategory::BrowserMetadata,
                         None,
-                        format!("browser url observed: {url}"),
+                        format!(
+                            "browser url observed: {}",
+                            redacted_browser_url_for_diagnostics(url.as_str())
+                        ),
                     )
                     .with_surface(url_surface_id),
                 );
@@ -789,6 +1723,8 @@ impl BrowserSurface {
             workspace_id,
             pane_id,
             webview,
+            network_session,
+            profile_mode: entry.profile_mode,
             url,
             active: visible_plan.is_some_and(|plan| plan.active),
             interactive: visible_plan.is_some() && interactive,
@@ -812,6 +1748,7 @@ impl BrowserSurface {
     ) -> Result<()> {
         self.workspace_id.set(entry.workspace_id);
         self.pane_id.set(entry.pane_id);
+        self.profile_mode = entry.profile_mode;
         let visible = visible_plan.is_some();
         let effective_interactive = visible && interactive;
         self.shell.set_interactive(effective_interactive);
@@ -919,6 +1856,8 @@ impl BrowserSurface {
             workspace_id: self.workspace_id.clone(),
             pane_id: self.pane_id.clone(),
             webview: self.webview.clone(),
+            profile_mode: self.profile_mode,
+            network_session: self.network_session.clone(),
             last_load_state: self.last_load_state.clone(),
         }
     }
@@ -938,6 +1877,7 @@ struct TerminalSurface {
     visible: bool,
     width_px: i32,
     height_px: i32,
+    resize_frozen: bool,
 }
 
 impl TerminalSurface {
@@ -948,6 +1888,7 @@ impl TerminalSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        resize_preview_active: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
         host: &GhosttyHost,
@@ -971,6 +1912,13 @@ impl TerminalSurface {
         let shell = NativeSurfaceShell::new(shell_class, effective_interactive);
         let attention_ring = AttentionRingOverlay::new();
         shell.mount_child(&widget);
+        let initial_width_px = visible_plan.map_or(0, |plan| plan.frame.width);
+        let initial_height_px = visible_plan.map_or(0, |plan| plan.frame.height);
+        let mut resize_frozen = false;
+        if resize_preview_active && visible_plan.is_some() {
+            freeze_terminal_widget(&widget, initial_width_px, initial_height_px);
+            resize_frozen = true;
+        }
         match visible_plan {
             Some(plan) => {
                 shell.show_at(overlay, plan.frame);
@@ -1022,8 +1970,9 @@ impl TerminalSurface {
             active: visible_plan.is_some_and(|plan| plan.active),
             interactive: effective_interactive,
             visible: visible_plan.is_some(),
-            width_px: visible_plan.map_or(0, |plan| plan.frame.width),
-            height_px: visible_plan.map_or(0, |plan| plan.frame.height),
+            width_px: initial_width_px,
+            height_px: initial_height_px,
+            resize_frozen,
         })
     }
 
@@ -1035,7 +1984,8 @@ impl TerminalSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
-        host: &GhosttyHost,
+        resize_preview_active: bool,
+        host: Option<&GhosttyHost>,
         diagnostics: Option<&DiagnosticsSink>,
     ) {
         self.workspace_id.set(entry.workspace_id);
@@ -1045,6 +1995,15 @@ impl TerminalSurface {
         let effective_interactive = visible && interactive;
         self.widget.set_can_target(effective_interactive);
         self.shell.set_interactive(effective_interactive);
+        if resize_preview_active && visible {
+            if !self.resize_frozen {
+                freeze_terminal_widget(&self.widget, self.width_px, self.height_px);
+                self.resize_frozen = true;
+            }
+        } else if self.resize_frozen {
+            thaw_terminal_widget(&self.widget);
+            self.resize_frozen = false;
+        }
         match visible_plan {
             Some(plan) => {
                 self.shell.show_at(overlay, plan.frame);
@@ -1064,7 +2023,9 @@ impl TerminalSurface {
             && effective_interactive
             && (!self.active || !self.interactive || !self.visible)
         {
-            let _ = host.focus_surface(&self.widget);
+            if let Some(host) = host {
+                let _ = host.focus_surface(&self.widget);
+            }
         }
         if !visible || !effective_interactive {
             self.focus_state.set(false);
@@ -1072,8 +2033,10 @@ impl TerminalSurface {
         self.active = visible_plan.is_some_and(|plan| plan.active);
         self.interactive = effective_interactive;
         self.visible = visible;
-        self.width_px = visible_plan.map_or(0, |plan| plan.frame.width);
-        self.height_px = visible_plan.map_or(0, |plan| plan.frame.height);
+        if !resize_preview_active {
+            self.width_px = visible_plan.map_or(0, |plan| plan.frame.width);
+            self.height_px = visible_plan.map_or(0, |plan| plan.frame.height);
+        }
 
         emit_diagnostic(
             diagnostics,
@@ -1090,6 +2053,24 @@ impl TerminalSurface {
     fn is_focused(&self) -> bool {
         self.focus_state.get() || self.widget.has_focus()
     }
+}
+
+fn freeze_terminal_widget(widget: &Widget, width_px: i32, height_px: i32) {
+    widget.set_hexpand(false);
+    widget.set_vexpand(false);
+    widget.set_halign(Align::Start);
+    widget.set_valign(Align::Start);
+    widget.set_size_request(width_px.max(1), height_px.max(1));
+    widget.queue_allocate();
+}
+
+fn thaw_terminal_widget(widget: &Widget) {
+    widget.set_hexpand(true);
+    widget.set_vexpand(true);
+    widget.set_halign(Align::Fill);
+    widget.set_valign(Align::Fill);
+    widget.set_size_request(-1, -1);
+    widget.queue_allocate();
 }
 
 struct NativeSurfaceShell {
@@ -1370,6 +2351,186 @@ fn native_surface_classes(kind: PaneKind) -> (&'static str, &'static str) {
     }
 }
 
+fn resize_handle_class(cursor: taskers_core::ResizeHandleCursor) -> &'static str {
+    match cursor {
+        taskers_core::ResizeHandleCursor::EastWest => "resize-handle-ew",
+        taskers_core::ResizeHandleCursor::NorthSouth => "resize-handle-ns",
+        taskers_core::ResizeHandleCursor::SouthEast => "resize-handle-se",
+    }
+}
+
+fn resize_cursor_name(cursor: taskers_core::ResizeHandleCursor) -> &'static str {
+    match cursor {
+        taskers_core::ResizeHandleCursor::EastWest => "ew-resize",
+        taskers_core::ResizeHandleCursor::NorthSouth => "ns-resize",
+        taskers_core::ResizeHandleCursor::SouthEast => "nwse-resize",
+    }
+}
+
+fn preview_for_drag(
+    target: &taskers_core::ResizeHandleTarget,
+    split_gap: i32,
+    dx: f64,
+    dy: f64,
+) -> Option<taskers_core::ResizePreview> {
+    match target {
+        taskers_core::ResizeHandleTarget::WorkspaceColumnEdge {
+            workspace_id,
+            column_widths,
+            leading_index,
+        } => resize_track_pair(
+            column_widths,
+            *leading_index,
+            dx.round() as i32,
+            MIN_WORKSPACE_WINDOW_WIDTH,
+        )
+        .map(
+            |widths| taskers_core::ResizePreview::WorkspaceColumnWidths {
+                workspace_id: *workspace_id,
+                widths,
+            },
+        ),
+        taskers_core::ResizeHandleTarget::WorkspaceWindowBottomEdge {
+            workspace_id,
+            window_heights,
+            upper_index,
+        } => resize_track_pair(
+            window_heights,
+            *upper_index,
+            dy.round() as i32,
+            MIN_WORKSPACE_WINDOW_HEIGHT,
+        )
+        .map(
+            |heights| taskers_core::ResizePreview::WorkspaceWindowHeights {
+                workspace_id: *workspace_id,
+                heights,
+            },
+        ),
+        taskers_core::ResizeHandleTarget::WorkspaceWindowCorner {
+            workspace_id,
+            column_widths,
+            leading_index,
+            window_heights,
+            upper_index,
+        } => {
+            let next_column_widths = resize_track_pair(
+                column_widths,
+                *leading_index,
+                dx.round() as i32,
+                MIN_WORKSPACE_WINDOW_WIDTH,
+            );
+            let next_window_heights = resize_track_pair(
+                window_heights,
+                *upper_index,
+                dy.round() as i32,
+                MIN_WORKSPACE_WINDOW_HEIGHT,
+            );
+            if next_column_widths.is_none() && next_window_heights.is_none() {
+                None
+            } else {
+                Some(taskers_core::ResizePreview::WorkspaceWindowCorner {
+                    workspace_id: *workspace_id,
+                    column_widths: next_column_widths.unwrap_or_else(|| column_widths.clone()),
+                    window_heights: next_window_heights.unwrap_or_else(|| window_heights.clone()),
+                })
+            }
+        }
+        taskers_core::ResizeHandleTarget::WorkspaceWindowSplit {
+            workspace_id,
+            workspace_window_id,
+            path,
+            axis,
+            parent_frame,
+            initial_ratio,
+        } => split_ratio_preview(*axis, *parent_frame, *initial_ratio, split_gap, dx, dy).map(
+            |ratio| taskers_core::ResizePreview::WorkspaceWindowSplitRatio {
+                workspace_id: *workspace_id,
+                workspace_window_id: *workspace_window_id,
+                path: path.clone(),
+                ratio,
+            },
+        ),
+        taskers_core::ResizeHandleTarget::PaneTabSplit {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            path,
+            axis,
+            parent_frame,
+            initial_ratio,
+        } => split_ratio_preview(*axis, *parent_frame, *initial_ratio, split_gap, dx, dy).map(
+            |ratio| taskers_core::ResizePreview::PaneTabSplitRatio {
+                workspace_id: *workspace_id,
+                pane_container_id: *pane_container_id,
+                pane_tab_id: *pane_tab_id,
+                path: path.clone(),
+                ratio,
+            },
+        ),
+    }
+}
+
+fn resize_track_pair<Id: Copy>(
+    tracks: &[(Id, i32)],
+    leading_index: usize,
+    delta: i32,
+    min_extent: i32,
+) -> Option<Vec<(Id, i32)>> {
+    if delta == 0 || leading_index + 1 >= tracks.len() {
+        return None;
+    }
+
+    let leading = tracks[leading_index].1;
+    let trailing = tracks[leading_index + 1].1;
+    let clamped_delta = delta.clamp(min_extent - leading, trailing - min_extent);
+    if clamped_delta == 0 {
+        return None;
+    }
+
+    let mut next = tracks.to_vec();
+    next[leading_index].1 = leading + clamped_delta;
+    next[leading_index + 1].1 = trailing - clamped_delta;
+    Some(next)
+}
+
+fn corrected_drag_delta(widget: &GtkBox, anchor: DragAnchor, dx: f64, dy: f64) -> (f64, f64) {
+    let pointer_abs_x = widget.margin_start() + anchor.pointer_offset_x + dx.round() as i32;
+    let pointer_abs_y = widget.margin_top() + anchor.pointer_offset_y + dy.round() as i32;
+    (
+        f64::from(pointer_abs_x - anchor.start_abs_x),
+        f64::from(pointer_abs_y - anchor.start_abs_y),
+    )
+}
+
+fn split_ratio_preview(
+    axis: taskers_core::SplitAxis,
+    parent_frame: taskers_core::Frame,
+    initial_ratio: u16,
+    split_gap: i32,
+    dx: f64,
+    dy: f64,
+) -> Option<u16> {
+    let delta = match axis {
+        taskers_core::SplitAxis::Horizontal => dx.round() as i32,
+        taskers_core::SplitAxis::Vertical => dy.round() as i32,
+    };
+    if delta == 0 {
+        return None;
+    }
+
+    let usable = match axis {
+        taskers_core::SplitAxis::Horizontal => parent_frame.width.saturating_sub(split_gap),
+        taskers_core::SplitAxis::Vertical => parent_frame.height.saturating_sub(split_gap),
+    }
+    .max(1);
+    let max_first = usable.saturating_sub(1).max(1);
+    let initial_first = (((usable * i32::from(initial_ratio)) / 1000).max(1)).clamp(1, max_first);
+    let next_first = (initial_first + delta).clamp(1, max_first);
+    let next_ratio = ((f64::from(next_first) / f64::from(usable)) * 1000.0).round() as u16;
+    let next_ratio = next_ratio.clamp(MIN_RESIZE_SPLIT_RATIO, MAX_RESIZE_SPLIT_RATIO);
+    (next_ratio != initial_ratio).then_some(next_ratio)
+}
+
 fn native_surface_css(theme_id: &str) -> String {
     format!(
         r#"
@@ -1391,6 +2552,21 @@ fn native_surface_css(theme_id: &str) -> String {
 .native-surface-browser,
 .native-surface-browser-widget {{
   background: transparent;
+}}
+
+.resize-handle {{
+  background: transparent;
+  border: none;
+  min-width: 1px;
+  min-height: 1px;
+}}
+
+.resize-handle:hover {{
+  background: rgba(255, 255, 255, 0.08);
+}}
+
+.resize-handle-active {{
+  background: rgba(255, 255, 255, 0.16);
 }}
  "#,
         terminal_surface_background(theme_id)
@@ -1589,7 +2765,8 @@ fn browser_command_surface_id(command: &BrowserControlCommand) -> SurfaceId {
         | BrowserControlCommand::ScrollIntoView { surface_id, .. }
         | BrowserControlCommand::Get { surface_id, .. }
         | BrowserControlCommand::Is { surface_id, .. }
-        | BrowserControlCommand::Screenshot { surface_id, .. } => *surface_id,
+        | BrowserControlCommand::Screenshot { surface_id, .. }
+        | BrowserControlCommand::ClearData { surface_id, .. } => *surface_id,
     }
 }
 
@@ -1614,6 +2791,38 @@ fn trim_terminal_tail(text: String, tail_lines: Option<usize>) -> String {
     lines[start..].join("\n")
 }
 
+fn build_persistent_browser_session() -> Result<NetworkSession> {
+    let paths = taskers_paths::TaskersPaths::detect();
+    let data_dir = paths.data_dir().join("browser").join("default");
+    let cache_dir = paths.cache_dir().join("browser").join("default");
+    ensure_private_dir(&data_dir)?;
+    ensure_private_dir(&cache_dir)?;
+    let data_dir = data_dir.to_string_lossy().into_owned();
+    let cache_dir = cache_dir.to_string_lossy().into_owned();
+    let session = NetworkSession::new(Some(&data_dir), Some(&cache_dir));
+    session.set_persistent_credential_storage_enabled(false);
+    Ok(session)
+}
+
+fn build_ephemeral_browser_session() -> NetworkSession {
+    let session = NetworkSession::new_ephemeral();
+    session.set_persistent_credential_storage_enabled(false);
+    session
+}
+
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
 fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
     SurfaceDescriptor {
         cols: spec.cols,
@@ -1622,6 +2831,7 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
         cwd: spec.cwd.clone(),
         title: Some(spec.title.clone()),
         url: None,
+        browser_profile_mode: BrowserProfileMode::PersistentDefault,
         // The current Ghostty bridge is more stable when it controls shell
         // selection itself, so keep command overrides empty until that path is
         // proven across hosts.
@@ -1693,6 +2903,9 @@ fn clip_to_content(
 ) -> Option<PortalSurfacePlan> {
     let clipped_frame = clip_frame_to_content(plan.frame, *content)?;
     let clipped_pane_frame = clip_frame_to_content(plan.pane_frame, *content)?;
+    if clipped_surface_is_too_small(plan.frame, clipped_frame) {
+        return None;
+    }
 
     Some(PortalSurfacePlan {
         frame: clipped_frame,
@@ -1728,6 +2941,17 @@ fn clip_frame_to_content(
     ))
 }
 
+fn clipped_surface_is_too_small(
+    original: taskers_core::Frame,
+    clipped: taskers_core::Frame,
+) -> bool {
+    let clipped_horizontally = clipped.x != original.x || clipped.width != original.width;
+    let clipped_vertically = clipped.y != original.y || clipped.height != original.height;
+
+    (clipped_horizontally && clipped.width < MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX)
+        || (clipped_vertically && clipped.height < MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX)
+}
+
 fn emit_diagnostic(sink: Option<&DiagnosticsSink>, record: DiagnosticRecord) {
     if let Some(sink) = sink {
         sink(record);
@@ -1749,11 +2973,14 @@ fn hidden_frame() -> taskers_core::Frame {
 mod tests {
     use super::{
         browser_plans, host_attention_palette, native_surface_classes, native_surface_css,
-        native_surfaces_interactive, terminal_plans, trim_terminal_tail, workspace_pan_delta,
+        native_surfaces_interactive, preview_for_drag, redacted_browser_url_for_diagnostics,
+        terminal_plans, trim_terminal_tail, workspace_pan_delta,
     };
-    use taskers_domain::PaneKind;
+    use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
-        AttentionRingState, BootstrapModel, SharedCore, ShellDragMode, SurfaceMountSpec,
+        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneTabId, PortalSurfacePlan,
+        ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis, SurfaceMountSpec,
+        WorkspaceColumnId, WorkspaceWindowId,
     };
 
     #[test]
@@ -1828,5 +3055,131 @@ mod tests {
         assert!(dark_waiting.stroke.blue > dark_waiting.stroke.red);
         assert!(dark_error.stroke.red > dark_error.stroke.green);
         assert_ne!(dark_waiting.stroke.green, gruvbox_waiting.stroke.green);
+    }
+
+    #[test]
+    fn browser_url_diagnostics_strip_query_and_path_details() {
+        assert_eq!(
+            redacted_browser_url_for_diagnostics(
+                "https://example.com/callback?token=secret#fragment"
+            ),
+            "https://example.com/..."
+        );
+        assert_eq!(
+            redacted_browser_url_for_diagnostics("about:blank"),
+            "about:blank"
+        );
+    }
+
+    #[test]
+    fn drops_horizontally_clipped_sliver_surfaces() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        let snapshot = core.snapshot();
+        let plan = snapshot.portal.panes[0].clone();
+
+        let clipped = super::clip_to_content(
+            &PortalSurfacePlan {
+                frame: Frame::new(0, 0, 720, plan.frame.height),
+                pane_frame: Frame::new(0, 0, 720, plan.pane_frame.height),
+                ..plan
+            },
+            &Frame::new(680, 0, 200, 1200),
+        );
+
+        assert!(
+            clipped.is_none(),
+            "expected narrow clipped sliver to be skipped"
+        );
+    }
+
+    #[test]
+    fn keeps_reasonably_wide_clipped_surfaces() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        let snapshot = core.snapshot();
+        let plan = snapshot.portal.panes[0].clone();
+
+        let clipped = super::clip_to_content(
+            &PortalSurfacePlan {
+                frame: Frame::new(0, 0, 720, plan.frame.height),
+                pane_frame: Frame::new(0, 0, 720, plan.pane_frame.height),
+                ..plan
+            },
+            &Frame::new(360, 0, 360, 1200),
+        );
+
+        assert!(
+            clipped.is_some(),
+            "expected substantial clipped width to remain renderable"
+        );
+    }
+
+    #[test]
+    fn preview_for_drag_clamps_workspace_window_dimensions() {
+        let workspace_id = taskers_shell_core::WorkspaceId::new();
+        let workspace_column_id = WorkspaceColumnId::new();
+        let neighbor_column_id = WorkspaceColumnId::new();
+        let workspace_window_id = WorkspaceWindowId::new();
+        let lower_window_id = WorkspaceWindowId::new();
+        let preview = preview_for_drag(
+            &ResizeHandleTarget::WorkspaceWindowCorner {
+                workspace_id,
+                column_widths: vec![
+                    (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 120),
+                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 240),
+                ],
+                leading_index: 0,
+                window_heights: vec![
+                    (workspace_window_id, MIN_WORKSPACE_WINDOW_HEIGHT + 90),
+                    (lower_window_id, MIN_WORKSPACE_WINDOW_HEIGHT + 170),
+                ],
+                upper_index: 0,
+            },
+            2,
+            -480.0,
+            -320.0,
+        )
+        .expect("corner preview");
+
+        assert_eq!(
+            preview,
+            ResizePreview::WorkspaceWindowCorner {
+                workspace_id,
+                column_widths: vec![
+                    (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
+                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 360),
+                ],
+                window_heights: vec![
+                    (workspace_window_id, MIN_WORKSPACE_WINDOW_HEIGHT),
+                    (lower_window_id, MIN_WORKSPACE_WINDOW_HEIGHT + 260),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn preview_for_drag_generates_pane_split_ratio_updates() {
+        let workspace_id = taskers_shell_core::WorkspaceId::new();
+        let pane_container_id = PaneContainerId::new();
+        let pane_tab_id = PaneTabId::new();
+        let preview = preview_for_drag(
+            &ResizeHandleTarget::PaneTabSplit {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path: vec![false, true],
+                axis: SplitAxis::Horizontal,
+                parent_frame: Frame::new(0, 0, 1000, 600),
+                initial_ratio: 500,
+            },
+            2,
+            120.0,
+            0.0,
+        )
+        .expect("split preview");
+
+        let ResizePreview::PaneTabSplitRatio { ratio, .. } = preview else {
+            panic!("expected pane split preview");
+        };
+        assert!(ratio > 500);
     }
 }

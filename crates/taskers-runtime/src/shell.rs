@@ -853,6 +853,40 @@ mod tests {
     }
 
     #[test]
+    fn zsh_shell_hook_avoids_readonly_status_parameter_name() {
+        let zsh_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        ));
+
+        assert!(
+            !zsh_hooks.contains("local status="),
+            "expected zsh hooks to avoid assigning to zsh's readonly status parameter"
+        );
+    }
+
+    #[test]
+    fn bash_shell_hook_marks_prompt_only_once_until_preexec_runs() {
+        let bash_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.bash"
+        ));
+
+        assert!(
+            bash_hooks.contains("TASKERS_OSC133_PROMPT_MARKED"),
+            "expected bash hooks to track whether the prompt is already OSC133-marked"
+        );
+        assert!(
+            bash_hooks.contains("TASKERS_OSC133_SAVE_PS1:-"),
+            "expected bash hooks to treat saved prompt copies as part of the marked state"
+        );
+        assert!(
+            bash_hooks.contains("TASKERS_OSC133_PROMPT_MARKED=1"),
+            "expected bash hooks to keep the marked state synchronized with the prompt save guards"
+        );
+    }
+
+    #[test]
     fn shell_hooks_invalidate_metadata_cache_after_agent_exit() {
         let bash_hooks = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

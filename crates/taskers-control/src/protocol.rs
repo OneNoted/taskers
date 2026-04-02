@@ -3,8 +3,9 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use taskers_domain::{
-    AgentTarget, AppModel, AttentionState, Direction, NotificationDeliveryState, NotificationId,
-    PaneId, PaneKind, PaneMetadataPatch, PersistedSession, ProgressState, SignalEvent, SignalKind,
+    AgentTarget, AppModel, AttentionState, BrowserProfileMode, Direction,
+    NotificationDeliveryState, NotificationId, PaneContainerId, PaneId, PaneKind,
+    PaneMetadataPatch, PaneTabId, PersistedSession, ProgressState, SignalEvent, SignalKind,
     SplitAxis, SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceLogEntry,
     WorkspaceViewport, WorkspaceWindowId, WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
 };
@@ -79,6 +80,27 @@ pub enum ControlCommand {
         workspace_window_id: WorkspaceWindowId,
         workspace_window_tab_id: WorkspaceWindowTabId,
     },
+    CreatePaneTab {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        kind: PaneKind,
+    },
+    FocusPaneTab {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    },
+    MovePaneTab {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        to_index: usize,
+    },
+    ClosePaneTab {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    },
     FocusPane {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
@@ -113,6 +135,13 @@ pub enum ControlCommand {
         path: Vec<bool>,
         ratio: u16,
     },
+    SetPaneTabSplitRatio {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
     UpdatePaneMetadata {
         pane_id: PaneId,
         patch: PaneMetadataPatch,
@@ -125,6 +154,7 @@ pub enum ControlCommand {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
         kind: PaneKind,
+        browser_profile_mode: Option<BrowserProfileMode>,
     },
     FocusSurface {
         workspace_id: WorkspaceId,
@@ -270,9 +300,128 @@ pub enum ControlCommand {
     TerminalDebug {
         debug_command: TerminalDebugCommand,
     },
+    Vcs {
+        vcs_command: VcsCommand,
+    },
     QueryStatus {
         query: ControlQuery,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "vcs_command", rename_all = "snake_case")]
+pub enum VcsCommand {
+    Refresh {
+        surface_id: SurfaceId,
+        diff_path: Option<String>,
+    },
+    GitCommit {
+        surface_id: SurfaceId,
+        message: String,
+    },
+    GitCreateBranch {
+        surface_id: SurfaceId,
+        name: String,
+    },
+    GitSwitchBranch {
+        surface_id: SurfaceId,
+        name: String,
+    },
+    GitFetch {
+        surface_id: SurfaceId,
+    },
+    GitPull {
+        surface_id: SurfaceId,
+    },
+    GitPush {
+        surface_id: SurfaceId,
+    },
+    JjDescribe {
+        surface_id: SurfaceId,
+        message: String,
+    },
+    JjNew {
+        surface_id: SurfaceId,
+        message: Option<String>,
+    },
+    JjCreateBookmark {
+        surface_id: SurfaceId,
+        name: String,
+    },
+    JjSwitchBookmark {
+        surface_id: SurfaceId,
+        name: String,
+    },
+    JjFetch {
+        surface_id: SurfaceId,
+    },
+    JjPush {
+        surface_id: SurfaceId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsMode {
+    Git,
+    Jj,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VcsFileStatus {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    Untracked,
+    Conflicted,
+    Changed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsFileEntry {
+    pub path: String,
+    pub status: VcsFileStatus,
+    pub staged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsRefEntry {
+    pub name: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsPullRequestInfo {
+    pub number: Option<u32>,
+    pub title: Option<String>,
+    pub url: String,
+    pub state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsSnapshot {
+    pub surface_id: SurfaceId,
+    pub mode: VcsMode,
+    pub repo_root: String,
+    pub repo_name: String,
+    pub cwd: String,
+    pub headline: String,
+    pub detail: Option<String>,
+    pub summary_text: String,
+    pub files: Vec<VcsFileEntry>,
+    pub refs: Vec<VcsRefEntry>,
+    pub diff_path: Option<String>,
+    pub diff_text: Option<String>,
+    pub pull_request: Option<VcsPullRequestInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsCommandResult {
+    pub snapshot: Option<VcsSnapshot>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,6 +608,11 @@ pub enum BrowserControlCommand {
         path: Option<String>,
         full_document: bool,
     },
+    ClearData {
+        surface_id: SurfaceId,
+        origin_filter: Option<String>,
+        reload: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -632,6 +786,10 @@ pub enum ControlResponse {
         pane_id: PaneId,
         workspace_window_tab_id: WorkspaceWindowTabId,
     },
+    PaneTabCreated {
+        pane_id: PaneId,
+        pane_tab_id: PaneTabId,
+    },
     Status {
         session: PersistedSession,
     },
@@ -644,6 +802,9 @@ pub enum ControlResponse {
     },
     TerminalDebug {
         result: TerminalDebugResult,
+    },
+    Vcs {
+        result: VcsCommandResult,
     },
     Identify {
         result: IdentifyResult,

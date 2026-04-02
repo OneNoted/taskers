@@ -9,12 +9,14 @@ use dioxus::html::{
 use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionRingState, AttentionState,
-    BrowserChromeSnapshot, Direction, LayoutNodeSnapshot, NotificationPreferenceKey, PaneId,
-    PaneSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot,
+    BrowserChromeSnapshot, Direction, LayoutNodeSnapshot, LivePaneSnapshot,
+    NotificationPreferenceKey, PaneId, PaneKind, PaneSnapshot, PaneTabLayoutSnapshot,
+    PaneTabSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot,
     RuntimeStateSnapshot, RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection,
     ShellSnapshot, ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot,
-    SurfaceId, SurfaceKind, SurfaceSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot,
-    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    SurfaceId, SurfaceKind, SurfaceSnapshot, VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode,
+    VcsPanelSnapshot, VcsSnapshot, WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary,
+    WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
     WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
 };
 use taskers_shell_core as taskers_core;
@@ -204,33 +206,12 @@ fn compute_window_tab_drop_index(
     target_index
 }
 
-fn pane_has_surface_drop_target(target: Option<SurfaceDropTarget>, pane_id: PaneId) -> bool {
-    match target {
-        Some(SurfaceDropTarget::AppendToPane {
-            pane_id: target_pane_id,
-        })
-        | Some(SurfaceDropTarget::BeforeSurface {
-            pane_id: target_pane_id,
-            ..
-        })
-        | Some(SurfaceDropTarget::SplitPane {
-            pane_id: target_pane_id,
-            ..
-        }) => target_pane_id == pane_id,
-        None => false,
-    }
-}
-
 fn pane_allows_surface_split(
     dragged: Option<DraggedSurface>,
     pane_id: PaneId,
     surface_count: usize,
 ) -> bool {
     dragged.is_some_and(|dragged| dragged.pane_id != pane_id || surface_count > 1)
-}
-
-fn pane_shows_tab_strip(surface_count: usize) -> bool {
-    surface_count > 1
 }
 
 fn show_live_surface_backdrop(surface_kind: SurfaceKind, overview_mode: bool) -> bool {
@@ -330,7 +311,7 @@ fn app_css(snapshot: &ShellSnapshot) -> String {
     theme::generate_css(
         &theme::resolve_palette(&snapshot.settings.selected_theme_id),
         snapshot.metrics,
-        snapshot.attention_panel_visible,
+        snapshot.attention_panel_visible || snapshot.vcs_panel.visible,
     )
 }
 
@@ -377,6 +358,10 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     let jump_unread = {
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::FocusLatestUnread)
+    };
+    let toggle_vcs_panel = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::ToggleVcsPanel)
     };
     let drag_source = use_signal(|| None::<WorkspaceId>);
     let drag_target = use_signal(|| None::<WorkspaceId>);
@@ -502,6 +487,22 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             }
                         }
                     }
+                    if matches!(snapshot.section, ShellSection::Workspace) {
+                        div { class: "workspace-header-actions",
+                            button {
+                                class: if snapshot.vcs_panel.visible {
+                                    "pane-action workspace-header-action workspace-header-action-active"
+                                } else {
+                                    "pane-action workspace-header-action"
+                                },
+                                r#type: "button",
+                                onclick: toggle_vcs_panel,
+                                title: "Toggle VCS panel",
+                                {icons::git_branch(14, "workspace-header-action-icon")}
+                                span { "VCS" }
+                            }
+                        }
+                    }
                 }
 
                 if matches!(snapshot.section, ShellSection::Workspace) {
@@ -528,7 +529,12 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                 }
             }
 
-            if snapshot.attention_panel_visible {
+            if snapshot.vcs_panel.visible {
+                VcsPanel {
+                    panel: snapshot.vcs_panel.clone(),
+                    core: core.clone(),
+                }
+            } else if snapshot.attention_panel_visible {
                 aside { class: "attention-panel",
                     div { class: "notification-header",
                         div { class: "sidebar-heading", "Notifications" }
@@ -899,6 +905,373 @@ fn render_workspace_log_entry(entry: &WorkspaceLogEntrySnapshot) -> Element {
             }
             div { class: "workspace-log-message", "{entry.message}" }
         }
+    }
+}
+
+#[component]
+fn VcsPanel(panel: VcsPanelSnapshot, core: SharedCore) -> Element {
+    let commit_message = use_signal(String::new);
+    let branch_name = use_signal(String::new);
+    let bookmark_name = use_signal(String::new);
+    let refresh = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::RefreshVcsPanel)
+    };
+
+    rsx! {
+        aside { class: "attention-panel vcs-panel",
+            div { class: "notification-header",
+                div { class: "sidebar-heading", "Version Control" }
+                button {
+                    class: "notification-jump-button vcs-refresh-button",
+                    r#type: "button",
+                    onclick: refresh,
+                    title: "Refresh repository status",
+                    {icons::refresh(12, "browser-toolbar-icon")}
+                    span { "Refresh" }
+                }
+            }
+
+            if let Some(error) = &panel.error {
+                div { class: "vcs-panel-error", "{error}" }
+            }
+
+            if let Some(snapshot) = &panel.snapshot {
+                section { class: "attention-section",
+                    div { class: "vcs-panel-summary",
+                        div { class: "vcs-panel-repo-row",
+                            span { class: "notification-count-pill notification-count-unread", "{format_vcs_mode(snapshot.mode)}" }
+                            span { class: "workspace-label", "{snapshot.repo_name}" }
+                        }
+                        div { class: "workspace-branch-row",
+                            {icons::git_branch(10, "workspace-branch-icon")}
+                            span { "{snapshot.headline}" }
+                        }
+                        if let Some(detail) = &snapshot.detail {
+                            div { class: "workspace-notification workspace-status", "{detail}" }
+                        }
+                        div { class: "workspace-notification", "{snapshot.summary_text}" }
+                        if let Some(pr) = &snapshot.pull_request {
+                            a {
+                                class: "workspace-pr-row vcs-pr-link",
+                                href: "{pr.url}",
+                                target: "_blank",
+                                rel: "noreferrer noopener",
+                                span { class: "workspace-pr-number",
+                                    if let Some(number) = pr.number {
+                                        "#{number}"
+                                    } else {
+                                        "PR"
+                                    }
+                                }
+                                span { class: "workspace-pr-title",
+                                    "{pr.title.clone().unwrap_or_else(|| pr.url.clone())}"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                {render_vcs_action_panel(snapshot, core.clone(), commit_message, branch_name, bookmark_name)}
+
+                section { class: "attention-section vcs-files",
+                    div { class: "attention-section-title", "Changed files" }
+                    if snapshot.files.is_empty() {
+                        div { class: "notification-empty-subtitle", "No changed files." }
+                    } else {
+                        div { class: "vcs-file-list",
+                            for file in &snapshot.files {
+                                {render_vcs_file_row(file, snapshot.diff_path.as_deref(), core.clone())}
+                            }
+                        }
+                    }
+                }
+
+                section { class: "attention-section vcs-diff",
+                    div { class: "attention-section-title", "Diff preview" }
+                    if let Some(diff) = &snapshot.diff_text {
+                        pre { class: "vcs-diff-preview", "{diff}" }
+                    } else {
+                        div { class: "notification-empty-subtitle", "Select a file to preview its diff." }
+                    }
+                }
+            } else {
+                div { class: "notification-empty",
+                    {icons::git_branch(24, "notification-empty-icon")}
+                    div { class: "notification-empty-title", "No repository selected" }
+                    if let Some(title) = &panel.target_surface_title {
+                        div { class: "notification-empty-subtitle",
+                            "Focused terminal: {title}"
+                        }
+                    } else {
+                        div { class: "notification-empty-subtitle",
+                            "Select a terminal inside a Git or JJ repo to manage version control here."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_vcs_action_panel(
+    snapshot: &VcsSnapshot,
+    core: SharedCore,
+    mut commit_message: Signal<String>,
+    mut branch_name: Signal<String>,
+    mut bookmark_name: Signal<String>,
+) -> Element {
+    let surface_id = snapshot.surface_id;
+    let mode = snapshot.mode;
+    let fetch = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                command: match mode {
+                    VcsMode::Git => VcsCommand::GitFetch { surface_id },
+                    VcsMode::Jj => VcsCommand::JjFetch { surface_id },
+                },
+            });
+        }
+    };
+    let push = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                command: match mode {
+                    VcsMode::Git => VcsCommand::GitPush { surface_id },
+                    VcsMode::Jj => VcsCommand::JjPush { surface_id },
+                },
+            });
+        }
+    };
+
+    rsx! {
+        section { class: "attention-section vcs-actions",
+            div { class: "attention-section-title", "Actions" }
+            div { class: "vcs-action-row",
+                button { class: "pane-action", r#type: "button", onclick: fetch, "Fetch" }
+                if snapshot.mode == VcsMode::Git {
+                    button {
+                        class: "pane-action",
+                        r#type: "button",
+                        onclick: {
+                            let core = core.clone();
+                            move |_| {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::GitPull { surface_id },
+                                });
+                            }
+                        },
+                        "Pull"
+                    }
+                }
+                button { class: "pane-action", r#type: "button", onclick: push, "Push" }
+            }
+
+            if snapshot.mode == VcsMode::Git {
+                form {
+                    class: "vcs-inline-form",
+                    onsubmit: {
+                        let core = core.clone();
+                        move |_| {
+                            let message = commit_message.read().trim().to_string();
+                            if !message.is_empty() {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::GitCommit { surface_id, message },
+                                });
+                                commit_message.set(String::new());
+                            }
+                        }
+                    },
+                    input {
+                        class: "browser-address vcs-input",
+                        r#type: "text",
+                        value: "{commit_message}",
+                        placeholder: "Commit message",
+                        oninput: move |event| commit_message.set(event.value()),
+                    }
+                    button { class: "pane-action", r#type: "submit", "Commit" }
+                }
+                div { class: "vcs-ref-list",
+                    for reference in &snapshot.refs {
+                        button {
+                            class: if reference.active { "pane-action vcs-ref-chip vcs-ref-chip-active" } else { "pane-action vcs-ref-chip" },
+                            r#type: "button",
+                            onclick: {
+                                let core = core.clone();
+                                let name = reference.name.clone();
+                                move |_| {
+                                    core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                        command: VcsCommand::GitSwitchBranch {
+                                            surface_id,
+                                            name: name.clone(),
+                                        },
+                                    });
+                                }
+                            },
+                            "{reference.name}"
+                        }
+                    }
+                }
+                form {
+                    class: "vcs-inline-form",
+                    onsubmit: {
+                        let core = core.clone();
+                        move |_| {
+                            let name = branch_name.read().trim().to_string();
+                            if !name.is_empty() {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::GitCreateBranch { surface_id, name },
+                                });
+                                branch_name.set(String::new());
+                            }
+                        }
+                    },
+                    input {
+                        class: "browser-address vcs-input",
+                        r#type: "text",
+                        value: "{branch_name}",
+                        placeholder: "New branch name",
+                        oninput: move |event| branch_name.set(event.value()),
+                    }
+                    button { class: "pane-action", r#type: "submit", "Create branch" }
+                }
+            } else {
+                form {
+                    class: "vcs-inline-form",
+                    onsubmit: {
+                        let core = core.clone();
+                        move |_| {
+                            let message = commit_message.read().trim().to_string();
+                            if !message.is_empty() {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::JjDescribe { surface_id, message },
+                                });
+                                commit_message.set(String::new());
+                            }
+                        }
+                    },
+                    input {
+                        class: "browser-address vcs-input",
+                        r#type: "text",
+                        value: "{commit_message}",
+                        placeholder: "Change description",
+                        oninput: move |event| commit_message.set(event.value()),
+                    }
+                    button { class: "pane-action", r#type: "submit", "Describe change" }
+                }
+                button {
+                    class: "pane-action",
+                    r#type: "button",
+                    onclick: {
+                        let core = core.clone();
+                        move |_| {
+                            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                command: VcsCommand::JjNew {
+                                    surface_id,
+                                    message: None,
+                                },
+                            });
+                        }
+                    },
+                    "New change"
+                }
+                div { class: "vcs-ref-list",
+                    for reference in &snapshot.refs {
+                        button {
+                            class: if reference.active { "pane-action vcs-ref-chip vcs-ref-chip-active" } else { "pane-action vcs-ref-chip" },
+                            r#type: "button",
+                            onclick: {
+                                let core = core.clone();
+                                let name = reference.name.clone();
+                                move |_| {
+                                    core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                        command: VcsCommand::JjSwitchBookmark {
+                                            surface_id,
+                                            name: name.clone(),
+                                        },
+                                    });
+                                }
+                            },
+                            "{reference.name}"
+                        }
+                    }
+                }
+                form {
+                    class: "vcs-inline-form",
+                    onsubmit: {
+                        let core = core.clone();
+                        move |_| {
+                            let name = bookmark_name.read().trim().to_string();
+                            if !name.is_empty() {
+                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                    command: VcsCommand::JjCreateBookmark { surface_id, name },
+                                });
+                                bookmark_name.set(String::new());
+                            }
+                        }
+                    },
+                    input {
+                        class: "browser-address vcs-input",
+                        r#type: "text",
+                        value: "{bookmark_name}",
+                        placeholder: "New bookmark name",
+                        oninput: move |event| bookmark_name.set(event.value()),
+                    }
+                    button { class: "pane-action", r#type: "submit", "Create bookmark" }
+                }
+            }
+        }
+    }
+}
+
+fn render_vcs_file_row(
+    file: &VcsFileEntry,
+    selected_path: Option<&str>,
+    core: SharedCore,
+) -> Element {
+    let selected = selected_path == Some(file.path.as_str());
+    let path = file.path.clone();
+    let onclick = move |_| {
+        core.dispatch_shell_action(ShellAction::ShowVcsDiff {
+            path: Some(path.clone()),
+        });
+    };
+    rsx! {
+        button {
+            class: if selected { "vcs-file-row vcs-file-row-active" } else { "vcs-file-row" },
+            r#type: "button",
+            onclick: onclick,
+            span { class: "workspace-pr-number", "{format_vcs_file_status(file.status, file.staged)}" }
+            span { class: "workspace-pr-title", "{file.path}" }
+        }
+    }
+}
+
+fn format_vcs_mode(mode: VcsMode) -> &'static str {
+    match mode {
+        VcsMode::Git => "Git",
+        VcsMode::Jj => "JJ",
+    }
+}
+
+fn format_vcs_file_status(status: VcsFileStatus, staged: bool) -> &'static str {
+    match (status, staged) {
+        (VcsFileStatus::Added, true) => "A+",
+        (VcsFileStatus::Added, false) => "A",
+        (VcsFileStatus::Deleted, true) => "D+",
+        (VcsFileStatus::Deleted, false) => "D",
+        (VcsFileStatus::Renamed, true) => "R+",
+        (VcsFileStatus::Renamed, false) => "R",
+        (VcsFileStatus::Copied, true) => "C+",
+        (VcsFileStatus::Copied, false) => "C",
+        (VcsFileStatus::Untracked, _) => "??",
+        (VcsFileStatus::Conflicted, _) => "!!",
+        (VcsFileStatus::Changed, true) => "~+",
+        (VcsFileStatus::Changed, false) => "~",
+        (VcsFileStatus::Modified, true) => "M+",
+        (VcsFileStatus::Modified, false) => "M",
     }
 }
 
@@ -1539,30 +1912,232 @@ fn render_pane(
     core: SharedCore,
     runtime_status: &RuntimeStatus,
     surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_drag_candidate: Signal<Option<SurfaceDragCandidate>>,
+    dragged_surface: Option<DraggedSurface>,
+) -> Element {
+    let pane_id = pane.id;
+    let pane_container_id = pane.pane_container_id;
+    let pane_class = if pane.active {
+        "pane-card pane-card-active".to_string()
+    } else {
+        "pane-card".to_string()
+    };
+    let focus_pane = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
+        }
+    };
+    let add_browser_pane_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind: PaneKind::Browser,
+            })
+        }
+    };
+    let add_terminal_pane_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind: PaneKind::Terminal,
+            })
+        }
+    };
+    let add_terminal_pane_tab_plus = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind: PaneKind::Terminal,
+            })
+        }
+    };
+    let close_pane_tab = {
+        let core = core.clone();
+        let active_pane_tab_id = pane.active_pane_tab;
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::ClosePaneTab {
+                pane_container_id,
+                pane_tab_id: active_pane_tab_id,
+            })
+        }
+    };
+
+    let flash_key = pane.focus_flash_token;
+    let flash_class = if flash_key > 0 {
+        "pane-flash-ring pane-flash-ring-active"
+    } else {
+        "pane-flash-ring"
+    };
+
+    rsx! {
+        div { class: "pane-frame",
+            section { class: "{pane_class}", onclick: focus_pane,
+                div { class: "pane-toolbar",
+                    div { class: "pane-tabs pane-tabs-primary",
+                        div { class: "surface-tabs",
+                            for pane_tab in &pane.pane_tabs {
+                                {render_pane_tab(pane, pane_tab, core.clone())}
+                            }
+                            button { class: "surface-tab-add", title: "New terminal pane tab", onclick: add_terminal_pane_tab_plus,
+                                {icons::plus(12, "surface-tab-add-icon")}
+                            }
+                        }
+                    }
+                    div { class: "pane-action-cluster pane-action-cluster-visible",
+                        button { class: "pane-utility", title: "New terminal pane tab", onclick: add_terminal_pane_tab,
+                            {icons::terminal(14, "pane-utility-icon")}
+                        }
+                        button { class: "pane-utility", title: "New browser pane tab", onclick: add_browser_pane_tab,
+                            {icons::globe(14, "pane-utility-icon")}
+                        }
+                        div { class: "pane-action-separator" }
+                        button { class: "pane-utility pane-utility-close", title: "Close pane tab", onclick: close_pane_tab,
+                            {icons::close(12, "pane-utility-icon")}
+                        }
+                    }
+                }
+                {render_pane_tab_layout(
+                    workspace_id,
+                    &pane.layout,
+                    overview_mode,
+                    browser_chrome,
+                    core.clone(),
+                    runtime_status,
+                    surface_drop_target,
+                    surface_drag_candidate,
+                    dragged_surface,
+                )}
+                div { key: "{flash_key}", class: "{flash_class}" }
+            }
+        }
+    }
+}
+
+fn render_pane_tab(pane: &PaneSnapshot, pane_tab: &PaneTabSnapshot, core: SharedCore) -> Element {
+    let pane_container_id = pane.pane_container_id;
+    let pane_tab_id = pane_tab.id;
+    let attention_class = match pane_tab.attention {
+        AttentionState::WaitingInput => " surface-tab-attention-waiting",
+        AttentionState::Error => " surface-tab-attention-error",
+        AttentionState::Completed => " surface-tab-attention-completed",
+        AttentionState::Normal | AttentionState::Busy => "",
+    };
+    let tab_class = if pane_tab.active {
+        format!("surface-tab surface-tab-active{attention_class}")
+    } else {
+        format!("surface-tab{attention_class}")
+    };
+    let focus_core = core.clone();
+    let focus_pane_tab = move |event: Event<MouseData>| {
+        event.stop_propagation();
+        focus_core.dispatch_shell_action(ShellAction::FocusPaneTab {
+            pane_container_id,
+            pane_tab_id,
+        });
+    };
+    let close_pane_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::ClosePaneTab {
+                pane_container_id,
+                pane_tab_id,
+            });
+        }
+    };
+    let pane_tab_icon_class = format!(
+        "surface-tab-kind-icon {}",
+        runtime_state_class(pane_tab.runtime.state)
+    );
+
+    rsx! {
+        div { class: "{tab_class}", title: "{pane_tab.title}",
+            button { class: "surface-tab-focus", onclick: focus_pane_tab,
+                {render_runtime_icon(&pane_tab.runtime, 10, &pane_tab_icon_class)}
+                span { class: "surface-tab-copy",
+                    span { class: "surface-tab-primary", "{pane_tab.title}" }
+                }
+            }
+            button { class: "surface-tab-close", title: "Close pane tab", onclick: close_pane_tab,
+                {icons::close(10, "surface-tab-close-icon")}
+            }
+        }
+    }
+}
+
+fn render_pane_tab_layout(
+    workspace_id: WorkspaceId,
+    node: &PaneTabLayoutSnapshot,
+    overview_mode: bool,
+    browser_chrome: Option<&BrowserChromeSnapshot>,
+    core: SharedCore,
+    runtime_status: &RuntimeStatus,
+    surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_drag_candidate: Signal<Option<SurfaceDragCandidate>>,
+    dragged_surface: Option<DraggedSurface>,
+) -> Element {
+    match node {
+        PaneTabLayoutSnapshot::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => {
+            let direction = match axis {
+                SplitAxis::Horizontal => "row",
+                SplitAxis::Vertical => "column",
+            };
+            let first_weight = (*ratio).clamp(0.1, 0.9);
+            let second_weight = (1.0 - first_weight).clamp(0.1, 0.9);
+            let first_style = format!("flex: {first_weight} 1 0%;");
+            let second_style = format!("flex: {second_weight} 1 0%;");
+
+            rsx! {
+                div { class: "split-container", style: "flex-direction: {direction};",
+                    div { class: "split-child", style: "{first_style}",
+                        {render_pane_tab_layout(workspace_id, first, overview_mode, browser_chrome, core.clone(), runtime_status, surface_drop_target, surface_drag_candidate, dragged_surface)}
+                    }
+                    div { class: "split-child", style: "{second_style}",
+                        {render_pane_tab_layout(workspace_id, second, overview_mode, browser_chrome, core.clone(), runtime_status, surface_drop_target, surface_drag_candidate, dragged_surface)}
+                    }
+                }
+            }
+        }
+        PaneTabLayoutSnapshot::Pane(pane) => render_live_pane(
+            workspace_id,
+            pane,
+            overview_mode,
+            browser_chrome,
+            core,
+            runtime_status,
+            surface_drop_target,
+            surface_drag_candidate,
+            dragged_surface,
+        ),
+    }
+}
+
+fn render_live_pane(
+    workspace_id: WorkspaceId,
+    pane: &LivePaneSnapshot,
+    overview_mode: bool,
+    browser_chrome: Option<&BrowserChromeSnapshot>,
+    core: SharedCore,
+    runtime_status: &RuntimeStatus,
+    surface_drop_target: Signal<Option<SurfaceDropTarget>>,
     mut surface_drag_candidate: Signal<Option<SurfaceDragCandidate>>,
     dragged_surface: Option<DraggedSurface>,
 ) -> Element {
     let pane_id = pane.id;
-    let pane_is_drop_target = pane_has_surface_drop_target(*surface_drop_target.read(), pane_id);
-    let pane_class = if pane.active {
-        format!(
-            "pane-card pane-card-active{}",
-            if pane_is_drop_target {
-                " pane-card-drop-target"
-            } else {
-                ""
-            }
-        )
-    } else {
-        format!(
-            "pane-card{}",
-            if pane_is_drop_target {
-                " pane-card-drop-target"
-            } else {
-                ""
-            }
-        )
-    };
     let active_surface = pane
         .surfaces
         .iter()
@@ -1570,7 +2145,7 @@ fn render_pane(
         .unwrap_or_else(|| {
             pane.surfaces
                 .first()
-                .expect("pane snapshot should contain surfaces")
+                .expect("live pane snapshot should contain surfaces")
         });
     let active_surface_id = active_surface.id;
     let ordered_surface_ids = pane
@@ -1591,14 +2166,26 @@ fn render_pane(
                 .map(|url| format!("{}-{}", active_surface.id, url))
         })
         .unwrap_or_else(|| active_surface.id.to_string());
-    let show_tab_strip = pane_shows_tab_strip(pane.surfaces.len());
     let pane_allows_split =
         pane_allows_surface_split(dragged_surface, pane_id, pane.surfaces.len());
     let surface_drag_active = dragged_surface.is_some();
+    let live_pane_class = if pane.active {
+        "live-pane-shell live-pane-shell-active"
+    } else {
+        "live-pane-shell"
+    };
+    let pane_action_cluster_class = if pane.active {
+        "pane-action-cluster pane-action-cluster-visible"
+    } else {
+        "pane-action-cluster"
+    };
 
     let focus_pane = {
         let core = core.clone();
-        move |_| core.dispatch_shell_action(ShellAction::FocusPane { pane_id })
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
+        }
     };
     let add_browser_surface = {
         let core = core.clone();
@@ -1606,10 +2193,30 @@ fn render_pane(
             event.stop_propagation();
             core.dispatch_shell_action(ShellAction::AddBrowserSurface {
                 pane_id: Some(pane_id),
+                profile_mode: taskers_core::BrowserProfileMode::PersistentDefault,
+            })
+        }
+    };
+    let add_ephemeral_browser_surface = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+                pane_id: Some(pane_id),
+                profile_mode: taskers_core::BrowserProfileMode::Ephemeral,
             })
         }
     };
     let add_terminal_surface = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::AddTerminalSurface {
+                pane_id: Some(pane_id),
+            })
+        }
+    };
+    let add_terminal_surface_plus = {
         let core = core.clone();
         move |event: Event<MouseData>| {
             event.stop_propagation();
@@ -1645,6 +2252,11 @@ fn render_pane(
             })
         }
     };
+    let close_label = if pane.surfaces.len() > 1 {
+        "Close current surface tab"
+    } else {
+        "Close current surface"
+    };
     let begin_active_surface_drag_candidate = move |event: Event<PointerData>| {
         if let Some(candidate) =
             surface_drag_candidate_from_event(&event, workspace_id, pane_id, active_surface_id)
@@ -1653,277 +2265,126 @@ fn render_pane(
         }
     };
 
-    let flash_key = pane.focus_flash_token;
-    let flash_class = if flash_key > 0 {
-        "pane-flash-ring pane-flash-ring-active"
-    } else {
-        "pane-flash-ring"
-    };
-    let close_label = if pane.surfaces.len() > 1 {
-        "Close current tab"
-    } else {
-        "Close current surface"
-    };
-    let pane_runtime_icon_class = format!(
-        "pane-toolbar-kind-icon {}",
-        runtime_state_class(active_surface.runtime.state)
-    );
-    let pane_runtime_chip_class = format!(
-        "pane-runtime-chip {}",
-        runtime_state_class(active_surface.runtime.state)
-    );
-    let pane_runtime_state_class = format!(
-        "pane-runtime-state {}",
-        runtime_state_class(active_surface.runtime.state)
-    );
-    let pane_surface_summary_title = surface_summary_title(active_surface);
-    let resume_prompt_active = active_surface.interrupted_agent_resume.is_some();
-    let dismiss_surface_alert = {
-        let core = core.clone();
-        move |event: Event<MouseData>| {
-            event.stop_propagation();
-            core.dispatch_shell_action(ShellAction::DismissSurfaceAlert {
-                workspace_id,
-                pane_id,
-                surface_id: active_surface_id,
-            });
-        }
-    };
-    let resume_interrupted_agent = {
-        let core = core.clone();
-        move |event: Event<MouseData>| {
-            event.stop_propagation();
-            core.dispatch_shell_action(ShellAction::ResumeInterruptedAgent {
-                workspace_id,
-                pane_id,
-                surface_id: active_surface_id,
-            });
-        }
-    };
-    let dismiss_interrupted_agent_resume = {
-        let core = core.clone();
-        move |event: Event<MouseData>| {
-            event.stop_propagation();
-            core.dispatch_shell_action(ShellAction::DismissInterruptedAgentResume {
-                workspace_id,
-                pane_id,
-                surface_id: active_surface_id,
-            });
-        }
-    };
-    let swallow_runtime_state_pointer = move |event: Event<PointerData>| {
-        event.stop_propagation();
-    };
-
     rsx! {
-        div { class: "pane-frame",
-            section { class: "{pane_class}", onclick: focus_pane,
-                div { class: "pane-toolbar",
-                    if show_tab_strip {
-                        div {
-                            class: "pane-toolbar-meta",
-                            title: "{pane_surface_summary_title}",
-                            div { class: "{pane_runtime_chip_class}",
-                                {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
-                                div { class: "pane-runtime-copy",
-                                    span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
-                                    if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
-                                        span { class: "pane-runtime-badge", "{runtime_label}" }
-                                    }
-                                    if resume_prompt_active {
-                                        button {
-                                            r#type: "button",
-                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
-                                            title: "Run the interrupted agent command again",
-                                            onpointerdown: swallow_runtime_state_pointer,
-                                            onpointerup: swallow_runtime_state_pointer,
-                                            onclick: resume_interrupted_agent,
-                                            "Run again"
-                                        }
-                                        button {
-                                            r#type: "button",
-                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
-                                            title: "Dismiss interrupted agent prompt",
-                                            onpointerdown: swallow_runtime_state_pointer,
-                                            onpointerup: swallow_runtime_state_pointer,
-                                            onclick: dismiss_interrupted_agent_resume,
-                                            "Dismiss"
-                                        }
-                                    } else if let Some(status_label) = surface_status_text(active_surface) {
-                                        button {
-                                            r#type: "button",
-                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
-                                            title: "Dismiss alert",
-                                            onpointerdown: swallow_runtime_state_pointer,
-                                            onpointerup: swallow_runtime_state_pointer,
-                                            onclick: dismiss_surface_alert,
-                                            "{status_label}"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        div {
-                            class: "pane-toolbar-meta pane-toolbar-meta-draggable",
-                            title: "{pane_surface_summary_title}",
-                            onpointerdown: begin_active_surface_drag_candidate,
-                            div { class: "{pane_runtime_chip_class}",
-                                {render_runtime_icon(&active_surface.runtime, 14, &pane_runtime_icon_class)}
-                                div { class: "pane-runtime-copy",
-                                    span { class: "pane-runtime-primary", "{surface_primary_label(active_surface)}" }
-                                    if let Some(runtime_label) = surface_runtime_badge_text(active_surface) {
-                                        span { class: "pane-runtime-badge", "{runtime_label}" }
-                                    }
-                                    if resume_prompt_active {
-                                        button {
-                                            r#type: "button",
-                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
-                                            title: "Run the interrupted agent command again",
-                                            onpointerdown: swallow_runtime_state_pointer,
-                                            onpointerup: swallow_runtime_state_pointer,
-                                            onclick: resume_interrupted_agent,
-                                            "Run again"
-                                        }
-                                        button {
-                                            r#type: "button",
-                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
-                                            title: "Dismiss interrupted agent prompt",
-                                            onpointerdown: swallow_runtime_state_pointer,
-                                            onpointerup: swallow_runtime_state_pointer,
-                                            onclick: dismiss_interrupted_agent_resume,
-                                            "Dismiss"
-                                        }
-                                    } else if let Some(status_label) = surface_status_text(active_surface) {
-                                        button {
-                                            r#type: "button",
-                                            class: "{pane_runtime_state_class} pane-runtime-state-dismiss",
-                                            title: "Dismiss alert",
-                                            onpointerdown: swallow_runtime_state_pointer,
-                                            onpointerup: swallow_runtime_state_pointer,
-                                            onclick: dismiss_surface_alert,
-                                            "{status_label}"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    div { class: "pane-action-cluster",
-                        button { class: "pane-utility", title: "New terminal tab", onclick: add_terminal_surface,
-                            {icons::terminal(14, "pane-utility-icon")}
-                        }
-                        button { class: "pane-utility", title: "New browser tab", onclick: add_browser_surface,
-                            {icons::globe(14, "pane-utility-icon")}
-                        }
-                        div { class: "pane-action-separator" }
-                        button { class: "pane-utility", title: "Split right", onclick: split_terminal,
-                            {icons::split_horizontal(14, "pane-utility-icon")}
-                        }
-                        button { class: "pane-utility", title: "Split down", onclick: split_down,
-                            {icons::split_vertical(14, "pane-utility-icon")}
-                        }
-                        div { class: "pane-action-separator" }
-                        button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface,
-                            {icons::close(12, "pane-utility-icon")}
-                        }
-                    }
-                }
-                if show_tab_strip {
-                    div { class: "pane-tabs",
-                        div { class: "surface-tabs",
-                            for surface in &pane.surfaces {
-                                {render_surface_tab(
-                                    workspace_id,
-                                    pane.id,
-                                    pane.active_surface,
-                                    surface,
-                                    core.clone(),
-                                    surface_drop_target,
-                                    surface_drag_candidate,
-                                    dragged_surface,
-                                    &ordered_surface_ids,
-                                )}
-                            }
-                            if surface_drag_active {
-                                {render_surface_pane_drop_target(
-                                    "surface-tab surface-tab-append-target",
-                                    "+",
-                                    SurfaceDropTarget::AppendToPane { pane_id },
-                                    core.clone(),
-                                    surface_drop_target,
-                                )}
-                            }
-                        }
-                    }
-                }
-                if matches!(active_surface.kind, SurfaceKind::Browser) {
-                    BrowserToolbar {
-                        key: "{toolbar_key}",
-                        surface: active_surface.clone(),
-                        chrome: active_browser_chrome,
-                        core: core.clone(),
-                    }
-                }
-                div { class: "pane-body",
-                    if show_live_surface_backdrop(active_surface.kind, overview_mode) {
-                        {render_surface_backdrop(active_surface, runtime_status)}
+        section { class: "{live_pane_class}", onclick: focus_pane,
+            div { class: "pane-tabs pane-tabs-inline",
+                div {
+                    class: "surface-tabs",
+                    onpointerdown: begin_active_surface_drag_candidate,
+                    for surface in &pane.surfaces {
+                        {render_surface_tab(
+                            workspace_id,
+                            pane.id,
+                            pane.active_surface,
+                            surface,
+                            core.clone(),
+                            surface_drop_target,
+                            surface_drag_candidate,
+                            dragged_surface,
+                            &ordered_surface_ids,
+                        )}
                     }
                     if surface_drag_active {
-                        div { class: "pane-drop-overlay",
+                        {render_surface_pane_drop_target(
+                            "surface-tab surface-tab-append-target",
+                            "+",
+                            SurfaceDropTarget::AppendToPane { pane_id },
+                            core.clone(),
+                            surface_drop_target,
+                        )}
+                    }
+                    button { class: "surface-tab-add", title: "New terminal surface", onclick: add_terminal_surface_plus,
+                        {icons::plus(12, "surface-tab-add-icon")}
+                    }
+                }
+                div { class: "{pane_action_cluster_class}",
+                    button { class: "pane-utility", title: "New terminal surface", onclick: add_terminal_surface,
+                        {icons::terminal(14, "pane-utility-icon")}
+                    }
+                    button { class: "pane-utility", title: "New browser surface", onclick: add_browser_surface,
+                        {icons::globe(14, "pane-utility-icon")}
+                    }
+                    button { class: "pane-utility", title: "New private browser surface", onclick: add_ephemeral_browser_surface,
+                        {icons::shield(14, "pane-utility-icon")}
+                    }
+                    div { class: "pane-action-separator" }
+                    button { class: "pane-utility", title: "Split right", onclick: split_terminal,
+                        {icons::split_horizontal(14, "pane-utility-icon")}
+                    }
+                    button { class: "pane-utility", title: "Split down", onclick: split_down,
+                        {icons::split_vertical(14, "pane-utility-icon")}
+                    }
+                    div { class: "pane-action-separator" }
+                    button { class: "pane-utility pane-utility-close", title: "{close_label}", onclick: close_surface,
+                        {icons::close(12, "pane-utility-icon")}
+                    }
+                }
+            }
+            if matches!(active_surface.kind, SurfaceKind::Browser) {
+                BrowserToolbar {
+                    key: "{toolbar_key}",
+                    surface: active_surface.clone(),
+                    chrome: active_browser_chrome,
+                    core: core.clone(),
+                }
+            }
+            div { class: "pane-body",
+                if show_live_surface_backdrop(active_surface.kind, overview_mode) {
+                    {render_surface_backdrop(active_surface, runtime_status)}
+                }
+                if surface_drag_active {
+                    div { class: "pane-drop-overlay",
+                        {render_surface_pane_drop_target(
+                            "pane-drop-target pane-drop-target-center",
+                            "append",
+                            SurfaceDropTarget::AppendToPane { pane_id },
+                            core.clone(),
+                            surface_drop_target,
+                        )}
+                        if pane_allows_split {
                             {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-center",
-                                "append",
-                                SurfaceDropTarget::AppendToPane { pane_id },
+                                "pane-drop-target pane-drop-target-edge pane-drop-target-left",
+                                "split left",
+                                SurfaceDropTarget::SplitPane {
+                                    pane_id,
+                                    direction: Direction::Left,
+                                },
                                 core.clone(),
                                 surface_drop_target,
                             )}
-                            if pane_allows_split {
-                                {render_surface_pane_drop_target(
-                                    "pane-drop-target pane-drop-target-edge pane-drop-target-left",
-                                    "split left",
-                                    SurfaceDropTarget::SplitPane {
-                                        pane_id,
-                                        direction: Direction::Left,
-                                    },
-                                    core.clone(),
-                                    surface_drop_target,
-                                )}
-                                {render_surface_pane_drop_target(
-                                    "pane-drop-target pane-drop-target-edge pane-drop-target-right",
-                                    "split right",
-                                    SurfaceDropTarget::SplitPane {
-                                        pane_id,
-                                        direction: Direction::Right,
-                                    },
-                                    core.clone(),
-                                    surface_drop_target,
-                                )}
-                                {render_surface_pane_drop_target(
-                                    "pane-drop-target pane-drop-target-edge pane-drop-target-top",
-                                    "split up",
-                                    SurfaceDropTarget::SplitPane {
-                                        pane_id,
-                                        direction: Direction::Up,
-                                    },
-                                    core.clone(),
-                                    surface_drop_target,
-                                )}
-                                {render_surface_pane_drop_target(
-                                    "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
-                                    "split down",
-                                    SurfaceDropTarget::SplitPane {
-                                        pane_id,
-                                        direction: Direction::Down,
-                                    },
-                                    core.clone(),
-                                    surface_drop_target,
-                                )}
-                            }
+                            {render_surface_pane_drop_target(
+                                "pane-drop-target pane-drop-target-edge pane-drop-target-right",
+                                "split right",
+                                SurfaceDropTarget::SplitPane {
+                                    pane_id,
+                                    direction: Direction::Right,
+                                },
+                                core.clone(),
+                                surface_drop_target,
+                            )}
+                            {render_surface_pane_drop_target(
+                                "pane-drop-target pane-drop-target-edge pane-drop-target-top",
+                                "split up",
+                                SurfaceDropTarget::SplitPane {
+                                    pane_id,
+                                    direction: Direction::Up,
+                                },
+                                core.clone(),
+                                surface_drop_target,
+                            )}
+                            {render_surface_pane_drop_target(
+                                "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
+                                "split down",
+                                SurfaceDropTarget::SplitPane {
+                                    pane_id,
+                                    direction: Direction::Down,
+                                },
+                                core.clone(),
+                                surface_drop_target,
+                            )}
                         }
                     }
                 }
-                div { key: "{flash_key}", class: "{flash_class}" }
             }
         }
     }
@@ -2136,6 +2597,16 @@ fn render_surface_tab(
     let swallow_pointer = move |event: Event<PointerData>| {
         event.stop_propagation();
     };
+    let close_surface = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CloseSurface {
+                pane_id,
+                surface_id,
+            });
+        }
+    };
 
     rsx! {
         div {
@@ -2157,6 +2628,14 @@ fn render_surface_tab(
                         span { key: "{surface_id}-runtime-badge", class: "surface-tab-runtime-badge", "{runtime_label}" }
                     }
                 }
+            }
+            button {
+                class: "surface-tab-close",
+                title: "Close surface tab",
+                onpointerdown: swallow_pointer,
+                onpointerup: swallow_pointer,
+                onclick: close_surface,
+                {icons::close(10, "surface-tab-close-icon")}
             }
             if let Some(status_label) = surface_status_text(surface) {
                 if dismissible_status {
@@ -2207,10 +2686,19 @@ fn BrowserToolbar(
         .as_ref()
         .map(|chrome| chrome.devtools_open)
         .unwrap_or(false);
+    let profile_mode = chrome
+        .as_ref()
+        .map(|chrome| chrome.profile_mode)
+        .unwrap_or(surface.browser_profile_mode);
     let devtools_label = if devtools_open {
         "Hide tools"
     } else {
         "Devtools"
+    };
+    let clear_data_title = if profile_mode.is_ephemeral() {
+        "Clear private browser data"
+    } else {
+        "Clear stored browser data"
     };
 
     let navigate = {
@@ -2240,8 +2728,14 @@ fn BrowserToolbar(
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::BrowserReload { surface_id })
     };
-    let toggle_devtools =
-        move |_| core.dispatch_shell_action(ShellAction::ToggleBrowserDevtools { surface_id });
+    let toggle_devtools = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::ToggleBrowserDevtools { surface_id })
+    };
+    let clear_data = {
+        let core = core.clone();
+        move |_| core.dispatch_shell_action(ShellAction::ClearBrowserData { surface_id })
+    };
 
     rsx! {
         form { class: "browser-toolbar", onsubmit: navigate,
@@ -2275,11 +2769,24 @@ fn BrowserToolbar(
                 placeholder: "Enter URL...",
                 oninput: move |event| address.set(event.value()),
             }
+            if profile_mode.is_ephemeral() {
+                div { class: "browser-toolbar-badge",
+                    {icons::shield(12, "browser-toolbar-icon")}
+                    span { "Private" }
+                }
+            }
             button {
                 r#type: "submit",
                 class: "browser-toolbar-button browser-toolbar-button-primary",
                 title: "Navigate",
                 {icons::arrow_right_circle(14, "browser-toolbar-icon")}
+            }
+            button {
+                r#type: "button",
+                class: "browser-toolbar-button",
+                onclick: clear_data,
+                title: "{clear_data_title}",
+                {icons::trash(14, "browser-toolbar-icon")}
             }
             button {
                 r#type: "button",
@@ -2458,8 +2965,8 @@ mod tests {
         surface_status_text, surface_summary_title,
     };
     use crate::taskers_core::{
-        AttentionRingState, AttentionState, PaneId, RuntimeIdentitySnapshot, RuntimeStateSnapshot,
-        SurfaceId, SurfaceSnapshot, WorkspaceId,
+        AttentionRingState, AttentionState, BrowserProfileMode, PaneId, RuntimeIdentitySnapshot,
+        RuntimeStateSnapshot, SurfaceId, SurfaceSnapshot, WorkspaceId,
     };
 
     fn sample_surface(
@@ -2482,6 +2989,7 @@ mod tests {
             activity_label: activity_label.map(str::to_owned),
             status_label: status_label.map(str::to_owned),
             url: None,
+            browser_profile_mode: BrowserProfileMode::PersistentDefault,
             cwd: None,
             attention: AttentionState::Normal,
             notification_ring: None,

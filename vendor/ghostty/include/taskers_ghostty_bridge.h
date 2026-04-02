@@ -30,10 +30,15 @@ typedef struct {
 taskers_ghostty_host_t *taskers_ghostty_host_new(
     const taskers_ghostty_host_options_s *);
 void taskers_ghostty_host_free(taskers_ghostty_host_t *);
+const char *taskers_ghostty_host_version(void);
+const char *taskers_ghostty_host_build_id(void);
+void taskers_ghostty_host_begin_shutdown(taskers_ghostty_host_t *);
+size_t taskers_ghostty_host_surface_count(taskers_ghostty_host_t *);
 int taskers_ghostty_host_tick(taskers_ghostty_host_t *);
 void *taskers_ghostty_surface_new(
     taskers_ghostty_host_t *,
     const taskers_ghostty_surface_options_s *);
+void taskers_ghostty_surface_destroy(void *);
 int taskers_ghostty_surface_grab_focus(void *);
 int taskers_ghostty_surface_has_selection(void *);
 int taskers_ghostty_surface_send_text(void *, const char *, size_t);

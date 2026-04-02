@@ -5,23 +5,28 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use taskers_control::{ControlCommand, ControlResponse};
+use taskers_control::{ControlCommand, ControlResponse, VcsCommandResult};
 use taskers_core::{AppState, default_session_path};
 use taskers_domain::{
     ActivityItem, AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, KEYBOARD_RESIZE_STEP,
-    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, NotificationId, PaneKind,
-    PaneMetadata, PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame,
-    Workspace, WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
+    MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, NotificationId, PaneMetadata,
+    PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
+    WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
 use taskers_runtime::ShellLaunchSpec;
 use time::OffsetDateTime;
 use tokio::sync::watch;
 
+pub use taskers_control::{VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode, VcsSnapshot};
 pub use taskers_domain::{
-    Direction, PaneId, SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId,
-    WorkspaceWindowMoveTarget, WorkspaceWindowTabId,
+    BrowserProfileMode, Direction, PaneContainerId, PaneId, PaneKind, PaneTabId, PaneTabLayoutNode,
+    SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowMoveTarget,
+    WorkspaceWindowTabId,
 };
+
+pub const MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX: i32 = 160;
+pub const MIN_RENDERED_NATIVE_SURFACE_HEIGHT_PX: i32 = 96;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivityId {
@@ -601,6 +606,14 @@ impl Frame {
         }
     }
 
+    pub const fn right(self) -> i32 {
+        self.x + self.width
+    }
+
+    pub const fn bottom(self) -> i32 {
+        self.y + self.height
+    }
+
     pub fn inset_top(self, amount: i32) -> Self {
         let clamped = amount.clamp(0, self.height.saturating_sub(1));
         Self {
@@ -632,6 +645,9 @@ impl Frame {
     }
 }
 
+const RESIZE_HANDLE_THICKNESS_PX: i32 = 12;
+const RESIZE_CORNER_SIZE_PX: i32 = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayoutMetrics {
     pub sidebar_width: i32,
@@ -652,19 +668,19 @@ pub struct LayoutMetrics {
 impl Default for LayoutMetrics {
     fn default() -> Self {
         Self {
-            sidebar_width: 212,
-            activity_width: 280,
-            toolbar_height: 32,
-            workspace_padding: 12,
-            window_border_width: 2,
+            sidebar_width: 200,
+            activity_width: 264,
+            toolbar_height: 28,
+            workspace_padding: 8,
+            window_border_width: 1,
             window_toolbar_height: 20,
             window_body_padding: 0,
-            split_gap: 8,
+            split_gap: 2,
             pane_border_width: 1,
-            pane_header_height: 26,
-            browser_toolbar_height: 34,
-            surface_tab_height: 28,
-            terminal_gutter_x: 6,
+            pane_header_height: 24,
+            browser_toolbar_height: 30,
+            surface_tab_height: 24,
+            terminal_gutter_x: 4,
         }
     }
 }
@@ -716,6 +732,7 @@ pub struct SurfaceSnapshot {
     pub activity_label: Option<String>,
     pub status_label: Option<String>,
     pub url: Option<String>,
+    pub browser_profile_mode: BrowserProfileMode,
     pub cwd: Option<String>,
     pub attention: AttentionState,
     pub notification_ring: Option<AttentionRingState>,
@@ -729,7 +746,7 @@ pub struct InterruptedAgentResumeSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneSnapshot {
+pub struct LivePaneSnapshot {
     pub id: PaneId,
     pub active: bool,
     pub attention: AttentionState,
@@ -752,8 +769,47 @@ pub enum LayoutNodeSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneTabSnapshot {
+    pub id: PaneTabId,
+    pub active: bool,
+    pub attention: AttentionState,
+    pub runtime: RuntimeIdentitySnapshot,
+    pub title: String,
+    pub pane_count: usize,
+    pub surface_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaneSnapshot {
+    pub id: PaneId,
+    pub pane_container_id: PaneContainerId,
+    pub active: bool,
+    pub attention: AttentionState,
+    pub notification_ring: Option<AttentionRingState>,
+    pub active_pane_tab: PaneTabId,
+    pub active_surface: SurfaceId,
+    pub runtime: RuntimeIdentitySnapshot,
+    pub surfaces: Vec<SurfaceSnapshot>,
+    pub pane_tabs: Vec<PaneTabSnapshot>,
+    pub layout: PaneTabLayoutSnapshot,
+    pub focus_flash_token: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneTabLayoutSnapshot {
+    Pane(LivePaneSnapshot),
+    Split {
+        axis: SplitAxis,
+        ratio: f32,
+        first: Box<PaneTabLayoutSnapshot>,
+        second: Box<PaneTabLayoutSnapshot>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserMountSpec {
     pub url: String,
+    pub profile_mode: BrowserProfileMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -841,6 +897,7 @@ pub struct BrowserSurfaceCatalogEntry {
     pub pane_id: PaneId,
     pub surface_id: SurfaceId,
     pub url: String,
+    pub profile_mode: BrowserProfileMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -940,6 +997,7 @@ pub struct BrowserChromeSnapshot {
     pub surface_id: SurfaceId,
     pub title: String,
     pub url: String,
+    pub profile_mode: BrowserProfileMode,
     pub can_go_back: bool,
     pub can_go_forward: bool,
     pub devtools_open: bool,
@@ -1048,6 +1106,15 @@ pub struct SettingsSnapshot {
     pub notification_preferences: NotificationPreferencesSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VcsPanelSnapshot {
+    pub visible: bool,
+    pub target_surface_id: Option<SurfaceId>,
+    pub target_surface_title: Option<String>,
+    pub snapshot: Option<VcsSnapshot>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellSnapshot {
     pub revision: u64,
@@ -1055,6 +1122,7 @@ pub struct ShellSnapshot {
     pub overview_mode: bool,
     pub drag_mode: ShellDragMode,
     pub surface_drag: Option<SurfaceDragSessionSnapshot>,
+    pub resize_preview_active: bool,
     pub attention_panel_visible: bool,
     pub workspaces: Vec<WorkspaceSummary>,
     pub current_workspace: WorkspaceViewSnapshot,
@@ -1068,9 +1136,94 @@ pub struct ShellSnapshot {
     pub browser_catalog: Vec<BrowserSurfaceCatalogEntry>,
     pub terminal_catalog: Vec<TerminalSurfaceCatalogEntry>,
     pub portal: SurfacePortalPlan,
+    pub resize_handles: Vec<ResizeHandleSnapshot>,
     pub metrics: LayoutMetrics,
     pub runtime_status: RuntimeStatus,
     pub settings: SettingsSnapshot,
+    pub vcs_panel: VcsPanelSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeHandleCursor {
+    EastWest,
+    NorthSouth,
+    SouthEast,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResizeHandleSnapshot {
+    pub id: String,
+    pub frame: Frame,
+    pub cursor: ResizeHandleCursor,
+    pub target: ResizeHandleTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResizeHandleTarget {
+    WorkspaceColumnEdge {
+        workspace_id: WorkspaceId,
+        column_widths: Vec<(WorkspaceColumnId, i32)>,
+        leading_index: usize,
+    },
+    WorkspaceWindowBottomEdge {
+        workspace_id: WorkspaceId,
+        window_heights: Vec<(WorkspaceWindowId, i32)>,
+        upper_index: usize,
+    },
+    WorkspaceWindowCorner {
+        workspace_id: WorkspaceId,
+        column_widths: Vec<(WorkspaceColumnId, i32)>,
+        leading_index: usize,
+        window_heights: Vec<(WorkspaceWindowId, i32)>,
+        upper_index: usize,
+    },
+    WorkspaceWindowSplit {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: Vec<bool>,
+        axis: SplitAxis,
+        parent_frame: Frame,
+        initial_ratio: u16,
+    },
+    PaneTabSplit {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: Vec<bool>,
+        axis: SplitAxis,
+        parent_frame: Frame,
+        initial_ratio: u16,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResizePreview {
+    WorkspaceColumnWidths {
+        workspace_id: WorkspaceId,
+        widths: Vec<(WorkspaceColumnId, i32)>,
+    },
+    WorkspaceWindowHeights {
+        workspace_id: WorkspaceId,
+        heights: Vec<(WorkspaceWindowId, i32)>,
+    },
+    WorkspaceWindowCorner {
+        workspace_id: WorkspaceId,
+        column_widths: Vec<(WorkspaceColumnId, i32)>,
+        window_heights: Vec<(WorkspaceWindowId, i32)>,
+    },
+    WorkspaceWindowSplitRatio {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
+    PaneTabSplitRatio {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1113,6 +1266,7 @@ pub enum HostCommand {
     BrowserForward { surface_id: SurfaceId },
     BrowserReload { surface_id: SurfaceId },
     BrowserToggleDevtools { surface_id: SurfaceId },
+    BrowserClearData { surface_id: SurfaceId },
     TerminalSendText { surface_id: SurfaceId, text: String },
 }
 
@@ -1169,18 +1323,37 @@ pub enum ShellAction {
         window_id: WorkspaceWindowId,
         tab_id: WorkspaceWindowTabId,
     },
+    CreatePaneTab {
+        pane_container_id: PaneContainerId,
+        kind: PaneKind,
+    },
+    FocusPaneTab {
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    },
+    MovePaneTab {
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_index: usize,
+    },
+    ClosePaneTab {
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    },
     ScrollViewport {
         dx: i32,
         dy: i32,
     },
     SplitBrowser {
         pane_id: Option<PaneId>,
+        profile_mode: BrowserProfileMode,
     },
     SplitTerminal {
         pane_id: Option<PaneId>,
     },
     AddBrowserSurface {
         pane_id: Option<PaneId>,
+        profile_mode: BrowserProfileMode,
     },
     AddTerminalSurface {
         pane_id: Option<PaneId>,
@@ -1218,6 +1391,11 @@ pub enum ShellAction {
     PreviewSurfaceDragWorkspace {
         workspace_id: WorkspaceId,
     },
+    PreviewResize {
+        preview: ResizePreview,
+    },
+    CommitResizePreview,
+    CancelResizePreview,
     CancelSurfaceDrag,
     EndDrag,
     NavigateBrowser {
@@ -1232,6 +1410,9 @@ pub enum ShellAction {
         surface_id: SurfaceId,
     },
     BrowserReload {
+        surface_id: SurfaceId,
+    },
+    ClearBrowserData {
         surface_id: SurfaceId,
     },
     ToggleBrowserDevtools {
@@ -1262,6 +1443,14 @@ pub enum ShellAction {
         pane_id: PaneId,
         surface_id: SurfaceId,
     },
+    ToggleVcsPanel,
+    RefreshVcsPanel,
+    ShowVcsDiff {
+        path: Option<String>,
+    },
+    RunVcsCommand {
+        command: VcsCommand,
+    },
     SelectTheme {
         theme_id: String,
     },
@@ -1280,10 +1469,16 @@ struct UiState {
     overview_mode: bool,
     drag_mode: ShellDragMode,
     surface_drag: Option<SurfaceDragSessionSnapshot>,
+    resize_preview: Option<ResizePreview>,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     notification_preferences: NotificationPreferencesSnapshot,
     window_size: PixelSize,
+    vcs_panel_visible: bool,
+    last_terminal_surface_by_workspace: BTreeMap<WorkspaceId, SurfaceId>,
+    vcs_snapshot: Option<VcsSnapshot>,
+    vcs_error: Option<String>,
+    vcs_diff_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1344,10 +1539,16 @@ impl TaskersCore {
                 overview_mode: false,
                 drag_mode: ShellDragMode::None,
                 surface_drag: None,
+                resize_preview: None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 notification_preferences: bootstrap.notification_preferences,
                 window_size: PixelSize::new(1440, 900),
+                vcs_panel_visible: false,
+                last_terminal_surface_by_workspace: BTreeMap::new(),
+                vcs_snapshot: None,
+                vcs_error: None,
+                vcs_diff_path: None,
             },
             host_commands: VecDeque::new(),
             browser_navigation: BTreeMap::new(),
@@ -1358,12 +1559,21 @@ impl TaskersCore {
         self.revision
     }
 
+    fn model_for_snapshot(&self) -> AppModel {
+        let mut model = self.app_state.snapshot_model();
+        if let Some(preview) = &self.ui.resize_preview {
+            apply_resize_preview_to_model(&mut model, preview);
+        }
+        model
+    }
+
     fn snapshot(&self) -> ShellSnapshot {
-        let model = self.app_state.snapshot_model();
+        let model = self.model_for_snapshot();
         let agents = self.agent_sessions_snapshot(&model);
         let activity = self.activity_snapshot(&model);
         let done_activity = self.done_activity_snapshot(&model);
         let attention_panel_visible = !agents.is_empty() || !activity.is_empty();
+        let right_panel_visible = attention_panel_visible || self.ui.vcs_panel_visible;
         let workspace_id = model
             .active_workspace_id()
             .expect("active workspace should exist");
@@ -1386,7 +1596,7 @@ impl TaskersCore {
         let active_window = workspace
             .active_window_record()
             .expect("active workspace window should exist");
-        let viewport = self.workspace_viewport_frame(attention_panel_visible);
+        let viewport = self.workspace_viewport_frame(right_panel_visible);
         let clamped_viewport = clamped_workspace_viewport(
             workspace,
             viewport.width,
@@ -1421,6 +1631,14 @@ impl TaskersCore {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let resize_handles = if matches!(self.ui.section, ShellSection::Workspace)
+            && !self.ui.overview_mode
+            && self.ui.drag_mode == ShellDragMode::None
+        {
+            self.resize_handles_snapshot(workspace_id, workspace, &window_frames)
+        } else {
+            Vec::new()
+        };
 
         ShellSnapshot {
             revision: self.revision,
@@ -1428,6 +1646,7 @@ impl TaskersCore {
             overview_mode: self.ui.overview_mode,
             drag_mode: self.ui.drag_mode,
             surface_drag: self.ui.surface_drag,
+            resize_preview_active: self.ui.resize_preview.is_some(),
             attention_panel_visible,
             workspaces: self.workspace_summaries(&model),
             current_workspace: WorkspaceViewSnapshot {
@@ -1479,15 +1698,17 @@ impl TaskersCore {
                     Vec::new()
                 },
             },
+            resize_handles,
             metrics: self.metrics,
             runtime_status: self.runtime_status.clone(),
             settings: self.settings_snapshot(),
+            vcs_panel: self.vcs_panel_snapshot(&model),
         }
     }
 
-    fn workspace_viewport_frame(&self, attention_panel_visible: bool) -> Frame {
+    fn workspace_viewport_frame(&self, right_panel_visible: bool) -> Frame {
         let metrics = self.metrics;
-        let activity_width = if attention_panel_visible {
+        let activity_width = if right_panel_visible {
             metrics.activity_width
         } else {
             0
@@ -1516,6 +1737,134 @@ impl TaskersCore {
                 .collect(),
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
             notification_preferences: self.ui.notification_preferences,
+        }
+    }
+
+    fn preview_resize(&mut self, preview: ResizePreview) -> bool {
+        if self.ui.resize_preview.as_ref() == Some(&preview) {
+            return false;
+        }
+        self.ui.resize_preview = Some(preview);
+        self.bump_local_revision();
+        true
+    }
+
+    fn commit_resize_preview(&mut self) -> bool {
+        let Some(preview) = self.ui.resize_preview.clone() else {
+            return false;
+        };
+
+        let committed = match preview {
+            ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths,
+            } => widths.into_iter().all(|(workspace_column_id, width)| {
+                self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+                    workspace_id,
+                    workspace_column_id,
+                    width,
+                })
+            }),
+            ResizePreview::WorkspaceWindowHeights {
+                workspace_id,
+                heights,
+            } => heights.into_iter().all(|(workspace_window_id, height)| {
+                self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                    workspace_id,
+                    workspace_window_id,
+                    height,
+                })
+            }),
+            ResizePreview::WorkspaceWindowCorner {
+                workspace_id,
+                column_widths,
+                window_heights,
+            } => {
+                column_widths
+                    .into_iter()
+                    .all(|(workspace_column_id, width)| {
+                        self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+                            workspace_id,
+                            workspace_column_id,
+                            width,
+                        })
+                    })
+                    && window_heights
+                        .into_iter()
+                        .all(|(workspace_window_id, height)| {
+                            self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                                workspace_id,
+                                workspace_window_id,
+                                height,
+                            })
+                        })
+            }
+            ResizePreview::WorkspaceWindowSplitRatio {
+                workspace_id,
+                workspace_window_id,
+                path,
+                ratio,
+            } => self.dispatch_control(ControlCommand::SetWindowSplitRatio {
+                workspace_id,
+                workspace_window_id,
+                path,
+                ratio,
+            }),
+            ResizePreview::PaneTabSplitRatio {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path,
+                ratio,
+            } => self.dispatch_control(ControlCommand::SetPaneTabSplitRatio {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path,
+                ratio,
+            }),
+        };
+
+        if committed {
+            self.ui.resize_preview = None;
+        }
+
+        committed
+    }
+
+    fn cancel_resize_preview(&mut self) -> bool {
+        if self.ui.resize_preview.take().is_none() {
+            return false;
+        }
+        self.bump_local_revision();
+        true
+    }
+
+    fn vcs_panel_snapshot(&self, model: &AppModel) -> VcsPanelSnapshot {
+        let workspace_id = model.active_workspace_id();
+        let target_surface_id =
+            workspace_id.and_then(|workspace_id| self.vcs_target_surface_id(model, workspace_id));
+        let target_surface_title = target_surface_id.and_then(|surface_id| {
+            model
+                .workspaces
+                .values()
+                .flat_map(|workspace| workspace.panes.values())
+                .flat_map(|pane| pane.surfaces.values())
+                .find(|surface| surface.id == surface_id)
+                .and_then(|surface| {
+                    surface
+                        .metadata
+                        .title
+                        .clone()
+                        .or_else(|| surface.metadata.cwd.clone())
+                })
+        });
+        VcsPanelSnapshot {
+            visible: self.ui.vcs_panel_visible,
+            target_surface_id,
+            target_surface_title,
+            snapshot: self.ui.vcs_snapshot.clone(),
+            error: self.ui.vcs_error.clone(),
         }
     }
 
@@ -1702,11 +2051,19 @@ impl TaskersCore {
         let active_tab = window
             .active_tab_record()
             .expect("workspace window should have an active tab");
-        let pane_ids = active_tab.layout.leaves();
-        let pane_count = pane_ids.len();
-        let surface_count = pane_ids
+        let pane_container_ids = active_tab.layout.leaves();
+        let pane_count = pane_container_ids
             .iter()
-            .filter_map(|pane_id| workspace.panes.get(pane_id))
+            .filter_map(|pane_container_id| workspace.pane_containers.get(pane_container_id))
+            .flat_map(|pane_container| pane_container.tabs.values())
+            .map(|pane_tab| pane_tab.layout.leaves().len())
+            .sum();
+        let surface_count = pane_container_ids
+            .iter()
+            .filter_map(|pane_container_id| workspace.pane_containers.get(pane_container_id))
+            .flat_map(|pane_container| pane_container.tabs.values())
+            .flat_map(|pane_tab| pane_tab.layout.leaves())
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
             .map(|pane| pane.surfaces.len())
             .sum();
         let title = window_primary_title(workspace, window);
@@ -1741,13 +2098,13 @@ impl TaskersCore {
         node: &taskers_domain::LayoutNode,
     ) -> LayoutNodeSnapshot {
         match node {
-            taskers_domain::LayoutNode::Leaf { pane_id } => LayoutNodeSnapshot::Pane(
+            taskers_domain::LayoutNode::Leaf { leaf_id } => LayoutNodeSnapshot::Pane(
                 self.pane_snapshot(
                     workspace,
                     workspace
-                        .panes
-                        .get(pane_id)
-                        .expect("layout leaf should reference a pane"),
+                        .pane_containers
+                        .get(leaf_id)
+                        .expect("layout leaf should reference a pane container"),
                 ),
             ),
             taskers_domain::LayoutNode::Split {
@@ -1767,8 +2124,122 @@ impl TaskersCore {
     fn pane_snapshot(
         &self,
         workspace: &Workspace,
-        pane: &taskers_domain::PaneRecord,
+        pane_container: &taskers_domain::PaneContainerRecord,
     ) -> PaneSnapshot {
+        let active_pane_tab = pane_container
+            .active_tab_record()
+            .expect("pane container should have an active pane tab");
+        let active_pane = workspace
+            .panes
+            .get(&active_pane_tab.active_pane)
+            .expect("active pane tab should reference a pane");
+        let active_live_pane = self.live_pane_snapshot(workspace, active_pane);
+        let pane_tabs = pane_container
+            .tabs
+            .values()
+            .map(|pane_tab| self.pane_tab_snapshot(workspace, pane_tab, pane_container.active_tab))
+            .collect::<Vec<_>>();
+        let is_active = workspace.active_pane == active_pane.id;
+        let has_unread = pane_container
+            .tabs
+            .values()
+            .flat_map(|pane_tab| pane_tab.layout.leaves())
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .map(taskers_domain::PaneRecord::highest_attention)
+            .max_by_key(|attention| attention.rank())
+            .unwrap_or(taskers_domain::AttentionState::Normal)
+            != taskers_domain::AttentionState::Normal;
+        let explicit_flash_token = pane_container
+            .tabs
+            .values()
+            .flat_map(|pane_tab| pane_tab.layout.leaves())
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .flat_map(|pane| pane.surfaces.values())
+            .filter_map(|surface| workspace.surface_flash_tokens.get(&surface.id))
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let focus_flash_token = if is_active && has_unread {
+            self.revision
+        } else {
+            0
+        };
+        let flash_token = focus_flash_token.max(explicit_flash_token);
+        PaneSnapshot {
+            id: active_pane.id,
+            pane_container_id: pane_container.id,
+            active: is_active,
+            attention: pane_container_attention(workspace, pane_container).into(),
+            notification_ring: pane_container_notification_ring(workspace, pane_container),
+            active_pane_tab: pane_container.active_tab,
+            active_surface: active_live_pane.active_surface,
+            runtime: active_live_pane.runtime.clone(),
+            surfaces: active_live_pane.surfaces.clone(),
+            pane_tabs,
+            layout: self.pane_tab_layout_snapshot(workspace, &active_pane_tab.layout),
+            focus_flash_token: flash_token,
+        }
+    }
+
+    fn pane_tab_snapshot(
+        &self,
+        workspace: &Workspace,
+        pane_tab: &taskers_domain::PaneTabRecord,
+        active_pane_tab_id: PaneTabId,
+    ) -> PaneTabSnapshot {
+        let now = OffsetDateTime::now_utc();
+        let pane_ids = pane_tab.layout.leaves();
+        let pane_count = pane_ids.len();
+        let surface_count = pane_ids
+            .iter()
+            .filter_map(|pane_id| workspace.panes.get(pane_id))
+            .map(|pane| pane.surfaces.len())
+            .sum();
+        PaneTabSnapshot {
+            id: pane_tab.id,
+            active: pane_tab.id == active_pane_tab_id,
+            attention: pane_tab_attention(workspace, pane_tab).into(),
+            runtime: pane_tab_runtime_identity(workspace, pane_tab, now),
+            title: pane_tab_primary_title(workspace, pane_tab),
+            pane_count,
+            surface_count,
+        }
+    }
+
+    fn pane_tab_layout_snapshot(
+        &self,
+        workspace: &Workspace,
+        node: &taskers_domain::PaneTabLayoutNode,
+    ) -> PaneTabLayoutSnapshot {
+        match node {
+            taskers_domain::PaneTabLayoutNode::Leaf { leaf_id } => PaneTabLayoutSnapshot::Pane(
+                self.live_pane_snapshot(
+                    workspace,
+                    workspace
+                        .panes
+                        .get(leaf_id)
+                        .expect("pane tab leaf should reference a pane"),
+                ),
+            ),
+            taskers_domain::PaneTabLayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => PaneTabLayoutSnapshot::Split {
+                axis: SplitAxis::from_domain(*axis),
+                ratio: f32::from(*ratio) / 1000.0,
+                first: Box::new(self.pane_tab_layout_snapshot(workspace, first)),
+                second: Box::new(self.pane_tab_layout_snapshot(workspace, second)),
+            },
+        }
+    }
+
+    fn live_pane_snapshot(
+        &self,
+        workspace: &Workspace,
+        pane: &taskers_domain::PaneRecord,
+    ) -> LivePaneSnapshot {
         let now = OffsetDateTime::now_utc();
         let is_active = workspace.active_pane == pane.id;
         let has_unread = pane.highest_attention() != taskers_domain::AttentionState::Normal;
@@ -1796,6 +2267,7 @@ impl TaskersCore {
                 activity_label: surface_activity_label(surface, now),
                 status_label: surface_status_label(surface, now),
                 url: normalized_surface_url(surface),
+                browser_profile_mode: surface.metadata.browser_profile_mode,
                 cwd: normalized_cwd(&surface.metadata),
                 attention: surface.attention.into(),
                 notification_ring: surface_notification_ring(surface),
@@ -1807,7 +2279,7 @@ impl TaskersCore {
                 }),
             })
             .collect::<Vec<_>>();
-        PaneSnapshot {
+        LivePaneSnapshot {
             id: pane.id,
             active: is_active,
             attention: pane.highest_attention().into(),
@@ -1835,6 +2307,7 @@ impl TaskersCore {
             surface_id: surface.id,
             title: display_surface_title(surface),
             url: normalized_surface_url(surface).unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
+            profile_mode: surface.metadata.browser_profile_mode,
             can_go_back: self
                 .browser_navigation
                 .get(&surface.id)
@@ -1863,7 +2336,8 @@ impl TaskersCore {
                     }
                     let descriptor = fallback_surface_descriptor(surface);
                     let mount = mount_spec_from_descriptor(surface, descriptor);
-                    let SurfaceMountSpec::Browser(BrowserMountSpec { url }) = mount else {
+                    let SurfaceMountSpec::Browser(BrowserMountSpec { url, profile_mode }) = mount
+                    else {
                         continue;
                     };
                     catalog.push(BrowserSurfaceCatalogEntry {
@@ -1871,6 +2345,7 @@ impl TaskersCore {
                         pane_id: pane.id,
                         surface_id: surface.id,
                         url,
+                        profile_mode,
                     });
                 }
             }
@@ -1937,9 +2412,62 @@ impl TaskersCore {
         frame: Frame,
     ) -> Vec<PortalSurfacePlan> {
         match node {
-            taskers_domain::LayoutNode::Leaf { pane_id } => workspace
+            taskers_domain::LayoutNode::Leaf { leaf_id } => workspace
+                .pane_containers
+                .get(leaf_id)
+                .and_then(|pane_container| pane_container.active_tab_record())
+                .map(|pane_tab| {
+                    self.collect_pane_tab_surface_plans(
+                        workspace_id,
+                        workspace,
+                        &pane_tab.layout,
+                        pane_container_content_frame(frame, self.metrics),
+                    )
+                })
+                .unwrap_or_default(),
+            taskers_domain::LayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let axis = SplitAxis::from_domain(*axis);
+                let (first_frame, second_frame) =
+                    split_frame(frame, axis, *ratio, self.metrics.split_gap);
+                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                    let active_pane = workspace.active_pane;
+                    let render_first = layout_node_contains_pane(workspace, first, active_pane)
+                        || !layout_node_contains_pane(workspace, second, active_pane);
+                    return if render_first {
+                        self.collect_surface_plans(workspace_id, workspace, first, frame)
+                    } else {
+                        self.collect_surface_plans(workspace_id, workspace, second, frame)
+                    };
+                }
+                let mut plans =
+                    self.collect_surface_plans(workspace_id, workspace, first, first_frame);
+                plans.extend(self.collect_surface_plans(
+                    workspace_id,
+                    workspace,
+                    second,
+                    second_frame,
+                ));
+                plans
+            }
+        }
+    }
+
+    fn collect_pane_tab_surface_plans(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace: &Workspace,
+        node: &PaneTabLayoutNode,
+        frame: Frame,
+    ) -> Vec<PortalSurfacePlan> {
+        match node {
+            PaneTabLayoutNode::Leaf { leaf_id } => workspace
                 .panes
-                .get(pane_id)
+                .get(leaf_id)
                 .and_then(|pane| {
                     let active_surface = pane.active_surface()?;
                     Some(PortalSurfacePlan {
@@ -1963,21 +2491,31 @@ impl TaskersCore {
                 })
                 .into_iter()
                 .collect(),
-            taskers_domain::LayoutNode::Split {
+            PaneTabLayoutNode::Split {
                 axis,
                 ratio,
                 first,
                 second,
             } => {
-                let (first_frame, second_frame) = split_frame(
-                    frame,
-                    SplitAxis::from_domain(*axis),
-                    *ratio,
-                    self.metrics.split_gap,
+                let axis = SplitAxis::from_domain(*axis);
+                let (first_frame, second_frame) =
+                    split_frame(frame, axis, *ratio, self.metrics.split_gap);
+                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                    let active_pane = workspace.active_pane;
+                    let render_first = first.contains(active_pane) || !second.contains(active_pane);
+                    return if render_first {
+                        self.collect_pane_tab_surface_plans(workspace_id, workspace, first, frame)
+                    } else {
+                        self.collect_pane_tab_surface_plans(workspace_id, workspace, second, frame)
+                    };
+                }
+                let mut plans = self.collect_pane_tab_surface_plans(
+                    workspace_id,
+                    workspace,
+                    first,
+                    first_frame,
                 );
-                let mut plans =
-                    self.collect_surface_plans(workspace_id, workspace, first, first_frame);
-                plans.extend(self.collect_surface_plans(
+                plans.extend(self.collect_pane_tab_surface_plans(
                     workspace_id,
                     workspace,
                     second,
@@ -1986,6 +2524,336 @@ impl TaskersCore {
                 plans
             }
         }
+    }
+
+    fn resize_handles_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace: &Workspace,
+        window_frames: &BTreeMap<WorkspaceWindowId, (WorkspaceColumnId, Frame)>,
+    ) -> Vec<ResizeHandleSnapshot> {
+        let mut handles = Vec::new();
+        let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
+        let column_widths = ordered_columns
+            .iter()
+            .filter_map(|column| {
+                column.window_order.iter().find_map(|window_id| {
+                    window_frames
+                        .get(window_id)
+                        .map(|(_, frame)| (column.id, frame.width))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for (column_index, column) in ordered_columns.iter().enumerate() {
+            let window_ids = column
+                .window_order
+                .iter()
+                .copied()
+                .filter(|window_id| workspace.windows.contains_key(window_id))
+                .collect::<Vec<_>>();
+            let window_heights = window_ids
+                .iter()
+                .filter_map(|window_id| {
+                    window_frames
+                        .get(window_id)
+                        .map(|(_, frame)| (*window_id, frame.height))
+                })
+                .collect::<Vec<_>>();
+            let has_right_neighbor = column_index + 1 < ordered_columns.len();
+
+            for (window_index, window_id) in window_ids.iter().enumerate() {
+                let Some(window) = workspace.windows.get(window_id) else {
+                    continue;
+                };
+                let Some((_, frame)) = window_frames.get(window_id) else {
+                    continue;
+                };
+                let has_bottom_neighbor = window_index + 1 < window_ids.len();
+
+                if has_right_neighbor {
+                    handles.push(ResizeHandleSnapshot {
+                        id: format!("workspace-column-edge-{}-{}", column.id, window.id),
+                        frame: workspace_window_edge_handle_frame(*frame, true),
+                        cursor: ResizeHandleCursor::EastWest,
+                        target: ResizeHandleTarget::WorkspaceColumnEdge {
+                            workspace_id,
+                            column_widths: column_widths.clone(),
+                            leading_index: column_index,
+                        },
+                    });
+                }
+
+                if has_bottom_neighbor {
+                    handles.push(ResizeHandleSnapshot {
+                        id: format!("workspace-window-bottom-{}", window.id),
+                        frame: workspace_window_edge_handle_frame(*frame, false),
+                        cursor: ResizeHandleCursor::NorthSouth,
+                        target: ResizeHandleTarget::WorkspaceWindowBottomEdge {
+                            workspace_id,
+                            window_heights: window_heights.clone(),
+                            upper_index: window_index,
+                        },
+                    });
+                }
+
+                if has_right_neighbor && has_bottom_neighbor {
+                    handles.push(ResizeHandleSnapshot {
+                        id: format!("workspace-window-corner-{}", window.id),
+                        frame: workspace_window_corner_handle_frame(*frame),
+                        cursor: ResizeHandleCursor::SouthEast,
+                        target: ResizeHandleTarget::WorkspaceWindowCorner {
+                            workspace_id,
+                            column_widths: column_widths.clone(),
+                            leading_index: column_index,
+                            window_heights: window_heights.clone(),
+                            upper_index: window_index,
+                        },
+                    });
+                }
+
+                let Some(layout) = window.active_layout() else {
+                    continue;
+                };
+                let mut path = Vec::new();
+                self.collect_window_split_resize_handles(
+                    workspace_id,
+                    workspace,
+                    window.id,
+                    layout,
+                    workspace_window_content_frame(*frame, self.metrics),
+                    window
+                        .active_pane()
+                        .expect("workspace window should have an active pane"),
+                    &mut path,
+                    &mut handles,
+                );
+            }
+        }
+
+        handles
+    }
+
+    fn collect_window_split_resize_handles(
+        &self,
+        workspace_id: WorkspaceId,
+        workspace: &Workspace,
+        workspace_window_id: WorkspaceWindowId,
+        node: &taskers_domain::LayoutNode,
+        frame: Frame,
+        active_pane: PaneId,
+        path: &mut Vec<bool>,
+        handles: &mut Vec<ResizeHandleSnapshot>,
+    ) {
+        match node {
+            taskers_domain::LayoutNode::Leaf { leaf_id } => {
+                let Some(pane_container) = workspace.pane_containers.get(leaf_id) else {
+                    return;
+                };
+                let Some(pane_tab) = pane_container.active_tab_record() else {
+                    return;
+                };
+                let mut pane_path = Vec::new();
+                self.collect_pane_split_resize_handles(
+                    workspace_id,
+                    pane_container.id,
+                    pane_tab.id,
+                    &pane_tab.layout,
+                    pane_container_content_frame(frame, self.metrics),
+                    pane_tab.active_pane,
+                    &mut pane_path,
+                    handles,
+                );
+            }
+            taskers_domain::LayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let axis = SplitAxis::from_domain(*axis);
+                let (first_frame, second_frame) =
+                    split_frame(frame, axis, *ratio, self.metrics.split_gap);
+                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                    let render_first = layout_node_contains_pane(workspace, first, active_pane)
+                        || !layout_node_contains_pane(workspace, second, active_pane);
+                    if render_first {
+                        path.push(false);
+                        self.collect_window_split_resize_handles(
+                            workspace_id,
+                            workspace,
+                            workspace_window_id,
+                            first,
+                            frame,
+                            active_pane,
+                            path,
+                            handles,
+                        );
+                        path.pop();
+                    } else {
+                        path.push(true);
+                        self.collect_window_split_resize_handles(
+                            workspace_id,
+                            workspace,
+                            workspace_window_id,
+                            second,
+                            frame,
+                            active_pane,
+                            path,
+                            handles,
+                        );
+                        path.pop();
+                    }
+                    return;
+                }
+
+                handles.push(ResizeHandleSnapshot {
+                    id: format!(
+                        "workspace-window-split-{}-{}",
+                        workspace_window_id,
+                        resize_path_id(path)
+                    ),
+                    frame: split_resize_handle_frame(frame, axis, *ratio, self.metrics.split_gap),
+                    cursor: split_resize_cursor(axis),
+                    target: ResizeHandleTarget::WorkspaceWindowSplit {
+                        workspace_id,
+                        workspace_window_id,
+                        path: path.clone(),
+                        axis,
+                        parent_frame: frame,
+                        initial_ratio: *ratio,
+                    },
+                });
+
+                path.push(false);
+                self.collect_window_split_resize_handles(
+                    workspace_id,
+                    workspace,
+                    workspace_window_id,
+                    first,
+                    first_frame,
+                    active_pane,
+                    path,
+                    handles,
+                );
+                path.pop();
+
+                path.push(true);
+                self.collect_window_split_resize_handles(
+                    workspace_id,
+                    workspace,
+                    workspace_window_id,
+                    second,
+                    second_frame,
+                    active_pane,
+                    path,
+                    handles,
+                );
+                path.pop();
+            }
+        }
+    }
+
+    fn collect_pane_split_resize_handles(
+        &self,
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        node: &PaneTabLayoutNode,
+        frame: Frame,
+        active_pane: PaneId,
+        path: &mut Vec<bool>,
+        handles: &mut Vec<ResizeHandleSnapshot>,
+    ) {
+        let PaneTabLayoutNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = node
+        else {
+            return;
+        };
+
+        let axis = SplitAxis::from_domain(*axis);
+        let (first_frame, second_frame) = split_frame(frame, axis, *ratio, self.metrics.split_gap);
+        if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+            let render_first = first.contains(active_pane) || !second.contains(active_pane);
+            if render_first {
+                path.push(false);
+                self.collect_pane_split_resize_handles(
+                    workspace_id,
+                    pane_container_id,
+                    pane_tab_id,
+                    first,
+                    frame,
+                    active_pane,
+                    path,
+                    handles,
+                );
+                path.pop();
+            } else {
+                path.push(true);
+                self.collect_pane_split_resize_handles(
+                    workspace_id,
+                    pane_container_id,
+                    pane_tab_id,
+                    second,
+                    frame,
+                    active_pane,
+                    path,
+                    handles,
+                );
+                path.pop();
+            }
+            return;
+        }
+
+        handles.push(ResizeHandleSnapshot {
+            id: format!(
+                "pane-tab-split-{}-{}-{}",
+                pane_container_id,
+                pane_tab_id,
+                resize_path_id(path)
+            ),
+            frame: split_resize_handle_frame(frame, axis, *ratio, self.metrics.split_gap),
+            cursor: split_resize_cursor(axis),
+            target: ResizeHandleTarget::PaneTabSplit {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path: path.clone(),
+                axis,
+                parent_frame: frame,
+                initial_ratio: *ratio,
+            },
+        });
+
+        path.push(false);
+        self.collect_pane_split_resize_handles(
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            first,
+            first_frame,
+            active_pane,
+            path,
+            handles,
+        );
+        path.pop();
+
+        path.push(true);
+        self.collect_pane_split_resize_handles(
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            second,
+            second_frame,
+            active_pane,
+            path,
+            handles,
+        );
+        path.pop();
     }
 
     fn mount_spec_for_active_surface(
@@ -2023,6 +2891,7 @@ impl TaskersCore {
                 surface_id,
             } => {
                 self.browser_navigation.remove(&surface_id);
+                self.clear_vcs_surface_target(surface_id);
                 self.close_surface_by_id(pane_id, surface_id)
             }
             HostEvent::SurfaceTitleChanged { surface_id, title } => self.update_surface_metadata(
@@ -2073,11 +2942,13 @@ impl TaskersCore {
                 if self.ui.section == section {
                     return false;
                 }
+                self.ui.resize_preview = None;
                 self.ui.section = section;
                 self.bump_local_revision();
                 true
             }
             ShellAction::ToggleOverview => {
+                self.ui.resize_preview = None;
                 self.ui.overview_mode = !self.ui.overview_mode;
                 self.bump_local_revision();
                 true
@@ -2133,19 +3004,48 @@ impl TaskersCore {
             ShellAction::CloseWorkspaceWindowTab { window_id, tab_id } => {
                 self.close_workspace_window_tab(window_id, tab_id)
             }
+            ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind,
+            } => self.create_pane_tab(pane_container_id, kind),
+            ShellAction::FocusPaneTab {
+                pane_container_id,
+                pane_tab_id,
+            } => self.focus_pane_tab(pane_container_id, pane_tab_id),
+            ShellAction::MovePaneTab {
+                pane_container_id,
+                pane_tab_id,
+                target_index,
+            } => self.move_pane_tab(pane_container_id, pane_tab_id, target_index),
+            ShellAction::ClosePaneTab {
+                pane_container_id,
+                pane_tab_id,
+            } => self.close_pane_tab(pane_container_id, pane_tab_id),
             ShellAction::ScrollViewport { dx, dy } => self.scroll_viewport_by(dx, dy),
-            ShellAction::SplitBrowser { pane_id } => {
-                self.split_with_kind_axis(pane_id, PaneKind::Browser, DomainSplitAxis::Horizontal)
-            }
-            ShellAction::SplitTerminal { pane_id } => {
-                self.split_with_kind_axis(pane_id, PaneKind::Terminal, DomainSplitAxis::Horizontal)
-            }
-            ShellAction::AddBrowserSurface { pane_id } => {
-                self.add_surface_to_pane(pane_id, PaneKind::Browser)
-            }
-            ShellAction::AddTerminalSurface { pane_id } => {
-                self.add_surface_to_pane(pane_id, PaneKind::Terminal)
-            }
+            ShellAction::SplitBrowser {
+                pane_id,
+                profile_mode,
+            } => self.split_with_kind_axis(
+                pane_id,
+                PaneKind::Browser,
+                DomainSplitAxis::Horizontal,
+                profile_mode,
+            ),
+            ShellAction::SplitTerminal { pane_id } => self.split_with_kind_axis(
+                pane_id,
+                PaneKind::Terminal,
+                DomainSplitAxis::Horizontal,
+                BrowserProfileMode::PersistentDefault,
+            ),
+            ShellAction::AddBrowserSurface {
+                pane_id,
+                profile_mode,
+            } => self.add_surface_to_pane(pane_id, PaneKind::Browser, profile_mode),
+            ShellAction::AddTerminalSurface { pane_id } => self.add_surface_to_pane(
+                pane_id,
+                PaneKind::Terminal,
+                BrowserProfileMode::PersistentDefault,
+            ),
             ShellAction::FocusPane { pane_id } => self.focus_pane_by_id(pane_id),
             ShellAction::FocusSurface {
                 pane_id,
@@ -2186,6 +3086,9 @@ impl TaskersCore {
             ShellAction::PreviewSurfaceDragWorkspace { workspace_id } => {
                 self.preview_surface_drag_workspace(workspace_id)
             }
+            ShellAction::PreviewResize { preview } => self.preview_resize(preview),
+            ShellAction::CommitResizePreview => self.commit_resize_preview(),
+            ShellAction::CancelResizePreview => self.cancel_resize_preview(),
             ShellAction::CancelSurfaceDrag => self.clear_surface_drag(true),
             ShellAction::EndDrag => self.clear_surface_drag(false),
             ShellAction::NavigateBrowser { surface_id, url } => {
@@ -2202,6 +3105,9 @@ impl TaskersCore {
             }
             ShellAction::BrowserReload { surface_id } => {
                 self.queue_host_command(HostCommand::BrowserReload { surface_id })
+            }
+            ShellAction::ClearBrowserData { surface_id } => {
+                self.queue_host_command(HostCommand::BrowserClearData { surface_id })
             }
             ShellAction::ToggleBrowserDevtools { surface_id } => {
                 self.queue_host_command(HostCommand::BrowserToggleDevtools { surface_id })
@@ -2227,6 +3133,10 @@ impl TaskersCore {
                 pane_id,
                 surface_id,
             } => self.dismiss_interrupted_agent_resume(workspace_id, pane_id, surface_id),
+            ShellAction::ToggleVcsPanel => self.toggle_vcs_panel(),
+            ShellAction::RefreshVcsPanel => self.refresh_vcs_panel(),
+            ShellAction::ShowVcsDiff { path } => self.show_vcs_diff(path),
+            ShellAction::RunVcsCommand { command } => self.run_vcs_command(command),
             ShellAction::SelectTheme { theme_id } => {
                 if self.ui.selected_theme_id == theme_id {
                     return false;
@@ -2296,6 +3206,7 @@ impl TaskersCore {
                     None,
                     PaneKind::Browser,
                     DomainSplitAxis::Horizontal,
+                    BrowserProfileMode::PersistentDefault,
                 ))
             }),
             ShortcutAction::FocusBrowserAddress => false,
@@ -2435,10 +3346,16 @@ impl TaskersCore {
                     None,
                     PaneKind::Terminal,
                     DomainSplitAxis::Horizontal,
+                    BrowserProfileMode::PersistentDefault,
                 ))
             }),
             ShortcutAction::SplitDown => self.run_workspace_shortcut(|core, _| {
-                Some(core.split_with_kind_axis(None, PaneKind::Terminal, DomainSplitAxis::Vertical))
+                Some(core.split_with_kind_axis(
+                    None,
+                    PaneKind::Terminal,
+                    DomainSplitAxis::Vertical,
+                    BrowserProfileMode::PersistentDefault,
+                ))
             }),
         }
     }
@@ -2455,6 +3372,10 @@ impl TaskersCore {
             self.ui.section = ShellSection::Workspace;
             self.bump_local_revision();
             changed = true;
+        }
+        changed |= self.sync_terminal_focus_for_workspace(workspace_id);
+        if self.ui.vcs_panel_visible {
+            changed |= self.refresh_vcs_panel();
         }
         changed
     }
@@ -2609,6 +3530,72 @@ impl TaskersCore {
         })
     }
 
+    fn create_pane_tab(&mut self, pane_container_id: PaneContainerId, kind: PaneKind) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = self.resolve_workspace_pane_container(&model, pane_container_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::CreatePaneTab {
+            workspace_id,
+            pane_container_id,
+            kind,
+        })
+    }
+
+    fn focus_pane_tab(
+        &mut self,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = self.resolve_workspace_pane_container(&model, pane_container_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::FocusPaneTab {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+        })
+    }
+
+    fn move_pane_tab(
+        &mut self,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_index: usize,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = self.resolve_workspace_pane_container(&model, pane_container_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::MovePaneTab {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            to_index: target_index,
+        })
+    }
+
+    fn close_pane_tab(
+        &mut self,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = self.resolve_workspace_pane_container(&model, pane_container_id)
+        else {
+            return false;
+        };
+        self.dispatch_control(ControlCommand::ClosePaneTab {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+        })
+    }
+
     fn scroll_viewport_by(&mut self, dx: i32, dy: i32) -> bool {
         let model = self.app_state.snapshot_model();
         let Some(workspace_id) = model.active_workspace_id() else {
@@ -2647,6 +3634,7 @@ impl TaskersCore {
         pane_id: Option<PaneId>,
         kind: PaneKind,
         axis: DomainSplitAxis,
+        browser_profile_mode: BrowserProfileMode,
     ) -> bool {
         let Some((workspace_id, target_pane_id)) = self.resolve_target_pane(pane_id) else {
             return false;
@@ -2680,10 +3668,12 @@ impl TaskersCore {
             .and_then(|workspace| workspace.panes.get(&new_pane_id))
             .map(|pane| pane.active_surface);
 
+        let is_browser = matches!(kind, PaneKind::Browser);
         let created = self.dispatch_control(ControlCommand::CreateSurface {
             workspace_id,
             pane_id: new_pane_id,
             kind,
+            browser_profile_mode: is_browser.then_some(browser_profile_mode),
         });
         if !created {
             return false;
@@ -2699,14 +3689,21 @@ impl TaskersCore {
         true
     }
 
-    fn add_surface_to_pane(&mut self, pane_id: Option<PaneId>, kind: PaneKind) -> bool {
+    fn add_surface_to_pane(
+        &mut self,
+        pane_id: Option<PaneId>,
+        kind: PaneKind,
+        browser_profile_mode: BrowserProfileMode,
+    ) -> bool {
         let Some((workspace_id, target_pane_id)) = self.resolve_target_pane(pane_id) else {
             return false;
         };
+        let is_browser = matches!(kind, PaneKind::Browser);
         self.dispatch_control(ControlCommand::CreateSurface {
             workspace_id,
             pane_id: target_pane_id,
             kind,
+            browser_profile_mode: is_browser.then_some(browser_profile_mode),
         })
     }
 
@@ -2722,10 +3719,15 @@ impl TaskersCore {
                 workspace_id,
             });
         }
-        self.dispatch_control(ControlCommand::FocusPane {
+        let mut changed = self.dispatch_control(ControlCommand::FocusPane {
             workspace_id,
             pane_id,
-        })
+        });
+        changed |= self.sync_terminal_focus_for_workspace(workspace_id);
+        if self.ui.vcs_panel_visible {
+            changed |= self.refresh_vcs_panel();
+        }
+        changed
     }
 
     fn focus_surface_by_id(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
@@ -2740,11 +3742,16 @@ impl TaskersCore {
                 workspace_id,
             });
         }
-        self.dispatch_control(ControlCommand::FocusSurface {
+        let mut changed = self.dispatch_control(ControlCommand::FocusSurface {
             workspace_id,
             pane_id,
             surface_id,
-        })
+        });
+        changed |= self.record_terminal_focus(workspace_id, surface_id);
+        if self.ui.vcs_panel_visible {
+            changed |= self.refresh_vcs_panel();
+        }
+        changed
     }
 
     fn close_surface_by_id(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
@@ -2963,7 +3970,197 @@ impl TaskersCore {
     }
 
     fn update_surface_metadata(&mut self, surface_id: SurfaceId, patch: PaneMetadataPatch) -> bool {
-        self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch })
+        let mut changed =
+            self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch });
+        if self.ui.vcs_panel_visible
+            && self
+                .ui
+                .vcs_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.surface_id == surface_id)
+        {
+            changed |= self.refresh_vcs_panel();
+        }
+        changed
+    }
+
+    fn toggle_vcs_panel(&mut self) -> bool {
+        self.ui.vcs_panel_visible = !self.ui.vcs_panel_visible;
+        if !self.ui.vcs_panel_visible {
+            self.bump_local_revision();
+            return true;
+        }
+        let mut changed = self.refresh_vcs_panel();
+        if !changed {
+            self.bump_local_revision();
+            changed = true;
+        }
+        changed
+    }
+
+    fn refresh_vcs_panel(&mut self) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(surface_id) = self.vcs_target_surface_id(&model, workspace_id) else {
+            let changed =
+                self.ui.vcs_snapshot.take().is_some() || self.ui.vcs_error.take().is_some();
+            if changed {
+                self.bump_local_revision();
+            }
+            return changed;
+        };
+        let response = self.dispatch_control_with_response(ControlCommand::Vcs {
+            vcs_command: VcsCommand::Refresh {
+                surface_id,
+                diff_path: self.ui.vcs_diff_path.clone(),
+            },
+        });
+        self.store_vcs_response(response)
+    }
+
+    fn show_vcs_diff(&mut self, path: Option<String>) -> bool {
+        if self.ui.vcs_diff_path == path {
+            return false;
+        }
+        self.ui.vcs_diff_path = path;
+        self.refresh_vcs_panel()
+    }
+
+    fn run_vcs_command(&mut self, command: VcsCommand) -> bool {
+        let response = self.dispatch_control_with_response(ControlCommand::Vcs {
+            vcs_command: command,
+        });
+        self.store_vcs_response(response)
+    }
+
+    fn store_vcs_response(&mut self, response: Option<ControlResponse>) -> bool {
+        let previous_snapshot = self.ui.vcs_snapshot.clone();
+        let previous_error = self.ui.vcs_error.clone();
+        match response {
+            Some(ControlResponse::Vcs { result }) => self.apply_vcs_result(result),
+            Some(_) => {
+                self.ui.vcs_error = Some("unexpected VCS response".into());
+            }
+            None => {
+                self.ui.vcs_error = Some("VCS request failed".into());
+            }
+        }
+        let changed =
+            self.ui.vcs_snapshot != previous_snapshot || self.ui.vcs_error != previous_error;
+        if changed {
+            self.bump_local_revision();
+        }
+        changed
+    }
+
+    fn apply_vcs_result(&mut self, result: VcsCommandResult) {
+        self.ui.vcs_error = None;
+        if let Some(snapshot) = result.snapshot {
+            self.ui.vcs_snapshot = Some(snapshot);
+        } else {
+            self.ui.vcs_snapshot = None;
+            self.ui.vcs_diff_path = None;
+        }
+        if let Some(message) = result.message {
+            self.ui.vcs_error = Some(message);
+        }
+    }
+
+    fn sync_terminal_focus_for_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let Some(surface_id) = workspace
+            .panes
+            .get(&workspace.active_pane)
+            .and_then(|pane| pane.active_surface())
+            .filter(|surface| surface.kind == PaneKind::Terminal)
+            .map(|surface| surface.id)
+        else {
+            return false;
+        };
+        self.record_terminal_focus(workspace_id, surface_id)
+    }
+
+    fn record_terminal_focus(&mut self, workspace_id: WorkspaceId, surface_id: SurfaceId) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let is_terminal_surface = workspace
+            .panes
+            .values()
+            .flat_map(|pane| pane.surfaces.values())
+            .any(|surface| surface.id == surface_id && surface.kind == PaneKind::Terminal);
+        if !is_terminal_surface {
+            return false;
+        }
+        let previous = self
+            .ui
+            .last_terminal_surface_by_workspace
+            .insert(workspace_id, surface_id);
+        if previous == Some(surface_id) {
+            return false;
+        }
+        if self.app_state.snapshot_model().active_workspace_id() == Some(workspace_id) {
+            self.ui.vcs_diff_path = None;
+        }
+        true
+    }
+
+    fn clear_vcs_surface_target(&mut self, surface_id: SurfaceId) {
+        self.ui
+            .last_terminal_surface_by_workspace
+            .retain(|_, tracked_surface_id| *tracked_surface_id != surface_id);
+        if self
+            .ui
+            .vcs_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.surface_id == surface_id)
+        {
+            self.ui.vcs_snapshot = None;
+            self.ui.vcs_diff_path = None;
+        }
+    }
+
+    fn vcs_target_surface_id(
+        &self,
+        model: &AppModel,
+        workspace_id: WorkspaceId,
+    ) -> Option<SurfaceId> {
+        let workspace = model.workspaces.get(&workspace_id)?;
+        if let Some(surface_id) = self
+            .ui
+            .last_terminal_surface_by_workspace
+            .get(&workspace_id)
+            .copied()
+            .filter(|surface_id| {
+                workspace
+                    .panes
+                    .values()
+                    .flat_map(|pane| pane.surfaces.values())
+                    .any(|surface| surface.id == *surface_id && surface.kind == PaneKind::Terminal)
+            })
+        {
+            return Some(surface_id);
+        }
+        workspace
+            .panes
+            .get(&workspace.active_pane)
+            .and_then(|pane| pane.active_surface())
+            .filter(|surface| surface.kind == PaneKind::Terminal)
+            .map(|surface| surface.id)
+            .or_else(|| {
+                workspace
+                    .panes
+                    .values()
+                    .flat_map(|pane| pane.surfaces.values())
+                    .find(|surface| surface.kind == PaneKind::Terminal)
+                    .map(|surface| surface.id)
+            })
     }
 
     fn move_active_workspace_window(&mut self, direction: Direction) -> bool {
@@ -3301,6 +4498,22 @@ impl TaskersCore {
             })
     }
 
+    fn resolve_workspace_pane_container(
+        &self,
+        model: &AppModel,
+        pane_container_id: PaneContainerId,
+    ) -> Option<WorkspaceId> {
+        model
+            .workspaces
+            .iter()
+            .find_map(|(workspace_id, workspace)| {
+                workspace
+                    .pane_containers
+                    .contains_key(&pane_container_id)
+                    .then_some(*workspace_id)
+            })
+    }
+
     fn resolve_surface_location(
         &self,
         model: &AppModel,
@@ -3358,6 +4571,138 @@ impl TaskersCore {
     fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         self.host_commands.drain(..).collect()
     }
+}
+
+fn apply_resize_preview_to_model(model: &mut AppModel, preview: &ResizePreview) {
+    match preview {
+        ResizePreview::WorkspaceColumnWidths {
+            workspace_id,
+            widths,
+        } => {
+            for (workspace_column_id, width) in widths {
+                let _ =
+                    model.set_workspace_column_width(*workspace_id, *workspace_column_id, *width);
+            }
+        }
+        ResizePreview::WorkspaceWindowHeights {
+            workspace_id,
+            heights,
+        } => {
+            for (workspace_window_id, height) in heights {
+                let _ =
+                    model.set_workspace_window_height(*workspace_id, *workspace_window_id, *height);
+            }
+        }
+        ResizePreview::WorkspaceWindowCorner {
+            workspace_id,
+            column_widths,
+            window_heights,
+        } => {
+            for (workspace_column_id, width) in column_widths {
+                let _ =
+                    model.set_workspace_column_width(*workspace_id, *workspace_column_id, *width);
+            }
+            for (workspace_window_id, height) in window_heights {
+                let _ =
+                    model.set_workspace_window_height(*workspace_id, *workspace_window_id, *height);
+            }
+        }
+        ResizePreview::WorkspaceWindowSplitRatio {
+            workspace_id,
+            workspace_window_id,
+            path,
+            ratio,
+        } => {
+            let _ = model.set_window_split_ratio(*workspace_id, *workspace_window_id, path, *ratio);
+        }
+        ResizePreview::PaneTabSplitRatio {
+            workspace_id,
+            pane_container_id,
+            pane_tab_id,
+            path,
+            ratio,
+        } => {
+            let _ = model.set_pane_tab_split_ratio(
+                *workspace_id,
+                *pane_container_id,
+                *pane_tab_id,
+                path,
+                *ratio,
+            );
+        }
+    }
+}
+
+fn workspace_window_edge_handle_frame(frame: Frame, right_edge: bool) -> Frame {
+    if right_edge {
+        let center_x = frame.right() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+        Frame::new(
+            center_x - RESIZE_HANDLE_THICKNESS_PX / 2,
+            frame.y,
+            RESIZE_HANDLE_THICKNESS_PX,
+            frame.height.max(1),
+        )
+    } else {
+        let center_y = frame.bottom() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+        Frame::new(
+            frame.x,
+            center_y - RESIZE_HANDLE_THICKNESS_PX / 2,
+            frame.width.max(1),
+            RESIZE_HANDLE_THICKNESS_PX,
+        )
+    }
+}
+
+fn workspace_window_corner_handle_frame(frame: Frame) -> Frame {
+    let center_x = frame.right() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+    let center_y = frame.bottom() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+    Frame::new(
+        center_x - RESIZE_CORNER_SIZE_PX / 2,
+        center_y - RESIZE_CORNER_SIZE_PX / 2,
+        RESIZE_CORNER_SIZE_PX,
+        RESIZE_CORNER_SIZE_PX,
+    )
+}
+
+fn split_resize_handle_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> Frame {
+    let (first_frame, _) = split_frame(frame, axis, ratio, gap);
+    match axis {
+        SplitAxis::Horizontal => {
+            let center_x = first_frame.right() + gap / 2;
+            Frame::new(
+                center_x - RESIZE_HANDLE_THICKNESS_PX / 2,
+                frame.y,
+                RESIZE_HANDLE_THICKNESS_PX,
+                frame.height.max(1),
+            )
+        }
+        SplitAxis::Vertical => {
+            let center_y = first_frame.bottom() + gap / 2;
+            Frame::new(
+                frame.x,
+                center_y - RESIZE_HANDLE_THICKNESS_PX / 2,
+                frame.width.max(1),
+                RESIZE_HANDLE_THICKNESS_PX,
+            )
+        }
+    }
+}
+
+fn split_resize_cursor(axis: SplitAxis) -> ResizeHandleCursor {
+    match axis {
+        SplitAxis::Horizontal => ResizeHandleCursor::EastWest,
+        SplitAxis::Vertical => ResizeHandleCursor::NorthSouth,
+    }
+}
+
+fn resize_path_id(path: &[bool]) -> String {
+    if path.is_empty() {
+        return "root".into();
+    }
+
+    path.iter()
+        .map(|segment| if *segment { '1' } else { '0' })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -3443,7 +4788,10 @@ impl SharedCore {
     }
 
     pub fn split_with_browser(&self) {
-        self.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        self.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
     }
 
     pub fn split_with_terminal(&self) {
@@ -3889,6 +5237,34 @@ fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, F
     }
 }
 
+fn should_collapse_render_split(frame: Frame, axis: SplitAxis, gap: i32) -> bool {
+    match axis {
+        SplitAxis::Horizontal => {
+            frame.width < (MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX * 2 + gap.max(0))
+        }
+        SplitAxis::Vertical => {
+            frame.height < (MIN_RENDERED_NATIVE_SURFACE_HEIGHT_PX * 2 + gap.max(0))
+        }
+    }
+}
+
+fn layout_node_contains_pane(
+    workspace: &Workspace,
+    node: &taskers_domain::LayoutNode,
+    pane_id: PaneId,
+) -> bool {
+    match node {
+        taskers_domain::LayoutNode::Leaf { leaf_id } => workspace
+            .pane_containers
+            .get(leaf_id)
+            .is_some_and(|container| container.contains_pane(pane_id)),
+        taskers_domain::LayoutNode::Split { first, second, .. } => {
+            layout_node_contains_pane(workspace, first, pane_id)
+                || layout_node_contains_pane(workspace, second, pane_id)
+        }
+    }
+}
+
 fn pane_body_frame(
     frame: Frame,
     metrics: LayoutMetrics,
@@ -3911,7 +5287,13 @@ fn pane_body_frame(
     frame
         .inset(metrics.pane_border_width)
         .inset_horizontal(terminal_gutter_x)
-        .inset_top(metrics.pane_header_height + tab_strip_height + browser_toolbar_height)
+        .inset_top(tab_strip_height + browser_toolbar_height)
+}
+
+fn pane_container_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
+    frame
+        .inset(metrics.pane_border_width)
+        .inset_top(metrics.pane_header_height)
 }
 
 fn workspace_window_content_frame(frame: Frame, metrics: LayoutMetrics) -> Frame {
@@ -4168,11 +5550,19 @@ fn workspace_window_tab_snapshot(
     active_tab_id: WorkspaceWindowTabId,
     now: OffsetDateTime,
 ) -> WorkspaceWindowTabSnapshot {
-    let pane_ids = tab.layout.leaves();
-    let pane_count = pane_ids.len();
-    let surface_count = pane_ids
+    let pane_container_ids = tab.layout.leaves();
+    let pane_count = pane_container_ids
         .iter()
-        .filter_map(|pane_id| workspace.panes.get(pane_id))
+        .filter_map(|pane_container_id| workspace.pane_containers.get(pane_container_id))
+        .flat_map(|pane_container| pane_container.tabs.values())
+        .map(|pane_tab| pane_tab.layout.leaves().len())
+        .sum();
+    let surface_count = pane_container_ids
+        .iter()
+        .filter_map(|pane_container_id| workspace.pane_containers.get(pane_container_id))
+        .flat_map(|pane_container| pane_container.tabs.values())
+        .flat_map(|pane_tab| pane_tab.layout.leaves())
+        .filter_map(|pane_id| workspace.panes.get(&pane_id))
         .map(|pane| pane.surfaces.len())
         .sum();
     WorkspaceWindowTabSnapshot {
@@ -4193,8 +5583,8 @@ fn workspace_window_tab_attention(
     tab.layout
         .leaves()
         .into_iter()
-        .filter_map(|pane_id| workspace.panes.get(&pane_id))
-        .map(|pane| pane.highest_attention())
+        .filter_map(|pane_container_id| workspace.pane_containers.get(&pane_container_id))
+        .map(|pane_container| pane_container_attention(workspace, pane_container))
         .max_by_key(|attention| attention.rank())
         .unwrap_or(taskers_domain::AttentionState::Normal)
         .into()
@@ -4209,17 +5599,26 @@ fn workspace_window_tab_runtime_identity(
         tab.layout
             .leaves()
             .into_iter()
-            .filter_map(|pane_id| workspace.panes.get(&pane_id))
-            .map(|pane| (pane_runtime_identity(pane, now), pane.id == tab.active_pane)),
+            .filter_map(|pane_container_id| workspace.pane_containers.get(&pane_container_id))
+            .map(|pane_container| {
+                (
+                    pane_container_runtime_identity(workspace, pane_container, now),
+                    pane_container
+                        .active_pane()
+                        .is_some_and(|pane_id| pane_id == tab.active_pane),
+                )
+            }),
         fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
     )
 }
 
 fn window_tab_primary_title(workspace: &Workspace, tab: &WorkspaceWindowTabRecord) -> String {
     workspace
-        .panes
-        .get(&tab.active_pane)
-        .and_then(|pane| pane.active_surface())
+        .pane_containers
+        .get(&tab.active_container)
+        .and_then(|pane_container| pane_container.active_pane())
+        .and_then(|pane_id| workspace.panes.get(&pane_id))
+        .and_then(taskers_domain::PaneRecord::active_surface)
         .map(display_surface_title)
         .unwrap_or_else(|| "Workspace window".into())
 }
@@ -4286,6 +5685,91 @@ fn surface_notification_ring(surface: &SurfaceRecord) -> Option<AttentionRingSta
 
 fn pane_notification_ring(pane: &taskers_domain::PaneRecord) -> Option<AttentionRingState> {
     dominant_attention_ring(pane.surfaces.values().filter_map(surface_notification_ring))
+}
+
+fn pane_tab_attention(
+    workspace: &Workspace,
+    pane_tab: &taskers_domain::PaneTabRecord,
+) -> taskers_domain::AttentionState {
+    pane_tab
+        .layout
+        .leaves()
+        .into_iter()
+        .filter_map(|pane_id| workspace.panes.get(&pane_id))
+        .map(taskers_domain::PaneRecord::highest_attention)
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(taskers_domain::AttentionState::Normal)
+}
+
+fn pane_tab_runtime_identity(
+    workspace: &Workspace,
+    pane_tab: &taskers_domain::PaneTabRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    dominant_runtime_identity(
+        pane_tab
+            .layout
+            .leaves()
+            .into_iter()
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .map(|pane| {
+                (
+                    pane_runtime_identity(pane, now),
+                    pane.id == pane_tab.active_pane,
+                )
+            }),
+        fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle),
+    )
+}
+
+fn pane_tab_primary_title(
+    workspace: &Workspace,
+    pane_tab: &taskers_domain::PaneTabRecord,
+) -> String {
+    workspace
+        .panes
+        .get(&pane_tab.active_pane)
+        .and_then(taskers_domain::PaneRecord::active_surface)
+        .map(display_surface_title)
+        .unwrap_or_else(|| "Pane tab".into())
+}
+
+fn pane_container_attention(
+    workspace: &Workspace,
+    pane_container: &taskers_domain::PaneContainerRecord,
+) -> taskers_domain::AttentionState {
+    pane_container
+        .tabs
+        .values()
+        .map(|pane_tab| pane_tab_attention(workspace, pane_tab))
+        .max_by_key(|attention| attention.rank())
+        .unwrap_or(taskers_domain::AttentionState::Normal)
+}
+
+fn pane_container_notification_ring(
+    workspace: &Workspace,
+    pane_container: &taskers_domain::PaneContainerRecord,
+) -> Option<AttentionRingState> {
+    dominant_attention_ring(
+        pane_container
+            .tabs
+            .values()
+            .flat_map(|pane_tab| pane_tab.layout.leaves())
+            .filter_map(|pane_id| workspace.panes.get(&pane_id))
+            .filter_map(pane_notification_ring),
+    )
+}
+
+fn pane_container_runtime_identity(
+    workspace: &Workspace,
+    pane_container: &taskers_domain::PaneContainerRecord,
+    now: OffsetDateTime,
+) -> RuntimeIdentitySnapshot {
+    pane_container
+        .active_pane()
+        .and_then(|pane_id| workspace.panes.get(&pane_id))
+        .map(|pane| pane_runtime_identity(pane, now))
+        .unwrap_or_else(|| fallback_runtime_identity("terminal", RuntimeStateSnapshot::Idle))
 }
 
 fn surface_agent_key(surface: &SurfaceRecord) -> Option<String> {
@@ -4487,7 +5971,8 @@ fn is_generic_terminal_title(title: &str) -> bool {
 }
 
 fn pane_shows_tab_strip_for_surface_count(surface_count: usize) -> bool {
-    surface_count > 1
+    let _ = surface_count;
+    true
 }
 
 fn format_relative_time(timestamp: OffsetDateTime) -> String {
@@ -4666,6 +6151,7 @@ fn fallback_surface_descriptor(surface: &SurfaceRecord) -> SurfaceDescriptor {
             .filter(|title| !title.is_empty())
             .map(str::to_string),
         url: normalized_surface_url(surface),
+        browser_profile_mode: surface.metadata.browser_profile_mode,
         command_argv: Vec::new(),
         env: BTreeMap::new(),
     }
@@ -4682,6 +6168,7 @@ fn mount_spec_from_descriptor(
                 .as_deref()
                 .map(resolved_browser_uri)
                 .unwrap_or_else(|| DEFAULT_BROWSER_HOME.into()),
+            profile_mode: descriptor.browser_profile_mode,
         }),
         PaneKind::Terminal => SurfaceMountSpec::Terminal(TerminalMountSpec {
             title: display_surface_title(surface),
@@ -4754,6 +6241,7 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::PixelSize;
     use taskers_control::ControlCommand;
     use taskers_core::AppState;
     use taskers_domain::{
@@ -4765,12 +6253,13 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, DEFAULT_BROWSER_HOME, Direction, HostCommand, HostEvent,
-        LayoutMetrics, NotificationPreferencesSnapshot, RuntimeCapability, RuntimeStatus,
-        SharedCore, ShellAction, ShellDragMode, ShellSection, SurfaceDragSessionSnapshot,
-        SurfaceMountSpec, WorkspaceDirection, default_preview_app_state,
-        default_session_path_for_preview, display_surface_title, pane_body_frame,
-        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME, Direction,
+        HostCommand, HostEvent, LayoutMetrics, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
+        NotificationPreferencesSnapshot, ResizeHandleTarget, ResizePreview, RuntimeCapability,
+        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
+        SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection, WorkspaceWindowSnapshot,
+        default_preview_app_state, default_session_path_for_preview, display_surface_title,
+        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
 
@@ -4855,6 +6344,19 @@ mod tests {
         }
     }
 
+    fn window_snapshot(
+        snapshot: &super::ShellSnapshot,
+        window_id: taskers_domain::WorkspaceWindowId,
+    ) -> &WorkspaceWindowSnapshot {
+        snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == window_id)
+            .expect("window snapshot")
+    }
+
     fn bootstrap_with_model(model: AppModel, name: &str) -> BootstrapModel {
         BootstrapModel {
             app_state: super::AppState::new(
@@ -4872,9 +6374,11 @@ mod tests {
     fn find_pane<'a>(
         node: &'a super::LayoutNodeSnapshot,
         pane_id: taskers_domain::PaneId,
-    ) -> Option<&'a super::PaneSnapshot> {
+    ) -> Option<&'a super::LivePaneSnapshot> {
         match node {
-            super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
+            super::LayoutNodeSnapshot::Pane(pane) => {
+                find_live_pane_in_layout(&pane.layout, pane_id)
+            }
             super::LayoutNodeSnapshot::Split { first, second, .. } => {
                 find_pane(first, pane_id).or_else(|| find_pane(second, pane_id))
             }
@@ -4885,10 +6389,15 @@ mod tests {
         node: &super::LayoutNodeSnapshot,
         pane_id: taskers_domain::PaneId,
         frame: super::Frame,
-        gap: i32,
+        metrics: super::LayoutMetrics,
     ) -> Option<super::Frame> {
         match node {
-            super::LayoutNodeSnapshot::Pane(pane) => (pane.id == pane_id).then_some(frame),
+            super::LayoutNodeSnapshot::Pane(pane) => find_live_pane_frame(
+                &pane.layout,
+                pane_id,
+                super::pane_container_content_frame(frame, metrics),
+                metrics.split_gap,
+            ),
             super::LayoutNodeSnapshot::Split {
                 axis,
                 ratio,
@@ -4896,9 +6405,10 @@ mod tests {
                 second,
             } => {
                 let ratio = (ratio.clamp(0.15, 0.85) * 1000.0).round() as u16;
-                let (first_frame, second_frame) = split_frame(frame, *axis, ratio, gap);
-                find_pane_frame(first, pane_id, first_frame, gap)
-                    .or_else(|| find_pane_frame(second, pane_id, second_frame, gap))
+                let (first_frame, second_frame) =
+                    split_frame(frame, *axis, ratio, metrics.split_gap);
+                find_pane_frame(first, pane_id, first_frame, metrics)
+                    .or_else(|| find_pane_frame(second, pane_id, second_frame, metrics))
             }
         }
     }
@@ -4908,10 +6418,60 @@ mod tests {
         pane_ids: &mut Vec<taskers_domain::PaneId>,
     ) {
         match node {
-            super::LayoutNodeSnapshot::Pane(pane) => pane_ids.push(pane.id),
+            super::LayoutNodeSnapshot::Pane(pane) => {
+                collect_live_pane_ids(&pane.layout, pane_ids);
+            }
             super::LayoutNodeSnapshot::Split { first, second, .. } => {
                 collect_pane_ids(first, pane_ids);
                 collect_pane_ids(second, pane_ids);
+            }
+        }
+    }
+
+    fn find_live_pane_in_layout<'a>(
+        node: &'a super::PaneTabLayoutSnapshot,
+        pane_id: taskers_domain::PaneId,
+    ) -> Option<&'a super::LivePaneSnapshot> {
+        match node {
+            super::PaneTabLayoutSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
+            super::PaneTabLayoutSnapshot::Split { first, second, .. } => {
+                find_live_pane_in_layout(first, pane_id)
+                    .or_else(|| find_live_pane_in_layout(second, pane_id))
+            }
+        }
+    }
+
+    fn find_live_pane_frame(
+        node: &super::PaneTabLayoutSnapshot,
+        pane_id: taskers_domain::PaneId,
+        frame: super::Frame,
+        gap: i32,
+    ) -> Option<super::Frame> {
+        match node {
+            super::PaneTabLayoutSnapshot::Pane(pane) => (pane.id == pane_id).then_some(frame),
+            super::PaneTabLayoutSnapshot::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let ratio = (ratio.clamp(0.15, 0.85) * 1000.0).round() as u16;
+                let (first_frame, second_frame) = split_frame(frame, *axis, ratio, gap);
+                find_live_pane_frame(first, pane_id, first_frame, gap)
+                    .or_else(|| find_live_pane_frame(second, pane_id, second_frame, gap))
+            }
+        }
+    }
+
+    fn collect_live_pane_ids(
+        node: &super::PaneTabLayoutSnapshot,
+        pane_ids: &mut Vec<taskers_domain::PaneId>,
+    ) {
+        match node {
+            super::PaneTabLayoutSnapshot::Pane(pane) => pane_ids.push(pane.id),
+            super::PaneTabLayoutSnapshot::Split { first, second, .. } => {
+                collect_live_pane_ids(first, pane_ids);
+                collect_live_pane_ids(second, pane_ids);
             }
         }
     }
@@ -5329,12 +6889,18 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let second_pane_id = {
             let workspace = model.workspaces.get(&workspace_id).expect("workspace");
-            workspace
-                .windows
-                .get(&workspace.active_window)
-                .expect("window")
-                .active_layout()
-                .expect("layout")
+            let pane_container = workspace
+                .pane_containers
+                .values()
+                .find(|pane_container| pane_container.contains_pane(first_pane_id))
+                .expect("pane container");
+            let pane_tab = pane_container
+                .tabs
+                .values()
+                .find(|pane_tab| pane_tab.layout.contains(first_pane_id))
+                .expect("pane tab");
+            pane_tab
+                .layout
                 .leaves()
                 .into_iter()
                 .find(|pane_id| *pane_id != first_pane_id)
@@ -5657,6 +7223,279 @@ mod tests {
     }
 
     #[test]
+    fn canceling_resize_preview_restores_column_width_snapshot() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let mut widths = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, column.width))
+            .collect::<Vec<_>>();
+        let original_width = widths[0].1;
+        widths[0].1 += 180;
+        widths[1].1 -= 180;
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths,
+            },
+        });
+
+        assert_eq!(
+            core.snapshot().current_workspace.columns[0].width,
+            original_width + 180
+        );
+
+        core.dispatch_shell_action(ShellAction::CancelResizePreview);
+
+        assert_eq!(
+            core.snapshot().current_workspace.columns[0].width,
+            original_width
+        );
+    }
+
+    #[test]
+    fn committing_corner_resize_updates_model_state() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let initial_snapshot = core.snapshot();
+        let top_left_window_id = initial_snapshot.current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow {
+            window_id: top_left_window_id,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let top_left_window = window_snapshot(&snapshot, top_left_window_id);
+        let top_left_column_id = top_left_window.column_id;
+        let model_before = core.inner.lock().app_state.snapshot_model();
+        let workspace_before = model_before
+            .workspaces
+            .get(&workspace_id)
+            .expect("workspace");
+        let column_before = workspace_before
+            .columns
+            .get(&top_left_column_id)
+            .expect("column")
+            .width;
+        let mut column_widths = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, column.width))
+            .collect::<Vec<_>>();
+        let left_column_index = column_widths
+            .iter()
+            .position(|(column_id, _)| *column_id == top_left_column_id)
+            .expect("left column index");
+        column_widths[left_column_index].1 += 120;
+        column_widths[left_column_index + 1].1 -= 120;
+        let mut window_heights = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .find(|column| column.id == top_left_column_id)
+            .expect("left column")
+            .windows
+            .iter()
+            .map(|window| (window.id, window.frame.height))
+            .collect::<Vec<_>>();
+        let upper_window_index = window_heights
+            .iter()
+            .position(|(window_id, _)| *window_id == top_left_window_id)
+            .expect("upper window index");
+        window_heights[upper_window_index].1 += 80;
+        window_heights[upper_window_index + 1].1 -= 80;
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceWindowCorner {
+                workspace_id,
+                column_widths,
+                window_heights,
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        let model_after = core.inner.lock().app_state.snapshot_model();
+        let workspace_after = model_after
+            .workspaces
+            .get(&workspace_id)
+            .expect("workspace");
+        assert_eq!(
+            workspace_after
+                .columns
+                .get(&top_left_column_id)
+                .expect("column")
+                .width,
+            column_before + 120
+        );
+        assert_eq!(
+            workspace_after
+                .windows
+                .get(&top_left_window_id)
+                .expect("window")
+                .height,
+            snapshot
+                .current_workspace
+                .columns
+                .iter()
+                .find(|column| column.id == top_left_column_id)
+                .expect("left column")
+                .windows[0]
+                .frame
+                .height
+                + 80
+        );
+    }
+
+    #[test]
+    fn pane_split_resize_preview_updates_handle_ratio_and_commits() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::SplitTerminal { pane_id: None });
+
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let active_pane_id = snapshot.current_workspace.active_pane;
+        let model = core.inner.lock().app_state.snapshot_model();
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let window_id = workspace.window_for_pane(active_pane_id).expect("window");
+        let window = workspace.windows.get(&window_id).expect("window");
+        let pane_container_id = window.active_container().expect("active container");
+        let pane_tab_id = workspace
+            .pane_containers
+            .get(&pane_container_id)
+            .and_then(|pane_container| pane_container.tab_for_pane(active_pane_id))
+            .expect("pane tab");
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::PaneTabSplitRatio {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path: Vec::new(),
+                ratio: 700,
+            },
+        });
+
+        let preview_snapshot = core.snapshot();
+        let handle = preview_snapshot
+            .resize_handles
+            .iter()
+            .find(|handle| {
+                matches!(
+                    &handle.target,
+                    ResizeHandleTarget::PaneTabSplit {
+                        pane_container_id: target_container_id,
+                        pane_tab_id: target_tab_id,
+                        path,
+                        initial_ratio,
+                        ..
+                    } if *target_container_id == pane_container_id
+                        && *target_tab_id == pane_tab_id
+                        && path.is_empty()
+                        && *initial_ratio == 700
+                )
+            })
+            .expect("pane split resize handle");
+        assert!(!handle.id.is_empty());
+
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        let committed_model = core.inner.lock().app_state.snapshot_model();
+        let committed_workspace = committed_model
+            .workspaces
+            .get(&workspace_id)
+            .expect("workspace");
+        let pane_tab = committed_workspace
+            .pane_containers
+            .get(&pane_container_id)
+            .and_then(|pane_container| pane_container.tabs.get(&pane_tab_id))
+            .expect("pane tab");
+        let taskers_domain::PaneTabLayoutNode::Split { ratio, .. } = &pane_tab.layout else {
+            panic!("expected split layout");
+        };
+        assert_eq!(*ratio, 700);
+    }
+
+    #[test]
+    fn resize_handles_are_hidden_in_overview_mode() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        assert!(!core.snapshot().resize_handles.is_empty());
+
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+
+        assert!(core.snapshot().resize_handles.is_empty());
+    }
+
+    #[test]
+    fn wide_three_column_workspace_can_shrink_left_column_below_old_limit() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(2048, 900));
+        let left_window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let before = core.snapshot();
+        let workspace_id = before.current_workspace.id;
+        let left_window = window_snapshot(&before, left_window_id);
+        let before_width = left_window.frame.width;
+        let mut column_widths = before
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.id,
+                    column.windows.first().expect("column window").frame.width,
+                )
+            })
+            .collect::<Vec<_>>();
+        column_widths[1].1 += column_widths[0].1 - taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH;
+        column_widths[0].1 = taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH;
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: column_widths,
+            },
+        });
+
+        let after = core.snapshot();
+        let after_width = window_snapshot(&after, left_window_id).frame.width;
+
+        assert!(
+            after_width < before_width,
+            "expected left column to keep shrinking in a three-column layout"
+        );
+        assert!(
+            after_width < 720,
+            "expected left column to shrink below the old hard limit"
+        );
+    }
+
+    #[test]
     fn terminal_portal_frames_include_horizontal_gutter() {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
@@ -5696,7 +7535,7 @@ mod tests {
             &active_window.layout,
             workspace.active_pane,
             workspace_window_content_frame(active_window.frame, metrics),
-            metrics.split_gap,
+            metrics,
         )
         .expect("active pane frame");
         let pane_kind = match &active_plan.mount {
@@ -5745,7 +7584,7 @@ mod tests {
             &active_window.layout,
             pane_id,
             workspace_window_content_frame(active_window.frame, metrics),
-            metrics.split_gap,
+            metrics,
         )
         .expect("active pane frame");
         let pane_kind = match &active_plan.mount {
@@ -5768,19 +7607,78 @@ mod tests {
     }
 
     #[test]
+    fn pathological_horizontal_splits_collapse_to_renderable_portal_panes() {
+        let core = SharedCore::bootstrap(bootstrap());
+        for _ in 0..6 {
+            core.split_with_terminal();
+        }
+
+        let snapshot = core.snapshot();
+        let widths = snapshot
+            .portal
+            .panes
+            .iter()
+            .map(|plan| plan.pane_frame.width)
+            .collect::<Vec<_>>();
+        assert!(
+            snapshot.portal.panes.len() < snapshot.current_workspace.pane_count,
+            "expected tiny split branches to be elided from the rendered portal"
+        );
+        assert!(
+            snapshot
+                .portal
+                .panes
+                .iter()
+                .all(|plan| { plan.pane_frame.width >= MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX }),
+            "unexpected rendered pane widths: {widths:?}"
+        );
+        let active_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == snapshot.current_workspace.active_pane)
+            .expect("active pane should remain renderable");
+        assert!(active_plan.pane_frame.width >= MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX);
+    }
+
+    #[test]
     fn split_browser_creates_real_browser_pane() {
         let core = SharedCore::bootstrap(bootstrap());
         let before = core.snapshot().portal.panes.len();
 
-        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
 
         let snapshot = core.snapshot();
         assert!(snapshot.portal.panes.len() > before);
         assert!(snapshot.portal.panes.iter().any(|plan| {
             matches!(
                 &plan.mount,
-                SurfaceMountSpec::Browser(BrowserMountSpec { url })
+                SurfaceMountSpec::Browser(BrowserMountSpec { url, .. })
                     if url == DEFAULT_BROWSER_HOME
+            )
+        }));
+    }
+
+    #[test]
+    fn split_browser_preserves_requested_profile_mode() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::Ephemeral,
+        });
+
+        let snapshot = core.snapshot();
+        let browser = snapshot.browser_chrome.expect("active browser chrome");
+        assert_eq!(browser.profile_mode, BrowserProfileMode::Ephemeral);
+        assert!(snapshot.portal.panes.iter().any(|plan| {
+            matches!(
+                &plan.mount,
+                SurfaceMountSpec::Browser(BrowserMountSpec { profile_mode, .. })
+                    if *profile_mode == BrowserProfileMode::Ephemeral
             )
         }));
     }
@@ -5806,22 +7704,8 @@ mod tests {
         });
 
         let snapshot = core.snapshot();
-        let pane = match &snapshot.current_workspace.layout {
-            super::LayoutNodeSnapshot::Split { first, second, .. } => {
-                [first.as_ref(), second.as_ref()]
-                    .into_iter()
-                    .find_map(|node| match node {
-                        super::LayoutNodeSnapshot::Pane(pane) => pane
-                            .surfaces
-                            .iter()
-                            .any(|surface| surface.id == browser_surface.surface_id)
-                            .then_some(pane),
-                        _ => None,
-                    })
-                    .expect("browser pane")
-            }
-            super::LayoutNodeSnapshot::Pane(_) => panic!("expected split layout"),
-        };
+        let pane = find_pane(&snapshot.current_workspace.layout, browser_surface.pane_id)
+            .expect("browser pane");
 
         let surface = pane
             .surfaces
@@ -5835,7 +7719,10 @@ mod tests {
     #[test]
     fn browser_snapshot_and_host_commands_follow_active_browser_surface() {
         let core = SharedCore::bootstrap(bootstrap());
-        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
 
         let snapshot = core.snapshot();
         let browser = snapshot.browser_chrome.expect("active browser chrome");
@@ -5944,6 +7831,7 @@ mod tests {
         let first_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::SplitBrowser {
             pane_id: Some(first_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         core.dispatch_shell_action(ShellAction::CreateWorkspace);
@@ -5951,6 +7839,7 @@ mod tests {
         let second_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::SplitBrowser {
             pane_id: Some(second_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let catalog = core.snapshot().browser_catalog;
@@ -6042,7 +7931,10 @@ mod tests {
     #[test]
     fn browser_navigation_host_events_update_browser_chrome_snapshot() {
         let core = SharedCore::bootstrap(bootstrap());
-        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
 
         let snapshot = core.snapshot();
         let browser = snapshot.browser_chrome.expect("active browser chrome");
@@ -6069,7 +7961,10 @@ mod tests {
     #[test]
     fn explicit_about_blank_browser_urls_are_preserved() {
         let core = SharedCore::bootstrap(bootstrap());
-        core.dispatch_shell_action(ShellAction::SplitBrowser { pane_id: None });
+        core.dispatch_shell_action(ShellAction::SplitBrowser {
+            pane_id: None,
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
 
         let browser = core
             .snapshot()
@@ -6407,6 +8302,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
         let snapshot = core.snapshot();
         let moved_surface_id = find_pane(&snapshot.current_workspace.layout, source_pane_id)
@@ -6457,6 +8353,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -6498,6 +8395,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -6547,6 +8445,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -6588,6 +8487,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -6638,6 +8538,7 @@ mod tests {
         let source_pane_id = core.snapshot().current_workspace.active_pane;
         core.dispatch_shell_action(ShellAction::AddBrowserSurface {
             pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
         });
 
         let snapshot = core.snapshot();
@@ -6805,6 +8706,41 @@ mod tests {
         core.dispatch_shortcut_action(super::ShortcutAction::FocusLatestUnread);
 
         assert_eq!(core.snapshot().current_workspace.id, second_workspace_id);
+    }
+
+    #[test]
+    fn focusing_browser_surface_keeps_vcs_target_on_last_terminal() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let terminal_surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("terminal surface");
+        let browser_surface_id = model
+            .create_surface(workspace_id, pane_id, taskers_domain::PaneKind::Browser)
+            .expect("browser surface");
+
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-vcs-terminal-target",
+        ));
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id,
+            surface_id: terminal_surface_id,
+        });
+        core.dispatch_shell_action(ShellAction::FocusSurface {
+            pane_id,
+            surface_id: browser_surface_id,
+        });
+
+        let snapshot = core.snapshot();
+        assert_eq!(
+            snapshot.vcs_panel.target_surface_id,
+            Some(terminal_surface_id)
+        );
     }
 
     #[test]
