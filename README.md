@@ -84,6 +84,19 @@ taskersctl browser snapshot
 taskersctl browser get title
 ```
 
+Enable shell completions for `taskersctl`:
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+taskersctl completion bash > ~/.local/share/bash-completion/completions/taskersctl
+
+mkdir -p ~/.zsh/completions
+taskersctl completion zsh > ~/.zsh/completions/_taskersctl
+
+mkdir -p ~/.config/fish/completions
+taskersctl completion fish > ~/.config/fish/completions/taskersctl.fish
+```
+
 ## Develop
 
 On Ubuntu 24.04, install the Linux UI dependencies first:

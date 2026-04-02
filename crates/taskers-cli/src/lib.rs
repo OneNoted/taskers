@@ -1,7 +1,13 @@
-use std::{env, future::pending, path::PathBuf, process::Command as ProcessCommand};
+use std::{
+    env,
+    future::pending,
+    io::{self, Write},
+    path::PathBuf,
+    process::Command as ProcessCommand,
+};
 
 use anyhow::{Context, anyhow, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use taskers_control::{
     BrowserControlCommand, BrowserGetCommand, BrowserLoadState, BrowserPredicateCommand,
     BrowserTarget, BrowserWaitCondition, ControlClient, ControlCommand, ControlQuery,
@@ -107,6 +113,10 @@ enum Command {
         #[command(flatten)]
         screenshot: ScreenshotArgs,
     },
+    Completion {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
     Identify {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -134,6 +144,13 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Fish,
+    Zsh,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1129,6 +1146,375 @@ impl From<CliBrowserLoadState> for BrowserLoadState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CompletionNode {
+    path: Vec<String>,
+    subcommands: Vec<String>,
+    flags: Vec<String>,
+    value_flags: Vec<String>,
+}
+
+fn cli_command() -> clap::Command {
+    Cli::command()
+}
+
+fn render_completion(shell: CompletionShell) -> String {
+    let nodes = completion_nodes(&cli_command());
+    match shell {
+        CompletionShell::Bash => render_bash_completion(&nodes),
+        CompletionShell::Fish => render_fish_completion(&nodes),
+        CompletionShell::Zsh => render_zsh_completion(&nodes),
+    }
+}
+
+fn write_completion(shell: CompletionShell, mut writer: impl Write) -> anyhow::Result<()> {
+    writer.write_all(render_completion(shell).as_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn completion_nodes(root: &clap::Command) -> Vec<CompletionNode> {
+    let mut nodes = Vec::new();
+    collect_completion_nodes(root, Vec::new(), &mut nodes);
+    nodes
+}
+
+fn collect_completion_nodes(
+    command: &clap::Command,
+    path: Vec<String>,
+    nodes: &mut Vec<CompletionNode>,
+) {
+    let subcommands = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .map(|subcommand| subcommand.get_name().to_string())
+        .collect::<Vec<_>>();
+    let mut flags = Vec::new();
+    let mut value_flags = Vec::new();
+
+    for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+        let takes_values = arg.get_action().takes_values();
+
+        if let Some(long) = arg.get_long() {
+            let flag = format!("--{long}");
+            push_unique(&mut flags, flag.clone());
+            if takes_values {
+                push_unique(&mut value_flags, flag);
+            }
+        }
+
+        if let Some(short) = arg.get_short() {
+            let flag = format!("-{short}");
+            push_unique(&mut flags, flag.clone());
+            if takes_values {
+                push_unique(&mut value_flags, flag);
+            }
+        }
+    }
+
+    nodes.push(CompletionNode {
+        path: path.clone(),
+        subcommands,
+        flags,
+        value_flags,
+    });
+
+    for subcommand in command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+    {
+        let mut child_path = path.clone();
+        child_path.push(subcommand.get_name().to_string());
+        collect_completion_nodes(subcommand, child_path, nodes);
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn render_bash_completion(nodes: &[CompletionNode]) -> String {
+    format!(
+        r#"_taskersctl_subcommands() {{
+  case "$1" in
+{subcommands_cases}    * ) ;;
+  esac
+}}
+
+_taskersctl_flags() {{
+  case "$1" in
+{flags_cases}    * ) ;;
+  esac
+}}
+
+_taskersctl_value_flags() {{
+  case "$1" in
+{value_flags_cases}    * ) ;;
+  esac
+}}
+
+_taskersctl() {{
+  local cur path subcommands flags value_flags word expect_value=0
+  local i
+  COMPREPLY=()
+  cur="${{COMP_WORDS[COMP_CWORD]}}"
+  path=""
+
+  for ((i=1; i<COMP_CWORD; i++)); do
+    word="${{COMP_WORDS[i]}}"
+    if (( expect_value )); then
+      expect_value=0
+      continue
+    fi
+    [[ -z "$word" ]] && continue
+
+    if [[ "$word" == --*=* ]]; then
+      value_flags="$(_taskersctl_value_flags "$path")"
+      case " $value_flags " in
+        *" ${{word%%=*}} "*) continue ;;
+      esac
+    fi
+
+    if [[ "$word" == -* ]]; then
+      value_flags="$(_taskersctl_value_flags "$path")"
+      case " $value_flags " in
+        *" $word "*) expect_value=1 ;;
+      esac
+      continue
+    fi
+
+    subcommands="$(_taskersctl_subcommands "$path")"
+    case " $subcommands " in
+      *" $word "*) path="${{path:+$path }}$word" ;;
+    esac
+  done
+
+  (( expect_value )) && return 0
+
+  subcommands="$(_taskersctl_subcommands "$path")"
+  flags="$(_taskersctl_flags "$path")"
+  if [[ "$cur" == -* ]]; then
+    COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
+  else
+    COMPREPLY=( $(compgen -W "$subcommands $flags" -- "$cur") )
+  fi
+}}
+
+complete -F _taskersctl taskersctl
+"#,
+        subcommands_cases = render_bash_case_body(nodes, |node| &node.subcommands),
+        flags_cases = render_bash_case_body(nodes, |node| &node.flags),
+        value_flags_cases = render_bash_case_body(nodes, |node| &node.value_flags),
+    )
+}
+
+fn render_zsh_completion(nodes: &[CompletionNode]) -> String {
+    format!(
+        r#"#compdef taskersctl
+
+__taskersctl_subcommands() {{
+  case "$1" in
+{subcommands_cases}    * ) ;;
+  esac
+}}
+
+__taskersctl_flags() {{
+  case "$1" in
+{flags_cases}    * ) ;;
+  esac
+}}
+
+__taskersctl_value_flags() {{
+  case "$1" in
+{value_flags_cases}    * ) ;;
+  esac
+}}
+
+_taskersctl() {{
+  local cur path subcommands_text flags_text value_flags_text word expect_value=0
+  local -a candidates
+  local i
+  cur="${{words[CURRENT]}}"
+  path=""
+
+  for ((i=2; i<CURRENT; i++)); do
+    word="${{words[i]}}"
+    if (( expect_value )); then
+      expect_value=0
+      continue
+    fi
+    [[ -z "$word" ]] && continue
+
+    if [[ "$word" == --*=* ]]; then
+      value_flags_text="$(__taskersctl_value_flags "$path")"
+      [[ " $value_flags_text " == *" ${{word%%=*}} "* ]] && continue
+    fi
+
+    if [[ "$word" == -* ]]; then
+      value_flags_text="$(__taskersctl_value_flags "$path")"
+      [[ " $value_flags_text " == *" $word "* ]] && expect_value=1
+      continue
+    fi
+
+    subcommands_text="$(__taskersctl_subcommands "$path")"
+    [[ " $subcommands_text " == *" $word "* ]] && path="${{path:+$path }}$word"
+  done
+
+  (( expect_value )) && return 0
+
+  subcommands_text="$(__taskersctl_subcommands "$path")"
+  flags_text="$(__taskersctl_flags "$path")"
+  if [[ "$cur" == -* ]]; then
+    candidates=(${{=flags_text}})
+  else
+    candidates=(${{=subcommands_text}} ${{=flags_text}})
+  fi
+  compadd -- $candidates
+}}
+
+compdef _taskersctl taskersctl
+"#,
+        subcommands_cases = render_bash_case_body(nodes, |node| &node.subcommands),
+        flags_cases = render_bash_case_body(nodes, |node| &node.flags),
+        value_flags_cases = render_bash_case_body(nodes, |node| &node.value_flags),
+    )
+}
+
+fn render_fish_completion(nodes: &[CompletionNode]) -> String {
+    format!(
+        r#"function __taskersctl_subcommands
+  switch "$argv[1]"
+{subcommands_cases}    case '*'
+  end
+end
+
+function __taskersctl_flags
+  switch "$argv[1]"
+{flags_cases}    case '*'
+  end
+end
+
+function __taskersctl_value_flags
+  switch "$argv[1]"
+{value_flags_cases}    case '*'
+  end
+end
+
+function __taskersctl_complete
+  set -l tokens (commandline -opc)
+  set -e tokens[1]
+  set -l path
+  set -l expect_value 0
+
+  for word in $tokens
+    if test $expect_value -eq 1
+      set expect_value 0
+      continue
+    end
+    if test -z "$word"
+      continue
+    end
+
+    if string match -qr '^--[^=]+=.*$' -- $word
+      set -l opt (string replace -r '=.*$' '' -- $word)
+      set -l value_flags (__taskersctl_value_flags "$path")
+      if contains -- $opt $value_flags
+        continue
+      end
+    end
+
+    if string match -qr '^-' -- $word
+      set -l value_flags (__taskersctl_value_flags "$path")
+      if contains -- $word $value_flags
+        set expect_value 1
+      end
+      continue
+    end
+
+    set -l subcommands (__taskersctl_subcommands "$path")
+    if contains -- $word $subcommands
+      if test -n "$path"
+        set path "$path $word"
+      else
+        set path "$word"
+      end
+    end
+  end
+
+  if test $expect_value -eq 1
+    return 0
+  end
+
+  set -l token (commandline -ct)
+  set -l subcommands (__taskersctl_subcommands "$path")
+  set -l flags (__taskersctl_flags "$path")
+  if string match -qr '^-' -- $token
+    printf '%s\n' $flags
+  else
+    printf '%s\n' $subcommands $flags
+  end
+end
+
+complete -f -c taskersctl -a '(__taskersctl_complete)'
+"#,
+        subcommands_cases = render_fish_case_body(nodes, |node| &node.subcommands),
+        flags_cases = render_fish_case_body(nodes, |node| &node.flags),
+        value_flags_cases = render_fish_case_body(nodes, |node| &node.value_flags),
+    )
+}
+
+fn render_bash_case_body<'a>(
+    nodes: &'a [CompletionNode],
+    values: impl Fn(&'a CompletionNode) -> &'a [String],
+) -> String {
+    let mut output = String::new();
+    for node in nodes {
+        output.push_str("    ");
+        output.push_str(&completion_case_key(&node.path));
+        output.push_str(" ) printf '%s' '");
+        output.push_str(&shell_words(values(node)));
+        output.push_str("' ;;\n");
+    }
+    output
+}
+
+fn render_fish_case_body<'a>(
+    nodes: &'a [CompletionNode],
+    values: impl Fn(&'a CompletionNode) -> &'a [String],
+) -> String {
+    let mut output = String::new();
+    for node in nodes {
+        output.push_str("    case '");
+        output.push_str(&completion_path(&node.path));
+        output.push_str("'\n");
+        for value in values(node) {
+            output.push_str("      echo '");
+            output.push_str(value);
+            output.push_str("'\n");
+        }
+    }
+    output
+}
+
+fn completion_case_key(path: &[String]) -> String {
+    let path = completion_path(path);
+    if path.is_empty() {
+        "''".into()
+    } else {
+        format!("'{path}'")
+    }
+}
+
+fn completion_path(path: &[String]) -> String {
+    path.join(" ")
+}
+
+fn shell_words(values: &[String]) -> String {
+    values.join(" ")
+}
+
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -1743,6 +2129,9 @@ pub async fn run() -> anyhow::Result<()> {
         }
         Command::Screenshot { screenshot } => {
             handle_screenshot_cli_command(screenshot).await?;
+        }
+        Command::Completion { shell } => {
+            write_completion(shell, io::stdout())?;
         }
         Command::Identify {
             socket,
@@ -3360,6 +3749,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use clap::Parser;
     use taskers_control::{
         BrowserTarget, BrowserWaitCondition, ControlClient, ControlCommand, InMemoryController,
         ScreenshotCommand, ScreenshotTarget, bind_socket, serve,
@@ -3368,11 +3758,11 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::{
-        CliBrowserLoadState, CliScreenshotTarget, CliSignalKind, ScreenshotArgs, emit_agent_hook,
-        ensure_implicit_notify_target_context, env_pane_id, env_surface_id, env_workspace_id,
-        infer_agent_kind, query_model, resolve_browser_target, resolve_screenshot_command,
-        resolve_wait_condition, resolve_workspace_window_screenshot_target,
-        send_screenshot_command,
+        Cli, CliBrowserLoadState, CliScreenshotTarget, CliSignalKind, CompletionShell,
+        ScreenshotArgs, emit_agent_hook, ensure_implicit_notify_target_context, env_pane_id,
+        env_surface_id, env_workspace_id, infer_agent_kind, query_model, render_completion,
+        resolve_browser_target, resolve_screenshot_command, resolve_wait_condition,
+        resolve_workspace_window_screenshot_target, send_screenshot_command,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -3391,6 +3781,42 @@ mod tests {
         assert_eq!(infer_agent_kind("Claude Code"), Some("claude".into()));
         assert_eq!(infer_agent_kind("opencode"), Some("opencode".into()));
         assert_eq!(infer_agent_kind("unknown"), None);
+    }
+
+    #[test]
+    fn parses_completion_subcommand() {
+        let cli = Cli::try_parse_from(["taskersctl", "completion", "fish"])
+            .expect("completion subcommand should parse");
+        let debug = format!("{cli:?}");
+        assert!(debug.contains("Completion"));
+        assert!(debug.contains("Fish"));
+    }
+
+    #[test]
+    fn generated_completion_scripts_include_public_commands_only() {
+        for shell in [
+            CompletionShell::Bash,
+            CompletionShell::Fish,
+            CompletionShell::Zsh,
+        ] {
+            let script = render_completion(shell);
+            assert!(
+                script.contains("browser"),
+                "expected browser command in {shell:?} completion"
+            );
+            assert!(
+                script.contains("workspace"),
+                "expected workspace command in {shell:?} completion"
+            );
+            assert!(
+                script.contains("--socket"),
+                "expected socket flag in {shell:?} completion"
+            );
+            assert!(
+                !script.contains(" session "),
+                "hidden session command leaked into {shell:?} completion"
+            );
+        }
     }
 
     #[test]
