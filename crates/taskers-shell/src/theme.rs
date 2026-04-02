@@ -1092,6 +1092,10 @@ input:focus-visible {{
   background: {accent_12};
 }}
 
+.workspace-window-tab-dragging {{
+  opacity: 0.34;
+}}
+
 .workspace-window-tab-button {{
   flex: 1 1 auto;
   min-width: 0;
@@ -1574,6 +1578,10 @@ input:focus-visible {{
   background: {accent_12};
 }}
 
+.surface-tab-dragging {{
+  opacity: 0.34;
+}}
+
 .surface-tab-active {{
   background: {overlay_16};
   border-color: {accent_20};
@@ -1732,6 +1740,53 @@ input:focus-visible {{
 }}
 
 .surface-tab-active .surface-tab-kind-icon {{
+  opacity: 1.0;
+}}
+
+.drag-preview-shell {{
+  position: fixed;
+  inset: 0 auto auto 0;
+  z-index: 9999;
+  pointer-events: none;
+}}
+
+.drag-preview-card {{
+  pointer-events: none;
+  max-width: min(360px, calc(100vw - 32px));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.38);
+  opacity: 0.97;
+  border-color: {accent_24};
+  background: {surface_85};
+  backdrop-filter: blur(10px) saturate(1.12);
+}}
+
+.drag-preview-window-tab {{
+  min-width: 120px;
+}}
+
+.drag-preview-surface-tab {{
+  min-width: 132px;
+  padding-right: 10px;
+}}
+
+.drag-preview-copy {{
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+}}
+
+.drag-preview-title {{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: {text_bright};
+}}
+
+.drag-preview-icon {{
+  flex: 0 0 auto;
   opacity: 1.0;
 }}
 

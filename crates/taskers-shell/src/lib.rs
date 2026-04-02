@@ -97,6 +97,22 @@ enum SurfaceDropTarget {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DragPreviewKind {
+    WindowTab,
+    PaneTab,
+    Surface,
+}
+
+#[derive(Clone, PartialEq)]
+struct DragPreviewInfo {
+    kind: DragPreviewKind,
+    runtime_key: String,
+    runtime_state: RuntimeStateSnapshot,
+    title: String,
+    runtime_badge: Option<String>,
+}
+
 fn runtime_state_class(state: RuntimeStateSnapshot) -> &'static str {
     match state {
         RuntimeStateSnapshot::Idle => "runtime-state-idle",
@@ -369,6 +385,169 @@ fn current_dragged_pane_tab(snapshot: &ShellSnapshot) -> Option<DraggedPaneTab> 
     }
 }
 
+fn find_workspace_window_tab_snapshot<'a>(
+    workspace: &'a WorkspaceViewSnapshot,
+    window_id: taskers_core::WorkspaceWindowId,
+    tab_id: WorkspaceWindowTabId,
+) -> Option<&'a WorkspaceWindowTabSnapshot> {
+    workspace
+        .columns
+        .iter()
+        .flat_map(|column| column.windows.iter())
+        .find(|window| window.id == window_id)
+        .and_then(|window| window.tabs.iter().find(|tab| tab.id == tab_id))
+}
+
+fn find_pane_tab_snapshot<'a>(
+    node: &'a LayoutNodeSnapshot,
+    pane_container_id: PaneContainerId,
+    pane_tab_id: PaneTabId,
+) -> Option<&'a PaneTabSnapshot> {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) => {
+            if pane.pane_container_id == pane_container_id {
+                pane.pane_tabs.iter().find(|tab| tab.id == pane_tab_id)
+            } else {
+                None
+            }
+        }
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            find_pane_tab_snapshot(first, pane_container_id, pane_tab_id)
+                .or_else(|| find_pane_tab_snapshot(second, pane_container_id, pane_tab_id))
+        }
+    }
+}
+
+fn find_surface_snapshot<'a>(
+    node: &'a LayoutNodeSnapshot,
+    pane_id: PaneId,
+    surface_id: SurfaceId,
+) -> Option<&'a SurfaceSnapshot> {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) => {
+            find_surface_snapshot_in_pane_tab_layout(&pane.layout, pane_id, surface_id)
+        }
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            find_surface_snapshot(first, pane_id, surface_id)
+                .or_else(|| find_surface_snapshot(second, pane_id, surface_id))
+        }
+    }
+}
+
+fn find_surface_snapshot_in_pane_tab_layout<'a>(
+    node: &'a PaneTabLayoutSnapshot,
+    pane_id: PaneId,
+    surface_id: SurfaceId,
+) -> Option<&'a SurfaceSnapshot> {
+    match node {
+        PaneTabLayoutSnapshot::Pane(pane) => {
+            if pane.id == pane_id {
+                pane.surfaces
+                    .iter()
+                    .find(|surface| surface.id == surface_id)
+            } else {
+                None
+            }
+        }
+        PaneTabLayoutSnapshot::Split { first, second, .. } => {
+            find_surface_snapshot_in_pane_tab_layout(first, pane_id, surface_id)
+                .or_else(|| find_surface_snapshot_in_pane_tab_layout(second, pane_id, surface_id))
+        }
+    }
+}
+
+fn drag_preview_info(snapshot: &ShellSnapshot) -> Option<DragPreviewInfo> {
+    match snapshot.drag_session? {
+        DragSessionSnapshot::WindowTab(dragged) => {
+            let tab = find_workspace_window_tab_snapshot(
+                &snapshot.current_workspace,
+                dragged.window_id,
+                dragged.tab_id,
+            )?;
+            Some(DragPreviewInfo {
+                kind: DragPreviewKind::WindowTab,
+                runtime_key: tab.runtime.key.clone(),
+                runtime_state: tab.runtime.state,
+                title: tab.title.clone(),
+                runtime_badge: None,
+            })
+        }
+        DragSessionSnapshot::PaneTab(dragged) => {
+            let tab = find_pane_tab_snapshot(
+                &snapshot.current_workspace.layout,
+                dragged.pane_container_id,
+                dragged.pane_tab_id,
+            )?;
+            Some(DragPreviewInfo {
+                kind: DragPreviewKind::PaneTab,
+                runtime_key: tab.runtime.key.clone(),
+                runtime_state: tab.runtime.state,
+                title: tab.title.clone(),
+                runtime_badge: None,
+            })
+        }
+        DragSessionSnapshot::Surface(dragged) => {
+            let surface = find_surface_snapshot(
+                &snapshot.current_workspace.layout,
+                dragged.pane_id,
+                dragged.surface_id,
+            );
+            Some(DragPreviewInfo {
+                kind: DragPreviewKind::Surface,
+                runtime_key: surface
+                    .map(|surface| surface.runtime.key.clone())
+                    .unwrap_or_else(|| "terminal".into()),
+                runtime_state: surface
+                    .map(|surface| surface.runtime.state)
+                    .unwrap_or(RuntimeStateSnapshot::Idle),
+                title: surface
+                    .map(surface_summary_title)
+                    .unwrap_or_else(|| "Moving tab".into()),
+                runtime_badge: surface
+                    .and_then(surface_runtime_badge_text)
+                    .map(str::to_string),
+            })
+        }
+    }
+}
+
+fn render_drag_preview(snapshot: &ShellSnapshot, pointer: (f64, f64)) -> Element {
+    let Some(preview) = drag_preview_info(snapshot) else {
+        return rsx! {};
+    };
+    let style = format!(
+        "transform: translate({:.1}px, {:.1}px);",
+        pointer.0 + 14.0,
+        pointer.1 + 12.0
+    );
+    let icon_class = format!(
+        "drag-preview-icon {}",
+        runtime_state_class(preview.runtime_state)
+    );
+    let card_class = match preview.kind {
+        DragPreviewKind::WindowTab => {
+            "workspace-window-tab workspace-window-tab-active drag-preview-card drag-preview-window-tab"
+        }
+        DragPreviewKind::PaneTab | DragPreviewKind::Surface => {
+            "surface-tab surface-tab-active drag-preview-card drag-preview-surface-tab"
+        }
+    };
+
+    rsx! {
+        div { class: "drag-preview-shell", style: "{style}",
+            div { class: "{card_class}",
+                {render_runtime_icon_by_key(preview.runtime_key.as_str(), 11, &icon_class)}
+                span { class: "drag-preview-copy",
+                    span { class: "drag-preview-title", "{preview.title}" }
+                    if let Some(runtime_badge) = &preview.runtime_badge {
+                        span { class: "surface-tab-runtime-badge", "{runtime_badge}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn apply_surface_drop(
     core: &SharedCore,
     dragged: DraggedSurface,
@@ -471,6 +650,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     let mut surface_drag_candidate = use_signal(|| None::<SurfaceDragCandidate>);
     let mut window_tab_drag_candidate = use_signal(|| None::<WindowTabDragCandidate>);
     let mut pane_tab_drag_candidate = use_signal(|| None::<PaneTabDragCandidate>);
+    let mut drag_pointer = use_signal(|| None::<(f64, f64)>);
     let window_drag_source = use_signal(|| None::<DraggedWindow>);
     let window_drop_target = use_signal(|| None::<WorkspaceWindowMoveTarget>);
     let mut window_tab_drop_target = use_signal(|| None::<WindowTabDropTarget>);
@@ -484,6 +664,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
         move |event: Event<PointerData>| {
             if event.data().held_buttons().contains(MouseButton::Primary) {
                 let (current_x, current_y) = pointer_client_position(&event);
+                drag_pointer.set(Some((current_x, current_y)));
                 let window_candidate = *window_tab_drag_candidate.read();
                 let pane_candidate = *pane_tab_drag_candidate.read();
                 let surface_candidate = *surface_drag_candidate.read();
@@ -534,6 +715,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             if core.snapshot().drag_session.is_some()
                 && !event.data().held_buttons().contains(MouseButton::Primary)
             {
+                drag_pointer.set(None);
                 window_tab_drag_candidate.set(None);
                 pane_tab_drag_candidate.set(None);
                 surface_drag_candidate.set(None);
@@ -561,6 +743,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             if surface_drag_candidate.read().is_some() {
                 surface_drag_candidate.set(None);
             }
+            drag_pointer.set(None);
             if core.snapshot().drag_session.is_some() {
                 window_tab_drop_target.set(None);
                 pane_tab_drop_target.set(None);
@@ -586,6 +769,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
             if surface_drag_candidate.read().is_some() {
                 surface_drag_candidate.set(None);
             }
+            drag_pointer.set(None);
             if core.snapshot().drag_session.is_some() {
                 window_tab_drop_target.set(None);
                 pane_tab_drop_target.set(None);
@@ -771,6 +955,11 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                             }
                         }
                     }
+                }
+            }
+            if let Some(pointer) = *drag_pointer.read() {
+                if snapshot.drag_session.is_some() {
+                    {render_drag_preview(&snapshot, pointer)}
                 }
             }
         }
@@ -1982,6 +2171,8 @@ fn render_workspace_window_tab(
     mut window_tab_drop_target: Signal<Option<WindowTabDropTarget>>,
 ) -> Element {
     let tab_id = tab.id;
+    let is_dragged = dragged_window_tab
+        .is_some_and(|dragged| dragged.window_id == window_id && dragged.tab_id == tab_id);
     let is_drop_target = matches!(
         *window_tab_drop_target.read(),
         Some(WindowTabDropTarget::BeforeTab {
@@ -1997,20 +2188,30 @@ fn render_workspace_window_tab(
     };
     let tab_class = if tab.active {
         format!(
-            "workspace-window-tab workspace-window-tab-active{}{}",
+            "workspace-window-tab workspace-window-tab-active{}{}{}",
             attention_class,
             if is_drop_target {
                 " workspace-window-tab-drop-target"
+            } else {
+                ""
+            },
+            if is_dragged {
+                " workspace-window-tab-dragging"
             } else {
                 ""
             }
         )
     } else {
         format!(
-            "workspace-window-tab{}{}",
+            "workspace-window-tab{}{}{}",
             attention_class,
             if is_drop_target {
                 " workspace-window-tab-drop-target"
+            } else {
+                ""
+            },
+            if is_dragged {
+                " workspace-window-tab-dragging"
             } else {
                 ""
             }
@@ -2311,6 +2512,9 @@ fn render_pane_tab(
 ) -> Element {
     let pane_container_id = pane.pane_container_id;
     let pane_tab_id = pane_tab.id;
+    let is_dragged = dragged_pane_tab.is_some_and(|dragged| {
+        dragged.pane_container_id == pane_container_id && dragged.pane_tab_id == pane_tab_id
+    });
     let is_drop_target = matches!(
         *pane_tab_drop_target.read(),
         Some(PaneTabDropTarget::BeforeTab {
@@ -2326,18 +2530,28 @@ fn render_pane_tab(
     };
     let tab_class = if pane_tab.active {
         format!(
-            "surface-tab surface-tab-active{attention_class}{}",
+            "surface-tab surface-tab-active{attention_class}{}{}",
             if is_drop_target {
                 " surface-tab-drop-target"
+            } else {
+                ""
+            },
+            if is_dragged {
+                " surface-tab-dragging"
             } else {
                 ""
             }
         )
     } else {
         format!(
-            "surface-tab{attention_class}{}",
+            "surface-tab{attention_class}{}{}",
             if is_drop_target {
                 " surface-tab-drop-target"
+            } else {
+                ""
+            },
+            if is_dragged {
+                " surface-tab-dragging"
             } else {
                 ""
             }
@@ -2842,6 +3056,8 @@ fn render_surface_tab(
     ordered_surface_ids: &[SurfaceId],
 ) -> Element {
     let surface_id = surface.id;
+    let is_dragged = dragged_surface
+        .is_some_and(|dragged| dragged.pane_id == pane_id && dragged.surface_id == surface_id);
     let is_drop_target = matches!(
         *surface_drop_target.read(),
         Some(SurfaceDropTarget::BeforeSurface {
@@ -2851,20 +3067,30 @@ fn render_surface_tab(
     );
     let tab_class = if surface.id == active_surface_id {
         format!(
-            "surface-tab surface-tab-active{}{}",
+            "surface-tab surface-tab-active{}{}{}",
             attention_ring_class(surface.notification_ring, "surface-tab-attention"),
             if is_drop_target {
                 " surface-tab-drop-target"
+            } else {
+                ""
+            },
+            if is_dragged {
+                " surface-tab-dragging"
             } else {
                 ""
             }
         )
     } else {
         format!(
-            "surface-tab{}{}",
+            "surface-tab{}{}{}",
             attention_ring_class(surface.notification_ring, "surface-tab-attention"),
             if is_drop_target {
                 " surface-tab-drop-target"
+            } else {
+                ""
+            },
+            if is_dragged {
+                " surface-tab-dragging"
             } else {
                 ""
             }
