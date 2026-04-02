@@ -2086,6 +2086,12 @@ fn render_window_drop_zone(
     dragged_window_tab: Option<DraggedWindowTab>,
     core: SharedCore,
 ) -> Element {
+    let label = match target {
+        WorkspaceWindowMoveTarget::ColumnBefore { .. } => "Column",
+        WorkspaceWindowMoveTarget::ColumnAfter { .. } => "Column",
+        WorkspaceWindowMoveTarget::StackAbove { .. } => "Stack",
+        WorkspaceWindowMoveTarget::StackBelow { .. } => "Stack",
+    };
     let class = if *window_drop_target.read() == Some(target) {
         format!("{base_class} workspace-window-drop-zone-active")
     } else if visible {
@@ -2158,6 +2164,7 @@ fn render_window_drop_zone(
             onpointerleave: clear_drop_target,
             ondrop: drop_window_drag,
             onpointerup: drop_window_pointer,
+            span { class: "workspace-window-drop-copy", "{label}" }
         }
     }
 }
@@ -2928,7 +2935,7 @@ fn render_live_pane(
                     div { class: "pane-drop-overlay",
                         {render_surface_pane_drop_target(
                             "pane-drop-target pane-drop-target-center",
-                            "append",
+                            "Move here",
                             SurfaceDropTarget::AppendToPane { pane_id },
                             core.clone(),
                             surface_drop_target,
@@ -2936,7 +2943,7 @@ fn render_live_pane(
                         if pane_allows_split {
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-left",
-                                "split left",
+                                "Split ←",
                                 SurfaceDropTarget::SplitPane {
                                     pane_id,
                                     direction: Direction::Left,
@@ -2946,7 +2953,7 @@ fn render_live_pane(
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-right",
-                                "split right",
+                                "Split →",
                                 SurfaceDropTarget::SplitPane {
                                     pane_id,
                                     direction: Direction::Right,
@@ -2956,7 +2963,7 @@ fn render_live_pane(
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-top",
-                                "split up",
+                                "Split ↑",
                                 SurfaceDropTarget::SplitPane {
                                     pane_id,
                                     direction: Direction::Up,
@@ -2966,7 +2973,7 @@ fn render_live_pane(
                             )}
                             {render_surface_pane_drop_target(
                                 "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
-                                "split down",
+                                "Split ↓",
                                 SurfaceDropTarget::SplitPane {
                                     pane_id,
                                     direction: Direction::Down,

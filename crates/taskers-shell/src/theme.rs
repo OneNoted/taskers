@@ -1833,6 +1833,9 @@ input:focus-visible {{
 .workspace-window-drop-zone {{
   position: absolute;
   z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   opacity: 0;
   pointer-events: none;
   background: transparent;
@@ -1852,11 +1855,48 @@ input:focus-visible {{
   box-shadow: inset 0 0 0 1px {accent_24};
 }}
 
+.workspace-window-drop-copy {{
+  opacity: 0;
+  pointer-events: none;
+  padding: 4px 6px;
+  border: 1px solid {border_10};
+  background: rgba(0,0,0,0.16);
+  color: {text_bright};
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  transition: opacity 0.12s ease-in-out, transform 0.12s ease-in-out;
+  transform: scale(0.96);
+}}
+
+.workspace-window-drop-zone-visible .workspace-window-drop-copy,
+.workspace-window-drop-zone-active .workspace-window-drop-copy {{
+  opacity: 1;
+  transform: scale(1);
+}}
+
 .workspace-window-drop-zone-left,
 .workspace-window-drop-zone-right {{
   top: 10px;
   bottom: 10px;
   width: 6px;
+}}
+
+.workspace-window-drop-zone-left .workspace-window-drop-copy,
+.workspace-window-drop-zone-right .workspace-window-drop-copy {{
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  padding: 6px 4px;
+}}
+
+.workspace-window-drop-zone-left .workspace-window-drop-copy {{
+  transform: rotate(180deg) scale(0.96);
+}}
+
+.workspace-window-drop-zone-visible.workspace-window-drop-zone-left .workspace-window-drop-copy,
+.workspace-window-drop-zone-active.workspace-window-drop-zone-left .workspace-window-drop-copy {{
+  transform: rotate(180deg) scale(1);
 }}
 
 .workspace-window-drop-zone-left {{
@@ -2010,8 +2050,7 @@ input:focus-visible {{
   color: {text_bright};
   font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
   pointer-events: auto;
   border-radius: 0;
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
@@ -2083,6 +2122,13 @@ input:focus-visible {{
 .pane-drop-target-center .pane-drop-target-copy {{
   padding: 6px 10px;
   font-size: 10px;
+  font-weight: 700;
+}}
+
+.pane-drop-target-edge .pane-drop-target-copy {{
+  padding: 3px 6px;
+  font-size: 8px;
+  background: rgba(0,0,0,0.10);
 }}
 
 .surface-backdrop {{
