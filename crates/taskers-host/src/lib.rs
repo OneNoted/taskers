@@ -660,6 +660,7 @@ impl TaskersHost {
 
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
         let interactive = native_surfaces_interactive(snapshot.drag_mode);
+        let visible = native_surfaces_visible(snapshot.drag_mode);
         if self.selected_theme_id != snapshot.settings.selected_theme_id {
             self.selected_theme_id = snapshot.settings.selected_theme_id.clone();
             update_native_surface_css(&self.native_surface_provider, &self.selected_theme_id);
@@ -672,7 +673,7 @@ impl TaskersHost {
                 format!("host sync start panes={}", snapshot.portal.panes.len()),
             ),
         );
-        self.sync_browser_surfaces(snapshot, interactive)?;
+        self.sync_browser_surfaces(snapshot, interactive, visible)?;
         let _bridge_guard = self.begin_bridge_operation(
             BridgeOperationKind::SurfaceSync,
             Some(snapshot.revision),
@@ -685,6 +686,7 @@ impl TaskersHost {
             &snapshot.settings.selected_theme_id,
             snapshot.revision,
             interactive,
+            visible,
             snapshot.resize_preview_active,
         ) {
             Ok(terminal_mutated) => terminal_mutated,
@@ -1170,7 +1172,12 @@ impl TaskersHost {
         }
     }
 
-    fn sync_browser_surfaces(&mut self, snapshot: &ShellSnapshot, interactive: bool) -> Result<()> {
+    fn sync_browser_surfaces(
+        &mut self,
+        snapshot: &ShellSnapshot,
+        interactive: bool,
+        visible: bool,
+    ) -> Result<()> {
         let desired = browser_plans(&snapshot.portal);
         let desired_by_id = desired
             .into_iter()
@@ -1211,7 +1218,11 @@ impl TaskersHost {
         }
 
         for entry in snapshot.browser_catalog.iter() {
-            let visible_plan = desired_by_id.get(&entry.surface_id);
+            let visible_plan = if visible {
+                desired_by_id.get(&entry.surface_id)
+            } else {
+                None
+            };
             match self.browser_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
@@ -1250,6 +1261,7 @@ impl TaskersHost {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        visible: bool,
         resize_preview_active: bool,
     ) -> Result<bool> {
         let desired = terminal_plans(portal);
@@ -1307,7 +1319,11 @@ impl TaskersHost {
         }
 
         for entry in catalog {
-            let visible_plan = desired_by_id.get(&entry.surface_id);
+            let visible_plan = if visible {
+                desired_by_id.get(&entry.surface_id)
+            } else {
+                None
+            };
             match self.terminal_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
@@ -2869,6 +2885,10 @@ fn native_surfaces_interactive(drag_mode: ShellDragMode) -> bool {
     drag_mode == ShellDragMode::None
 }
 
+fn native_surfaces_visible(drag_mode: ShellDragMode) -> bool {
+    drag_mode == ShellDragMode::None
+}
+
 fn workspace_pan_delta(dx: f64, dy: f64) -> Option<(i32, i32)> {
     if !dx.is_finite() || !dy.is_finite() {
         return None;
@@ -2973,8 +2993,9 @@ fn hidden_frame() -> taskers_core::Frame {
 mod tests {
     use super::{
         browser_plans, host_attention_palette, native_surface_classes, native_surface_css,
-        native_surfaces_interactive, preview_for_drag, redacted_browser_url_for_diagnostics,
-        terminal_plans, trim_terminal_tail, workspace_pan_delta,
+        native_surfaces_interactive, native_surfaces_visible, preview_for_drag,
+        redacted_browser_url_for_diagnostics, terminal_plans, trim_terminal_tail,
+        workspace_pan_delta,
     };
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
@@ -3009,7 +3030,18 @@ mod tests {
     fn native_surfaces_disable_pointer_targeting_during_shell_drags() {
         assert!(native_surfaces_interactive(ShellDragMode::None));
         assert!(!native_surfaces_interactive(ShellDragMode::Window));
+        assert!(!native_surfaces_interactive(ShellDragMode::WindowTab));
+        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab));
         assert!(!native_surfaces_interactive(ShellDragMode::Surface));
+    }
+
+    #[test]
+    fn native_surfaces_hide_during_shell_drags() {
+        assert!(native_surfaces_visible(ShellDragMode::None));
+        assert!(!native_surfaces_visible(ShellDragMode::Window));
+        assert!(!native_surfaces_visible(ShellDragMode::WindowTab));
+        assert!(!native_surfaces_visible(ShellDragMode::PaneTab));
+        assert!(!native_surfaces_visible(ShellDragMode::Surface));
     }
 
     #[test]
