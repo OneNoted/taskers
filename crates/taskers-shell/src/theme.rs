@@ -955,10 +955,7 @@ input:focus-visible {{
 }}
 
 .workspace-viewport-overview {{
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
+  display: block;
 }}
 
 .workspace-strip-canvas {{
@@ -1001,8 +998,8 @@ input:focus-visible {{
 }}
 
 .workspace-viewport-overview .workspace-strip-canvas {{
-  position: relative;
-  inset: auto;
+  position: absolute;
+  inset: 0 auto auto 0;
 }}
 
 .workspace-window-shell {{
