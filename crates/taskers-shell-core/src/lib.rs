@@ -1674,7 +1674,6 @@ impl TaskersCore {
             })
             .collect::<BTreeMap<_, _>>();
         let resize_handles = if matches!(self.ui.section, ShellSection::Workspace)
-            && !self.ui.overview_mode
             && self.ui.drag_mode == ShellDragMode::None
         {
             self.resize_handles_snapshot(workspace_id, workspace, &window_frames)
@@ -4525,10 +4524,6 @@ impl TaskersCore {
         let mut changed = false;
         if self.ui.section != ShellSection::Workspace {
             self.ui.section = ShellSection::Workspace;
-            changed = true;
-        }
-        if self.ui.overview_mode {
-            self.ui.overview_mode = false;
             changed = true;
         }
         if self.ui.drag_mode != ShellDragMode::None {
@@ -7580,7 +7575,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_handles_are_hidden_in_overview_mode() {
+    fn resize_handles_remain_available_in_overview_mode() {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
             direction: WorkspaceDirection::Right,
@@ -7590,7 +7585,7 @@ mod tests {
 
         core.dispatch_shell_action(ShellAction::ToggleOverview);
 
-        assert!(core.snapshot().resize_handles.is_empty());
+        assert!(!core.snapshot().resize_handles.is_empty());
     }
 
     #[test]
@@ -8869,6 +8864,32 @@ mod tests {
         core.dispatch_shortcut_action(super::ShortcutAction::FocusLatestUnread);
 
         assert_eq!(core.snapshot().current_workspace.id, second_workspace_id);
+    }
+
+    #[test]
+    fn window_shortcuts_keep_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        let before = core
+            .snapshot()
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| column.windows.len())
+            .sum::<usize>();
+
+        core.dispatch_shortcut_action(super::ShortcutAction::NewWindowRight);
+
+        let snapshot = core.snapshot();
+        let after = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| column.windows.len())
+            .sum::<usize>();
+
+        assert!(snapshot.overview_mode);
+        assert!(after > before);
     }
 
     #[test]

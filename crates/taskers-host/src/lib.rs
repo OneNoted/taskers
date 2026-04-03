@@ -665,7 +665,7 @@ impl TaskersHost {
     }
 
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
-        let interactive = native_surfaces_interactive(snapshot.drag_mode, snapshot.overview_mode);
+        let interactive = native_surfaces_interactive(snapshot.drag_mode);
         let visible = native_surfaces_visible(snapshot.drag_mode);
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
@@ -2994,8 +2994,8 @@ fn detach_from_overlay(overlay: &Overlay, widget: &Widget) {
     }
 }
 
-fn native_surfaces_interactive(drag_mode: ShellDragMode, overview_mode: bool) -> bool {
-    drag_mode == ShellDragMode::None && !overview_mode
+fn native_surfaces_interactive(drag_mode: ShellDragMode) -> bool {
+    drag_mode == ShellDragMode::None
 }
 
 fn native_surfaces_visible(drag_mode: ShellDragMode) -> bool {
@@ -3311,15 +3311,11 @@ mod tests {
 
     #[test]
     fn native_surfaces_disable_pointer_targeting_during_shell_drags() {
-        assert!(native_surfaces_interactive(ShellDragMode::None, false));
-        assert!(!native_surfaces_interactive(ShellDragMode::None, true));
-        assert!(!native_surfaces_interactive(ShellDragMode::Window, false));
-        assert!(!native_surfaces_interactive(
-            ShellDragMode::WindowTab,
-            false
-        ));
-        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab, false));
-        assert!(!native_surfaces_interactive(ShellDragMode::Surface, false));
+        assert!(native_surfaces_interactive(ShellDragMode::None));
+        assert!(!native_surfaces_interactive(ShellDragMode::Window));
+        assert!(!native_surfaces_interactive(ShellDragMode::WindowTab));
+        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab));
+        assert!(!native_surfaces_interactive(ShellDragMode::Surface));
     }
 
     #[test]
