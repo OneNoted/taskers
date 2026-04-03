@@ -1823,9 +1823,10 @@ fn render_workspace_strip(
             core.dispatch_shell_action(ShellAction::ScrollViewport { dx, dy: 0 });
         }
     };
-    let canvas_style = format!(
-        "width:{}px;height:{}px;",
-        workspace.canvas_width, workspace.canvas_height
+    let canvas_style = workspace_strip_canvas_style(
+        workspace.canvas_width,
+        workspace.canvas_height,
+        workspace.overview_scale,
     );
 
     rsx! {
@@ -1889,9 +1890,12 @@ fn render_workspace_window(
 ) -> Element {
     let local_x = window.frame.x - workspace.viewport_origin_x;
     let local_y = window.frame.y - workspace.viewport_origin_y;
-    let style = format!(
-        "left:{}px;top:{}px;width:{}px;height:{}px;",
-        local_x, local_y, window.frame.width, window.frame.height
+    let style = workspace_window_style(
+        local_x,
+        local_y,
+        window.frame.width,
+        window.frame.height,
+        workspace.overview_scale,
     );
     let window_class = if window.active {
         "workspace-window-shell workspace-window-shell-active"
@@ -2082,6 +2086,52 @@ fn render_workspace_window(
                 )}
             }
         }
+    }
+}
+
+fn workspace_strip_canvas_style(
+    canvas_width: i32,
+    canvas_height: i32,
+    overview_scale: f32,
+) -> String {
+    if overview_scale < 1.0 {
+        let width = ((canvas_width as f32) / overview_scale).round() as i32;
+        let height = ((canvas_height as f32) / overview_scale).round() as i32;
+        format!(
+            "width:{}px;height:{}px;transform:scale({:.6});transform-origin:top left;",
+            width.max(1),
+            height.max(1),
+            overview_scale
+        )
+    } else {
+        format!("width:{}px;height:{}px;", canvas_width, canvas_height)
+    }
+}
+
+fn workspace_window_style(
+    local_x: i32,
+    local_y: i32,
+    width: i32,
+    height: i32,
+    overview_scale: f32,
+) -> String {
+    if overview_scale < 1.0 {
+        let x = ((local_x as f32) / overview_scale).round() as i32;
+        let y = ((local_y as f32) / overview_scale).round() as i32;
+        let width = ((width as f32) / overview_scale).round() as i32;
+        let height = ((height as f32) / overview_scale).round() as i32;
+        format!(
+            "left:{}px;top:{}px;width:{}px;height:{}px;",
+            x,
+            y,
+            width.max(1),
+            height.max(1)
+        )
+    } else {
+        format!(
+            "left:{}px;top:{}px;width:{}px;height:{}px;",
+            local_x, local_y, width, height
+        )
     }
 }
 
@@ -3587,7 +3637,8 @@ mod tests {
     use super::{
         SurfaceDragCandidate, SurfaceKind, attention_ring_class, show_surface_backdrop,
         surface_drag_threshold_reached, surface_primary_label, surface_runtime_badge_text,
-        surface_status_text, surface_summary_title,
+        surface_status_text, surface_summary_title, workspace_strip_canvas_style,
+        workspace_window_style,
     };
     use crate::taskers_core::{
         AttentionRingState, AttentionState, BrowserProfileMode, PaneId, RuntimeIdentitySnapshot,
@@ -3639,6 +3690,30 @@ mod tests {
         assert!(!show_surface_backdrop(SurfaceKind::Terminal, true, true));
         assert!(show_surface_backdrop(SurfaceKind::Browser, true, false));
         assert!(show_surface_backdrop(SurfaceKind::Terminal, true, false));
+    }
+
+    #[test]
+    fn overview_canvas_style_scales_canvas_back_to_unscaled_layout_space() {
+        assert_eq!(
+            workspace_strip_canvas_style(720, 360, 0.5),
+            "width:1440px;height:720px;transform:scale(0.500000);transform-origin:top left;"
+        );
+        assert_eq!(
+            workspace_strip_canvas_style(720, 360, 1.0),
+            "width:720px;height:360px;"
+        );
+    }
+
+    #[test]
+    fn overview_window_style_rescales_window_geometry_for_dom_layout() {
+        assert_eq!(
+            workspace_window_style(120, 60, 360, 180, 0.5),
+            "left:240px;top:120px;width:720px;height:360px;"
+        );
+        assert_eq!(
+            workspace_window_style(120, 60, 360, 180, 1.0),
+            "left:120px;top:60px;width:360px;height:180px;"
+        );
     }
 
     #[test]
