@@ -696,6 +696,8 @@ pub enum ScreenshotCommand {
     Capture {
         target: ScreenshotTarget,
         path: Option<String>,
+        #[serde(default)]
+        overview: bool,
     },
 }
 
@@ -924,6 +926,7 @@ mod tests {
                 workspace_id: WorkspaceId::new(),
             },
             path: Some("/tmp/taskers-shot.png".into()),
+            overview: true,
         };
 
         let value = serde_json::to_value(&command).expect("serialize screenshot command");

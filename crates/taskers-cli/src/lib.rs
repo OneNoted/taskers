@@ -766,6 +766,12 @@ struct ScreenshotArgs {
     surface: Option<SurfaceId>,
     #[arg(long)]
     out: Option<String>,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Temporarily switch to overview mode before capture. Especially useful with workspace_canvas for zoomed-out debug screenshots."
+    )]
+    overview: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -3558,6 +3564,7 @@ async fn resolve_screenshot_command(
     Ok(ScreenshotCommand::Capture {
         target,
         path: screenshot.out.clone(),
+        overview: screenshot.overview,
     })
 }
 
@@ -4521,6 +4528,7 @@ mod tests {
                 pane: None,
                 surface: None,
                 out: Some(tempdir.join("window.png").display().to_string()),
+                overview: true,
             },
         )
         .await
@@ -4532,8 +4540,12 @@ mod tests {
                     ScreenshotTarget::WorkspaceWindow {
                         workspace_id: resolved_workspace_id,
                     },
+                overview,
                 ..
-            } => assert_eq!(resolved_workspace_id, workspace_id),
+            } => {
+                assert_eq!(resolved_workspace_id, workspace_id);
+                assert!(overview);
+            }
             other => panic!("unexpected screenshot command: {other:?}"),
         }
 
@@ -4587,6 +4599,7 @@ mod tests {
                 pane: Some(workspace.active_pane),
                 surface: Some(browser_surface_id),
                 out: None,
+                overview: false,
             },
         )
         .await
@@ -4632,6 +4645,7 @@ mod tests {
                     workspace_id: taskers_domain::WorkspaceId::new(),
                 },
                 path: Some(output_path.display().to_string()),
+                overview: false,
             },
         )
         .await

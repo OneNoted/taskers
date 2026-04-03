@@ -959,7 +959,7 @@ impl TaskersHost {
         })?;
 
         match command {
-            ScreenshotCommand::Capture { target, path } => match target {
+            ScreenshotCommand::Capture { target, path, .. } => match target {
                 ScreenshotTarget::Surface { surface_id } => {
                     let surface = self.terminal_surfaces.get(&surface_id).ok_or_else(|| {
                         ControlError::not_found(format!(

@@ -1893,8 +1893,47 @@ fn handle_screenshot_request(
     diagnostics: Option<&DiagnosticsWriter>,
     command: ScreenshotCommand,
 ) -> Result<ControlResponse, ControlError> {
+    let (command, capture_overview) = match command {
+        ScreenshotCommand::Capture {
+            target,
+            path,
+            overview,
+        } => (
+            ScreenshotCommand::Capture {
+                target,
+                path,
+                overview: false,
+            },
+            overview,
+        ),
+    };
+
+    let snapshot = core.snapshot();
+    let restore_workspace_section =
+        capture_overview && !matches!(snapshot.section, ShellSection::Workspace);
+    let restore_overview_mode = capture_overview && !snapshot.overview_mode;
+
+    if restore_workspace_section {
+        core.dispatch_shell_action(ShellAction::ShowSection {
+            section: ShellSection::Workspace,
+        });
+    }
+    if restore_overview_mode {
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+    }
+
     sync_window(window, core, host, last_revision, last_size, diagnostics);
     let result = host.borrow_mut().execute_screenshot(command)?;
+
+    if restore_overview_mode {
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+    }
+    if restore_workspace_section {
+        core.dispatch_shell_action(ShellAction::ShowSection {
+            section: snapshot.section,
+        });
+    }
+
     sync_window(window, core, host, last_revision, last_size, diagnostics);
     Ok(ControlResponse::Screenshot { result })
 }
