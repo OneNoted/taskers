@@ -2519,7 +2519,7 @@ fn preview_for_drag(
             workspace_id,
             column_widths,
             leading_index,
-        } => resize_track_pair(
+        } => resize_track_push(
             column_widths,
             *leading_index,
             dx.round() as i32,
@@ -2554,7 +2554,7 @@ fn preview_for_drag(
             window_heights,
             upper_index,
         } => {
-            let next_column_widths = resize_track_pair(
+            let next_column_widths = resize_track_push(
                 column_widths,
                 *leading_index,
                 dx.round() as i32,
@@ -2631,6 +2631,27 @@ fn resize_track_pair<Id: Copy>(
     let mut next = tracks.to_vec();
     next[leading_index].1 = leading + clamped_delta;
     next[leading_index + 1].1 = trailing - clamped_delta;
+    Some(next)
+}
+
+fn resize_track_push<Id: Copy>(
+    tracks: &[(Id, i32)],
+    leading_index: usize,
+    delta: i32,
+    min_extent: i32,
+) -> Option<Vec<(Id, i32)>> {
+    if delta == 0 || leading_index >= tracks.len() {
+        return None;
+    }
+
+    let leading = tracks[leading_index].1;
+    let clamped_delta = delta.max(min_extent - leading);
+    if clamped_delta == 0 {
+        return None;
+    }
+
+    let mut next = tracks.to_vec();
+    next[leading_index].1 = leading + clamped_delta;
     Some(next)
 }
 
@@ -3518,11 +3539,44 @@ mod tests {
                 workspace_id,
                 column_widths: vec![
                     (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
-                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 360),
+                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 240),
                 ],
                 window_heights: vec![
                     (workspace_window_id, MIN_WORKSPACE_WINDOW_HEIGHT),
                     (lower_window_id, MIN_WORKSPACE_WINDOW_HEIGHT + 260),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn preview_for_drag_can_grow_workspace_column_without_shrinking_neighbor() {
+        let workspace_id = taskers_shell_core::WorkspaceId::new();
+        let workspace_column_id = WorkspaceColumnId::new();
+        let neighbor_column_id = WorkspaceColumnId::new();
+
+        let preview = preview_for_drag(
+            &ResizeHandleTarget::WorkspaceColumnEdge {
+                workspace_id,
+                column_widths: vec![
+                    (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
+                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
+                ],
+                leading_index: 0,
+            },
+            2,
+            240.0,
+            0.0,
+        )
+        .expect("column preview");
+
+        assert_eq!(
+            preview,
+            ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: vec![
+                    (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 240),
+                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
                 ],
             }
         );
