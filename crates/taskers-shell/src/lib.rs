@@ -15,10 +15,11 @@ use taskers_core::{
     ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot, RuntimeStateSnapshot,
     RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
     ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot, SurfaceId,
-    SurfaceKind, SurfaceSnapshot, VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode,
-    VcsPanelSnapshot, VcsSnapshot, WindowTabDragSessionSnapshot, WorkspaceDirection, WorkspaceId,
-    WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget,
-    WorkspaceWindowSnapshot, WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
+    SurfaceKind, SurfaceMountSpec, SurfacePortalPlan, SurfaceSnapshot, VcsCommand, VcsFileEntry,
+    VcsFileStatus, VcsMode, VcsPanelSnapshot, VcsSnapshot, WindowTabDragSessionSnapshot,
+    WorkspaceDirection, WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary,
+    WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
 };
 use taskers_shell_core as taskers_core;
 
@@ -892,7 +893,7 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                 if matches!(snapshot.section, ShellSection::Workspace) {
                     div { class: if snapshot.overview_mode { "workspace-canvas workspace-canvas-overview" } else { "workspace-canvas" },
                         if snapshot.overview_mode {
-                            {render_workspace_overview(&snapshot.current_workspace, core.clone())}
+                            {render_workspace_overview(&snapshot.current_workspace, &snapshot.portal, core.clone())}
                         } else {
                             {render_workspace_strip(
                                 &snapshot.current_workspace,
@@ -1893,7 +1894,15 @@ fn render_workspace_strip(
     }
 }
 
-fn render_workspace_overview(workspace: &WorkspaceViewSnapshot, core: SharedCore) -> Element {
+fn render_workspace_overview(
+    workspace: &WorkspaceViewSnapshot,
+    portal: &SurfacePortalPlan,
+    core: SharedCore,
+) -> Element {
+    if !portal.panes.is_empty() {
+        return render_workspace_overview_live(workspace, portal, core);
+    }
+
     rsx! {
         div { class: "workspace-overview-scene",
             if workspace.overview_scene.cards.is_empty() {
@@ -1909,6 +1918,162 @@ fn render_workspace_overview(workspace: &WorkspaceViewSnapshot, core: SharedCore
                 }
             }
         }
+    }
+}
+
+fn render_workspace_overview_live(
+    workspace: &WorkspaceViewSnapshot,
+    portal: &SurfacePortalPlan,
+    core: SharedCore,
+) -> Element {
+    let scene_style = format!(
+        "width:{}px;height:{}px;",
+        workspace.canvas_width, workspace.canvas_height
+    );
+
+    rsx! {
+        div { class: "workspace-overview-live-scene", style: "{scene_style}",
+            for column in &workspace.columns {
+                for window in &column.windows {
+                    {render_workspace_overview_live_window(window, workspace, core.clone())}
+                }
+            }
+            for plan in &portal.panes {
+                {render_workspace_overview_live_pane(plan, workspace)}
+            }
+        }
+    }
+}
+
+fn render_workspace_overview_live_window(
+    window: &WorkspaceWindowSnapshot,
+    workspace: &WorkspaceViewSnapshot,
+    core: SharedCore,
+) -> Element {
+    let local_x = window.frame.x - workspace.viewport_origin_x;
+    let local_y = window.frame.y - workspace.viewport_origin_y;
+    let style = format!(
+        "left:{}px;top:{}px;width:{}px;height:{}px;",
+        local_x, local_y, window.frame.width, window.frame.height
+    );
+    let window_class = if window.active {
+        "workspace-overview-live-window workspace-overview-live-window-active"
+    } else {
+        "workspace-overview-live-window"
+    };
+    let window_id = window.id;
+    let open_window = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shell_action(ShellAction::ToggleOverview);
+        }
+    };
+    let focus_window = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+        }
+    };
+    let move_window = |direction: ShortcutAction| {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shortcut_action(direction);
+        }
+    };
+
+    rsx! {
+        article { class: "{window_class}", style: "{style}",
+            div { class: "workspace-overview-live-window-header",
+                div { class: "workspace-overview-live-window-title-row",
+                    div { class: "workspace-overview-live-window-title",
+                        {render_runtime_icon(&window.runtime, 12, "workspace-overview-live-window-runtime-icon")}
+                        span { "{window.title}" }
+                    }
+                    div { class: "workspace-overview-live-window-meta",
+                        span { "{window.pane_count} panes" }
+                        span { "{window.surface_count} surfaces" }
+                        span { "{window.tabs.len()} tabs" }
+                    }
+                }
+                div { class: "workspace-overview-live-window-actions",
+                    button {
+                        class: "pane-action workspace-overview-live-window-action",
+                        r#type: "button",
+                        onclick: focus_window,
+                        title: "Focus window",
+                        "Focus"
+                    }
+                    button {
+                        class: "pane-action workspace-overview-live-window-action",
+                        r#type: "button",
+                        onclick: open_window,
+                        title: "Open window",
+                        "Open"
+                    }
+                    if workspace.columns.len() > 1 {
+                        button {
+                            class: "pane-action workspace-overview-live-window-action",
+                            r#type: "button",
+                            onclick: move_window(ShortcutAction::MoveWindowLeft),
+                            title: "Move window left",
+                            {icons::arrow_left(12, "workspace-overview-live-window-action-icon")}
+                        }
+                        button {
+                            class: "pane-action workspace-overview-live-window-action",
+                            r#type: "button",
+                            onclick: move_window(ShortcutAction::MoveWindowRight),
+                            title: "Move window right",
+                            {icons::arrow_right(12, "workspace-overview-live-window-action-icon")}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_workspace_overview_live_pane(
+    plan: &taskers_core::PortalSurfacePlan,
+    workspace: &WorkspaceViewSnapshot,
+) -> Element {
+    let pane_x = plan.pane_frame.x - workspace.viewport_origin_x;
+    let pane_y = plan.pane_frame.y - workspace.viewport_origin_y;
+    let pane_style = format!(
+        "left:{}px;top:{}px;width:{}px;height:{}px;",
+        pane_x, pane_y, plan.pane_frame.width, plan.pane_frame.height
+    );
+    let surface_x = plan.frame.x - workspace.viewport_origin_x;
+    let surface_y = plan.frame.y - workspace.viewport_origin_y;
+    let surface_style = format!(
+        "left:{}px;top:{}px;width:{}px;height:{}px;",
+        surface_x, surface_y, plan.frame.width, plan.frame.height
+    );
+    let pane_class = if plan.active {
+        "workspace-overview-live-pane workspace-overview-live-pane-active"
+    } else {
+        "workspace-overview-live-pane"
+    };
+    let kind_label = match &plan.mount {
+        SurfaceMountSpec::Terminal(_) => "Terminal",
+        SurfaceMountSpec::Browser(_) => "Browser",
+    };
+    let label = match &plan.mount {
+        SurfaceMountSpec::Terminal(spec) => spec.title.trim(),
+        SurfaceMountSpec::Browser(spec) => spec.url.as_str(),
+    };
+
+    rsx! {
+        div { class: "{pane_class}", style: "{pane_style}",
+            div { class: "workspace-overview-live-pane-label",
+                span { class: "workspace-overview-live-pane-kind", "{kind_label}" }
+                span { class: "workspace-overview-live-pane-title", "{label}" }
+            }
+        }
+        div { class: "workspace-overview-live-surface-frame", style: "{surface_style}" }
     }
 }
 

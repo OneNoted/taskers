@@ -943,7 +943,7 @@ input:focus-visible {{
 .workspace-canvas-overview {{
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 16px;
+  padding: 0;
 }}
 
 .settings-canvas {{
@@ -1012,10 +1012,146 @@ input:focus-visible {{
 }}
 
 .workspace-overview-scene {{
+  padding: 16px;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 16px;
   align-content: start;
+}}
+
+.workspace-overview-live-scene {{
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+}}
+
+.workspace-overview-live-window {{
+  position: absolute;
+  border: 1px solid {border_08};
+  background: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}}
+
+.workspace-overview-live-window-active {{
+  border-color: {accent_24};
+}}
+
+.workspace-overview-live-window-header {{
+  position: absolute;
+  inset: 0 0 auto 0;
+  min-height: {window_toolbar_height}px;
+  padding: 0 6px 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(24, 24, 36, 0.84);
+  border-bottom: 1px solid {border_08};
+  backdrop-filter: blur(8px) saturate(1.2);
+  pointer-events: auto;
+}}
+
+.workspace-overview-live-window-title-row,
+.workspace-overview-live-window-title,
+.workspace-overview-live-window-meta,
+.workspace-overview-live-window-actions {{
+  display: flex;
+  align-items: center;
+}}
+
+.workspace-overview-live-window-title-row {{
+  gap: 10px;
+  min-width: 0;
+}}
+
+.workspace-overview-live-window-title {{
+  gap: 6px;
+  min-width: 0;
+  color: {text_bright};
+  font-size: 12px;
+  font-weight: 600;
+}}
+
+.workspace-overview-live-window-title span {{
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.workspace-overview-live-window-runtime-icon,
+.workspace-overview-live-window-action-icon {{
+  width: 12px;
+  height: 12px;
+}}
+
+.workspace-overview-live-window-meta {{
+  gap: 8px;
+  color: {text_dim};
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}}
+
+.workspace-overview-live-window-actions {{
+  gap: 6px;
+  margin-left: auto;
+}}
+
+.workspace-overview-live-window-action {{
+  min-height: 24px;
+  padding: 0 7px;
+}}
+
+.workspace-overview-live-pane,
+.workspace-overview-live-surface-frame {{
+  position: absolute;
+  pointer-events: none;
+}}
+
+.workspace-overview-live-pane {{
+  border: 1px solid {border_06};
+  background: rgba(15, 17, 23, 0.12);
+}}
+
+.workspace-overview-live-pane-active {{
+  border-color: {accent_20};
+  box-shadow: inset 0 0 0 1px {accent_12};
+}}
+
+.workspace-overview-live-pane-label {{
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 12px);
+  padding: 0 6px;
+  min-height: 20px;
+  background: rgba(24, 24, 36, 0.82);
+  border: 1px solid {border_08};
+  color: {text_dim};
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  overflow: hidden;
+}}
+
+.workspace-overview-live-pane-kind {{
+  color: {accent};
+  flex: 0 0 auto;
+}}
+
+.workspace-overview-live-pane-title {{
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.workspace-overview-live-surface-frame {{
+  border: 1px dashed rgba(255, 255, 255, 0.08);
 }}
 
 .workspace-overview-empty {{
