@@ -1230,6 +1230,12 @@ input:focus-visible {{
   min-height: 0;
 }}
 
+.overview-pane-slot > .pane-card,
+.overview-live-pane-slot > .live-pane-shell {{
+  width: 100%;
+  height: 100%;
+}}
+
 .split-container {{
   width: 100%;
   height: 100%;
