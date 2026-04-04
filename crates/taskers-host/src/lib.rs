@@ -681,7 +681,12 @@ impl TaskersHost {
                 format!("host sync start panes={}", snapshot.portal.panes.len()),
             ),
         );
-        self.sync_browser_surfaces(snapshot, interactive, visible)?;
+        self.sync_browser_surfaces(
+            snapshot,
+            interactive,
+            visible,
+            snapshot.resize_preview_active,
+        )?;
         let _bridge_guard = self.begin_bridge_operation(
             BridgeOperationKind::SurfaceSync,
             Some(snapshot.revision),
@@ -1286,6 +1291,7 @@ impl TaskersHost {
         snapshot: &ShellSnapshot,
         interactive: bool,
         visible: bool,
+        resize_preview_active: bool,
     ) -> Result<()> {
         let desired = browser_plans(&snapshot.portal);
         let desired_by_id = desired
@@ -1327,11 +1333,14 @@ impl TaskersHost {
         }
 
         for entry in snapshot.browser_catalog.iter() {
-            let visible_plan = if visible {
-                desired_by_id.get(&entry.surface_id)
-            } else {
-                None
-            };
+            let visible_plan = native_surface_visible_plan(
+                if visible {
+                    desired_by_id.get(&entry.surface_id)
+                } else {
+                    None
+                },
+                resize_preview_active,
+            );
             match self.browser_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
@@ -1429,11 +1438,14 @@ impl TaskersHost {
         }
 
         for entry in catalog {
-            let visible_plan = if visible {
-                desired_by_id.get(&entry.surface_id)
-            } else {
-                None
-            };
+            let visible_plan = native_surface_visible_plan(
+                if visible {
+                    desired_by_id.get(&entry.surface_id)
+                } else {
+                    None
+                },
+                resize_preview_active,
+            );
             match self.terminal_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
@@ -3271,20 +3283,34 @@ fn hidden_frame() -> taskers_core::Frame {
     taskers_core::Frame::new(100_000, 100_000, 1, 1)
 }
 
+fn native_surface_visible_plan<'a>(
+    visible_plan: Option<&'a PortalSurfacePlan>,
+    resize_preview_active: bool,
+) -> Option<&'a PortalSurfacePlan> {
+    if resize_preview_active {
+        None
+    } else {
+        visible_plan
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         browser_plans, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
-        native_surface_css, native_surfaces_interactive, native_surfaces_visible, preview_for_drag,
-        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path, terminal_plans,
-        trim_terminal_tail, with_capture_retries, workspace_pan_delta,
+        native_surface_css, native_surface_visible_plan, native_surfaces_interactive,
+        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
+        resolve_screenshot_output_path, terminal_plans, trim_terminal_tail, with_capture_retries,
+        workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
-        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneTabId, PortalSurfacePlan,
-        ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis, SurfaceMountSpec,
-        WorkspaceColumnId, WorkspaceWindowId,
+        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
+        PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis,
+        SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId, WorkspaceWindowId,
     };
 
     #[test]
@@ -3329,6 +3355,33 @@ mod tests {
         assert!(!native_surfaces_visible(ShellDragMode::WindowTab));
         assert!(!native_surfaces_visible(ShellDragMode::PaneTab));
         assert!(!native_surfaces_visible(ShellDragMode::Surface));
+    }
+
+    #[test]
+    fn resize_preview_hides_native_surface_plans() {
+        let plan = PortalSurfacePlan {
+            pane_id: PaneId::new(),
+            surface_id: SurfaceId::new(),
+            pane_frame: Frame::new(0, 0, 320, 240),
+            frame: Frame::new(10, 20, 300, 200),
+            mount: SurfaceMountSpec::Terminal(TerminalMountSpec {
+                title: "Terminal".into(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                command_argv: Vec::new(),
+                env: BTreeMap::new(),
+            }),
+            active: true,
+            notification_ring: None,
+        };
+
+        assert_eq!(
+            native_surface_visible_plan(Some(&plan), false).map(|plan| plan.frame),
+            Some(plan.frame)
+        );
+        assert!(native_surface_visible_plan(Some(&plan), true).is_none());
+        assert!(native_surface_visible_plan(None, true).is_none());
     }
 
     #[test]
