@@ -3813,12 +3813,19 @@ impl TaskersCore {
     }
 
     fn focus_pane_by_id(&mut self, pane_id: PaneId) -> bool {
-        let Some((workspace_id, _)) =
-            self.resolve_workspace_pane(&self.app_state.snapshot_model(), pane_id)
-        else {
+        let model = self.app_state.snapshot_model();
+        let Some((workspace_id, _)) = self.resolve_workspace_pane(&model, pane_id) else {
             return false;
         };
-        if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
+        let already_active = model.active_workspace_id() == Some(workspace_id)
+            && model
+                .workspaces
+                .get(&workspace_id)
+                .is_some_and(|workspace| workspace.active_pane == pane_id);
+        if already_active {
+            return false;
+        }
+        if model.active_workspace_id() != Some(workspace_id) {
             let _ = self.dispatch_control(ControlCommand::SwitchWorkspace {
                 window_id: None,
                 workspace_id,
@@ -3836,12 +3843,24 @@ impl TaskersCore {
     }
 
     fn focus_surface_by_id(&mut self, pane_id: PaneId, surface_id: SurfaceId) -> bool {
-        let Some((workspace_id, _)) =
-            self.resolve_surface_location(&self.app_state.snapshot_model(), surface_id)
-        else {
+        let model = self.app_state.snapshot_model();
+        let Some((workspace_id, _)) = self.resolve_surface_location(&model, surface_id) else {
             return false;
         };
-        if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
+        let already_active = model.active_workspace_id() == Some(workspace_id)
+            && model
+                .workspaces
+                .get(&workspace_id)
+                .is_some_and(|workspace| workspace.active_pane == pane_id)
+            && model
+                .workspaces
+                .get(&workspace_id)
+                .and_then(|workspace| workspace.panes.get(&pane_id))
+                .is_some_and(|pane| pane.active_surface == surface_id);
+        if already_active {
+            return false;
+        }
+        if model.active_workspace_id() != Some(workspace_id) {
             let _ = self.dispatch_control(ControlCommand::SwitchWorkspace {
                 window_id: None,
                 workspace_id,
@@ -8890,6 +8909,17 @@ mod tests {
 
         assert!(snapshot.overview_mode);
         assert!(after > before);
+    }
+
+    #[test]
+    fn redundant_host_pane_focus_does_not_advance_revision() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let before = core.revision();
+        let pane_id = core.snapshot().current_workspace.active_pane;
+
+        core.apply_host_event(HostEvent::PaneFocused { pane_id });
+
+        assert_eq!(core.revision(), before);
     }
 
     #[test]
