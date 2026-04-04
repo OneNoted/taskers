@@ -11,6 +11,7 @@ pub use protocol::{
     BrowserControlCommand, BrowserGetCommand, BrowserLoadState, BrowserPredicateCommand,
     BrowserTarget, BrowserWaitCondition, ControlCommand, ControlError, ControlErrorCode,
     ControlQuery, ControlResponse, IdentifyContext, IdentifyResult, RequestFrame, ResponseFrame,
+    ScreenshotCommand, ScreenshotResult, ScreenshotTarget, ScreenshotTargetResult,
     TerminalDebugCommand, TerminalDebugResult, TerminalRenderStats, VcsCommand, VcsCommandResult,
     VcsFileEntry, VcsFileStatus, VcsMode, VcsPullRequestInfo, VcsRefEntry, VcsSnapshot,
 };

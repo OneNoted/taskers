@@ -18,7 +18,7 @@ clap.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
-taskers-control = { version = "0.4.0", path = "../taskers-control" }
-taskers-domain = { version = "0.4.0", path = "../taskers-domain" }
+taskers-control = { version = "0.5.0", path = "../taskers-control" }
+taskers-domain = { version = "0.5.0", path = "../taskers-domain" }
 taskers-paths.workspace = true
-taskers-runtime = { version = "0.4.0", path = "../taskers-runtime" }
+taskers-runtime = { version = "0.5.0", path = "../taskers-runtime" }

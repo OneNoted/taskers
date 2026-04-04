@@ -96,6 +96,13 @@ pub enum ControlCommand {
         pane_tab_id: PaneTabId,
         to_index: usize,
     },
+    TransferPaneTab {
+        workspace_id: WorkspaceId,
+        source_pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        target_pane_container_id: PaneContainerId,
+        to_index: usize,
+    },
     ClosePaneTab {
         workspace_id: WorkspaceId,
         pane_container_id: PaneContainerId,
@@ -296,6 +303,9 @@ pub enum ControlCommand {
     },
     Browser {
         browser_command: BrowserControlCommand,
+    },
+    Screenshot {
+        screenshot_command: ScreenshotCommand,
     },
     TerminalDebug {
         debug_command: TerminalDebugCommand,
@@ -681,6 +691,62 @@ pub enum BrowserPredicateCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "screenshot_command", rename_all = "snake_case")]
+pub enum ScreenshotCommand {
+    Capture {
+        target: ScreenshotTarget,
+        path: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScreenshotTarget {
+    Surface {
+        surface_id: SurfaceId,
+    },
+    Pane {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+    },
+    WorkspaceWindow {
+        workspace_id: WorkspaceId,
+    },
+    WorkspaceCanvas {
+        workspace_id: WorkspaceId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenshotResult {
+    pub path: String,
+    pub width: i32,
+    pub height: i32,
+    pub target: ScreenshotTargetResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScreenshotTargetResult {
+    Surface {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    Pane {
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+    },
+    WorkspaceWindow {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+    },
+    WorkspaceCanvas {
+        workspace_id: WorkspaceId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "terminal_command", rename_all = "snake_case")]
 pub enum TerminalDebugCommand {
     IsFocused {
@@ -800,6 +866,9 @@ pub enum ControlResponse {
     Browser {
         result: JsonValue,
     },
+    Screenshot {
+        result: ScreenshotResult,
+    },
     TerminalDebug {
         result: TerminalDebugResult,
     },
@@ -837,5 +906,67 @@ impl From<AppModel> for ControlResponse {
         Self::Status {
             session: model.snapshot(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ControlResponse, ScreenshotCommand, ScreenshotResult, ScreenshotTarget,
+        ScreenshotTargetResult,
+    };
+    use taskers_domain::{PaneId, SurfaceId, WorkspaceId, WorkspaceWindowId};
+
+    #[test]
+    fn screenshot_commands_round_trip_through_serde() {
+        let command = ScreenshotCommand::Capture {
+            target: ScreenshotTarget::WorkspaceCanvas {
+                workspace_id: WorkspaceId::new(),
+            },
+            path: Some("/tmp/taskers-shot.png".into()),
+        };
+
+        let value = serde_json::to_value(&command).expect("serialize screenshot command");
+        let round_trip: ScreenshotCommand =
+            serde_json::from_value(value).expect("deserialize screenshot command");
+
+        assert_eq!(round_trip, command);
+    }
+
+    #[test]
+    fn screenshot_results_round_trip_through_serde() {
+        let result = ScreenshotResult {
+            path: "/tmp/taskers-shot.png".into(),
+            width: 640,
+            height: 480,
+            target: ScreenshotTargetResult::Surface {
+                workspace_id: WorkspaceId::new(),
+                pane_id: PaneId::new(),
+                surface_id: SurfaceId::new(),
+            },
+        };
+        let response = ControlResponse::Screenshot {
+            result: result.clone(),
+        };
+
+        let value = serde_json::to_value(&response).expect("serialize screenshot response");
+        let round_trip: ControlResponse =
+            serde_json::from_value(value).expect("deserialize screenshot response");
+
+        assert_eq!(round_trip, response);
+
+        let window_result = ScreenshotResult {
+            path: "/tmp/taskers-window.png".into(),
+            width: 800,
+            height: 600,
+            target: ScreenshotTargetResult::WorkspaceWindow {
+                workspace_id: WorkspaceId::new(),
+                workspace_window_id: WorkspaceWindowId::new(),
+            },
+        };
+        let value = serde_json::to_value(&window_result).expect("serialize screenshot result");
+        let round_trip: ScreenshotResult =
+            serde_json::from_value(value).expect("deserialize screenshot result");
+        assert_eq!(round_trip, window_result);
     }
 }

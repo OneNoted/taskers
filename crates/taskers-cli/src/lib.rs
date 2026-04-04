@@ -1,12 +1,18 @@
-use std::{env, future::pending, path::PathBuf, process::Command as ProcessCommand};
+use std::{
+    env,
+    future::pending,
+    io::{self, Write},
+    path::PathBuf,
+    process::Command as ProcessCommand,
+};
 
 use anyhow::{Context, anyhow, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use taskers_control::{
     BrowserControlCommand, BrowserGetCommand, BrowserLoadState, BrowserPredicateCommand,
     BrowserTarget, BrowserWaitCondition, ControlClient, ControlCommand, ControlQuery,
-    ControlResponse, InMemoryController, TerminalDebugCommand, bind_socket, default_socket_path,
-    serve,
+    ControlResponse, InMemoryController, ScreenshotCommand, ScreenshotTarget, TerminalDebugCommand,
+    bind_socket, default_socket_path, serve,
 };
 use taskers_domain::{
     AgentTarget, AppModel, AttentionState, BrowserProfileMode, Direction, KEYBOARD_RESIZE_STEP,
@@ -103,6 +109,19 @@ enum Command {
         #[command(subcommand)]
         command: BrowserCommand,
     },
+    Screenshot {
+        #[command(flatten)]
+        screenshot: ScreenshotArgs,
+    },
+    Completion {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+    #[command(name = "completion-query", hide = true)]
+    CompletionQuery {
+        #[command(flatten)]
+        query: CompletionQueryArgs,
+    },
     Identify {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -130,6 +149,31 @@ enum Command {
         #[command(subcommand)]
         command: SessionCommand,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Fish,
+    Zsh,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+struct CompletionQueryArgs {
+    #[arg(long)]
+    path: Option<String>,
+    #[arg(long, allow_hyphen_values = true)]
+    flag: Option<String>,
+    #[arg(long)]
+    positional: Option<usize>,
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    #[arg(long)]
+    workspace: Option<WorkspaceId>,
+    #[arg(long)]
+    pane: Option<PaneId>,
+    #[arg(long)]
+    surface: Option<SurfaceId>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -705,6 +749,36 @@ struct TerminalSurfaceArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+struct ScreenshotArgs {
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Taskers-owned screenshot target. V1 supports surface, pane, workspace_window, and workspace_canvas; app_window capture is deferred."
+    )]
+    target: CliScreenshotTarget,
+    #[arg(long)]
+    workspace: Option<WorkspaceId>,
+    #[arg(long)]
+    pane: Option<PaneId>,
+    #[arg(long)]
+    surface: Option<SurfaceId>,
+    #[arg(long)]
+    out: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliScreenshotTarget {
+    Surface,
+    Pane,
+    #[value(name = "workspace_window", alias = "workspace-window")]
+    WorkspaceWindow,
+    #[value(name = "workspace_canvas", alias = "workspace-canvas")]
+    WorkspaceCanvas,
+}
+
+#[derive(Debug, Clone, Args)]
 struct BrowserTargetArgs {
     #[arg(long = "ref")]
     reference: Option<String>,
@@ -1093,6 +1167,648 @@ impl From<CliBrowserLoadState> for BrowserLoadState {
             CliBrowserLoadState::Finished => BrowserLoadState::Finished,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct CompletionNode {
+    path: Vec<String>,
+    subcommands: Vec<String>,
+    flags: Vec<String>,
+    value_flags: Vec<String>,
+}
+
+fn cli_command() -> clap::Command {
+    Cli::command()
+}
+
+fn render_completion(shell: CompletionShell) -> String {
+    let nodes = completion_nodes(&cli_command());
+    match shell {
+        CompletionShell::Bash => render_bash_completion(&nodes),
+        CompletionShell::Fish => render_fish_completion(&nodes),
+        CompletionShell::Zsh => render_zsh_completion(&nodes),
+    }
+}
+
+fn write_completion(shell: CompletionShell, mut writer: impl Write) -> anyhow::Result<()> {
+    writer.write_all(render_completion(shell).as_bytes())?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn completion_nodes(root: &clap::Command) -> Vec<CompletionNode> {
+    let mut nodes = Vec::new();
+    collect_completion_nodes(root, Vec::new(), &mut nodes);
+    nodes
+}
+
+fn collect_completion_nodes(
+    command: &clap::Command,
+    path: Vec<String>,
+    nodes: &mut Vec<CompletionNode>,
+) {
+    let subcommands = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .map(|subcommand| subcommand.get_name().to_string())
+        .collect::<Vec<_>>();
+    let mut flags = Vec::new();
+    let mut value_flags = Vec::new();
+
+    for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+        let takes_values = arg.get_action().takes_values();
+
+        if let Some(long) = arg.get_long() {
+            let flag = format!("--{long}");
+            push_unique(&mut flags, flag.clone());
+            if takes_values {
+                push_unique(&mut value_flags, flag);
+            }
+        }
+
+        if let Some(short) = arg.get_short() {
+            let flag = format!("-{short}");
+            push_unique(&mut flags, flag.clone());
+            if takes_values {
+                push_unique(&mut value_flags, flag);
+            }
+        }
+    }
+
+    nodes.push(CompletionNode {
+        path: path.clone(),
+        subcommands,
+        flags,
+        value_flags,
+    });
+
+    for subcommand in command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+    {
+        let mut child_path = path.clone();
+        child_path.push(subcommand.get_name().to_string());
+        collect_completion_nodes(subcommand, child_path, nodes);
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+async fn completion_query_candidates(query: &CompletionQueryArgs) -> Vec<String> {
+    let Some(command) = completion_command_for_path(query.path.as_deref().unwrap_or_default())
+    else {
+        return Vec::new();
+    };
+
+    let Some(arg) = completion_arg_for_query(&command, query.flag.as_deref(), query.positional)
+    else {
+        return Vec::new();
+    };
+
+    let mut candidates = completion_static_candidates(arg);
+    let dynamic = completion_dynamic_candidates(
+        arg.get_id().as_str(),
+        query.socket.clone(),
+        query.workspace,
+        query.pane,
+        query.surface,
+    )
+    .await;
+    for candidate in dynamic {
+        push_unique(&mut candidates, candidate);
+    }
+    candidates
+}
+
+fn completion_command_for_path(path: &str) -> Option<clap::Command> {
+    let mut command = cli_command();
+    for segment in path
+        .split_whitespace()
+        .filter(|segment| !segment.is_empty())
+    {
+        let next = {
+            command
+                .get_subcommands()
+                .find(|subcommand| !subcommand.is_hide_set() && subcommand.get_name() == segment)?
+                .clone()
+        };
+        command = next;
+    }
+    Some(command)
+}
+
+fn completion_arg_for_query<'a>(
+    command: &'a clap::Command,
+    flag: Option<&str>,
+    positional: Option<usize>,
+) -> Option<&'a clap::Arg> {
+    if let Some(flag) = flag {
+        if let Some(long) = flag.strip_prefix("--") {
+            return command
+                .get_arguments()
+                .find(|arg| !arg.is_hide_set() && arg.get_long() == Some(long));
+        }
+        if let Some(short) = flag.strip_prefix('-') {
+            let mut chars = short.chars();
+            let short = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            return command
+                .get_arguments()
+                .find(|arg| !arg.is_hide_set() && arg.get_short() == Some(short));
+        }
+    }
+
+    positional.and_then(|index| {
+        command
+            .get_positionals()
+            .filter(|arg| !arg.is_hide_set())
+            .nth(index)
+    })
+}
+
+fn completion_static_candidates(arg: &clap::Arg) -> Vec<String> {
+    arg.get_possible_values()
+        .into_iter()
+        .filter(|value| !value.is_hide_set())
+        .map(|value| value.get_name().to_string())
+        .collect()
+}
+
+async fn completion_dynamic_candidates(
+    arg_id: &str,
+    socket: Option<PathBuf>,
+    workspace: Option<WorkspaceId>,
+    pane: Option<PaneId>,
+    _surface: Option<SurfaceId>,
+) -> Vec<String> {
+    let client = ControlClient::new(resolve_socket_path(socket));
+    let Ok(model) = query_model(&client).await else {
+        return Vec::new();
+    };
+
+    match arg_id {
+        "workspace" => {
+            let mut values = model
+                .workspaces
+                .keys()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            values.sort();
+            values
+        }
+        "pane" => {
+            let Ok(workspace_id) = resolve_workspace_id_from_model(&model, workspace) else {
+                return Vec::new();
+            };
+            let Some(workspace_record) = model.workspaces.get(&workspace_id) else {
+                return Vec::new();
+            };
+            let mut values = workspace_record
+                .panes
+                .keys()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            values.sort();
+            values
+        }
+        "surface" => {
+            let Ok(workspace_id) = resolve_workspace_id_from_model(&model, workspace) else {
+                return Vec::new();
+            };
+            let Some(workspace_record) = model.workspaces.get(&workspace_id) else {
+                return Vec::new();
+            };
+            let pane_id = pane
+                .or_else(env_pane_id)
+                .unwrap_or(workspace_record.active_pane);
+            let Some(pane_record) = workspace_record.panes.get(&pane_id) else {
+                return Vec::new();
+            };
+            let mut values = pane_record
+                .surfaces
+                .keys()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            values.sort();
+            values
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn render_bash_completion(nodes: &[CompletionNode]) -> String {
+    format!(
+        r#"_taskersctl_subcommands() {{
+  case "$1" in
+{subcommands_cases}    * ) ;;
+  esac
+}}
+
+_taskersctl_flags() {{
+  case "$1" in
+{flags_cases}    * ) ;;
+  esac
+}}
+
+_taskersctl_value_flags() {{
+  case "$1" in
+{value_flags_cases}    * ) ;;
+  esac
+}}
+
+_taskersctl_query_values() {{
+  local path="$1" flag="$2" positional="$3" socket="$4" workspace="$5" pane="$6" surface="$7"
+  local args=(completion-query)
+  [[ -n "$path" ]] && args+=(--path "$path")
+  [[ -n "$flag" ]] && args+=("--flag=$flag")
+  [[ -n "$positional" ]] && args+=(--positional "$positional")
+  [[ -n "$socket" ]] && args+=(--socket "$socket")
+  [[ -n "$workspace" ]] && args+=(--workspace "$workspace")
+  [[ -n "$pane" ]] && args+=(--pane "$pane")
+  [[ -n "$surface" ]] && args+=(--surface "$surface")
+  taskersctl "${{args[@]}}" 2>/dev/null
+}}
+
+_taskersctl() {{
+  local cur path subcommands flags value_flags word expect_value=0 expect_flag=""
+  local selected_socket="" selected_workspace="" selected_pane="" selected_surface=""
+  local positionals_used=0
+  local i eq_flag eq_value joined
+  local -a dynamic
+  COMPREPLY=()
+  cur="${{COMP_WORDS[COMP_CWORD]}}"
+  path=""
+
+  for ((i=1; i<COMP_CWORD; i++)); do
+    word="${{COMP_WORDS[i]}}"
+    if (( expect_value )); then
+      case "$expect_flag" in
+        --socket) selected_socket="$word" ;;
+        --workspace) selected_workspace="$word" ;;
+        --pane) selected_pane="$word" ;;
+        --surface) selected_surface="$word" ;;
+      esac
+      expect_value=0
+      expect_flag=""
+      continue
+    fi
+    [[ -z "$word" ]] && continue
+
+    if [[ "$word" == --*=* ]]; then
+      eq_flag="${{word%%=*}}"
+      eq_value="${{word#*=}}"
+      case "$eq_flag" in
+        --socket) selected_socket="$eq_value" ;;
+        --workspace) selected_workspace="$eq_value" ;;
+        --pane) selected_pane="$eq_value" ;;
+        --surface) selected_surface="$eq_value" ;;
+      esac
+      value_flags="$(_taskersctl_value_flags "$path")"
+      case " $value_flags " in
+        *" $eq_flag "*) continue ;;
+      esac
+    fi
+
+    if [[ "$word" == -* ]]; then
+      value_flags="$(_taskersctl_value_flags "$path")"
+      case " $value_flags " in
+        *" $word "*) expect_value=1; expect_flag="$word" ;;
+      esac
+      continue
+    fi
+
+    subcommands="$(_taskersctl_subcommands "$path")"
+    case " $subcommands " in
+      *" $word "*) path="${{path:+$path }}$word" ;;
+      *) positionals_used=$((positionals_used + 1)) ;;
+    esac
+  done
+
+  if (( expect_value )); then
+    mapfile -t dynamic < <(_taskersctl_query_values "$path" "$expect_flag" "" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")
+    joined="${{dynamic[*]}}"
+    COMPREPLY=( $(compgen -W "$joined" -- "$cur") )
+    return 0
+  fi
+
+  subcommands="$(_taskersctl_subcommands "$path")"
+  flags="$(_taskersctl_flags "$path")"
+  mapfile -t dynamic < <(_taskersctl_query_values "$path" "" "$positionals_used" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")
+  joined="${{dynamic[*]}}"
+  if [[ "$cur" == -* ]]; then
+    COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
+  else
+    COMPREPLY=( $(compgen -W "$subcommands $flags $joined" -- "$cur") )
+  fi
+}}
+
+complete -F _taskersctl taskersctl
+"#,
+        subcommands_cases = render_bash_case_body(nodes, |node| &node.subcommands),
+        flags_cases = render_bash_case_body(nodes, |node| &node.flags),
+        value_flags_cases = render_bash_case_body(nodes, |node| &node.value_flags),
+    )
+}
+
+fn render_zsh_completion(nodes: &[CompletionNode]) -> String {
+    format!(
+        r#"#compdef taskersctl
+
+__taskersctl_subcommands() {{
+  case "$1" in
+{subcommands_cases}    * ) ;;
+  esac
+}}
+
+__taskersctl_flags() {{
+  case "$1" in
+{flags_cases}    * ) ;;
+  esac
+}}
+
+__taskersctl_value_flags() {{
+  case "$1" in
+{value_flags_cases}    * ) ;;
+  esac
+}}
+
+__taskersctl_query_values() {{
+  local path="$1" flag="$2" positional="$3" socket="$4" workspace="$5" pane="$6" surface="$7"
+  local -a args
+  args=(completion-query)
+  [[ -n "$path" ]] && args+=(--path "$path")
+  [[ -n "$flag" ]] && args+=("--flag=$flag")
+  [[ -n "$positional" ]] && args+=(--positional "$positional")
+  [[ -n "$socket" ]] && args+=(--socket "$socket")
+  [[ -n "$workspace" ]] && args+=(--workspace "$workspace")
+  [[ -n "$pane" ]] && args+=(--pane "$pane")
+  [[ -n "$surface" ]] && args+=(--surface "$surface")
+  taskersctl $args 2>/dev/null
+}}
+
+_taskersctl() {{
+  local cur path subcommands_text flags_text value_flags_text word expect_value=0 expect_flag=""
+  local selected_socket="" selected_workspace="" selected_pane="" selected_surface=""
+  local positionals_used=0
+  local eq_flag eq_value
+  local -a candidates
+  local -a dynamic
+  local i
+  cur="${{words[CURRENT]}}"
+  path=""
+
+  for ((i=2; i<CURRENT; i++)); do
+    word="${{words[i]}}"
+    if (( expect_value )); then
+      case "$expect_flag" in
+        --socket) selected_socket="$word" ;;
+        --workspace) selected_workspace="$word" ;;
+        --pane) selected_pane="$word" ;;
+        --surface) selected_surface="$word" ;;
+      esac
+      expect_value=0
+      expect_flag=""
+      continue
+    fi
+    [[ -z "$word" ]] && continue
+
+    if [[ "$word" == --*=* ]]; then
+      eq_flag="${{word%%=*}}"
+      eq_value="${{word#*=}}"
+      case "$eq_flag" in
+        --socket) selected_socket="$eq_value" ;;
+        --workspace) selected_workspace="$eq_value" ;;
+        --pane) selected_pane="$eq_value" ;;
+        --surface) selected_surface="$eq_value" ;;
+      esac
+      value_flags_text="$(__taskersctl_value_flags "$path")"
+      [[ " $value_flags_text " == *" $eq_flag "* ]] && continue
+    fi
+
+    if [[ "$word" == -* ]]; then
+      value_flags_text="$(__taskersctl_value_flags "$path")"
+      if [[ " $value_flags_text " == *" $word "* ]]; then
+        expect_value=1
+        expect_flag="$word"
+      fi
+      continue
+    fi
+
+    subcommands_text="$(__taskersctl_subcommands "$path")"
+    if [[ " $subcommands_text " == *" $word "* ]]; then
+      path="${{path:+$path }}$word"
+    else
+      (( positionals_used += 1 ))
+    fi
+  done
+
+  if (( expect_value )); then
+    candidates=("${{(@f)$(__taskersctl_query_values "$path" "$expect_flag" "" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")}}")
+    (( $#candidates )) && compadd -- $candidates
+    return 0
+  fi
+
+  subcommands_text="$(__taskersctl_subcommands "$path")"
+  flags_text="$(__taskersctl_flags "$path")"
+  dynamic=("${{(@f)$(__taskersctl_query_values "$path" "" "$positionals_used" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")}}")
+  if [[ "$cur" == -* ]]; then
+    candidates=(${{=flags_text}})
+  else
+    candidates=(${{=subcommands_text}} ${{=flags_text}} $dynamic)
+  fi
+  compadd -- $candidates
+}}
+
+(( $+functions[compdef] )) && compdef _taskersctl taskersctl
+"#,
+        subcommands_cases = render_bash_case_body(nodes, |node| &node.subcommands),
+        flags_cases = render_bash_case_body(nodes, |node| &node.flags),
+        value_flags_cases = render_bash_case_body(nodes, |node| &node.value_flags),
+    )
+}
+
+fn render_fish_completion(nodes: &[CompletionNode]) -> String {
+    format!(
+        r#"function __taskersctl_subcommands
+  switch "$argv[1]"
+{subcommands_cases}    case '*'
+  end
+end
+
+function __taskersctl_flags
+  switch "$argv[1]"
+{flags_cases}    case '*'
+  end
+end
+
+function __taskersctl_value_flags
+  switch "$argv[1]"
+{value_flags_cases}    case '*'
+  end
+end
+
+function __taskersctl_query_values
+  set -l args completion-query
+  test -n "$argv[1]"; and set -a args --path "$argv[1]"
+  test -n "$argv[2]"; and set -a args --flag="$argv[2]"
+  test -n "$argv[3]"; and set -a args --positional "$argv[3]"
+  test -n "$argv[4]"; and set -a args --socket "$argv[4]"
+  test -n "$argv[5]"; and set -a args --workspace "$argv[5]"
+  test -n "$argv[6]"; and set -a args --pane "$argv[6]"
+  test -n "$argv[7]"; and set -a args --surface "$argv[7]"
+  taskersctl $args 2>/dev/null
+end
+
+function __taskersctl_complete
+  set -l tokens (commandline -opc)
+  set -e tokens[1]
+  set -l path
+  set -l expect_value 0
+  set -l expect_flag
+  set -l selected_socket
+  set -l selected_workspace
+  set -l selected_pane
+  set -l selected_surface
+  set -l positionals_used 0
+
+  for word in $tokens
+    if test $expect_value -eq 1
+      switch $expect_flag
+        case --socket
+          set selected_socket $word
+        case --workspace
+          set selected_workspace $word
+        case --pane
+          set selected_pane $word
+        case --surface
+          set selected_surface $word
+      end
+      set expect_value 0
+      set expect_flag
+      continue
+    end
+    if test -z "$word"
+      continue
+    end
+
+    if string match -qr '^--[^=]+=.*$' -- $word
+      set -l opt (string replace -r '=.*$' '' -- $word)
+      set -l opt_value (string replace -r '^[^=]*=' '' -- $word)
+      switch $opt
+        case --socket
+          set selected_socket $opt_value
+        case --workspace
+          set selected_workspace $opt_value
+        case --pane
+          set selected_pane $opt_value
+        case --surface
+          set selected_surface $opt_value
+      end
+      set -l value_flags (__taskersctl_value_flags "$path")
+      if contains -- $opt $value_flags
+        continue
+      end
+    end
+
+    if string match -qr '^-' -- $word
+      set -l value_flags (__taskersctl_value_flags "$path")
+      if contains -- $word $value_flags
+        set expect_value 1
+        set expect_flag $word
+      end
+      continue
+    end
+
+    set -l subcommands (__taskersctl_subcommands "$path")
+    if contains -- $word $subcommands
+      if test -n "$path"
+        set path "$path $word"
+      else
+        set path "$word"
+      end
+    else
+      set positionals_used (math $positionals_used + 1)
+    end
+  end
+
+  if test $expect_value -eq 1
+    __taskersctl_query_values "$path" "$expect_flag" "" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface"
+    return
+  end
+
+  set -l token (commandline -ct)
+  set -l subcommands (__taskersctl_subcommands "$path")
+  set -l flags (__taskersctl_flags "$path")
+  set -l dynamic (__taskersctl_query_values "$path" "" "$positionals_used" "$selected_socket" "$selected_workspace" "$selected_pane" "$selected_surface")
+  if string match -qr '^-' -- $token
+    printf '%s\n' $flags
+  else
+    printf '%s\n' $subcommands $flags $dynamic
+  end
+end
+
+complete -f -c taskersctl -a '(__taskersctl_complete)'
+"#,
+        subcommands_cases = render_fish_case_body(nodes, |node| &node.subcommands),
+        flags_cases = render_fish_case_body(nodes, |node| &node.flags),
+        value_flags_cases = render_fish_case_body(nodes, |node| &node.value_flags),
+    )
+}
+
+fn render_bash_case_body<'a>(
+    nodes: &'a [CompletionNode],
+    values: impl Fn(&'a CompletionNode) -> &'a [String],
+) -> String {
+    let mut output = String::new();
+    for node in nodes {
+        output.push_str("    ");
+        output.push_str(&completion_case_key(&node.path));
+        output.push_str(" ) printf '%s' '");
+        output.push_str(&shell_words(values(node)));
+        output.push_str("' ;;\n");
+    }
+    output
+}
+
+fn render_fish_case_body<'a>(
+    nodes: &'a [CompletionNode],
+    values: impl Fn(&'a CompletionNode) -> &'a [String],
+) -> String {
+    let mut output = String::new();
+    for node in nodes {
+        output.push_str("    case '");
+        output.push_str(&completion_path(&node.path));
+        output.push_str("'\n");
+        for value in values(node) {
+            output.push_str("      echo '");
+            output.push_str(value);
+            output.push_str("'\n");
+        }
+    }
+    output
+}
+
+fn completion_case_key(path: &[String]) -> String {
+    let path = completion_path(path);
+    if path.is_empty() {
+        "''".into()
+    } else {
+        format!("'{path}'")
+    }
+}
+
+fn completion_path(path: &[String]) -> String {
+    path.join(" ")
+}
+
+fn shell_words(values: &[String]) -> String {
+    values.join(" ")
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -1707,6 +2423,17 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Browser { command } => {
             handle_browser_cli_command(command).await?;
         }
+        Command::Screenshot { screenshot } => {
+            handle_screenshot_cli_command(screenshot).await?;
+        }
+        Command::Completion { shell } => {
+            write_completion(shell, io::stdout())?;
+        }
+        Command::CompletionQuery { query } => {
+            for candidate in completion_query_candidates(&query).await {
+                println!("{candidate}");
+            }
+        }
         Command::Identify {
             socket,
             workspace,
@@ -2249,6 +2976,21 @@ fn resolve_workspace_id_from_model(
         .context("missing workspace id; pass --workspace or run from inside Taskers")
 }
 
+fn resolve_workspace_window_screenshot_target(
+    model: &AppModel,
+    workspace: Option<WorkspaceId>,
+) -> anyhow::Result<ScreenshotTarget> {
+    let workspace_id = resolve_workspace_id_from_model(model, workspace)?;
+    let workspace = model
+        .workspaces
+        .get(&workspace_id)
+        .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+    if !workspace.windows.contains_key(&workspace.active_window) {
+        bail!("workspace {workspace_id} has no active workspace window");
+    }
+    Ok(ScreenshotTarget::WorkspaceWindow { workspace_id })
+}
+
 fn resolve_agent_target(
     model: &AppModel,
     workspace: Option<WorkspaceId>,
@@ -2755,6 +3497,70 @@ async fn handle_browser_cli_command(command: BrowserCommand) -> anyhow::Result<(
     Ok(())
 }
 
+async fn handle_screenshot_cli_command(screenshot: ScreenshotArgs) -> anyhow::Result<()> {
+    let client = ControlClient::new(resolve_socket_path(screenshot.socket.clone()));
+    let command = resolve_screenshot_command(&client, &screenshot).await?;
+    let result = send_screenshot_command(&client, command).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn resolve_screenshot_command(
+    client: &ControlClient,
+    screenshot: &ScreenshotArgs,
+) -> anyhow::Result<ScreenshotCommand> {
+    let model = query_model(client).await?;
+    let target = match screenshot.target {
+        CliScreenshotTarget::Surface => {
+            let (_, _, surface_id) = resolve_terminal_surface(
+                client,
+                &TerminalSurfaceArgs {
+                    socket: screenshot.socket.clone(),
+                    workspace: screenshot.workspace,
+                    pane: screenshot.pane,
+                    surface: screenshot.surface,
+                },
+            )
+            .await?;
+            ScreenshotTarget::Surface { surface_id }
+        }
+        CliScreenshotTarget::Pane => {
+            let workspace_id = resolve_workspace_id_from_model(&model, screenshot.workspace)?;
+            let workspace = model
+                .workspaces
+                .get(&workspace_id)
+                .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+            let pane_id = screenshot
+                .pane
+                .or_else(env_pane_id)
+                .unwrap_or(workspace.active_pane);
+            workspace.panes.get(&pane_id).ok_or_else(|| {
+                anyhow!("pane {pane_id} is not present in workspace {workspace_id}")
+            })?;
+            ScreenshotTarget::Pane {
+                workspace_id,
+                pane_id,
+            }
+        }
+        CliScreenshotTarget::WorkspaceWindow => {
+            resolve_workspace_window_screenshot_target(&model, screenshot.workspace)?
+        }
+        CliScreenshotTarget::WorkspaceCanvas => {
+            let workspace_id = resolve_workspace_id_from_model(&model, screenshot.workspace)?;
+            model
+                .workspaces
+                .get(&workspace_id)
+                .ok_or_else(|| anyhow!("workspace {workspace_id} not found"))?;
+            ScreenshotTarget::WorkspaceCanvas { workspace_id }
+        }
+    };
+
+    Ok(ScreenshotCommand::Capture {
+        target,
+        path: screenshot.out.clone(),
+    })
+}
+
 async fn run_browser_surface_command<F>(
     browser: &BrowserSurfaceArgs,
     build: F,
@@ -2840,6 +3646,18 @@ async fn send_terminal_debug_command(
     match response {
         ControlResponse::TerminalDebug { result } => Ok(serde_json::to_value(result)?),
         other => bail!("unexpected terminal debug response: {other:?}"),
+    }
+}
+
+async fn send_screenshot_command(
+    client: &ControlClient,
+    screenshot_command: ScreenshotCommand,
+) -> anyhow::Result<serde_json::Value> {
+    let response =
+        send_control_command(client, ControlCommand::Screenshot { screenshot_command }).await?;
+    match response {
+        ControlResponse::Screenshot { result } => Ok(serde_json::to_value(result)?),
+        other => bail!("unexpected screenshot response: {other:?}"),
     }
 }
 
@@ -3033,6 +3851,7 @@ fn resolve_wait_condition(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_agent_hook(
     socket: Option<PathBuf>,
     workspace: Option<WorkspaceId>,
@@ -3231,16 +4050,21 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use clap::Parser;
     use taskers_control::{
-        BrowserTarget, BrowserWaitCondition, ControlCommand, InMemoryController, bind_socket, serve,
+        BrowserTarget, BrowserWaitCondition, ControlClient, ControlCommand, InMemoryController,
+        ScreenshotCommand, ScreenshotTarget, bind_socket, serve,
     };
-    use taskers_domain::{AppModel, PaneKind};
+    use taskers_domain::{AppModel, BrowserProfileMode, PaneKind, SplitAxis, WorkspaceWindowId};
     use tokio::sync::oneshot;
 
     use super::{
-        CliBrowserLoadState, CliSignalKind, emit_agent_hook, ensure_implicit_notify_target_context,
-        env_pane_id, env_surface_id, env_workspace_id, infer_agent_kind, resolve_browser_target,
-        resolve_wait_condition,
+        Cli, CliBrowserLoadState, CliScreenshotTarget, CliSignalKind, CompletionQueryArgs,
+        CompletionShell, ScreenshotArgs, completion_query_candidates, emit_agent_hook,
+        ensure_implicit_notify_target_context, env_pane_id, env_surface_id, env_workspace_id,
+        infer_agent_kind, query_model, render_completion, resolve_browser_target,
+        resolve_screenshot_command, resolve_wait_condition,
+        resolve_workspace_window_screenshot_target, send_screenshot_command,
     };
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -3259,6 +4083,182 @@ mod tests {
         assert_eq!(infer_agent_kind("Claude Code"), Some("claude".into()));
         assert_eq!(infer_agent_kind("opencode"), Some("opencode".into()));
         assert_eq!(infer_agent_kind("unknown"), None);
+    }
+
+    #[test]
+    fn parses_completion_subcommand() {
+        let cli = Cli::try_parse_from(["taskersctl", "completion", "fish"])
+            .expect("completion subcommand should parse");
+        let debug = format!("{cli:?}");
+        assert!(debug.contains("Completion"));
+        assert!(debug.contains("Fish"));
+    }
+
+    #[test]
+    fn generated_completion_scripts_include_public_commands_only() {
+        for shell in [
+            CompletionShell::Bash,
+            CompletionShell::Fish,
+            CompletionShell::Zsh,
+        ] {
+            let script = render_completion(shell);
+            assert!(
+                script.contains("browser"),
+                "expected browser command in {shell:?} completion"
+            );
+            assert!(
+                script.contains("workspace"),
+                "expected workspace command in {shell:?} completion"
+            );
+            assert!(
+                script.contains("--socket"),
+                "expected socket flag in {shell:?} completion"
+            );
+            assert!(
+                !script.contains(" session "),
+                "hidden session command leaked into {shell:?} completion"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_query_returns_static_flag_values() {
+        let values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("screenshot".into()),
+            flag: Some("--target".into()),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+
+        assert_eq!(
+            values,
+            vec![
+                "surface".to_string(),
+                "pane".to_string(),
+                "workspace_window".to_string(),
+                "workspace_canvas".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_query_returns_static_positional_values() {
+        let values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("completion".into()),
+            positional: Some(0),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+
+        assert_eq!(
+            values,
+            vec!["bash".to_string(), "fish".to_string(), "zsh".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_query_returns_dynamic_taskers_ids() {
+        let tempdir = unique_temp_dir("taskers-cli-completion-query");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("taskers.sock");
+        let listener = bind_socket(&socket_path).expect("listener");
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+        let workspace_id = workspace.id;
+        let active_pane_id = workspace.active_pane;
+        let initial_surface_id = workspace
+            .panes
+            .get(&active_pane_id)
+            .expect("pane")
+            .active_surface;
+
+        controller
+            .handle(ControlCommand::SplitPane {
+                workspace_id,
+                pane_id: Some(active_pane_id),
+                axis: SplitAxis::Horizontal,
+            })
+            .expect("split pane");
+        let second_pane_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| {
+                workspace
+                    .panes
+                    .keys()
+                    .copied()
+                    .find(|pane_id| *pane_id != active_pane_id)
+            })
+            .expect("second pane");
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id,
+                pane_id: active_pane_id,
+                kind: PaneKind::Browser,
+                browser_profile_mode: Some(BrowserProfileMode::PersistentDefault),
+            })
+            .expect("create surface");
+        let browser_surface_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.panes.get(&active_pane_id))
+            .and_then(|pane| {
+                pane.surfaces
+                    .keys()
+                    .copied()
+                    .find(|surface_id| *surface_id != initial_surface_id)
+            })
+            .expect("browser surface");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(listener, controller, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        let workspace_values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("browser click".into()),
+            flag: Some("--workspace".into()),
+            socket: Some(socket_path.clone()),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+        assert!(workspace_values.contains(&workspace_id.to_string()));
+
+        let pane_values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("browser click".into()),
+            flag: Some("--pane".into()),
+            socket: Some(socket_path.clone()),
+            workspace: Some(workspace_id),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+        assert!(pane_values.contains(&active_pane_id.to_string()));
+        assert!(pane_values.contains(&second_pane_id.to_string()));
+
+        let surface_values = completion_query_candidates(&CompletionQueryArgs {
+            path: Some("browser click".into()),
+            flag: Some("--surface".into()),
+            socket: Some(socket_path.clone()),
+            workspace: Some(workspace_id),
+            pane: Some(active_pane_id),
+            ..CompletionQueryArgs::default()
+        })
+        .await;
+        assert!(surface_values.contains(&initial_surface_id.to_string()));
+        assert!(surface_values.contains(&browser_surface_id.to_string()));
+
+        shutdown_tx.send(()).expect("shutdown");
+        server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
     }
 
     #[test]
@@ -3487,6 +4487,168 @@ mod tests {
 
         shutdown_tx.send(()).expect("shutdown");
         server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
+    }
+
+    #[tokio::test]
+    async fn screenshot_workspace_window_resolves_to_selected_workspace() {
+        let tempdir = unique_temp_dir("taskers-cli-screenshot-window");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("taskers.sock");
+        let listener = bind_socket(&socket_path).expect("listener");
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(listener, controller, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        let client = ControlClient::new(socket_path.clone());
+        let workspace_id = query_model(&client)
+            .await
+            .expect("model")
+            .active_workspace_id()
+            .expect("workspace");
+
+        let command = resolve_screenshot_command(
+            &client,
+            &ScreenshotArgs {
+                socket: Some(socket_path),
+                target: CliScreenshotTarget::WorkspaceWindow,
+                workspace: Some(workspace_id),
+                pane: None,
+                surface: None,
+                out: Some(tempdir.join("window.png").display().to_string()),
+            },
+        )
+        .await
+        .expect("resolve screenshot");
+
+        match command {
+            ScreenshotCommand::Capture {
+                target:
+                    ScreenshotTarget::WorkspaceWindow {
+                        workspace_id: resolved_workspace_id,
+                    },
+                ..
+            } => assert_eq!(resolved_workspace_id, workspace_id),
+            other => panic!("unexpected screenshot command: {other:?}"),
+        }
+
+        shutdown_tx.send(()).expect("shutdown");
+        server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
+    }
+
+    #[tokio::test]
+    async fn screenshot_surface_rejects_non_terminal_surface() {
+        let tempdir = unique_temp_dir("taskers-cli-screenshot-surface");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("taskers.sock");
+        let listener = bind_socket(&socket_path).expect("listener");
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace = snapshot.model.active_workspace().expect("workspace");
+
+        controller
+            .handle(ControlCommand::CreateSurface {
+                workspace_id: workspace.id,
+                pane_id: workspace.active_pane,
+                kind: PaneKind::Browser,
+                browser_profile_mode: Some(BrowserProfileMode::PersistentDefault),
+            })
+            .expect("create browser surface");
+        let browser_surface_id = controller
+            .snapshot()
+            .model
+            .workspaces
+            .get(&workspace.id)
+            .and_then(|workspace| workspace.panes.get(&workspace.active_pane))
+            .map(|pane| pane.active_surface)
+            .expect("browser surface");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve(listener, controller, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+
+        let client = ControlClient::new(socket_path.clone());
+        let error = resolve_screenshot_command(
+            &client,
+            &ScreenshotArgs {
+                socket: Some(socket_path),
+                target: CliScreenshotTarget::Surface,
+                workspace: Some(workspace.id),
+                pane: Some(workspace.active_pane),
+                surface: Some(browser_surface_id),
+                out: None,
+            },
+        )
+        .await
+        .expect_err("browser surface should not resolve as a terminal screenshot target");
+
+        assert!(
+            error.to_string().contains("not a terminal"),
+            "unexpected error: {error}"
+        );
+
+        shutdown_tx.send(()).expect("shutdown");
+        server.await.expect("server task").expect("serve cleanly");
+        std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
+    }
+
+    #[test]
+    fn screenshot_workspace_window_errors_when_workspace_has_no_active_window() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let workspace = model.workspaces.get_mut(&workspace_id).expect("workspace");
+        workspace.active_window = WorkspaceWindowId::new();
+        let error = resolve_workspace_window_screenshot_target(&model, Some(workspace_id))
+            .expect_err("workspace without active window should fail");
+
+        assert!(
+            error.to_string().contains("no active workspace window"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn screenshot_bridge_unavailable_does_not_create_output() {
+        let tempdir = unique_temp_dir("taskers-cli-screenshot-unavailable");
+        std::fs::create_dir_all(&tempdir).expect("tempdir");
+        let socket_path = tempdir.join("missing.sock");
+        let output_path = tempdir.join("missing.png");
+        let client = ControlClient::new(socket_path);
+
+        let error = send_screenshot_command(
+            &client,
+            ScreenshotCommand::Capture {
+                target: ScreenshotTarget::WorkspaceCanvas {
+                    workspace_id: taskers_domain::WorkspaceId::new(),
+                },
+                path: Some(output_path.display().to_string()),
+            },
+        )
+        .await
+        .expect_err("missing host bridge should fail");
+
+        assert!(
+            !output_path.exists(),
+            "unexpected screenshot artifact at {}",
+            output_path.display()
+        );
+        assert!(
+            error.to_string().contains("No such file")
+                || error.to_string().contains("os error")
+                || error.to_string().contains("connect"),
+            "unexpected error: {error}"
+        );
+
         std::fs::remove_dir_all(&tempdir).expect("cleanup tempdir");
     }
 

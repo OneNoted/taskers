@@ -4,27 +4,29 @@ use anyhow::{Result, anyhow};
 use gtk::{
     Align, Box as GtkBox, CssProvider, DrawingArea, EventControllerFocus, EventControllerScroll,
     EventControllerScrollFlags, GestureClick, GestureDrag, Orientation, Overflow, Overlay,
-    STYLE_PROVIDER_PRIORITY_APPLICATION, Widget, glib, prelude::*,
+    STYLE_PROVIDER_PRIORITY_APPLICATION, Snapshot, Widget, WidgetPaintable, gdk, glib, graphene,
+    gsk, prelude::*,
 };
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     f64::consts::{FRAC_PI_2, PI, TAU},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use taskers_control::{
-    BrowserControlCommand, BrowserLoadState, ControlError, TerminalDebugCommand,
+    BrowserControlCommand, BrowserLoadState, ControlError, ControlErrorCode, ScreenshotCommand,
+    ScreenshotResult, ScreenshotTarget, ScreenshotTargetResult, TerminalDebugCommand,
     TerminalDebugResult, TerminalRenderStats,
 };
 use taskers_core::{
     BrowserSurfaceCatalogEntry, HostCommand, HostEvent, PaneId, PortalSurfacePlan, ShellDragMode,
     ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
-    TerminalSurfaceCatalogEntry, WorkspaceId,
+    TerminalSurfaceCatalogEntry, WorkspaceId, WorkspaceViewSnapshot,
 };
 use taskers_domain::{
     BrowserProfileMode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind,
@@ -484,6 +486,8 @@ pub struct TaskersHost {
     persistent_browser_session: Option<NetworkSession>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
     resize_handles: HashMap<String, ResizeHandleOverlay>,
+    current_portal: Option<SurfacePortalPlan>,
+    current_workspace: Option<WorkspaceViewSnapshot>,
 }
 
 struct ResizeHandleOverlay {
@@ -651,6 +655,8 @@ impl TaskersHost {
             persistent_browser_session: None,
             terminal_surfaces: HashMap::new(),
             resize_handles: HashMap::new(),
+            current_portal: None,
+            current_workspace: None,
         }
     }
 
@@ -660,6 +666,9 @@ impl TaskersHost {
 
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
         let interactive = native_surfaces_interactive(snapshot.drag_mode);
+        let visible = native_surfaces_visible(snapshot.drag_mode);
+        self.current_portal = Some(snapshot.portal.clone());
+        self.current_workspace = Some(snapshot.current_workspace.clone());
         if self.selected_theme_id != snapshot.settings.selected_theme_id {
             self.selected_theme_id = snapshot.settings.selected_theme_id.clone();
             update_native_surface_css(&self.native_surface_provider, &self.selected_theme_id);
@@ -672,7 +681,7 @@ impl TaskersHost {
                 format!("host sync start panes={}", snapshot.portal.panes.len()),
             ),
         );
-        self.sync_browser_surfaces(snapshot, interactive)?;
+        self.sync_browser_surfaces(snapshot, interactive, visible)?;
         let _bridge_guard = self.begin_bridge_operation(
             BridgeOperationKind::SurfaceSync,
             Some(snapshot.revision),
@@ -685,6 +694,7 @@ impl TaskersHost {
             &snapshot.settings.selected_theme_id,
             snapshot.revision,
             interactive,
+            visible,
             snapshot.resize_preview_active,
         ) {
             Ok(terminal_mutated) => terminal_mutated,
@@ -935,6 +945,107 @@ impl TaskersHost {
         handle.execute(command).await
     }
 
+    pub fn execute_screenshot(
+        &mut self,
+        command: ScreenshotCommand,
+    ) -> Result<ScreenshotResult, ControlError> {
+        let portal = self.current_portal.as_ref().ok_or_else(|| {
+            ControlError::not_supported("screenshot capture is unavailable before first host sync")
+        })?;
+        let workspace = self.current_workspace.as_ref().ok_or_else(|| {
+            ControlError::not_supported(
+                "workspace screenshot metadata is unavailable before first host sync",
+            )
+        })?;
+
+        match command {
+            ScreenshotCommand::Capture { target, path } => match target {
+                ScreenshotTarget::Surface { surface_id } => {
+                    let surface = self.terminal_surfaces.get(&surface_id).ok_or_else(|| {
+                        ControlError::not_found(format!(
+                            "terminal surface {surface_id} is not present in the current host snapshot"
+                        ))
+                    })?;
+                    ensure_visible_workspace(workspace.id, surface.workspace_id.get())?;
+                    let plan = portal
+                        .panes
+                        .iter()
+                        .find(|plan| plan.surface_id == surface_id)
+                        .ok_or_else(|| {
+                            ControlError::not_found(format!(
+                                "surface {surface_id} is not visible in the current host snapshot"
+                            ))
+                        })?;
+                    capture_widget_to_png(
+                        self.root.upcast_ref(),
+                        Some(plan.frame),
+                        path,
+                        ScreenshotTargetResult::Surface {
+                            workspace_id: surface.workspace_id.get(),
+                            pane_id: surface.pane_id.get(),
+                            surface_id,
+                        },
+                    )
+                }
+                ScreenshotTarget::Pane {
+                    workspace_id,
+                    pane_id,
+                } => {
+                    ensure_visible_workspace(workspace.id, workspace_id)?;
+                    let plan = portal
+                        .panes
+                        .iter()
+                        .find(|plan| plan.pane_id == pane_id)
+                        .ok_or_else(|| {
+                            ControlError::not_found(format!(
+                                "pane {pane_id} is not visible in the current host snapshot"
+                            ))
+                        })?;
+                    capture_widget_to_png(
+                        self.root.upcast_ref(),
+                        Some(plan.pane_frame),
+                        path,
+                        ScreenshotTargetResult::Pane {
+                            workspace_id,
+                            pane_id,
+                        },
+                    )
+                }
+                ScreenshotTarget::WorkspaceWindow { workspace_id } => {
+                    ensure_visible_workspace(workspace.id, workspace_id)?;
+                    let window = workspace
+                        .columns
+                        .iter()
+                        .flat_map(|column| column.windows.iter())
+                        .find(|window| window.id == workspace.active_window_id)
+                        .ok_or_else(|| {
+                            ControlError::not_found(format!(
+                                "workspace {workspace_id} has no active workspace window in the current host snapshot"
+                            ))
+                        })?;
+                    capture_widget_to_png(
+                        self.root.upcast_ref(),
+                        Some(window.frame),
+                        path,
+                        ScreenshotTargetResult::WorkspaceWindow {
+                            workspace_id,
+                            workspace_window_id: window.id,
+                        },
+                    )
+                }
+                ScreenshotTarget::WorkspaceCanvas { workspace_id } => {
+                    ensure_visible_workspace(workspace.id, workspace_id)?;
+                    capture_widget_to_png(
+                        self.root.upcast_ref(),
+                        Some(portal.content),
+                        path,
+                        ScreenshotTargetResult::WorkspaceCanvas { workspace_id },
+                    )
+                }
+            },
+        }
+    }
+
     pub fn execute_terminal_debug(
         &mut self,
         command: TerminalDebugCommand,
@@ -1170,7 +1281,12 @@ impl TaskersHost {
         }
     }
 
-    fn sync_browser_surfaces(&mut self, snapshot: &ShellSnapshot, interactive: bool) -> Result<()> {
+    fn sync_browser_surfaces(
+        &mut self,
+        snapshot: &ShellSnapshot,
+        interactive: bool,
+        visible: bool,
+    ) -> Result<()> {
         let desired = browser_plans(&snapshot.portal);
         let desired_by_id = desired
             .into_iter()
@@ -1211,7 +1327,11 @@ impl TaskersHost {
         }
 
         for entry in snapshot.browser_catalog.iter() {
-            let visible_plan = desired_by_id.get(&entry.surface_id);
+            let visible_plan = if visible {
+                desired_by_id.get(&entry.surface_id)
+            } else {
+                None
+            };
             match self.browser_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
@@ -1243,6 +1363,7 @@ impl TaskersHost {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sync_terminal_surfaces(
         &mut self,
         portal: &SurfacePortalPlan,
@@ -1250,6 +1371,7 @@ impl TaskersHost {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        visible: bool,
         resize_preview_active: bool,
     ) -> Result<bool> {
         let desired = terminal_plans(portal);
@@ -1307,7 +1429,11 @@ impl TaskersHost {
         }
 
         for entry in catalog {
-            let visible_plan = desired_by_id.get(&entry.surface_id);
+            let visible_plan = if visible {
+                desired_by_id.get(&entry.surface_id)
+            } else {
+                None
+            };
             match self.terminal_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
@@ -1511,6 +1637,7 @@ struct BrowserSurface {
 }
 
 impl BrowserSurface {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         overlay: &Overlay,
         entry: &BrowserSurfaceCatalogEntry,
@@ -1736,6 +1863,7 @@ impl BrowserSurface {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sync(
         &mut self,
         overlay: &Overlay,
@@ -1881,6 +2009,7 @@ struct TerminalSurface {
 }
 
 impl TerminalSurface {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         overlay: &Overlay,
         entry: &TerminalSurfaceCatalogEntry,
@@ -1976,6 +2105,7 @@ impl TerminalSurface {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sync(
         &mut self,
         overlay: &Overlay,
@@ -2022,10 +2152,9 @@ impl TerminalSurface {
         if visible_plan.is_some_and(|plan| plan.active)
             && effective_interactive
             && (!self.active || !self.interactive || !self.visible)
+            && let Some(host) = host
         {
-            if let Some(host) = host {
-                let _ = host.focus_surface(&self.widget);
-            }
+            let _ = host.focus_surface(&self.widget);
         }
         if !visible || !effective_interactive {
             self.focus_state.set(false);
@@ -2869,6 +2998,179 @@ fn native_surfaces_interactive(drag_mode: ShellDragMode) -> bool {
     drag_mode == ShellDragMode::None
 }
 
+fn native_surfaces_visible(drag_mode: ShellDragMode) -> bool {
+    drag_mode == ShellDragMode::None
+}
+
+fn ensure_visible_workspace(
+    visible_workspace_id: WorkspaceId,
+    requested_workspace_id: WorkspaceId,
+) -> Result<(), ControlError> {
+    if requested_workspace_id != visible_workspace_id {
+        return Err(ControlError::not_supported(format!(
+            "workspace {requested_workspace_id} is not the currently visible workspace {visible_workspace_id}; switch to it before capturing"
+        )));
+    }
+    Ok(())
+}
+
+fn capture_widget_to_png(
+    widget: &Widget,
+    viewport: Option<taskers_core::Frame>,
+    path: Option<String>,
+    target: ScreenshotTargetResult,
+) -> Result<ScreenshotResult, ControlError> {
+    let texture = capture_widget_texture_with_retry(widget, viewport)?;
+    let output_path = resolve_screenshot_output_path(path)?;
+    texture
+        .save_to_png(&output_path)
+        .map_err(|error| ControlError::internal(error.to_string()))?;
+    Ok(ScreenshotResult {
+        path: output_path.display().to_string(),
+        width: texture.width(),
+        height: texture.height(),
+        target,
+    })
+}
+
+fn capture_widget_texture_with_retry(
+    widget: &Widget,
+    viewport: Option<taskers_core::Frame>,
+) -> Result<gdk::Texture, ControlError> {
+    with_capture_retries(|| {
+        settle_capture_main_loop();
+        snapshot_widget_texture_once(widget, viewport)
+    })
+}
+
+fn settle_capture_main_loop() {
+    let context = glib::MainContext::default();
+    for _ in 0..2 {
+        while context.pending() {
+            let _ = context.iteration(false);
+        }
+        let _ = context.iteration(false);
+    }
+}
+
+fn with_capture_retries<T>(
+    mut attempt: impl FnMut() -> Result<T, ControlError>,
+) -> Result<T, ControlError> {
+    const CAPTURE_RETRY_ATTEMPTS: usize = 5;
+
+    let mut last_timeout = None;
+    for _ in 0..CAPTURE_RETRY_ATTEMPTS {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) if error.code == ControlErrorCode::Timeout => {
+                last_timeout = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_timeout.unwrap_or_else(|| {
+        ControlError::timeout("screenshot target did not stabilize before capture")
+    }))
+}
+
+fn snapshot_widget_texture_once(
+    widget: &Widget,
+    viewport: Option<taskers_core::Frame>,
+) -> Result<gdk::Texture, ControlError> {
+    let width = widget.width();
+    let height = widget.height();
+    if !widget.is_visible() {
+        return Err(ControlError::timeout(
+            "screenshot target is not visible for capture",
+        ));
+    }
+    if width <= 0 || height <= 0 {
+        return Err(ControlError::timeout(
+            "screenshot target is not yet allocated for capture",
+        ));
+    }
+    let paintable = WidgetPaintable::new(Some(widget));
+    let snapshot = Snapshot::new();
+    paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+    let node = snapshot
+        .to_node()
+        .ok_or_else(|| ControlError::internal("failed to build GTK render node for screenshot"))?;
+    let native = widget.native().ok_or_else(|| {
+        ControlError::not_supported("screenshot capture requires a realized GTK native surface")
+    })?;
+    let renderer = native.renderer().or_else(|| {
+        native
+            .surface()
+            .as_ref()
+            .and_then(gsk::Renderer::for_surface)
+    });
+    let renderer = renderer
+        .ok_or_else(|| ControlError::not_supported("screenshot capture requires a GTK renderer"))?;
+    let rect = viewport
+        .map(|frame| clamp_frame_to_widget(frame, width, height))
+        .transpose()?
+        .map(|frame| {
+            graphene::Rect::new(
+                frame.x as f32,
+                frame.y as f32,
+                frame.width as f32,
+                frame.height as f32,
+            )
+        });
+    Ok(renderer.render_texture(node, rect.as_ref()))
+}
+
+fn clamp_frame_to_widget(
+    frame: taskers_core::Frame,
+    widget_width: i32,
+    widget_height: i32,
+) -> Result<taskers_core::Frame, ControlError> {
+    let x = frame.x.clamp(0, widget_width.saturating_sub(1));
+    let y = frame.y.clamp(0, widget_height.saturating_sub(1));
+    let right = frame.right().clamp(x + 1, widget_width.max(x + 1));
+    let bottom = frame.bottom().clamp(y + 1, widget_height.max(y + 1));
+    let width = right - x;
+    let height = bottom - y;
+    if width <= 1 || height <= 1 {
+        return Err(ControlError::timeout(
+            "screenshot target viewport is too small to capture reliably",
+        ));
+    }
+    Ok(taskers_core::Frame::new(x, y, width, height))
+}
+
+pub(crate) fn resolve_screenshot_output_path(
+    path: Option<String>,
+) -> Result<PathBuf, ControlError> {
+    match path {
+        Some(path) => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                return Err(ControlError::invalid_params(
+                    "screenshot path must not be empty",
+                ));
+            }
+            let output = PathBuf::from(trimmed);
+            if let Some(parent) = output.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                fs::create_dir_all(parent).map_err(|error| {
+                    ControlError::internal(format!(
+                        "failed to create screenshot directory {}: {error}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            Ok(output)
+        }
+        None => {
+            Ok(std::env::temp_dir()
+                .join(format!("taskers-screenshot-{}.png", current_timestamp_ms())))
+        }
+    }
+}
+
 fn workspace_pan_delta(dx: f64, dy: f64) -> Option<(i32, i32)> {
     if !dx.is_finite() || !dy.is_finite() {
         return None;
@@ -2972,10 +3274,12 @@ fn hidden_frame() -> taskers_core::Frame {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_plans, host_attention_palette, native_surface_classes, native_surface_css,
-        native_surfaces_interactive, preview_for_drag, redacted_browser_url_for_diagnostics,
-        terminal_plans, trim_terminal_tail, workspace_pan_delta,
+        browser_plans, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
+        native_surface_css, native_surfaces_interactive, native_surfaces_visible, preview_for_drag,
+        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path, terminal_plans,
+        trim_terminal_tail, with_capture_retries, workspace_pan_delta,
     };
+    use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
         AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneTabId, PortalSurfacePlan,
@@ -3009,7 +3313,18 @@ mod tests {
     fn native_surfaces_disable_pointer_targeting_during_shell_drags() {
         assert!(native_surfaces_interactive(ShellDragMode::None));
         assert!(!native_surfaces_interactive(ShellDragMode::Window));
+        assert!(!native_surfaces_interactive(ShellDragMode::WindowTab));
+        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab));
         assert!(!native_surfaces_interactive(ShellDragMode::Surface));
+    }
+
+    #[test]
+    fn native_surfaces_hide_during_shell_drags() {
+        assert!(native_surfaces_visible(ShellDragMode::None));
+        assert!(!native_surfaces_visible(ShellDragMode::Window));
+        assert!(!native_surfaces_visible(ShellDragMode::WindowTab));
+        assert!(!native_surfaces_visible(ShellDragMode::PaneTab));
+        assert!(!native_surfaces_visible(ShellDragMode::Surface));
     }
 
     #[test]
@@ -3181,5 +3496,30 @@ mod tests {
             panic!("expected pane split preview");
         };
         assert!(ratio > 500);
+    }
+
+    #[test]
+    fn screenshot_capture_rejects_tiny_viewports() {
+        let error = clamp_frame_to_widget(Frame::new(0, 0, 1, 1), 120, 80)
+            .expect_err("tiny viewport should fail closed");
+        assert_eq!(error.code, ControlErrorCode::Timeout);
+    }
+
+    #[test]
+    fn screenshot_output_path_rejects_empty_override() {
+        let error = resolve_screenshot_output_path(Some("   ".into()))
+            .expect_err("empty screenshot path should fail");
+        assert_eq!(error.code, ControlErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn screenshot_capture_times_out_after_retry_exhaustion() {
+        let error = with_capture_retries::<()>(|| {
+            Err(ControlError::timeout(
+                "screenshot target did not stabilize before capture",
+            ))
+        })
+        .expect_err("retry exhaustion should return timeout");
+        assert_eq!(error.code, ControlErrorCode::Timeout);
     }
 }

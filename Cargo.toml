@@ -19,7 +19,7 @@ edition = "2024"
 homepage = "https://github.com/OneNoted/taskers"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/OneNoted/taskers"
-version = "0.4.0"
+version = "0.5.0"
 
 [workspace.dependencies]
 adw = { package = "libadwaita", version = "0.9.1" }
@@ -46,13 +46,13 @@ ureq = "2.12.1"
 uuid = { version = "1.22.0", features = ["serde", "v7"] }
 webkit6 = { version = "0.6.1", features = ["v2_50"] }
 xz2 = "0.1"
-taskers-core = { version = "0.4.0", path = "crates/taskers-core" }
-taskers-cli = { version = "0.4.0", path = "crates/taskers-cli" }
-taskers-control = { version = "0.4.0", path = "crates/taskers-control" }
-taskers-domain = { version = "0.4.0", path = "crates/taskers-domain" }
-taskers-ghostty = { version = "0.4.0", path = "crates/taskers-ghostty" }
-taskers-host = { version = "0.4.0", path = "crates/taskers-host" }
-taskers-paths = { version = "0.4.0", path = "crates/taskers-paths" }
-taskers-runtime = { version = "0.4.0", path = "crates/taskers-runtime" }
-taskers-shell = { version = "0.4.0", path = "crates/taskers-shell" }
-taskers-shell-core = { version = "0.4.0", path = "crates/taskers-shell-core" }
+taskers-core = { version = "0.5.0", path = "crates/taskers-core" }
+taskers-cli = { version = "0.5.0", path = "crates/taskers-cli" }
+taskers-control = { version = "0.5.0", path = "crates/taskers-control" }
+taskers-domain = { version = "0.5.0", path = "crates/taskers-domain" }
+taskers-ghostty = { version = "0.5.0", path = "crates/taskers-ghostty" }
+taskers-host = { version = "0.5.0", path = "crates/taskers-host" }
+taskers-paths = { version = "0.5.0", path = "crates/taskers-paths" }
+taskers-runtime = { version = "0.5.0", path = "crates/taskers-runtime" }
+taskers-shell = { version = "0.5.0", path = "crates/taskers-shell" }
+taskers-shell-core = { version = "0.5.0", path = "crates/taskers-shell-core" }

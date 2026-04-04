@@ -36,7 +36,7 @@ pub fn exit_code_from_status(status: ExitStatus) -> i32 {
     {
         use std::os::unix::process::ExitStatusExt;
 
-        return status.signal().map_or(1, |signal| 128 + signal);
+        status.signal().map_or(1, |signal| 128 + signal)
     }
 
     #[cfg(not(unix))]
@@ -487,7 +487,7 @@ mod tests {
         let launcher = PathBuf::from("/home/notes/.cargo/bin/taskers");
         let release_root = temp.path().join("releases");
         let release_exec = release_root
-            .join("0.4.0")
+            .join("0.5.0")
             .join("x86_64-unknown-linux-gnu")
             .join("bin")
             .join("taskers-gtk");

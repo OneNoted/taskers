@@ -1073,6 +1073,8 @@ input:focus-visible {{
   border-radius: 0;
   color: {text_subtle};
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .workspace-window-tab:hover {{
@@ -1092,6 +1094,10 @@ input:focus-visible {{
   background: {accent_12};
 }}
 
+.workspace-window-tab-dragging {{
+  opacity: 0.34;
+}}
+
 .workspace-window-tab-button {{
   flex: 1 1 auto;
   min-width: 0;
@@ -1103,12 +1109,16 @@ input:focus-visible {{
   background: transparent;
   padding: 0;
   color: inherit;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .workspace-window-tab-copy {{
   min-width: 0;
   display: inline-flex;
   align-items: center;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .workspace-window-tab-title {{
@@ -1118,6 +1128,8 @@ input:focus-visible {{
   white-space: nowrap;
   font-size: 11px;
   font-weight: 600;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .workspace-window-tab-kind-icon {{
@@ -1485,6 +1497,8 @@ input:focus-visible {{
   padding: 0;
   overflow-x: auto;
   background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab {{
@@ -1501,6 +1515,8 @@ input:focus-visible {{
   white-space: nowrap;
   border-radius: 0;
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab-focus {{
@@ -1515,6 +1531,8 @@ input:focus-visible {{
   color: inherit;
   text-align: left;
   cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab:hover {{
@@ -1574,6 +1592,10 @@ input:focus-visible {{
   background: {accent_12};
 }}
 
+.surface-tab-dragging {{
+  opacity: 0.34;
+}}
+
 .surface-tab-active {{
   background: {overlay_16};
   border-color: {accent_20};
@@ -1622,6 +1644,8 @@ input:focus-visible {{
   align-items: center;
   gap: 6px;
   flex: 1 1 auto;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab-primary {{
@@ -1632,6 +1656,8 @@ input:focus-visible {{
   color: {text_subtle};
   font-size: 12px;
   flex: 1 1 auto;
+  user-select: none;
+  -webkit-user-select: none;
 }}
 
 .surface-tab-runtime-badge {{
@@ -1735,6 +1761,53 @@ input:focus-visible {{
   opacity: 1.0;
 }}
 
+.drag-preview-shell {{
+  position: fixed;
+  inset: 0 auto auto 0;
+  z-index: 9999;
+  pointer-events: none;
+}}
+
+.drag-preview-card {{
+  pointer-events: none;
+  max-width: min(360px, calc(100vw - 32px));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.38);
+  opacity: 0.97;
+  border-color: {accent_24};
+  background: {surface_85};
+  backdrop-filter: blur(10px) saturate(1.12);
+}}
+
+.drag-preview-window-tab {{
+  min-width: 120px;
+}}
+
+.drag-preview-surface-tab {{
+  min-width: 132px;
+  padding-right: 10px;
+}}
+
+.drag-preview-copy {{
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+}}
+
+.drag-preview-title {{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: {text_bright};
+}}
+
+.drag-preview-icon {{
+  flex: 0 0 auto;
+  opacity: 1.0;
+}}
+
 .pane-utility {{
   min-width: 22px;
   height: 20px;
@@ -1760,6 +1833,9 @@ input:focus-visible {{
 .workspace-window-drop-zone {{
   position: absolute;
   z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   opacity: 0;
   pointer-events: none;
   background: transparent;
@@ -1767,15 +1843,37 @@ input:focus-visible {{
 }}
 
 .workspace-window-drop-zone-visible {{
-  opacity: 0.45;
+  opacity: 0.72;
   pointer-events: auto;
-  background: {accent_12};
+  background: linear-gradient(180deg, {accent_12} 0%, {accent_08} 100%);
 }}
 
 .workspace-window-drop-zone-active {{
   opacity: 1;
   pointer-events: auto;
-  background: {accent_24};
+  background: linear-gradient(180deg, {accent_20} 0%, {accent_12} 100%);
+  box-shadow: inset 0 0 0 1px {accent_24};
+}}
+
+.workspace-window-drop-copy {{
+  opacity: 0;
+  pointer-events: none;
+  padding: 4px 6px;
+  border: 1px solid {border_10};
+  background: rgba(0,0,0,0.16);
+  color: {text_bright};
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  transition: opacity 0.12s ease-in-out, transform 0.12s ease-in-out;
+  transform: scale(0.96);
+}}
+
+.workspace-window-drop-zone-visible .workspace-window-drop-copy,
+.workspace-window-drop-zone-active .workspace-window-drop-copy {{
+  opacity: 1;
+  transform: scale(1);
 }}
 
 .workspace-window-drop-zone-left,
@@ -1783,6 +1881,22 @@ input:focus-visible {{
   top: 10px;
   bottom: 10px;
   width: 6px;
+}}
+
+.workspace-window-drop-zone-left .workspace-window-drop-copy,
+.workspace-window-drop-zone-right .workspace-window-drop-copy {{
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  padding: 6px 4px;
+}}
+
+.workspace-window-drop-zone-left .workspace-window-drop-copy {{
+  transform: rotate(180deg) scale(0.96);
+}}
+
+.workspace-window-drop-zone-visible.workspace-window-drop-zone-left .workspace-window-drop-copy,
+.workspace-window-drop-zone-active.workspace-window-drop-zone-left .workspace-window-drop-copy {{
+  transform: rotate(180deg) scale(1);
 }}
 
 .workspace-window-drop-zone-left {{
@@ -1922,6 +2036,8 @@ input:focus-visible {{
   inset: 0;
   z-index: 8;
   pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0.10) 100%);
 }}
 
 .pane-drop-target {{
@@ -1929,34 +2045,43 @@ input:focus-visible {{
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid {accent_24};
-  background: {accent_12};
+  border: 1px dashed {accent_20};
+  background: rgba(255,255,255,0.02);
   color: {text_bright};
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
   pointer-events: auto;
   border-radius: 0;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
 }}
 
 .pane-drop-target-active {{
-  background: {accent_20};
+  background: {accent_12};
   border-style: solid;
+  border-color: {accent_24};
+  box-shadow:
+    inset 0 0 0 1px {accent_20},
+    0 0 0 1px rgba(0,0,0,0.20);
 }}
 
 .pane-drop-target-center {{
-  inset: 18%;
+  inset: 16% 18%;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%),
+    {accent_08};
 }}
 
 .pane-drop-target-edge {{
   z-index: 1;
+  background: rgba(255,255,255,0.015);
 }}
 
 .pane-drop-target-left,
 .pane-drop-target-right {{
-  top: 10px;
-  bottom: 10px;
-  width: 56px;
+  top: 12px;
+  bottom: 12px;
+  width: 30px;
 }}
 
 .pane-drop-target-left {{
@@ -1969,9 +2094,9 @@ input:focus-visible {{
 
 .pane-drop-target-top,
 .pane-drop-target-bottom {{
-  left: 10px;
-  right: 10px;
-  height: 48px;
+  left: 12px;
+  right: 12px;
+  height: 28px;
 }}
 
 .pane-drop-target-top {{
@@ -1980,6 +2105,30 @@ input:focus-visible {{
 
 .pane-drop-target-bottom {{
   bottom: 10px;
+}}
+
+.pane-drop-target-copy {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid {border_10};
+  background: rgba(0,0,0,0.12);
+  color: {text_bright};
+  box-shadow: 0 1px 8px rgba(0,0,0,0.12);
+}}
+
+.pane-drop-target-center .pane-drop-target-copy {{
+  padding: 6px 10px;
+  font-size: 10px;
+  font-weight: 700;
+}}
+
+.pane-drop-target-edge .pane-drop-target-copy {{
+  padding: 3px 6px;
+  font-size: 8px;
+  background: rgba(0,0,0,0.10);
 }}
 
 .surface-backdrop {{

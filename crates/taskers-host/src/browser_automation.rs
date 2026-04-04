@@ -1,5 +1,4 @@
 use std::{
-    path::PathBuf,
     pin::Pin,
     time::{Duration, Instant},
 };
@@ -14,7 +13,7 @@ use webkit6::{
     SnapshotOptions, SnapshotRegion, WebsiteData, WebsiteDataManager, WebsiteDataTypes, prelude::*,
 };
 
-use crate::BrowserSurfaceHandle;
+use crate::{BrowserSurfaceHandle, resolve_screenshot_output_path};
 
 const HELPER_SOURCE_URI: &str = "taskers://browser-helper";
 
@@ -488,7 +487,7 @@ return await Promise.resolve((0, eval)(__taskersEval));
             .snapshot_future(region, SnapshotOptions::NONE)
             .await
             .map_err(map_webkit_error)?;
-        let output_path = screenshot_path(path)?;
+        let output_path = resolve_screenshot_output_path(path)?;
         texture
             .save_to_png(&output_path)
             .map_err(|error| ControlError::internal(error.to_string()))?;
@@ -610,19 +609,6 @@ fn merge_json_object(target: &mut JsonValue, extra: JsonValue) {
     };
     for (key, value) in extra_object {
         target_object.insert(key.clone(), value.clone());
-    }
-}
-
-fn screenshot_path(path: Option<String>) -> Result<PathBuf, ControlError> {
-    match path {
-        Some(path) => Ok(PathBuf::from(path)),
-        None => {
-            let timestamp = glib::DateTime::now_local()
-                .map_err(|error| ControlError::internal(error.to_string()))?
-                .format("%Y%m%d-%H%M%S")
-                .map_err(|error| ControlError::internal(error.to_string()))?;
-            Ok(std::env::temp_dir().join(format!("taskers-browser-{}.png", timestamp)))
-        }
     }
 }
 

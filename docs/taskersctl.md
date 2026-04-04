@@ -39,6 +39,7 @@ Top-level command groups:
 - `agent`: manage workspace status, progress, logs, notifications, flash, and unread navigation
 - `agent-hook`: hook-oriented lifecycle commands for external tools
 - `browser`: inspect and automate embedded browser surfaces
+- `completion`: generate shell completion scripts for bash, zsh, or fish
 - `identify`: print the current resolved workspace, pane, and surface context
 - `debug`: inspect terminal focus, text, and render stats
 - `workspace`, `pane`, `surface`: create and manipulate Taskers structure directly
@@ -152,6 +153,31 @@ taskersctl agent-hook stop --message "Finished"
 ```
 
 Use `notification` for contextual agent output that should update the live pane/workspace summary without finalizing the run. Use `stop` for the final successful completion edge; non-zero shell exits still surface as error stops automatically. This is the best fit for wrappers around coding agents, CI helpers, and long-running scripts.
+
+## Shell Completions
+
+Generate completions directly from the live CLI parser:
+
+```bash
+taskersctl completion bash
+taskersctl completion zsh
+taskersctl completion fish
+```
+
+Install them in the usual shell-specific locations:
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+taskersctl completion bash > ~/.local/share/bash-completion/completions/taskersctl
+
+mkdir -p ~/.zsh/completions
+taskersctl completion zsh > ~/.zsh/completions/_taskersctl
+
+mkdir -p ~/.config/fish/completions
+taskersctl completion fish > ~/.config/fish/completions/taskersctl.fish
+```
+
+When Taskers is running, the generated scripts also complete live `--workspace`, `--pane`, and `--surface` ids from the current control socket and embedded terminal context.
 
 ## Advanced Notes
 

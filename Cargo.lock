@@ -2388,7 +2388,7 @@ checksum = "df7f62577c25e07834649fc3b39fafdc597c0a3527dc1c60129201ccfcbaa50c"
 
 [[package]]
 name = "taskers"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2417,7 +2417,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2432,7 +2432,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-control"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2463,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-domain"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "indexmap",
  "serde",
@@ -2475,7 +2475,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-ghostty"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "gtk4",
  "libloading",
@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-host"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "gtk4",
@@ -2507,11 +2507,11 @@ dependencies = [
 
 [[package]]
 name = "taskers-paths"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "taskers-runtime"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2525,7 +2525,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-shell"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dioxus",
  "taskers-shell-core",
@@ -2533,7 +2533,7 @@ dependencies = [
 
 [[package]]
 name = "taskers-shell-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "parking_lot",
  "taskers-control",
