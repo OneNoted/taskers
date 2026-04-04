@@ -1509,6 +1509,7 @@ pub enum ShellAction {
 struct UiState {
     section: ShellSection,
     overview_mode: bool,
+    overview_viewports: BTreeMap<WorkspaceId, taskers_domain::WorkspaceViewport>,
     drag_mode: ShellDragMode,
     drag_session: Option<DragSessionSnapshot>,
     resize_preview: Option<ResizePreview>,
@@ -1580,6 +1581,7 @@ impl TaskersCore {
             ui: UiState {
                 section: ShellSection::Workspace,
                 overview_mode: false,
+                overview_viewports: BTreeMap::new(),
                 drag_mode: ShellDragMode::None,
                 drag_session: None,
                 resize_preview: None,
@@ -1641,6 +1643,15 @@ impl TaskersCore {
             .active_window_record()
             .expect("active workspace window should exist");
         let viewport = self.workspace_viewport_frame(right_panel_visible);
+        let requested_viewport = if self.ui.overview_mode {
+            self.ui
+                .overview_viewports
+                .get(&workspace_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            workspace.viewport.clone()
+        };
         let render_context = workspace_render_context(
             workspace,
             self.ui.overview_mode,
@@ -1654,7 +1665,7 @@ impl TaskersCore {
             viewport.width,
             viewport.height,
             render_context.outer_padding,
-            workspace.viewport.clone(),
+            requested_viewport,
         );
         let canvas_metrics = workspace_canvas_metrics(&placements, render_context.outer_padding);
         let window_frames = placements
@@ -3720,12 +3731,21 @@ impl TaskersCore {
             self.metrics,
         );
         let placements = workspace_display_window_placements(workspace, render_context);
+        let requested_viewport = if self.ui.overview_mode {
+            self.ui
+                .overview_viewports
+                .get(&workspace_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            workspace.viewport.clone()
+        };
         let current_viewport = clamped_workspace_viewport(
             &placements,
             viewport_frame.width,
             viewport_frame.height,
             render_context.outer_padding,
-            workspace.viewport.clone(),
+            requested_viewport,
         );
         let next_viewport = clamped_workspace_viewport(
             &placements,
@@ -3737,13 +3757,30 @@ impl TaskersCore {
                 y: current_viewport.y.saturating_add(dy),
             },
         );
-        if next_viewport == workspace.viewport {
-            return false;
+        if self.ui.overview_mode {
+            let current_overview = self
+                .ui
+                .overview_viewports
+                .get(&workspace_id)
+                .cloned()
+                .unwrap_or_default();
+            if next_viewport == current_overview {
+                return false;
+            }
+            self.ui
+                .overview_viewports
+                .insert(workspace_id, next_viewport);
+            self.bump_local_revision();
+            true
+        } else {
+            if next_viewport == workspace.viewport {
+                return false;
+            }
+            self.dispatch_control(ControlCommand::SetWorkspaceViewport {
+                workspace_id,
+                viewport: next_viewport,
+            })
         }
-        self.dispatch_control(ControlCommand::SetWorkspaceViewport {
-            workspace_id,
-            viewport: next_viewport,
-        })
     }
 
     fn split_with_kind_axis(
@@ -4588,12 +4625,21 @@ impl TaskersCore {
             self.metrics,
         );
         let placements = workspace_display_window_placements(workspace, render_context);
+        let requested_viewport = if self.ui.overview_mode {
+            self.ui
+                .overview_viewports
+                .get(&workspace_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            workspace.viewport.clone()
+        };
         let current_viewport = clamped_workspace_viewport(
             &placements,
             viewport_frame.width,
             viewport_frame.height,
             render_context.outer_padding,
-            workspace.viewport.clone(),
+            requested_viewport,
         );
         let Some(active_frame) = placements
             .iter()
@@ -4623,6 +4669,22 @@ impl TaskersCore {
             render_context.outer_padding,
             next_viewport,
         );
+        if self.ui.overview_mode {
+            let current_overview = self
+                .ui
+                .overview_viewports
+                .get(&workspace_id)
+                .cloned()
+                .unwrap_or_default();
+            if next_viewport == current_overview {
+                return false;
+            }
+            self.ui
+                .overview_viewports
+                .insert(workspace_id, next_viewport);
+            self.bump_local_revision();
+            return true;
+        }
         if next_viewport == workspace.viewport {
             return false;
         }
@@ -8474,12 +8536,11 @@ mod tests {
     #[test]
     fn horizontal_scroll_host_events_pan_workspace_outside_overview() {
         let core = SharedCore::bootstrap(bootstrap());
-        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
-            direction: WorkspaceDirection::Right,
-        });
-        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
-            direction: WorkspaceDirection::Right,
-        });
+        for _ in 0..10 {
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            });
+        }
         let before = core.snapshot().current_workspace.viewport_x;
 
         core.apply_host_event(HostEvent::ViewportScrolled { dx: 180, dy: 0 });
@@ -8491,6 +8552,10 @@ mod tests {
 
         let overview_snapshot = core.snapshot();
         assert_eq!(overview_snapshot.current_workspace.viewport_x, 0);
+
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        let normal_snapshot = core.snapshot();
+        assert_eq!(normal_snapshot.current_workspace.viewport_x, after);
     }
 
     #[test]
@@ -8508,6 +8573,28 @@ mod tests {
 
         let after = core.snapshot().current_workspace.viewport_x;
         assert!(after > before);
+    }
+
+    #[test]
+    fn overview_panning_does_not_mutate_normal_workspace_viewport() {
+        let core = SharedCore::bootstrap(bootstrap());
+        for _ in 0..10 {
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            });
+        }
+
+        core.dispatch_shell_action(ShellAction::ScrollViewport { dx: 120, dy: 0 });
+        let normal_before_overview = core.snapshot().current_workspace.viewport_x;
+
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        core.dispatch_shell_action(ShellAction::ScrollViewport { dx: 240, dy: 0 });
+        let overview_viewport = core.snapshot().current_workspace.viewport_x;
+        assert!(overview_viewport > 0);
+
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        let normal_after_overview = core.snapshot().current_workspace.viewport_x;
+        assert_eq!(normal_after_overview, normal_before_overview);
     }
 
     #[test]
