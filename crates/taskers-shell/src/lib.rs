@@ -1807,21 +1807,29 @@ fn render_workspace_strip(
     };
     let scroll_viewport = {
         let core = core.clone();
-        let overview_scale = workspace.overview_scale;
         move |event: Event<WheelData>| {
-            if overview_scale < 1.0 {
-                return;
-            }
             let delta = event.delta().strip_units();
-            if delta.x.abs() < 1.0 || delta.x.abs() < delta.y.abs() {
-                return;
+            if delta.x.abs() >= delta.y.abs() {
+                if delta.x.abs() < 1.0 {
+                    return;
+                }
+                let dx = delta.x.round() as i32;
+                if dx == 0 {
+                    return;
+                }
+                event.prevent_default();
+                core.dispatch_shell_action(ShellAction::ScrollViewport { dx, dy: 0 });
+            } else {
+                if delta.y.abs() < 1.0 {
+                    return;
+                }
+                let dy = delta.y.round() as i32;
+                if dy == 0 {
+                    return;
+                }
+                event.prevent_default();
+                core.dispatch_shell_action(ShellAction::ScrollViewport { dx: 0, dy });
             }
-            let dx = delta.x.round() as i32;
-            if dx == 0 {
-                return;
-            }
-            event.prevent_default();
-            core.dispatch_shell_action(ShellAction::ScrollViewport { dx, dy: 0 });
         }
     };
     let canvas_style = workspace_strip_canvas_style(
