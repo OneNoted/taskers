@@ -2694,11 +2694,11 @@ fn split_ratio_preview(
 }
 
 fn native_surface_css(theme_id: &str) -> String {
+    const DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX: i32 = 20;
     format!(
         r#"
 .native-surface-host,
-.native-surface-widget,
-.terminal-output {{
+.native-surface-widget {{
   margin: 0;
   padding: 0;
   border-radius: 0;
@@ -2709,6 +2709,8 @@ fn native_surface_css(theme_id: &str) -> String {
 .native-surface-terminal-widget,
 .terminal-output {{
   background: {};
+  padding-left: {}px;
+  padding-right: {}px;
 }}
 
 .native-surface-browser,
@@ -2731,7 +2733,9 @@ fn native_surface_css(theme_id: &str) -> String {
   background: rgba(255, 255, 255, 0.16);
 }}
  "#,
-        terminal_surface_background(theme_id)
+        terminal_surface_background(theme_id),
+        DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX,
+        DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX
     )
 }
 
@@ -3425,6 +3429,8 @@ mod tests {
         assert!(dark.contains(".native-surface-terminal-widget"));
         assert!(dark.contains(".terminal-output"));
         assert!(dark.contains("background: #0f1117;"));
+        assert!(dark.contains("padding-left: 20px;"));
+        assert!(dark.contains("padding-right: 20px;"));
         assert!(gruvbox.contains("background: #282828;"));
     }
 
