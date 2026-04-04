@@ -487,6 +487,7 @@ pub struct TaskersHost {
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
     persistent_browser_session: Option<NetworkSession>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
+    current_overview_mode: bool,
     resize_handles: HashMap<String, ResizeHandleOverlay>,
     current_portal: Option<SurfacePortalPlan>,
     current_workspace: Option<WorkspaceViewSnapshot>,
@@ -656,6 +657,7 @@ impl TaskersHost {
             browser_surfaces: HashMap::new(),
             persistent_browser_session: None,
             terminal_surfaces: HashMap::new(),
+            current_overview_mode: false,
             resize_handles: HashMap::new(),
             current_portal: None,
             current_workspace: None,
@@ -669,6 +671,11 @@ impl TaskersHost {
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
         let interactive = native_surfaces_interactive(snapshot.drag_mode);
         let visible = native_surfaces_visible(snapshot.drag_mode);
+        let mode_changed = self.current_overview_mode != snapshot.overview_mode;
+        if mode_changed {
+            self.reset_surface_scene(snapshot.revision, snapshot.overview_mode);
+            self.current_overview_mode = snapshot.overview_mode;
+        }
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
         if self.selected_theme_id != snapshot.settings.selected_theme_id {
@@ -722,6 +729,66 @@ impl TaskersHost {
             );
         }
         Ok(())
+    }
+
+    fn reset_surface_scene(&mut self, revision: u64, overview_mode: bool) {
+        let bridge_running = self.bridge_running();
+        let host = self.ghostty_host.as_ref();
+
+        let terminal_surfaces = self.terminal_surfaces.drain().collect::<Vec<_>>();
+        for (surface_id, surface) in terminal_surfaces {
+            surface.shell.detach(&self.root);
+            surface.attention_ring.detach(&self.root);
+            if bridge_running {
+                if let Some(host) = host {
+                    host.destroy_surface(&surface.widget);
+                }
+            } else {
+                emit_diagnostic(
+                    self.diagnostics.as_ref(),
+                    DiagnosticRecord::new(
+                        DiagnosticCategory::Bridge,
+                        Some(revision),
+                        "skipped terminal surface destroy during scene reset because bridge is not running",
+                    )
+                    .with_surface(surface_id),
+                );
+            }
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::SurfaceLifecycle,
+                    Some(revision),
+                    if overview_mode {
+                        "normal scene terminal surface removed before overview rebuild"
+                    } else {
+                        "overview scene terminal surface removed before normal rebuild"
+                    },
+                )
+                .with_surface(surface_id),
+            );
+        }
+
+        let browser_surfaces = self.browser_surfaces.drain().collect::<Vec<_>>();
+        for (surface_id, surface) in browser_surfaces {
+            surface.shell.detach(&self.root);
+            surface.attention_ring.detach(&self.root);
+            emit_diagnostic(
+                self.diagnostics.as_ref(),
+                DiagnosticRecord::new(
+                    DiagnosticCategory::SurfaceLifecycle,
+                    Some(revision),
+                    if overview_mode {
+                        "normal scene browser surface removed before overview rebuild"
+                    } else {
+                        "overview scene browser surface removed before normal rebuild"
+                    },
+                )
+                .with_surface(surface_id),
+            );
+        }
+
+        self.skip_next_ghostty_tick = false;
     }
 
     pub fn tick(&mut self, revision: Option<u64>) {
