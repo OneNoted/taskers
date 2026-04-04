@@ -2047,6 +2047,8 @@ impl TerminalSurface {
         if resize_preview_active && visible_plan.is_some() {
             freeze_terminal_widget(&widget, initial_width_px, initial_height_px);
             resize_frozen = true;
+        } else if visible_plan.is_some() {
+            thaw_terminal_widget(&widget);
         }
         match visible_plan {
             Some(plan) => {
@@ -2130,9 +2132,13 @@ impl TerminalSurface {
                 freeze_terminal_widget(&self.widget, self.width_px, self.height_px);
                 self.resize_frozen = true;
             }
-        } else if self.resize_frozen {
-            thaw_terminal_widget(&self.widget);
-            self.resize_frozen = false;
+        } else {
+            if self.resize_frozen {
+                self.resize_frozen = false;
+            }
+            if visible {
+                thaw_terminal_widget(&self.widget);
+            }
         }
         match visible_plan {
             Some(plan) => {
