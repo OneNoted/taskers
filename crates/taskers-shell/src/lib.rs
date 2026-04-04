@@ -10,16 +10,15 @@ use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionRingState, AttentionState,
     BrowserChromeSnapshot, Direction, DragSessionSnapshot, LayoutNodeSnapshot, LivePaneSnapshot,
-    NotificationPreferenceKey, OverviewPreviewModeSnapshot, PaneContainerId, PaneId, PaneKind, PaneSnapshot,
-    PaneTabDragSessionSnapshot, PaneTabId, PaneTabLayoutSnapshot, PaneTabSnapshot,
+    NotificationPreferenceKey, OverviewPreviewModeSnapshot, PaneContainerId, PaneId, PaneKind,
+    PaneSnapshot, PaneTabDragSessionSnapshot, PaneTabId, PaneTabLayoutSnapshot, PaneTabSnapshot,
     ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot, RuntimeStateSnapshot,
     RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
     ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot, SurfaceId,
     SurfaceKind, SurfaceSnapshot, VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode,
-    VcsPanelSnapshot, VcsSnapshot, WindowTabDragSessionSnapshot, WorkspaceDirection,
-    WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot,
-    WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot, WorkspaceWindowTabId,
-    WorkspaceWindowTabSnapshot,
+    VcsPanelSnapshot, VcsSnapshot, WindowTabDragSessionSnapshot, WorkspaceDirection, WorkspaceId,
+    WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget,
+    WorkspaceWindowSnapshot, WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
 };
 use taskers_shell_core as taskers_core;
 

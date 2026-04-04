@@ -5111,13 +5111,18 @@ fn workspace_window_placements(
     let available_width = (viewport_width - horizontal_gap_total).max(0);
     let preferred_column_widths = ordered_columns
         .iter()
-        .map(|column| column.width.max(1))
+        .map(|column| column.width.max(MIN_WORKSPACE_WINDOW_WIDTH))
         .collect::<Vec<_>>();
-    let column_widths = fit_track_extents(
-        &preferred_column_widths,
-        available_width,
-        MIN_WORKSPACE_WINDOW_WIDTH,
-    );
+    let preferred_total = preferred_column_widths.iter().sum::<i32>();
+    let column_widths = if ordered_columns.len() > 1 && preferred_total > available_width {
+        preferred_column_widths.clone()
+    } else {
+        fit_track_extents(
+            &preferred_column_widths,
+            available_width,
+            MIN_WORKSPACE_WINDOW_WIDTH,
+        )
+    };
 
     let mut placements = Vec::new();
     let mut x = 0;
@@ -6521,14 +6526,14 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME, Direction,
-        HostCommand, HostEvent, LayoutMetrics, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
-        NotificationPreferencesSnapshot, ResizeHandleTarget, ResizePreview, RuntimeCapability,
-        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
-        SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection, WorkspaceWindowSnapshot,
-        default_preview_app_state, default_session_path_for_preview, display_surface_title,
-        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
-        workspace_window_content_frame,
+        BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME,
+        DEFAULT_WORKSPACE_WINDOW_GAP, Direction, HostCommand, HostEvent, LayoutMetrics,
+        MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX, NotificationPreferencesSnapshot, ResizeHandleTarget,
+        ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
+        ShellSection, SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection,
+        WorkspaceWindowSnapshot, default_preview_app_state, default_session_path_for_preview,
+        display_surface_title, pane_body_frame, pane_shows_tab_strip_for_surface_count,
+        resolved_browser_uri, split_frame, workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -7761,6 +7766,91 @@ mod tests {
         assert!(
             after_width < 720,
             "expected left column to shrink below the old hard limit"
+        );
+    }
+
+    #[test]
+    fn wide_three_column_workspace_keeps_total_width_beyond_viewport() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let workspace_id = core.snapshot().current_workspace.id;
+        let widths = core
+            .snapshot()
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, 720))
+            .collect::<Vec<_>>();
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths,
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        let snapshot = core.snapshot();
+        let total_column_width = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| column.windows.first().expect("column window").frame.width)
+            .sum::<i32>();
+        let total_gap_width = DEFAULT_WORKSPACE_WINDOW_GAP
+            * snapshot.current_workspace.columns.len().saturating_sub(1) as i32;
+
+        assert_eq!(total_column_width, 2160);
+        assert!(
+            snapshot.current_workspace.canvas_width >= total_column_width + total_gap_width,
+            "expected canvas width to grow beyond the viewport for wide workspaces"
+        );
+    }
+
+    #[test]
+    fn resizing_active_window_right_preserves_requested_growth_in_wide_workspace() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let left_window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow {
+            window_id: left_window_id,
+        });
+
+        let before = window_snapshot(&core.snapshot(), left_window_id)
+            .frame
+            .width;
+        let workspace_id = core.snapshot().current_workspace.id;
+        {
+            let mut inner = core.inner.lock();
+            assert!(inner.dispatch_control(ControlCommand::ResizeActiveWindow {
+                workspace_id,
+                direction: Direction::Right,
+                amount: 180,
+            }));
+        }
+
+        let after = window_snapshot(&core.snapshot(), left_window_id)
+            .frame
+            .width;
+        assert_eq!(
+            after,
+            before + 180,
+            "expected active window growth to push the workspace wider instead of being refit"
         );
     }
 
