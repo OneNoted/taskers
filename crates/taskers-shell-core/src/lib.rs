@@ -8541,6 +8541,37 @@ mod tests {
     }
 
     #[test]
+    fn overview_scene_preview_mode_tracks_live_preview_preference() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        assert!(
+            snapshot
+                .current_workspace
+                .overview_scene
+                .cards
+                .iter()
+                .all(|card| matches!(
+                    card.preview_mode,
+                    super::OverviewPreviewModeSnapshot::LivePreferred
+                ))
+        );
+
+        core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: false });
+        let snapshot = core.snapshot();
+        assert!(
+            snapshot
+                .current_workspace
+                .overview_scene
+                .cards
+                .iter()
+                .all(|card| matches!(
+                    card.preview_mode,
+                    super::OverviewPreviewModeSnapshot::Summary
+                ))
+        );
+    }
+
+    #[test]
     fn overview_scene_move_capabilities_follow_workspace_topology() {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
