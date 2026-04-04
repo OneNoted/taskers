@@ -286,9 +286,10 @@ fn show_surface_backdrop(
     surface_kind: SurfaceKind,
     overview_mode: bool,
     render_live_surfaces_in_overview: bool,
+    live_surface_mounted: bool,
 ) -> bool {
     if overview_mode {
-        return !render_live_surfaces_in_overview;
+        return !render_live_surfaces_in_overview || !live_surface_mounted;
     }
 
     !matches!(surface_kind, SurfaceKind::Browser)
@@ -2838,6 +2839,12 @@ fn render_live_pane(
     };
     let render_live_surfaces_in_overview =
         core.snapshot().settings.render_live_surfaces_in_overview;
+    let live_surface_mounted = core
+        .snapshot()
+        .portal
+        .panes
+        .iter()
+        .any(|plan| plan.surface_id == active_surface.id);
 
     let focus_pane = {
         let core = core.clone();
@@ -2992,6 +2999,7 @@ fn render_live_pane(
                     active_surface.kind,
                     overview_mode,
                     render_live_surfaces_in_overview,
+                    live_surface_mounted,
                 ) {
                     {render_surface_backdrop(active_surface, runtime_status)}
                 }
@@ -3684,12 +3692,48 @@ mod tests {
 
     #[test]
     fn backdrop_switches_between_live_and_abstract_overview_modes() {
-        assert!(!show_surface_backdrop(SurfaceKind::Browser, false, true));
-        assert!(show_surface_backdrop(SurfaceKind::Terminal, false, true));
-        assert!(!show_surface_backdrop(SurfaceKind::Browser, true, true));
-        assert!(!show_surface_backdrop(SurfaceKind::Terminal, true, true));
-        assert!(show_surface_backdrop(SurfaceKind::Browser, true, false));
-        assert!(show_surface_backdrop(SurfaceKind::Terminal, true, false));
+        assert!(!show_surface_backdrop(
+            SurfaceKind::Browser,
+            false,
+            true,
+            true
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Terminal,
+            false,
+            true,
+            true
+        ));
+        assert!(!show_surface_backdrop(
+            SurfaceKind::Browser,
+            true,
+            true,
+            true
+        ));
+        assert!(!show_surface_backdrop(
+            SurfaceKind::Terminal,
+            true,
+            true,
+            true
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Browser,
+            true,
+            false,
+            true
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Terminal,
+            true,
+            false,
+            true
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Terminal,
+            true,
+            true,
+            false
+        ));
     }
 
     #[test]
