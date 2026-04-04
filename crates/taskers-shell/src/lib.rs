@@ -1889,6 +1889,9 @@ fn render_workspace_window(
     dragged_pane_tab: Option<DraggedPaneTab>,
     pane_tab_drop_target: Signal<Option<PaneTabDropTarget>>,
 ) -> Element {
+    let shell_snapshot = core.snapshot();
+    let portal = shell_snapshot.portal.clone();
+    let metrics = shell_snapshot.metrics;
     let local_x = window.frame.x - workspace.viewport_origin_x;
     let local_y = window.frame.y - workspace.viewport_origin_y;
     let style = workspace_window_style(
@@ -2071,23 +2074,414 @@ fn render_workspace_window(
                 }
             }
             div { class: "workspace-window-body",
-                {render_layout(
-                    workspace.id,
-                    &window.layout,
-                    overview_mode,
-                    browser_chrome,
-                    core.clone(),
-                    runtime_status,
-                    surface_drop_target,
-                    surface_drag_candidate,
-                    dragged_surface,
-                    pane_tab_drag_candidate,
-                    dragged_pane_tab,
-                    pane_tab_drop_target,
-                )}
+                if overview_mode {
+                    {render_overview_window_layout(
+                        window,
+                        workspace.id,
+                        &portal,
+                        metrics,
+                        browser_chrome,
+                        core.clone(),
+                        runtime_status,
+                        surface_drop_target,
+                        surface_drag_candidate,
+                        dragged_surface,
+                        pane_tab_drag_candidate,
+                        dragged_pane_tab,
+                        pane_tab_drop_target,
+                    )}
+                } else {
+                    {render_layout(
+                        workspace.id,
+                        &window.layout,
+                        overview_mode,
+                        browser_chrome,
+                        core.clone(),
+                        runtime_status,
+                        surface_drop_target,
+                        surface_drag_candidate,
+                        dragged_surface,
+                        pane_tab_drag_candidate,
+                        dragged_pane_tab,
+                        pane_tab_drop_target,
+                    )}
+                }
             }
         }
     }
+}
+
+fn render_overview_window_layout(
+    window: &WorkspaceWindowSnapshot,
+    workspace_id: WorkspaceId,
+    portal: &taskers_core::SurfacePortalPlan,
+    metrics: taskers_core::LayoutMetrics,
+    browser_chrome: Option<&BrowserChromeSnapshot>,
+    core: SharedCore,
+    runtime_status: &RuntimeStatus,
+    surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_drag_candidate: Signal<Option<SurfaceDragCandidate>>,
+    dragged_surface: Option<DraggedSurface>,
+    pane_tab_drag_candidate: Signal<Option<PaneTabDragCandidate>>,
+    dragged_pane_tab: Option<DraggedPaneTab>,
+    pane_tab_drop_target: Signal<Option<PaneTabDropTarget>>,
+) -> Element {
+    let body_frame = overview_window_body_frame(window.frame, metrics);
+    let panes = collect_overview_panes(&window.layout);
+
+    rsx! {
+        div { class: "overview-window-layout",
+            for pane in panes {
+                if let Some(frame) = overview_pane_frame(&pane, portal, metrics) {
+                    div {
+                        class: "overview-pane-slot",
+                        style: overview_absolute_style(frame, body_frame.x, body_frame.y),
+                        {render_overview_pane(
+                            workspace_id,
+                            &pane,
+                            portal,
+                            browser_chrome,
+                            core.clone(),
+                            runtime_status,
+                            surface_drop_target,
+                            surface_drag_candidate,
+                            dragged_surface,
+                            pane_tab_drag_candidate,
+                            dragged_pane_tab,
+                            pane_tab_drop_target,
+                        )}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_overview_pane(
+    workspace_id: WorkspaceId,
+    pane: &PaneSnapshot,
+    portal: &taskers_core::SurfacePortalPlan,
+    browser_chrome: Option<&BrowserChromeSnapshot>,
+    core: SharedCore,
+    runtime_status: &RuntimeStatus,
+    surface_drop_target: Signal<Option<SurfaceDropTarget>>,
+    surface_drag_candidate: Signal<Option<SurfaceDragCandidate>>,
+    dragged_surface: Option<DraggedSurface>,
+    pane_tab_drag_candidate: Signal<Option<PaneTabDragCandidate>>,
+    dragged_pane_tab: Option<DraggedPaneTab>,
+    mut pane_tab_drop_target: Signal<Option<PaneTabDropTarget>>,
+) -> Element {
+    let pane_id = pane.id;
+    let pane_container_id = pane.pane_container_id;
+    let ordered_pane_tab_ids = pane
+        .pane_tabs
+        .iter()
+        .map(|pane_tab| pane_tab.id)
+        .collect::<Vec<_>>();
+    let pane_class = if pane.active {
+        "pane-card pane-card-active".to_string()
+    } else {
+        "pane-card".to_string()
+    };
+    let focus_pane = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusPane { pane_id });
+        }
+    };
+    let add_browser_pane_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind: PaneKind::Browser,
+            })
+        }
+    };
+    let add_terminal_pane_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind: PaneKind::Terminal,
+            })
+        }
+    };
+    let add_terminal_pane_tab_plus = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreatePaneTab {
+                pane_container_id,
+                kind: PaneKind::Terminal,
+            })
+        }
+    };
+    let close_pane_tab = {
+        let core = core.clone();
+        let active_pane_tab_id = pane.active_pane_tab;
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::ClosePaneTab {
+                pane_container_id,
+                pane_tab_id: active_pane_tab_id,
+            })
+        }
+    };
+    let flash_key = pane.focus_flash_token;
+    let flash_class = if flash_key > 0 {
+        "pane-flash-ring pane-flash-ring-active"
+    } else {
+        "pane-flash-ring"
+    };
+    let pane_tab_add_class = if *pane_tab_drop_target.read()
+        == Some(PaneTabDropTarget::AppendToContainer { pane_container_id })
+    {
+        "surface-tab-add surface-tab-append-target"
+    } else {
+        "surface-tab-add"
+    };
+    let content_origin = overview_pane_content_origin(pane, portal);
+    let live_panes = collect_overview_live_panes(&pane.layout);
+
+    rsx! {
+        section { class: "{pane_class}", onclick: focus_pane,
+            div { class: "pane-toolbar",
+                div { class: "pane-tabs pane-tabs-primary",
+                    div { class: "surface-tabs",
+                        for pane_tab in &pane.pane_tabs {
+                            {render_pane_tab(
+                                pane,
+                                pane_tab,
+                                &ordered_pane_tab_ids,
+                                core.clone(),
+                                pane_tab_drag_candidate,
+                                dragged_pane_tab,
+                                pane_tab_drop_target,
+                            )}
+                        }
+                        button {
+                            class: "{pane_tab_add_class}",
+                            title: "New terminal pane tab",
+                            onclick: add_terminal_pane_tab_plus,
+                            onpointerenter: move |event: Event<PointerData>| {
+                                if dragged_pane_tab.is_none() {
+                                    return;
+                                }
+                                event.stop_propagation();
+                                pane_tab_drop_target.set(Some(PaneTabDropTarget::AppendToContainer {
+                                    pane_container_id,
+                                }));
+                            },
+                            onpointermove: move |event: Event<PointerData>| {
+                                if dragged_pane_tab.is_none() {
+                                    return;
+                                }
+                                event.stop_propagation();
+                                pane_tab_drop_target.set(Some(PaneTabDropTarget::AppendToContainer {
+                                    pane_container_id,
+                                }));
+                            },
+                            onpointerleave: move |_: Event<PointerData>| {
+                                if *pane_tab_drop_target.read()
+                                    == Some(PaneTabDropTarget::AppendToContainer { pane_container_id })
+                                {
+                                    pane_tab_drop_target.set(None);
+                                }
+                            },
+                            onpointerup: move |event: Event<PointerData>| {
+                                pane_tab_drop_target.set(None);
+                                let Some(dragged) = dragged_pane_tab else {
+                                    return;
+                                };
+                                event.stop_propagation();
+                                if dragged.pane_container_id == pane_container_id {
+                                    core.dispatch_shell_action(ShellAction::MovePaneTab {
+                                        pane_container_id,
+                                        pane_tab_id: dragged.pane_tab_id,
+                                        target_index: usize::MAX,
+                                    });
+                                } else {
+                                    core.dispatch_shell_action(ShellAction::TransferPaneTab {
+                                        source_pane_container_id: dragged.pane_container_id,
+                                        pane_tab_id: dragged.pane_tab_id,
+                                        target_pane_container_id: pane_container_id,
+                                        target_index: usize::MAX,
+                                    });
+                                }
+                                core.dispatch_shell_action(ShellAction::EndDrag);
+                            },
+                            {icons::plus(12, "surface-tab-add-icon")}
+                        }
+                    }
+                }
+                div { class: "pane-action-cluster pane-action-cluster-visible",
+                    button { class: "pane-utility", title: "New terminal pane tab", onclick: add_terminal_pane_tab,
+                        {icons::terminal(14, "pane-utility-icon")}
+                    }
+                    button { class: "pane-utility", title: "New browser pane tab", onclick: add_browser_pane_tab,
+                        {icons::globe(14, "pane-utility-icon")}
+                    }
+                    div { class: "pane-action-separator" }
+                    button { class: "pane-utility pane-utility-close", title: "Close pane tab", onclick: close_pane_tab,
+                        {icons::close(12, "pane-utility-icon")}
+                    }
+                }
+            }
+            div { class: "overview-pane-layout",
+                for live_pane in live_panes {
+                    if let Some(plan) = portal.panes.iter().find(|plan| plan.pane_id == live_pane.id) {
+                        div {
+                            class: "overview-live-pane-slot",
+                            style: overview_absolute_style(
+                                plan.pane_frame,
+                                content_origin.0,
+                                content_origin.1,
+                            ),
+                            {render_live_pane(
+                                workspace_id,
+                                &live_pane,
+                                true,
+                                browser_chrome,
+                                core.clone(),
+                                runtime_status,
+                                surface_drop_target,
+                                surface_drag_candidate,
+                                dragged_surface,
+                            )}
+                        }
+                    }
+                }
+            }
+            div { key: "{flash_key}", class: "{flash_class}" }
+        }
+    }
+}
+
+fn collect_overview_panes(node: &LayoutNodeSnapshot) -> Vec<PaneSnapshot> {
+    let mut panes = Vec::new();
+    collect_overview_panes_into(node, &mut panes);
+    panes
+}
+
+fn collect_overview_panes_into(node: &LayoutNodeSnapshot, panes: &mut Vec<PaneSnapshot>) {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) => panes.push(pane.clone()),
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            collect_overview_panes_into(first, panes);
+            collect_overview_panes_into(second, panes);
+        }
+    }
+}
+
+fn collect_overview_live_panes(node: &PaneTabLayoutSnapshot) -> Vec<LivePaneSnapshot> {
+    let mut panes = Vec::new();
+    collect_overview_live_panes_into(node, &mut panes);
+    panes
+}
+
+fn collect_overview_live_panes_into(
+    node: &PaneTabLayoutSnapshot,
+    panes: &mut Vec<LivePaneSnapshot>,
+) {
+    match node {
+        PaneTabLayoutSnapshot::Pane(pane) => panes.push(pane.clone()),
+        PaneTabLayoutSnapshot::Split { first, second, .. } => {
+            collect_overview_live_panes_into(first, panes);
+            collect_overview_live_panes_into(second, panes);
+        }
+    }
+}
+
+fn overview_pane_frame(
+    pane: &PaneSnapshot,
+    portal: &taskers_core::SurfacePortalPlan,
+    metrics: taskers_core::LayoutMetrics,
+) -> Option<taskers_core::Frame> {
+    let content = overview_union_frame(
+        collect_overview_live_panes(&pane.layout)
+            .iter()
+            .filter_map(|live_pane| {
+                portal
+                    .panes
+                    .iter()
+                    .find(|plan| plan.pane_id == live_pane.id)
+            })
+            .map(|plan| plan.pane_frame),
+    )?;
+
+    Some(taskers_core::Frame::new(
+        content.x - metrics.pane_border_width,
+        content.y - metrics.pane_border_width - metrics.pane_header_height,
+        content.width + metrics.pane_border_width * 2,
+        content.height + metrics.pane_border_width * 2 + metrics.pane_header_height,
+    ))
+}
+
+fn overview_pane_content_origin(
+    pane: &PaneSnapshot,
+    portal: &taskers_core::SurfacePortalPlan,
+) -> (i32, i32) {
+    overview_union_frame(
+        collect_overview_live_panes(&pane.layout)
+            .iter()
+            .filter_map(|live_pane| {
+                portal
+                    .panes
+                    .iter()
+                    .find(|plan| plan.pane_id == live_pane.id)
+            })
+            .map(|plan| plan.pane_frame),
+    )
+    .map(|frame| (frame.x, frame.y))
+    .unwrap_or((0, 0))
+}
+
+fn overview_union_frame(
+    mut frames: impl Iterator<Item = taskers_core::Frame>,
+) -> Option<taskers_core::Frame> {
+    let first = frames.next()?;
+    let mut min_x = first.x;
+    let mut min_y = first.y;
+    let mut max_r = first.right();
+    let mut max_b = first.bottom();
+
+    for frame in frames {
+        min_x = min_x.min(frame.x);
+        min_y = min_y.min(frame.y);
+        max_r = max_r.max(frame.right());
+        max_b = max_b.max(frame.bottom());
+    }
+
+    Some(taskers_core::Frame::new(
+        min_x,
+        min_y,
+        max_r - min_x,
+        max_b - min_y,
+    ))
+}
+
+fn overview_absolute_style(frame: taskers_core::Frame, origin_x: i32, origin_y: i32) -> String {
+    format!(
+        "left:{}px;top:{}px;width:{}px;height:{}px;",
+        frame.x - origin_x,
+        frame.y - origin_y,
+        frame.width,
+        frame.height
+    )
+}
+
+fn overview_window_body_frame(
+    frame: taskers_core::Frame,
+    metrics: taskers_core::LayoutMetrics,
+) -> taskers_core::Frame {
+    frame
+        .inset(metrics.window_border_width)
+        .inset_top(metrics.window_toolbar_height)
+        .inset(metrics.window_body_padding)
 }
 
 fn workspace_strip_canvas_style(

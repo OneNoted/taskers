@@ -1211,6 +1211,23 @@ input:focus-visible {{
   min-height: 0;
   padding: {window_body_padding}px;
   background: {surface};
+  position: relative;
+}}
+
+.overview-window-layout,
+.overview-pane-layout {{
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}}
+
+.overview-pane-slot,
+.overview-live-pane-slot {{
+  position: absolute;
+  min-width: 0;
+  min-height: 0;
 }}
 
 .split-container {{
