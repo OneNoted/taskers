@@ -44,8 +44,6 @@ pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>
 // below this size, hide it until more of the pane is actually visible.
 const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 200;
 const MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX: i32 = 120;
-const MIN_OVERVIEW_LIVE_TERMINAL_WIDTH_PX: i32 = 240;
-const MIN_OVERVIEW_LIVE_TERMINAL_HEIGHT_PX: i32 = 120;
 const MIN_RESIZE_SPLIT_RATIO: u16 = 150;
 const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
 const GHOSTTY_BRIDGE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
@@ -487,7 +485,6 @@ pub struct TaskersHost {
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
     persistent_browser_session: Option<NetworkSession>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
-    current_overview_mode: bool,
     resize_handles: HashMap<String, ResizeHandleOverlay>,
     current_portal: Option<SurfacePortalPlan>,
     current_workspace: Option<WorkspaceViewSnapshot>,
@@ -657,7 +654,6 @@ impl TaskersHost {
             browser_surfaces: HashMap::new(),
             persistent_browser_session: None,
             terminal_surfaces: HashMap::new(),
-            current_overview_mode: false,
             resize_handles: HashMap::new(),
             current_portal: None,
             current_workspace: None,
@@ -669,13 +665,8 @@ impl TaskersHost {
     }
 
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
-        let interactive = native_surfaces_interactive(snapshot.drag_mode);
+        let interactive = native_surfaces_interactive(snapshot.drag_mode, snapshot.overview_mode);
         let visible = native_surfaces_visible(snapshot.drag_mode);
-        let mode_changed = self.current_overview_mode != snapshot.overview_mode;
-        if mode_changed {
-            self.reset_surface_scene(snapshot.revision, snapshot.overview_mode);
-            self.current_overview_mode = snapshot.overview_mode;
-        }
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
         if self.selected_theme_id != snapshot.settings.selected_theme_id {
@@ -704,7 +695,6 @@ impl TaskersHost {
             snapshot.revision,
             interactive,
             visible,
-            snapshot.overview_mode,
             snapshot.resize_preview_active,
         ) {
             Ok(terminal_mutated) => terminal_mutated,
@@ -729,66 +719,6 @@ impl TaskersHost {
             );
         }
         Ok(())
-    }
-
-    fn reset_surface_scene(&mut self, revision: u64, overview_mode: bool) {
-        let bridge_running = self.bridge_running();
-        let host = self.ghostty_host.as_ref();
-
-        let terminal_surfaces = self.terminal_surfaces.drain().collect::<Vec<_>>();
-        for (surface_id, surface) in terminal_surfaces {
-            surface.shell.detach(&self.root);
-            surface.attention_ring.detach(&self.root);
-            if bridge_running {
-                if let Some(host) = host {
-                    host.destroy_surface(&surface.widget);
-                }
-            } else {
-                emit_diagnostic(
-                    self.diagnostics.as_ref(),
-                    DiagnosticRecord::new(
-                        DiagnosticCategory::Bridge,
-                        Some(revision),
-                        "skipped terminal surface destroy during scene reset because bridge is not running",
-                    )
-                    .with_surface(surface_id),
-                );
-            }
-            emit_diagnostic(
-                self.diagnostics.as_ref(),
-                DiagnosticRecord::new(
-                    DiagnosticCategory::SurfaceLifecycle,
-                    Some(revision),
-                    if overview_mode {
-                        "normal scene terminal surface removed before overview rebuild"
-                    } else {
-                        "overview scene terminal surface removed before normal rebuild"
-                    },
-                )
-                .with_surface(surface_id),
-            );
-        }
-
-        let browser_surfaces = self.browser_surfaces.drain().collect::<Vec<_>>();
-        for (surface_id, surface) in browser_surfaces {
-            surface.shell.detach(&self.root);
-            surface.attention_ring.detach(&self.root);
-            emit_diagnostic(
-                self.diagnostics.as_ref(),
-                DiagnosticRecord::new(
-                    DiagnosticCategory::SurfaceLifecycle,
-                    Some(revision),
-                    if overview_mode {
-                        "normal scene browser surface removed before overview rebuild"
-                    } else {
-                        "overview scene browser surface removed before normal rebuild"
-                    },
-                )
-                .with_surface(surface_id),
-            );
-        }
-
-        self.skip_next_ghostty_tick = false;
     }
 
     pub fn tick(&mut self, revision: Option<u64>) {
@@ -1029,7 +959,7 @@ impl TaskersHost {
         })?;
 
         match command {
-            ScreenshotCommand::Capture { target, path, .. } => match target {
+            ScreenshotCommand::Capture { target, path } => match target {
                 ScreenshotTarget::Surface { surface_id } => {
                     let surface = self.terminal_surfaces.get(&surface_id).ok_or_else(|| {
                         ControlError::not_found(format!(
@@ -1442,10 +1372,9 @@ impl TaskersHost {
         revision: u64,
         interactive: bool,
         visible: bool,
-        overview_mode: bool,
         resize_preview_active: bool,
     ) -> Result<bool> {
-        let desired = terminal_plans(portal, overview_mode);
+        let desired = terminal_plans(portal);
         let desired_by_id = desired
             .into_iter()
             .map(|plan| (plan.surface_id, plan))
@@ -1501,9 +1430,7 @@ impl TaskersHost {
 
         for entry in catalog {
             let visible_plan = if visible {
-                desired_by_id
-                    .get(&entry.surface_id)
-                    .filter(|plan| terminal_plan_is_renderable(plan, overview_mode))
+                desired_by_id.get(&entry.surface_id)
             } else {
                 None
             };
@@ -1520,19 +1447,6 @@ impl TaskersHost {
                     self.diagnostics.as_ref(),
                 ),
                 None => {
-                    if visible_plan.is_none() {
-                        emit_diagnostic(
-                            self.diagnostics.as_ref(),
-                            DiagnosticRecord::new(
-                                DiagnosticCategory::SurfaceLifecycle,
-                                Some(revision),
-                                "skipping tiny overview terminal surface",
-                            )
-                            .with_pane(entry.pane_id)
-                            .with_surface(entry.surface_id),
-                        );
-                        continue;
-                    }
                     if !bridge_running {
                         emit_diagnostic(
                             self.diagnostics.as_ref(),
@@ -2133,8 +2047,6 @@ impl TerminalSurface {
         if resize_preview_active && visible_plan.is_some() {
             freeze_terminal_widget(&widget, initial_width_px, initial_height_px);
             resize_frozen = true;
-        } else if visible_plan.is_some() {
-            thaw_terminal_widget(&widget);
         }
         match visible_plan {
             Some(plan) => {
@@ -2218,13 +2130,9 @@ impl TerminalSurface {
                 freeze_terminal_widget(&self.widget, self.width_px, self.height_px);
                 self.resize_frozen = true;
             }
-        } else {
-            if self.resize_frozen {
-                self.resize_frozen = false;
-            }
-            if visible {
-                thaw_terminal_widget(&self.widget);
-            }
+        } else if self.resize_frozen {
+            thaw_terminal_widget(&self.widget);
+            self.resize_frozen = false;
         }
         match visible_plan {
             Some(plan) => {
@@ -3086,8 +2994,8 @@ fn detach_from_overlay(overlay: &Overlay, widget: &Widget) {
     }
 }
 
-fn native_surfaces_interactive(drag_mode: ShellDragMode) -> bool {
-    drag_mode == ShellDragMode::None
+fn native_surfaces_interactive(drag_mode: ShellDragMode, overview_mode: bool) -> bool {
+    drag_mode == ShellDragMode::None && !overview_mode
 }
 
 fn native_surfaces_visible(drag_mode: ShellDragMode) -> bool {
@@ -3282,23 +3190,13 @@ pub fn browser_plans(portal: &SurfacePortalPlan) -> Vec<PortalSurfacePlan> {
         .collect()
 }
 
-pub fn terminal_plans(portal: &SurfacePortalPlan, overview_mode: bool) -> Vec<PortalSurfacePlan> {
+pub fn terminal_plans(portal: &SurfacePortalPlan) -> Vec<PortalSurfacePlan> {
     portal
         .panes
         .iter()
         .filter(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
         .filter_map(|plan| clip_to_content(plan, &portal.content))
-        .filter(|plan| terminal_plan_is_renderable(plan, overview_mode))
         .collect()
-}
-
-fn terminal_plan_is_renderable(plan: &PortalSurfacePlan, overview_mode: bool) -> bool {
-    if !overview_mode {
-        return true;
-    }
-
-    plan.frame.width >= MIN_OVERVIEW_LIVE_TERMINAL_WIDTH_PX
-        && plan.frame.height >= MIN_OVERVIEW_LIVE_TERMINAL_HEIGHT_PX
 }
 
 fn clip_to_content(
@@ -3378,16 +3276,15 @@ mod tests {
     use super::{
         browser_plans, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
         native_surface_css, native_surfaces_interactive, native_surfaces_visible, preview_for_drag,
-        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
-        terminal_plan_is_renderable, terminal_plans, trim_terminal_tail, with_capture_retries,
-        workspace_pan_delta,
+        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path, terminal_plans,
+        trim_terminal_tail, with_capture_retries, workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
-        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
-        PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis,
-        SurfaceId, SurfaceMountSpec, WorkspaceColumnId, WorkspaceWindowId,
+        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneTabId, PortalSurfacePlan,
+        ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis, SurfaceMountSpec,
+        WorkspaceColumnId, WorkspaceWindowId,
     };
 
     #[test]
@@ -3396,44 +3293,12 @@ mod tests {
         let snapshot = core.snapshot();
 
         let browsers = browser_plans(&snapshot.portal);
-        let terminals = terminal_plans(&snapshot.portal, false);
+        let terminals = terminal_plans(&snapshot.portal);
 
         assert_eq!(browsers.len(), 1);
         assert_eq!(terminals.len(), 1);
         assert!(matches!(browsers[0].mount, SurfaceMountSpec::Browser(_)));
         assert!(matches!(terminals[0].mount, SurfaceMountSpec::Terminal(_)));
-    }
-
-    #[test]
-    fn overview_terminal_plans_skip_too_narrow_live_surfaces() {
-        let core = SharedCore::bootstrap(BootstrapModel::default());
-        let snapshot = core.snapshot();
-        let plan = snapshot
-            .portal
-            .panes
-            .iter()
-            .find(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
-            .expect("terminal plan")
-            .clone();
-
-        let narrow = PortalSurfacePlan {
-            frame: Frame::new(plan.frame.x, plan.frame.y, 168, plan.frame.height),
-            pane_frame: Frame::new(
-                plan.pane_frame.x,
-                plan.pane_frame.y,
-                168,
-                plan.pane_frame.height,
-            ),
-            ..plan
-        };
-        let portal = taskers_shell_core::SurfacePortalPlan {
-            window: snapshot.portal.window,
-            content: snapshot.portal.content,
-            panes: vec![narrow],
-        };
-
-        assert!(terminal_plans(&portal, true).is_empty());
-        assert_eq!(terminal_plans(&portal, false).len(), 1);
     }
 
     #[test]
@@ -3446,11 +3311,15 @@ mod tests {
 
     #[test]
     fn native_surfaces_disable_pointer_targeting_during_shell_drags() {
-        assert!(native_surfaces_interactive(ShellDragMode::None));
-        assert!(!native_surfaces_interactive(ShellDragMode::Window));
-        assert!(!native_surfaces_interactive(ShellDragMode::WindowTab));
-        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab));
-        assert!(!native_surfaces_interactive(ShellDragMode::Surface));
+        assert!(native_surfaces_interactive(ShellDragMode::None, false));
+        assert!(!native_surfaces_interactive(ShellDragMode::None, true));
+        assert!(!native_surfaces_interactive(ShellDragMode::Window, false));
+        assert!(!native_surfaces_interactive(
+            ShellDragMode::WindowTab,
+            false
+        ));
+        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab, false));
+        assert!(!native_surfaces_interactive(ShellDragMode::Surface, false));
     }
 
     #[test]
@@ -3460,29 +3329,6 @@ mod tests {
         assert!(!native_surfaces_visible(ShellDragMode::WindowTab));
         assert!(!native_surfaces_visible(ShellDragMode::PaneTab));
         assert!(!native_surfaces_visible(ShellDragMode::Surface));
-    }
-
-    #[test]
-    fn overview_terminal_plans_skip_panes_below_stability_cutoff() {
-        let plan = PortalSurfacePlan {
-            pane_id: PaneId::new(),
-            surface_id: SurfaceId::new(),
-            active: true,
-            notification_ring: None,
-            pane_frame: Frame::new(0, 0, 160, 400),
-            frame: Frame::new(0, 0, 160, 400),
-            mount: SurfaceMountSpec::Terminal(taskers_shell_core::TerminalMountSpec {
-                title: "Terminal".into(),
-                cwd: None,
-                cols: 120,
-                rows: 40,
-                command_argv: Vec::new(),
-                env: Default::default(),
-            }),
-        };
-
-        assert!(!terminal_plan_is_renderable(&plan, true));
-        assert!(terminal_plan_is_renderable(&plan, false));
     }
 
     #[test]

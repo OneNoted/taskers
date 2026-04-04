@@ -1497,7 +1497,6 @@ mod tests {
                         workspace_id: workspace.id,
                     },
                     path: None,
-                    overview: false,
                 },
             })
             .expect_err("screenshot should require live host");

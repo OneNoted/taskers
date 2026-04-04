@@ -955,7 +955,10 @@ input:focus-visible {{
 }}
 
 .workspace-viewport-overview {{
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
 }}
 
 .workspace-strip-canvas {{
@@ -998,8 +1001,8 @@ input:focus-visible {{
 }}
 
 .workspace-viewport-overview .workspace-strip-canvas {{
-  position: absolute;
-  inset: 0 auto auto 0;
+  position: relative;
+  inset: auto;
 }}
 
 .workspace-window-shell {{
@@ -1211,29 +1214,6 @@ input:focus-visible {{
   min-height: 0;
   padding: {window_body_padding}px;
   background: {surface};
-  position: relative;
-}}
-
-.overview-window-layout,
-.overview-pane-layout {{
-  position: relative;
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-}}
-
-.overview-pane-slot,
-.overview-live-pane-slot {{
-  position: absolute;
-  min-width: 0;
-  min-height: 0;
-}}
-
-.overview-pane-slot > .pane-card,
-.overview-live-pane-slot > .live-pane-shell {{
-  width: 100%;
-  height: 100%;
 }}
 
 .split-container {{
@@ -2167,6 +2147,66 @@ input:focus-visible {{
 
 .workspace-main-overview .workspace-window-shell {{
   box-shadow: none;
+}}
+
+.workspace-main-overview .workspace-window-toolbar {{
+  min-height: {window_toolbar_height}px;
+  padding: 0 6px;
+  background: {surface_85};
+}}
+
+.workspace-main-overview .workspace-window-grip {{
+  width: 28px;
+}}
+
+.workspace-main-overview .workspace-window-body {{
+  padding: 8px;
+  background: {border_03};
+}}
+
+.workspace-main-overview .workspace-window-flags,
+.workspace-main-overview .pane-action-cluster,
+.workspace-main-overview .browser-toolbar,
+.workspace-main-overview .surface-backdrop-note,
+.workspace-main-overview .surface-chip {{
+  display: none;
+}}
+
+.workspace-main-overview .split-container {{
+  gap: 8px;
+}}
+
+.workspace-main-overview .pane-toolbar,
+.workspace-main-overview .pane-tabs {{
+  min-height: 28px;
+  padding: 0 8px;
+}}
+
+.workspace-main-overview .surface-tab {{
+  height: 22px;
+  max-width: 180px;
+  padding: 0 6px;
+}}
+
+.workspace-main-overview .surface-tab-primary {{
+  font-size: 10px;
+}}
+
+.workspace-main-overview .pane-body {{
+  padding: 10px;
+}}
+
+.workspace-main-overview .pane-drop-overlay {{
+  display: none;
+}}
+
+.workspace-main-overview .surface-backdrop {{
+  gap: 8px;
+  padding: 10px;
+  border-style: solid;
+  background:
+    linear-gradient(180deg, {overlay_16} 0%, {overlay_03} 100%),
+    {border_03};
 }}
 
 .surface-backdrop-copy {{
