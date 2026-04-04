@@ -937,6 +937,7 @@ pub struct WorkspaceViewSnapshot {
     pub canvas_height: i32,
     pub canvas_offset_x: i32,
     pub canvas_offset_y: i32,
+    pub overview_scene: OverviewSceneSnapshot,
     pub columns: Vec<WorkspaceColumnSnapshot>,
     pub layout: LayoutNodeSnapshot,
 }
@@ -975,6 +976,37 @@ pub struct WorkspaceWindowTabSnapshot {
     pub title: String,
     pub pane_count: usize,
     pub surface_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverviewPreviewModeSnapshot {
+    Summary,
+    LivePreferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewWindowCardSnapshot {
+    pub window_id: WorkspaceWindowId,
+    pub column_id: WorkspaceColumnId,
+    pub title: String,
+    pub runtime: RuntimeIdentitySnapshot,
+    pub attention: AttentionState,
+    pub active: bool,
+    pub pane_count: usize,
+    pub surface_count: usize,
+    pub tab_count: usize,
+    pub preview_mode: OverviewPreviewModeSnapshot,
+    pub preview_lines: Vec<String>,
+    pub can_move_left: bool,
+    pub can_move_right: bool,
+    pub can_move_up: bool,
+    pub can_move_down: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewSceneSnapshot {
+    pub prefer_live_preview: bool,
+    pub cards: Vec<OverviewWindowCardSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1673,6 +1705,9 @@ impl TaskersCore {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let columns = self.workspace_columns_snapshot(workspace, &window_frames);
+        let overview_scene =
+            overview_scene_snapshot(&columns, self.ui.render_live_surfaces_in_overview);
         let resize_handles = if matches!(self.ui.section, ShellSection::Workspace)
             && !self.ui.overview_mode
             && self.ui.drag_mode == ShellDragMode::None
@@ -1716,7 +1751,8 @@ impl TaskersCore {
                 canvas_height: canvas_metrics.height,
                 canvas_offset_x: canvas_metrics.offset_x,
                 canvas_offset_y: canvas_metrics.offset_y,
-                columns: self.workspace_columns_snapshot(workspace, &window_frames),
+                overview_scene,
+                columns,
                 layout: self.snapshot_layout(
                     workspace,
                     active_window
@@ -5132,6 +5168,90 @@ fn workspace_window_placements(
     placements
 }
 
+fn overview_scene_snapshot(
+    columns: &[WorkspaceColumnSnapshot],
+    prefer_live_preview: bool,
+) -> OverviewSceneSnapshot {
+    let mut cards = Vec::new();
+    for (column_index, column) in columns.iter().enumerate() {
+        let last_column_index = columns.len().saturating_sub(1);
+        let last_row_index = column.windows.len().saturating_sub(1);
+        for (row_index, window) in column.windows.iter().enumerate() {
+            cards.push(OverviewWindowCardSnapshot {
+                window_id: window.id,
+                column_id: column.id,
+                title: window.title.clone(),
+                runtime: window.runtime.clone(),
+                attention: window.attention,
+                active: window.active,
+                pane_count: window.pane_count,
+                surface_count: window.surface_count,
+                tab_count: window.tabs.len(),
+                preview_mode: if prefer_live_preview {
+                    OverviewPreviewModeSnapshot::LivePreferred
+                } else {
+                    OverviewPreviewModeSnapshot::Summary
+                },
+                preview_lines: overview_preview_lines(&window.layout),
+                can_move_left: column_index > 0,
+                can_move_right: column_index < last_column_index,
+                can_move_up: row_index > 0,
+                can_move_down: row_index < last_row_index,
+            });
+        }
+    }
+
+    OverviewSceneSnapshot {
+        prefer_live_preview,
+        cards,
+    }
+}
+
+fn overview_preview_lines(layout: &LayoutNodeSnapshot) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_overview_preview_lines(layout, &mut out);
+    out.truncate(3);
+    if out.is_empty() {
+        out.push("No active pane content".to_string());
+    }
+    out
+}
+
+fn collect_overview_preview_lines(node: &LayoutNodeSnapshot, out: &mut Vec<String>) {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) => {
+            if let Some(surface) = pane
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == pane.active_surface)
+                .or_else(|| pane.surfaces.first())
+            {
+                let mut line = surface.runtime.label.clone();
+                if !surface.title.trim().is_empty() {
+                    line.push_str(" · ");
+                    line.push_str(surface.title.trim());
+                }
+                if let Some(status) = surface
+                    .status_label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|status| !status.is_empty())
+                {
+                    line.push_str(" · ");
+                    line.push_str(status);
+                }
+                out.push(line);
+            } else {
+                out.push(format!("{} pane", pane.runtime.label));
+            }
+        }
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            collect_overview_preview_lines(first, out);
+            collect_overview_preview_lines(second, out);
+        }
+    }
+}
+
 fn workspace_canvas_metrics(
     placements: &[WorkspaceWindowPlacement],
     outer_padding: i32,
@@ -8373,6 +8493,78 @@ mod tests {
         assert!(workspace.canvas_offset_y > 0);
         assert!(active_window.frame.x > workspace.viewport_origin_x);
         assert!(active_window.frame.y > workspace.viewport_origin_y);
+    }
+
+    #[test]
+    fn overview_scene_contains_one_card_per_workspace_window() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let window_count = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| column.windows.len())
+            .sum::<usize>();
+
+        assert_eq!(
+            snapshot.current_workspace.overview_scene.cards.len(),
+            window_count
+        );
+    }
+
+    #[test]
+    fn overview_scene_preview_lines_summarize_active_surfaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let card = snapshot
+            .current_workspace
+            .overview_scene
+            .cards
+            .first()
+            .expect("overview card");
+
+        assert!(!card.preview_lines.is_empty());
+        assert!(
+            card.preview_lines
+                .iter()
+                .any(|line| line.contains("Terminal") || line.contains("Browser")),
+            "expected preview lines to summarize active surfaces: {:?}",
+            card.preview_lines
+        );
+    }
+
+    #[test]
+    fn overview_scene_move_capabilities_follow_workspace_topology() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let cards = &snapshot.current_workspace.overview_scene.cards;
+        let movable = cards
+            .iter()
+            .find(|card| {
+                card.can_move_left || card.can_move_right || card.can_move_up || card.can_move_down
+            })
+            .expect("movable card");
+
+        assert!(
+            movable.can_move_left
+                || movable.can_move_right
+                || movable.can_move_up
+                || movable.can_move_down
+        );
     }
 
     #[test]

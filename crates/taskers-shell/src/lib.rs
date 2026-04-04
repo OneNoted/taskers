@@ -10,15 +10,16 @@ use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionRingState, AttentionState,
     BrowserChromeSnapshot, Direction, DragSessionSnapshot, LayoutNodeSnapshot, LivePaneSnapshot,
-    NotificationPreferenceKey, PaneContainerId, PaneId, PaneKind, PaneSnapshot,
+    NotificationPreferenceKey, OverviewPreviewModeSnapshot, PaneContainerId, PaneId, PaneKind, PaneSnapshot,
     PaneTabDragSessionSnapshot, PaneTabId, PaneTabLayoutSnapshot, PaneTabSnapshot,
     ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot, RuntimeStateSnapshot,
     RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
     ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot, SurfaceId,
     SurfaceKind, SurfaceSnapshot, VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode,
-    VcsPanelSnapshot, VcsSnapshot, WindowTabDragSessionSnapshot, WorkspaceId,
-    WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget,
-    WorkspaceWindowSnapshot, WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
+    VcsPanelSnapshot, VcsSnapshot, WindowTabDragSessionSnapshot, WorkspaceDirection,
+    WorkspaceId, WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot,
+    WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot, WorkspaceWindowTabId,
+    WorkspaceWindowTabSnapshot,
 };
 use taskers_shell_core as taskers_core;
 
@@ -658,6 +659,14 @@ pub fn TaskersShell(core: SharedCore) -> Element {
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::ToggleVcsPanel)
     };
+    let create_workspace_window = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            })
+        }
+    };
     let drag_source = use_signal(|| None::<WorkspaceId>);
     let drag_target = use_signal(|| None::<WorkspaceId>);
     let mut surface_drop_target = use_signal(|| None::<SurfaceDropTarget>);
@@ -858,6 +867,14 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                     if matches!(snapshot.section, ShellSection::Workspace) {
                         div { class: "workspace-header-actions",
                             button {
+                                class: "pane-action workspace-header-action",
+                                r#type: "button",
+                                onclick: create_workspace_window,
+                                title: "Create workspace window",
+                                {icons::plus(14, "workspace-header-action-icon")}
+                                span { "Window" }
+                            }
+                            button {
                                 class: if snapshot.vcs_panel.visible {
                                     "pane-action workspace-header-action workspace-header-action-active"
                                 } else {
@@ -875,24 +892,28 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 
                 if matches!(snapshot.section, ShellSection::Workspace) {
                     div { class: if snapshot.overview_mode { "workspace-canvas workspace-canvas-overview" } else { "workspace-canvas" },
-                        {render_workspace_strip(
-                            &snapshot.current_workspace,
-                            snapshot.overview_mode,
-                            snapshot.browser_chrome.as_ref(),
-                            core.clone(),
-                            &snapshot.runtime_status,
-                            surface_drop_target,
-                            surface_drag_candidate,
-                            dragged_surface,
-                            window_drag_source,
-                            window_drop_target,
-                            window_tab_drag_candidate,
-                            dragged_window_tab,
-                            window_tab_drop_target,
-                            pane_tab_drag_candidate,
-                            dragged_pane_tab,
-                            pane_tab_drop_target,
-                        )}
+                        if snapshot.overview_mode {
+                            {render_workspace_overview(&snapshot.current_workspace, core.clone())}
+                        } else {
+                            {render_workspace_strip(
+                                &snapshot.current_workspace,
+                                snapshot.overview_mode,
+                                snapshot.browser_chrome.as_ref(),
+                                core.clone(),
+                                &snapshot.runtime_status,
+                                surface_drop_target,
+                                surface_drag_candidate,
+                                dragged_surface,
+                                window_drag_source,
+                                window_drop_target,
+                                window_tab_drag_candidate,
+                                dragged_window_tab,
+                                window_tab_drop_target,
+                                pane_tab_drag_candidate,
+                                dragged_pane_tab,
+                                pane_tab_drop_target,
+                            )}
+                        }
                     }
                 } else {
                     div { class: "settings-canvas",
@@ -1866,6 +1887,137 @@ fn render_workspace_strip(
                             dragged_pane_tab,
                             pane_tab_drop_target,
                         )}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_workspace_overview(workspace: &WorkspaceViewSnapshot, core: SharedCore) -> Element {
+    rsx! {
+        div { class: "workspace-overview-scene",
+            if workspace.overview_scene.cards.is_empty() {
+                div { class: "workspace-overview-empty",
+                    div { class: "workspace-overview-empty-title", "No workspace windows" }
+                    div { class: "workspace-overview-empty-copy",
+                        "Create a new window to populate overview mode."
+                    }
+                }
+            } else {
+                for card in &workspace.overview_scene.cards {
+                    {render_workspace_overview_card(card, core.clone())}
+                }
+            }
+        }
+    }
+}
+
+fn render_workspace_overview_card(
+    card: &taskers_core::OverviewWindowCardSnapshot,
+    core: SharedCore,
+) -> Element {
+    let window_id = card.window_id;
+    let open_window = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shell_action(ShellAction::ToggleOverview);
+        }
+    };
+    let focus_window = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+        }
+    };
+    let move_window = |direction: ShortcutAction| {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shortcut_action(direction);
+        }
+    };
+    let card_class = if card.active {
+        "workspace-overview-card workspace-overview-card-active"
+    } else {
+        "workspace-overview-card"
+    };
+    let preview_mode_label = match card.preview_mode {
+        OverviewPreviewModeSnapshot::Summary => "Preview and jump",
+        OverviewPreviewModeSnapshot::LivePreferred => "Interactive when stable",
+    };
+
+    rsx! {
+        article { class: "{card_class}", onclick: open_window,
+            div { class: "workspace-overview-card-header",
+                div { class: "workspace-overview-card-title-row",
+                    div { class: "workspace-overview-card-title",
+                        "{card.title}"
+                    }
+                    div { class: "workspace-overview-card-runtime",
+                        {render_runtime_icon(&card.runtime, 12, "workspace-overview-card-runtime-icon")}
+                        span { "{card.runtime.label.as_str()}" }
+                    }
+                }
+                div { class: "workspace-overview-card-meta",
+                    span { "{card.pane_count} panes" }
+                    span { "{card.surface_count} surfaces" }
+                    span { "{card.tab_count} tabs" }
+                }
+            }
+            div { class: "workspace-overview-card-preview-mode",
+                "{preview_mode_label}"
+            }
+            div { class: "workspace-overview-card-preview",
+                for line in &card.preview_lines {
+                    div { class: "workspace-overview-card-preview-line", "{line}" }
+                }
+            }
+            div { class: "workspace-overview-card-actions",
+                button {
+                    class: "pane-action workspace-overview-card-action",
+                    r#type: "button",
+                    onclick: focus_window,
+                    title: "Focus window",
+                    "Focus"
+                }
+                if card.can_move_left {
+                    button {
+                        class: "pane-action workspace-overview-card-action",
+                        r#type: "button",
+                        onclick: move_window(ShortcutAction::MoveWindowLeft),
+                        title: "Move window left",
+                        {icons::arrow_left(12, "workspace-overview-card-action-icon")}
+                    }
+                }
+                if card.can_move_right {
+                    button {
+                        class: "pane-action workspace-overview-card-action",
+                        r#type: "button",
+                        onclick: move_window(ShortcutAction::MoveWindowRight),
+                        title: "Move window right",
+                        {icons::arrow_right(12, "workspace-overview-card-action-icon")}
+                    }
+                }
+                if card.can_move_up {
+                    button {
+                        class: "pane-action workspace-overview-card-action",
+                        r#type: "button",
+                        onclick: move_window(ShortcutAction::MoveWindowUp),
+                        title: "Move window up",
+                        "↑"
+                    }
+                }
+                if card.can_move_down {
+                    button {
+                        class: "pane-action workspace-overview-card-action",
+                        r#type: "button",
+                        onclick: move_window(ShortcutAction::MoveWindowDown),
+                        title: "Move window down",
+                        "↓"
                     }
                 }
             }
@@ -3859,12 +4011,12 @@ fn render_settings(settings: &SettingsSnapshot, core: SharedCore) -> Element {
             section { class: "settings-card",
                 div { class: "sidebar-heading", "Workspace overview" }
                 div { class: "settings-copy",
-                    "Overview mode can either render the real workspace surfaces or fall back to lighter abstraction cards."
+                    "Overview mode now uses dedicated overview cards. When possible it can prefer richer previews, but it should stay stable and readable first."
                 }
                 div { class: "settings-toggle-list",
                     {render_overview_surface_preference(
-                        "Render live surfaces",
-                        "Show the actual browser and terminal contents in overview mode. Turn this off to use the lower-cost abstraction cards instead.",
+                        "Prefer richer previews",
+                        "Ask overview to prefer richer previews when they are stable enough. Turn this off to keep overview on summary cards and jump into the full window for interaction.",
                         settings.render_live_surfaces_in_overview,
                         core.clone(),
                     )}

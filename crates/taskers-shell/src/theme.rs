@@ -940,6 +940,12 @@ input:focus-visible {{
   overflow: hidden;
 }}
 
+.workspace-canvas-overview {{
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px;
+}}
+
 .settings-canvas {{
   padding: 16px;
   overflow-y: auto;
@@ -1003,6 +1009,142 @@ input:focus-visible {{
 .workspace-viewport-overview .workspace-strip-canvas {{
   position: relative;
   inset: auto;
+}}
+
+.workspace-overview-scene {{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  align-content: start;
+}}
+
+.workspace-overview-empty {{
+  min-height: 220px;
+  border: 1px solid {border_08};
+  background: linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}}
+
+.workspace-overview-empty-title {{
+  color: {text_bright};
+  font-size: 15px;
+  font-weight: 600;
+}}
+
+.workspace-overview-empty-copy {{
+  color: {text_dim};
+  font-size: 13px;
+}}
+
+.workspace-overview-card {{
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 220px;
+  padding: 14px;
+  border: 1px solid {border_08};
+  background:
+    linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.18);
+  cursor: pointer;
+}}
+
+.workspace-overview-card:hover {{
+  border-color: {accent_20};
+  box-shadow: 0 6px 18px rgba(0,0,0,0.24);
+}}
+
+.workspace-overview-card-active {{
+  border-color: {accent_24};
+  box-shadow: 0 8px 22px rgba(0,0,0,0.28);
+}}
+
+.workspace-overview-card-header {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+
+.workspace-overview-card-title-row,
+.workspace-overview-card-meta,
+.workspace-overview-card-runtime,
+.workspace-overview-card-actions {{
+  display: flex;
+  align-items: center;
+}}
+
+.workspace-overview-card-title-row {{
+  justify-content: space-between;
+  gap: 12px;
+}}
+
+.workspace-overview-card-title {{
+  min-width: 0;
+  color: {text_bright};
+  font-size: 14px;
+  font-weight: 600;
+}}
+
+.workspace-overview-card-runtime {{
+  gap: 6px;
+  color: {text_dim};
+  font-size: 12px;
+}}
+
+.workspace-overview-card-runtime-icon,
+.workspace-overview-card-action-icon {{
+  width: 12px;
+  height: 12px;
+}}
+
+.workspace-overview-card-meta {{
+  flex-wrap: wrap;
+  gap: 10px;
+  color: {text_dim};
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}}
+
+.workspace-overview-card-preview-mode {{
+  color: {accent};
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}}
+
+.workspace-overview-card-preview {{
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid {border_06};
+  background: {surface_85};
+}}
+
+.workspace-overview-card-preview-line {{
+  color: {text};
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.workspace-overview-card-actions {{
+  flex-wrap: wrap;
+  gap: 8px;
+}}
+
+.workspace-overview-card-action {{
+  min-height: 28px;
+  padding: 0 8px;
 }}
 
 .workspace-window-shell {{
