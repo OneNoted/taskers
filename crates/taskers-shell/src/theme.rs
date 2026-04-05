@@ -1139,7 +1139,6 @@ input:focus-visible {{
   left: 6px;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   max-width: calc(100% - 12px);
   padding: 0 6px;
   min-height: 20px;
@@ -1147,14 +1146,7 @@ input:focus-visible {{
   border: 1px solid {border_08};
   color: {text_dim};
   font-size: 10px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
   overflow: hidden;
-}}
-
-.workspace-overview-live-pane-kind {{
-  color: {accent};
-  flex: 0 0 auto;
 }}
 
 .workspace-overview-live-pane-title {{

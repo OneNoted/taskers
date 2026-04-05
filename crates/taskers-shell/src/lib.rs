@@ -2097,19 +2097,22 @@ fn render_workspace_overview_live_pane(
     } else {
         "workspace-overview-live-pane"
     };
-    let kind_label = match &plan.mount {
-        SurfaceMountSpec::Terminal(_) => "Terminal",
-        SurfaceMountSpec::Browser(_) => "Browser",
-    };
     let label = match &plan.mount {
         SurfaceMountSpec::Terminal(spec) => spec.title.trim(),
         SurfaceMountSpec::Browser(spec) => spec.url.as_str(),
+    };
+    let label = if label.is_empty() {
+        match &plan.mount {
+            SurfaceMountSpec::Terminal(_) => "terminal",
+            SurfaceMountSpec::Browser(_) => "browser",
+        }
+    } else {
+        label
     };
 
     rsx! {
         div { class: "{pane_class}", style: "{pane_style}",
             div { class: "workspace-overview-live-pane-label",
-                span { class: "workspace-overview-live-pane-kind", "{kind_label}" }
                 span { class: "workspace-overview-live-pane-title", "{label}" }
             }
         }
