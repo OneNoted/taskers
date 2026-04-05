@@ -3297,19 +3297,21 @@ impl TaskersCore {
             ShortcutAction::FocusLatestUnread => {
                 self.dispatch_shell_action(ShellAction::FocusLatestUnread)
             }
-            ShortcutAction::CloseTerminal => self.run_workspace_shortcut(|core, workspace_id| {
-                let pane_id = core
-                    .app_state
-                    .snapshot_model()
-                    .workspaces
-                    .get(&workspace_id)
-                    .map(|workspace| workspace.active_pane)?;
-                Some(core.dispatch_control(ControlCommand::ClosePane {
-                    workspace_id,
-                    pane_id,
-                }))
-            }),
-            ShortcutAction::OpenBrowserSplit => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::CloseTerminal => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    let pane_id = core
+                        .app_state
+                        .snapshot_model()
+                        .workspaces
+                        .get(&workspace_id)
+                        .map(|workspace| workspace.active_pane)?;
+                    Some(core.dispatch_control(ControlCommand::ClosePane {
+                        workspace_id,
+                        pane_id,
+                    }))
+                })
+            }
+            ShortcutAction::OpenBrowserSplit => self.run_standard_workspace_shortcut(|core, _| {
                 Some(core.split_with_kind_axis(
                     None,
                     PaneKind::Browser,
@@ -3328,46 +3330,54 @@ impl TaskersCore {
                     core.queue_host_command(HostCommand::BrowserToggleDevtools { surface_id })
                 })
             }
-            ShortcutAction::FocusLeft => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                    workspace_id,
-                    direction: Direction::Left,
-                }))
-            }),
-            ShortcutAction::FocusRight => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                    workspace_id,
-                    direction: Direction::Right,
-                }))
-            }),
-            ShortcutAction::FocusUp => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                    workspace_id,
-                    direction: Direction::Up,
-                }))
-            }),
-            ShortcutAction::FocusDown => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                    workspace_id,
-                    direction: Direction::Down,
-                }))
-            }),
-            ShortcutAction::NewWindowLeft => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::FocusLeft => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                        workspace_id,
+                        direction: Direction::Left,
+                    }))
+                })
+            }
+            ShortcutAction::FocusRight => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                        workspace_id,
+                        direction: Direction::Right,
+                    }))
+                })
+            }
+            ShortcutAction::FocusUp => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                        workspace_id,
+                        direction: Direction::Up,
+                    }))
+                })
+            }
+            ShortcutAction::FocusDown => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                        workspace_id,
+                        direction: Direction::Down,
+                    }))
+                })
+            }
+            ShortcutAction::NewWindowLeft => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Left))
             }),
-            ShortcutAction::NewWindowRight => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::NewWindowRight => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Right))
             }),
-            ShortcutAction::NewWindowUp => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::NewWindowUp => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Up))
             }),
-            ShortcutAction::NewWindowDown => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::NewWindowDown => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Down))
             }),
             ShortcutAction::MoveWindowLeft
             | ShortcutAction::MoveWindowRight
             | ShortcutAction::MoveWindowUp
-            | ShortcutAction::MoveWindowDown => self.run_workspace_shortcut(|core, _| {
+            | ShortcutAction::MoveWindowDown => self.run_standard_workspace_shortcut(|core, _| {
                 let direction = match action {
                     ShortcutAction::MoveWindowLeft => Direction::Left,
                     ShortcutAction::MoveWindowRight => Direction::Right,
@@ -3378,7 +3388,7 @@ impl TaskersCore {
                 Some(core.move_active_workspace_window(direction))
             }),
             ShortcutAction::ResizeWindowLeft => {
-                self.run_workspace_shortcut(|core, workspace_id| {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Left,
@@ -3387,7 +3397,7 @@ impl TaskersCore {
                 })
             }
             ShortcutAction::ResizeWindowRight => {
-                self.run_workspace_shortcut(|core, workspace_id| {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Right,
@@ -3395,15 +3405,17 @@ impl TaskersCore {
                     }))
                 })
             }
-            ShortcutAction::ResizeWindowUp => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
-                    workspace_id,
-                    direction: Direction::Up,
-                    amount: KEYBOARD_RESIZE_STEP,
-                }))
-            }),
+            ShortcutAction::ResizeWindowUp => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
+                        workspace_id,
+                        direction: Direction::Up,
+                        amount: KEYBOARD_RESIZE_STEP,
+                    }))
+                })
+            }
             ShortcutAction::ResizeWindowDown => {
-                self.run_workspace_shortcut(|core, workspace_id| {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Down,
@@ -3411,17 +3423,19 @@ impl TaskersCore {
                     }))
                 })
             }
-            ShortcutAction::ResizeSplitLeft => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(
-                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
-                        workspace_id,
-                        direction: Direction::Left,
-                        amount: KEYBOARD_RESIZE_STEP,
-                    }),
-                )
-            }),
+            ShortcutAction::ResizeSplitLeft => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(
+                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                            workspace_id,
+                            direction: Direction::Left,
+                            amount: KEYBOARD_RESIZE_STEP,
+                        }),
+                    )
+                })
+            }
             ShortcutAction::ResizeSplitRight => {
-                self.run_workspace_shortcut(|core, workspace_id| {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
                     Some(
                         core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
                             workspace_id,
@@ -3431,25 +3445,29 @@ impl TaskersCore {
                     )
                 })
             }
-            ShortcutAction::ResizeSplitUp => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(
-                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
-                        workspace_id,
-                        direction: Direction::Up,
-                        amount: KEYBOARD_RESIZE_STEP,
-                    }),
-                )
-            }),
-            ShortcutAction::ResizeSplitDown => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(
-                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
-                        workspace_id,
-                        direction: Direction::Down,
-                        amount: KEYBOARD_RESIZE_STEP,
-                    }),
-                )
-            }),
-            ShortcutAction::SplitRight => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::ResizeSplitUp => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(
+                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                            workspace_id,
+                            direction: Direction::Up,
+                            amount: KEYBOARD_RESIZE_STEP,
+                        }),
+                    )
+                })
+            }
+            ShortcutAction::ResizeSplitDown => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(
+                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                            workspace_id,
+                            direction: Direction::Down,
+                            amount: KEYBOARD_RESIZE_STEP,
+                        }),
+                    )
+                })
+            }
+            ShortcutAction::SplitRight => self.run_standard_workspace_shortcut(|core, _| {
                 Some(core.split_with_kind_axis(
                     None,
                     PaneKind::Terminal,
@@ -3457,7 +3475,7 @@ impl TaskersCore {
                     BrowserProfileMode::PersistentDefault,
                 ))
             }),
-            ShortcutAction::SplitDown => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::SplitDown => self.run_standard_workspace_shortcut(|core, _| {
                 Some(core.split_with_kind_axis(
                     None,
                     PaneKind::Terminal,
@@ -4400,9 +4418,10 @@ impl TaskersCore {
 
     fn run_workspace_shortcut(
         &mut self,
+        preserve_overview: bool,
         handler: impl FnOnce(&mut Self, WorkspaceId) -> Option<bool>,
     ) -> bool {
-        let Some(workspace_id) = self.prepare_workspace_interaction() else {
+        let Some(workspace_id) = self.prepare_workspace_interaction(preserve_overview) else {
             return false;
         };
         let Some(mut changed) = handler(self, workspace_id) else {
@@ -4410,6 +4429,13 @@ impl TaskersCore {
         };
         changed |= self.ensure_active_window_visible();
         changed
+    }
+
+    fn run_standard_workspace_shortcut(
+        &mut self,
+        handler: impl FnOnce(&mut Self, WorkspaceId) -> Option<bool>,
+    ) -> bool {
+        self.run_workspace_shortcut(false, handler)
     }
 
     fn begin_window_drag(&mut self) -> bool {
@@ -4557,13 +4583,13 @@ impl TaskersCore {
         changed
     }
 
-    fn prepare_workspace_interaction(&mut self) -> Option<WorkspaceId> {
+    fn prepare_workspace_interaction(&mut self, preserve_overview: bool) -> Option<WorkspaceId> {
         let mut changed = false;
         if self.ui.section != ShellSection::Workspace {
             self.ui.section = ShellSection::Workspace;
             changed = true;
         }
-        if self.ui.overview_mode {
+        if self.ui.overview_mode && !preserve_overview {
             self.ui.overview_mode = false;
             changed = true;
         }
@@ -6530,10 +6556,11 @@ mod tests {
         DEFAULT_WORKSPACE_WINDOW_GAP, Direction, HostCommand, HostEvent, LayoutMetrics,
         MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX, NotificationPreferencesSnapshot, ResizeHandleTarget,
         ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
-        ShellSection, SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection,
-        WorkspaceWindowSnapshot, default_preview_app_state, default_session_path_for_preview,
-        display_surface_title, pane_body_frame, pane_shows_tab_strip_for_surface_count,
-        resolved_browser_uri, split_frame, workspace_window_content_frame,
+        ShellSection, ShortcutAction, SurfaceDragSessionSnapshot, SurfaceMountSpec,
+        WorkspaceDirection, WorkspaceWindowSnapshot, default_preview_app_state,
+        default_session_path_for_preview, display_surface_title, pane_body_frame,
+        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -8686,6 +8713,19 @@ mod tests {
                 || movable.can_move_up
                 || movable.can_move_down
         );
+    }
+
+    #[test]
+    fn new_window_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowRight));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        assert_eq!(snapshot.current_workspace.columns.len(), 2);
     }
 
     #[test]
