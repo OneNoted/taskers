@@ -3297,8 +3297,9 @@ impl TaskersCore {
             ShortcutAction::FocusLatestUnread => {
                 self.dispatch_shell_action(ShellAction::FocusLatestUnread)
             }
-            ShortcutAction::CloseTerminal => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
+            ShortcutAction::CloseTerminal => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
                     let pane_id = core
                         .app_state
                         .snapshot_model()
@@ -3309,8 +3310,8 @@ impl TaskersCore {
                         workspace_id,
                         pane_id,
                     }))
-                })
-            }
+                },
+            ),
             ShortcutAction::OpenBrowserSplit => self.run_standard_workspace_shortcut(|core, _| {
                 Some(core.split_with_kind_axis(
                     None,
@@ -3377,52 +3378,58 @@ impl TaskersCore {
             ShortcutAction::MoveWindowLeft
             | ShortcutAction::MoveWindowRight
             | ShortcutAction::MoveWindowUp
-            | ShortcutAction::MoveWindowDown => self.run_standard_workspace_shortcut(|core, _| {
-                let direction = match action {
-                    ShortcutAction::MoveWindowLeft => Direction::Left,
-                    ShortcutAction::MoveWindowRight => Direction::Right,
-                    ShortcutAction::MoveWindowUp => Direction::Up,
-                    ShortcutAction::MoveWindowDown => Direction::Down,
-                    _ => unreachable!("move action already matched"),
-                };
-                Some(core.move_active_workspace_window(direction))
-            }),
-            ShortcutAction::ResizeWindowLeft => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
+            | ShortcutAction::MoveWindowDown => {
+                self.run_workspace_shortcut(shortcut_preserves_overview(action), |core, _| {
+                    let direction = match action {
+                        ShortcutAction::MoveWindowLeft => Direction::Left,
+                        ShortcutAction::MoveWindowRight => Direction::Right,
+                        ShortcutAction::MoveWindowUp => Direction::Up,
+                        ShortcutAction::MoveWindowDown => Direction::Down,
+                        _ => unreachable!("move action already matched"),
+                    };
+                    Some(core.move_active_workspace_window(direction))
+                })
+            }
+            ShortcutAction::ResizeWindowLeft => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Left,
                         amount: KEYBOARD_RESIZE_STEP,
                     }))
-                })
-            }
-            ShortcutAction::ResizeWindowRight => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                },
+            ),
+            ShortcutAction::ResizeWindowRight => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Right,
                         amount: KEYBOARD_RESIZE_STEP,
                     }))
-                })
-            }
-            ShortcutAction::ResizeWindowUp => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                },
+            ),
+            ShortcutAction::ResizeWindowUp => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Up,
                         amount: KEYBOARD_RESIZE_STEP,
                     }))
-                })
-            }
-            ShortcutAction::ResizeWindowDown => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                },
+            ),
+            ShortcutAction::ResizeWindowDown => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Down,
                         amount: KEYBOARD_RESIZE_STEP,
                     }))
-                })
-            }
+                },
+            ),
             ShortcutAction::ResizeSplitLeft => {
                 self.run_standard_workspace_shortcut(|core, workspace_id| {
                     Some(
@@ -4781,6 +4788,25 @@ impl TaskersCore {
     fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         self.host_commands.drain(..).collect()
     }
+}
+
+fn shortcut_preserves_overview(action: ShortcutAction) -> bool {
+    matches!(
+        action,
+        ShortcutAction::CloseTerminal
+            | ShortcutAction::NewWindowLeft
+            | ShortcutAction::NewWindowRight
+            | ShortcutAction::NewWindowUp
+            | ShortcutAction::NewWindowDown
+            | ShortcutAction::MoveWindowLeft
+            | ShortcutAction::MoveWindowRight
+            | ShortcutAction::MoveWindowUp
+            | ShortcutAction::MoveWindowDown
+            | ShortcutAction::ResizeWindowLeft
+            | ShortcutAction::ResizeWindowRight
+            | ShortcutAction::ResizeWindowUp
+            | ShortcutAction::ResizeWindowDown
+    )
 }
 
 fn apply_resize_preview_to_model(model: &mut AppModel, preview: &ResizePreview) {
@@ -8726,6 +8752,82 @@ mod tests {
         let snapshot = core.snapshot();
         assert!(snapshot.overview_mode);
         assert_eq!(snapshot.current_workspace.columns.len(), 2);
+    }
+
+    #[test]
+    fn close_terminal_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::CloseTerminal));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        assert_eq!(snapshot.current_workspace.columns.len(), 1);
+    }
+
+    #[test]
+    fn move_window_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        let before = core.snapshot();
+        let active_window_id = before.current_workspace.active_window_id;
+        let before_column_index = before
+            .current_workspace
+            .columns
+            .iter()
+            .position(|column| {
+                column
+                    .windows
+                    .iter()
+                    .any(|window| window.id == active_window_id)
+            })
+            .expect("window column index");
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::MoveWindowLeft));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        let after_column_index = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .position(|column| {
+                column
+                    .windows
+                    .iter()
+                    .any(|window| window.id == active_window_id)
+            })
+            .expect("window column index");
+        assert_ne!(after_column_index, before_column_index);
+    }
+
+    #[test]
+    fn resize_window_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        let before = core.snapshot();
+        let active_window_id = before.current_workspace.active_window_id;
+        let before_width = window_snapshot(&before, active_window_id).frame.width;
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::ResizeWindowLeft));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        let after_width = window_snapshot(&snapshot, active_window_id).frame.width;
+        assert_ne!(after_width, before_width);
     }
 
     #[test]
