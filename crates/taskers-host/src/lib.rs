@@ -39,10 +39,10 @@ pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type ShellActionSink = Rc<dyn Fn(taskers_core::ShellAction) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
 
-// Very thin viewport-edge slivers have been enough to trip native GTK/Ghostty
-// rendering during teardown on Linux/NVIDIA. Once a clipped native surface is
-// below this size, hide it until more of the pane is actually visible.
-const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 200;
+// Extremely thin viewport-edge slivers have been enough to trip native
+// GTK/Ghostty rendering during teardown on Linux/NVIDIA. Keep only a narrow
+// safety valve here so moderately visible edge slices still render.
+const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 48;
 const MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX: i32 = 120;
 const MIN_RESIZE_SPLIT_RATIO: u16 = 150;
 const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
@@ -3509,6 +3509,48 @@ mod tests {
         assert!(
             clipped.is_some(),
             "expected substantial clipped width to remain renderable"
+        );
+    }
+
+    #[test]
+    fn keeps_moderately_clipped_surfaces() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        let snapshot = core.snapshot();
+        let plan = snapshot.portal.panes[0].clone();
+
+        let clipped = super::clip_to_content(
+            &PortalSurfacePlan {
+                frame: Frame::new(0, 0, 720, plan.frame.height),
+                pane_frame: Frame::new(0, 0, 720, plan.pane_frame.height),
+                ..plan
+            },
+            &Frame::new(640, 0, 200, 1200),
+        );
+
+        assert!(
+            clipped.is_some(),
+            "expected moderately clipped edge slice to stay renderable"
+        );
+    }
+
+    #[test]
+    fn keeps_moderately_wide_clipped_surfaces() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        let snapshot = core.snapshot();
+        let plan = snapshot.portal.panes[0].clone();
+
+        let clipped = super::clip_to_content(
+            &PortalSurfacePlan {
+                frame: Frame::new(0, 0, 720, plan.frame.height),
+                pane_frame: Frame::new(0, 0, 720, plan.pane_frame.height),
+                ..plan
+            },
+            &Frame::new(600, 0, 160, 1200),
+        );
+
+        assert!(
+            clipped.is_some(),
+            "expected moderately clipped edge surface to remain renderable"
         );
     }
 
