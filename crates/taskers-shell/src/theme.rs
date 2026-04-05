@@ -1041,11 +1041,11 @@ input:focus-visible {{
   position: absolute;
   inset: 0 0 auto 0;
   min-height: {window_toolbar_height}px;
-  padding: 0 6px 0 8px;
+  padding: 0 4px 0 6px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px;
   background: rgba(24, 24, 36, 0.84);
   border-bottom: 1px solid {border_08};
   backdrop-filter: blur(8px) saturate(1.2);
@@ -1061,15 +1061,17 @@ input:focus-visible {{
 }}
 
 .workspace-overview-live-window-title-row {{
-  gap: 10px;
+  gap: 6px;
   min-width: 0;
+  flex: 1 1 auto;
 }}
 
 .workspace-overview-live-window-title {{
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
+  flex: 1 1 auto;
   color: {text_bright};
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }}
 
@@ -1080,27 +1082,39 @@ input:focus-visible {{
 }}
 
 .workspace-overview-live-window-runtime-icon,
+.workspace-overview-live-window-stat-icon,
 .workspace-overview-live-window-action-icon {{
   width: 12px;
   height: 12px;
 }}
 
 .workspace-overview-live-window-meta {{
-  gap: 8px;
+  gap: 4px;
   color: {text_dim};
   font-size: 10px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  flex: 0 0 auto;
+}}
+
+.workspace-overview-live-window-stat {{
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 18px;
+  padding: 0 4px;
+  border: 1px solid {border_08};
+  background: rgba(15, 17, 23, 0.5);
 }}
 
 .workspace-overview-live-window-actions {{
-  gap: 6px;
+  gap: 4px;
   margin-left: auto;
+  flex: 0 0 auto;
 }}
 
 .workspace-overview-live-window-action {{
-  min-height: 24px;
-  padding: 0 7px;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
 }}
 
 .workspace-overview-live-pane,
@@ -1292,6 +1306,7 @@ input:focus-visible {{
   overflow: hidden;
   border-radius: 0;
   box-shadow: 0 2px 12px rgba(0,0,0,0.24);
+  container-type: inline-size;
 }}
 
 .workspace-window-shell-active {{
@@ -1529,6 +1544,7 @@ input:focus-visible {{
   border: {pane_border_width}px solid {border_10};
   overflow: hidden;
   border-radius: 0;
+  container-type: inline-size;
 }}
 
 .pane-card-active {{
@@ -2485,6 +2501,93 @@ input:focus-visible {{
   background:
     linear-gradient(180deg, {overlay_16} 0%, {overlay_03} 100%),
     {border_03};
+}}
+
+@container (max-width: 260px) {{
+  .workspace-window-toolbar {{
+    padding: 0 4px;
+    gap: 4px;
+  }}
+
+  .workspace-window-toolbar-spacer {{
+    min-width: 12px;
+  }}
+
+  .workspace-window-tab {{
+    max-width: 140px;
+    gap: 0;
+    padding: 0 2px 0 4px;
+  }}
+
+  .workspace-window-tab-button {{
+    gap: 4px;
+  }}
+
+  .workspace-window-tab-close {{
+    display: none;
+  }}
+
+  .workspace-window-tab-add {{
+    width: 18px;
+    height: 18px;
+  }}
+
+  .pane-toolbar {{
+    padding: 0 4px;
+    gap: 4px;
+  }}
+
+  .pane-toolbar-meta {{
+    gap: 4px;
+  }}
+
+  .pane-runtime-badge,
+  .pane-runtime-state,
+  .pane-action-separator {{
+    display: none;
+  }}
+
+  .pane-action-cluster {{
+    gap: 1px;
+  }}
+
+  .surface-tab {{
+    gap: 0;
+    padding: 0 2px 0 4px;
+  }}
+
+  .surface-tab-copy {{
+    gap: 4px;
+  }}
+
+  .surface-tab-runtime-badge,
+  .surface-tab-state,
+  .surface-tab-close {{
+    display: none;
+  }}
+
+  .surface-tab-add {{
+    width: 18px;
+    height: 18px;
+  }}
+}}
+
+@container (max-width: 200px) {{
+  .workspace-window-tab-kind-icon,
+  .surface-tab-kind-icon,
+  .pane-toolbar-meta {{
+    display: none;
+  }}
+
+  .workspace-window-tab {{
+    max-width: 96px;
+  }}
+
+  .surface-tab-add,
+  .workspace-window-tab-add {{
+    width: 16px;
+    height: 16px;
+  }}
 }}
 
 .surface-backdrop-copy {{

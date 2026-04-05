@@ -1994,9 +1994,18 @@ fn render_workspace_overview_live_window(
                         span { "{window.title}" }
                     }
                     div { class: "workspace-overview-live-window-meta",
-                        span { "{window.pane_count} panes" }
-                        span { "{window.surface_count} surfaces" }
-                        span { "{window.tabs.len()} tabs" }
+                        div { class: "workspace-overview-live-window-stat", title: "{window.pane_count} panes",
+                            {icons::split_horizontal(11, "workspace-overview-live-window-stat-icon")}
+                            span { "{window.pane_count}" }
+                        }
+                        div { class: "workspace-overview-live-window-stat", title: "{window.surface_count} surfaces",
+                            {icons::terminal(11, "workspace-overview-live-window-stat-icon")}
+                            span { "{window.surface_count}" }
+                        }
+                        div { class: "workspace-overview-live-window-stat", title: "{window.tabs.len()} tabs",
+                            {icons::split_vertical(11, "workspace-overview-live-window-stat-icon")}
+                            span { "{window.tabs.len()}" }
+                        }
                     }
                 }
                 div { class: "workspace-overview-live-window-actions",
@@ -2005,14 +2014,14 @@ fn render_workspace_overview_live_window(
                         r#type: "button",
                         onclick: focus_window,
                         title: "Focus window",
-                        "Focus"
+                        {icons::eye(12, "workspace-overview-live-window-action-icon")}
                     }
                     button {
                         class: "pane-action workspace-overview-live-window-action",
                         r#type: "button",
                         onclick: open_window,
                         title: "Open window",
-                        "Open"
+                        {icons::arrow_right_circle(12, "workspace-overview-live-window-action-icon")}
                     }
                     if workspace.columns.len() > 1 {
                         button {
