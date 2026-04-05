@@ -188,6 +188,16 @@ fn surface_summary_title(surface: &SurfaceSnapshot) -> String {
     parts.join(" · ")
 }
 
+fn select_active_surface(
+    surfaces: &[SurfaceSnapshot],
+    active_surface_id: SurfaceId,
+) -> Option<&SurfaceSnapshot> {
+    surfaces
+        .iter()
+        .find(|surface| surface.id == active_surface_id)
+        .or_else(|| surfaces.first())
+}
+
 fn compute_surface_drop_index(
     dragged: DraggedSurface,
     target_pane_id: PaneId,
@@ -3140,34 +3150,31 @@ fn render_live_pane(
     dragged_surface: Option<DraggedSurface>,
 ) -> Element {
     let pane_id = pane.id;
-    let active_surface = pane
-        .surfaces
-        .iter()
-        .find(|surface| surface.id == pane.active_surface)
-        .unwrap_or_else(|| {
-            pane.surfaces
-                .first()
-                .expect("live pane snapshot should contain surfaces")
-        });
-    let active_surface_id = active_surface.id;
+    let active_surface = select_active_surface(&pane.surfaces, pane.active_surface);
+    let active_surface_id = active_surface.map(|surface| surface.id);
     let ordered_surface_ids = pane
         .surfaces
         .iter()
         .map(|surface| surface.id)
         .collect::<Vec<_>>();
-    let active_browser_chrome = browser_chrome
-        .filter(|chrome| chrome.surface_id == active_surface.id)
-        .cloned();
+    let active_browser_chrome = active_surface.and_then(|active_surface| {
+        browser_chrome
+            .filter(|chrome| chrome.surface_id == active_surface.id)
+            .cloned()
+    });
     let toolbar_key = active_browser_chrome
         .as_ref()
-        .map(|chrome| format!("{}-{}", active_surface.id, chrome.url))
+        .map(|chrome| format!("{}-{}", chrome.surface_id, chrome.url))
         .or_else(|| {
-            active_surface
-                .url
-                .as_ref()
-                .map(|url| format!("{}-{}", active_surface.id, url))
+            active_surface.and_then(|surface| {
+                surface
+                    .url
+                    .as_ref()
+                    .map(|url| format!("{}-{}", surface.id, url))
+                    .or_else(|| Some(surface.id.to_string()))
+            })
         })
-        .unwrap_or_else(|| active_surface.id.to_string());
+        .unwrap_or_else(|| pane_id.to_string());
     let pane_allows_split =
         pane_allows_surface_split(dragged_surface, pane_id, pane.surfaces.len());
     let surface_drag_active = dragged_surface.is_some();
@@ -3250,6 +3257,9 @@ fn render_live_pane(
     let close_surface = {
         let core = core.clone();
         move |event: Event<MouseData>| {
+            let Some(active_surface_id) = active_surface_id else {
+                return;
+            };
             event.stop_propagation();
             core.dispatch_shell_action(ShellAction::CloseSurface {
                 pane_id,
@@ -3263,6 +3273,9 @@ fn render_live_pane(
         "Close current surface"
     };
     let begin_active_surface_drag_candidate = move |event: Event<PointerData>| {
+        let Some(active_surface_id) = active_surface_id else {
+            return;
+        };
         if let Some(candidate) =
             surface_drag_candidate_from_event(&event, workspace_id, pane_id, active_surface_id)
         {
@@ -3325,73 +3338,86 @@ fn render_live_pane(
                     }
                 }
             }
-            if matches!(active_surface.kind, SurfaceKind::Browser) {
-                BrowserToolbar {
-                    key: "{toolbar_key}",
-                    surface: active_surface.clone(),
-                    chrome: active_browser_chrome,
-                    core: core.clone(),
+            if let Some(active_surface) = active_surface {
+                if matches!(active_surface.kind, SurfaceKind::Browser) {
+                    BrowserToolbar {
+                        key: "{toolbar_key}",
+                        surface: active_surface.clone(),
+                        chrome: active_browser_chrome,
+                        core: core.clone(),
+                    }
                 }
             }
             div { class: "pane-body",
-                if show_surface_backdrop(
-                    active_surface.kind,
-                    overview_mode,
-                    render_live_surfaces_in_overview,
-                    resize_preview_active,
-                ) {
-                    {render_surface_backdrop(active_surface, runtime_status)}
-                }
-                if surface_drag_active {
-                    div { class: "pane-drop-overlay",
-                        {render_surface_pane_drop_target(
-                            "pane-drop-target pane-drop-target-center",
-                            "Move",
-                            SurfaceDropTarget::AppendToPane { pane_id },
-                            core.clone(),
-                            surface_drop_target,
-                        )}
-                        if pane_allows_split {
+                if let Some(active_surface) = active_surface {
+                    if show_surface_backdrop(
+                        active_surface.kind,
+                        overview_mode,
+                        render_live_surfaces_in_overview,
+                        resize_preview_active,
+                    ) {
+                        {render_surface_backdrop(active_surface, runtime_status)}
+                    }
+                    if surface_drag_active {
+                        div { class: "pane-drop-overlay",
                             {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-left",
-                                "",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Left,
-                                },
+                                "pane-drop-target pane-drop-target-center",
+                                "Move",
+                                SurfaceDropTarget::AppendToPane { pane_id },
                                 core.clone(),
                                 surface_drop_target,
                             )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-right",
-                                "",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Right,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-top",
-                                "",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Up,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
-                                "",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Down,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
+                            if pane_allows_split {
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-left",
+                                    "",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Left,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-right",
+                                    "",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Right,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-top",
+                                    "",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Up,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
+                                    "",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Down,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                            }
+                        }
+                    }
+                } else {
+                    div { class: "surface-backdrop surface-backdrop-empty",
+                        div { class: "surface-backdrop-copy",
+                            div { class: "surface-backdrop-title", "Pane is updating" }
+                            div { class: "surface-backdrop-note",
+                                "This pane temporarily has no active surface. It should repopulate without crashing."
+                            }
                         }
                     }
                 }
@@ -3982,9 +4008,9 @@ fn render_notification_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        SurfaceDragCandidate, SurfaceKind, attention_ring_class, show_surface_backdrop,
-        surface_drag_threshold_reached, surface_primary_label, surface_runtime_badge_text,
-        surface_status_text, surface_summary_title,
+        SurfaceDragCandidate, SurfaceKind, attention_ring_class, select_active_surface,
+        show_surface_backdrop, surface_drag_threshold_reached, surface_primary_label,
+        surface_runtime_badge_text, surface_status_text, surface_summary_title,
     };
     use crate::taskers_core::{
         AttentionRingState, AttentionState, BrowserProfileMode, PaneId, RuntimeIdentitySnapshot,
@@ -4182,6 +4208,35 @@ mod tests {
         );
 
         assert_eq!(surface_runtime_badge_text(&surface), None);
+    }
+
+    #[test]
+    fn select_active_surface_returns_none_for_empty_surface_list() {
+        assert!(select_active_surface(&[], SurfaceId::new()).is_none());
+    }
+
+    #[test]
+    fn select_active_surface_falls_back_to_first_surface_when_active_id_missing() {
+        let first = sample_surface(
+            "terminal",
+            "Terminal",
+            "fish",
+            None,
+            None,
+            RuntimeStateSnapshot::Idle,
+        );
+        let second = sample_surface(
+            "terminal",
+            "Terminal",
+            "notes",
+            None,
+            None,
+            RuntimeStateSnapshot::Idle,
+        );
+        let surfaces = vec![first.clone(), second];
+
+        let selected = select_active_surface(&surfaces, SurfaceId::new()).expect("surface");
+        assert_eq!(selected.id, first.id);
     }
 }
 
