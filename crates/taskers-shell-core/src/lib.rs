@@ -3332,36 +3332,60 @@ impl TaskersCore {
                 })
             }
             ShortcutAction::FocusLeft => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
-                    Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                        workspace_id,
-                        direction: Direction::Left,
-                    }))
-                })
+                if self.ui.overview_mode {
+                    self.run_workspace_shortcut(true, |core, _| {
+                        Some(core.focus_active_workspace_window(Direction::Left))
+                    })
+                } else {
+                    self.run_standard_workspace_shortcut(|core, workspace_id| {
+                        Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                            workspace_id,
+                            direction: Direction::Left,
+                        }))
+                    })
+                }
             }
             ShortcutAction::FocusRight => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
-                    Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                        workspace_id,
-                        direction: Direction::Right,
-                    }))
-                })
+                if self.ui.overview_mode {
+                    self.run_workspace_shortcut(true, |core, _| {
+                        Some(core.focus_active_workspace_window(Direction::Right))
+                    })
+                } else {
+                    self.run_standard_workspace_shortcut(|core, workspace_id| {
+                        Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                            workspace_id,
+                            direction: Direction::Right,
+                        }))
+                    })
+                }
             }
             ShortcutAction::FocusUp => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
-                    Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                        workspace_id,
-                        direction: Direction::Up,
-                    }))
-                })
+                if self.ui.overview_mode {
+                    self.run_workspace_shortcut(true, |core, _| {
+                        Some(core.focus_active_workspace_window(Direction::Up))
+                    })
+                } else {
+                    self.run_standard_workspace_shortcut(|core, workspace_id| {
+                        Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                            workspace_id,
+                            direction: Direction::Up,
+                        }))
+                    })
+                }
             }
             ShortcutAction::FocusDown => {
-                self.run_standard_workspace_shortcut(|core, workspace_id| {
-                    Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                        workspace_id,
-                        direction: Direction::Down,
-                    }))
-                })
+                if self.ui.overview_mode {
+                    self.run_workspace_shortcut(true, |core, _| {
+                        Some(core.focus_active_workspace_window(Direction::Down))
+                    })
+                } else {
+                    self.run_standard_workspace_shortcut(|core, workspace_id| {
+                        Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                            workspace_id,
+                            direction: Direction::Down,
+                        }))
+                    })
+                }
             }
             ShortcutAction::NewWindowLeft => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Left))
@@ -4421,6 +4445,63 @@ impl TaskersCore {
         };
 
         self.move_workspace_window_by_id(active_window_id, target)
+    }
+
+    fn focus_active_workspace_window(&mut self, direction: Direction) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let active_window_id = workspace.active_window;
+        let Some((active_column_id, active_column_index, active_window_index)) = workspace
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(column_index, (column_id, column))| {
+                column
+                    .window_order
+                    .iter()
+                    .position(|candidate| *candidate == active_window_id)
+                    .map(|window_index| (*column_id, column_index, window_index))
+            })
+        else {
+            return false;
+        };
+
+        let target_window_id = match direction {
+            Direction::Left => active_column_index
+                .checked_sub(1)
+                .and_then(|index| workspace.columns.get_index(index))
+                .and_then(|(_, column)| column.window_order.first())
+                .copied(),
+            Direction::Right => workspace
+                .columns
+                .get_index(active_column_index + 1)
+                .and_then(|(_, column)| column.window_order.first())
+                .copied(),
+            Direction::Up => workspace
+                .columns
+                .get(&active_column_id)
+                .and_then(|column| {
+                    active_window_index
+                        .checked_sub(1)
+                        .and_then(|index| column.window_order.get(index))
+                })
+                .copied(),
+            Direction::Down => workspace
+                .columns
+                .get(&active_column_id)
+                .and_then(|column| column.window_order.get(active_window_index + 1))
+                .copied(),
+        };
+
+        let Some(target_window_id) = target_window_id else {
+            return false;
+        };
+        self.focus_workspace_window(target_window_id)
     }
 
     fn run_workspace_shortcut(
@@ -8828,6 +8909,27 @@ mod tests {
         assert!(snapshot.overview_mode);
         let after_width = window_snapshot(&snapshot, active_window_id).frame.width;
         assert_ne!(after_width, before_width);
+    }
+
+    #[test]
+    fn focus_window_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        let before = core.snapshot();
+        let before_window_id = before.current_workspace.active_window_id;
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::FocusLeft));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        assert_ne!(
+            snapshot.current_workspace.active_window_id,
+            before_window_id
+        );
     }
 
     #[test]
