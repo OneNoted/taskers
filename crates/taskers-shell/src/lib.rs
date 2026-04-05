@@ -1984,6 +1984,23 @@ fn render_workspace_overview_live_window(
             core.dispatch_shortcut_action(direction);
         }
     };
+    let add_window_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab { window_id });
+        }
+    };
+    let add_window = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            });
+        }
+    };
 
     rsx! {
         article { class: "{window_class}", style: "{style}",
@@ -2009,6 +2026,20 @@ fn render_workspace_overview_live_window(
                     }
                 }
                 div { class: "workspace-overview-live-window-actions",
+                    button {
+                        class: "pane-action workspace-overview-live-window-action",
+                        r#type: "button",
+                        onclick: add_window_tab,
+                        title: "New window tab",
+                        {icons::plus(12, "workspace-overview-live-window-action-icon")}
+                    }
+                    button {
+                        class: "pane-action workspace-overview-live-window-action",
+                        r#type: "button",
+                        onclick: add_window,
+                        title: "New window",
+                        {icons::split_horizontal(12, "workspace-overview-live-window-action-icon")}
+                    }
                     button {
                         class: "pane-action workspace-overview-live-window-action",
                         r#type: "button",
@@ -2113,6 +2144,23 @@ fn render_workspace_overview_card(
             core.dispatch_shortcut_action(direction);
         }
     };
+    let add_window_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab { window_id });
+        }
+    };
+    let add_window = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            });
+        }
+    };
     let card_class = if card.active {
         "workspace-overview-card workspace-overview-card-active"
     } else {
@@ -2150,6 +2198,20 @@ fn render_workspace_overview_card(
                 }
             }
             div { class: "workspace-overview-card-actions",
+                button {
+                    class: "pane-action workspace-overview-card-action",
+                    r#type: "button",
+                    onclick: add_window_tab,
+                    title: "New window tab",
+                    {icons::plus(12, "workspace-overview-card-action-icon")}
+                }
+                button {
+                    class: "pane-action workspace-overview-card-action",
+                    r#type: "button",
+                    onclick: add_window,
+                    title: "New window",
+                    {icons::split_horizontal(12, "workspace-overview-card-action-icon")}
+                }
                 button {
                     class: "pane-action workspace-overview-card-action",
                     r#type: "button",
