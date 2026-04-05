@@ -297,6 +297,10 @@ taskers_error() {
   taskers_signal error "$@"
 }
 
+taskers__on_chpwd() {
+  taskers__emit_metadata_if_changed
+}
+
 taskers__normalize_backspace() {
   stty erase '^?' 2>/dev/null || true
   zmodload -F zsh/terminfo b:terminfo 2>/dev/null || true
@@ -315,10 +319,18 @@ taskers__normalize_backspace() {
   fi
 }
 
-typeset -ga preexec_functions
-typeset -ga precmd_functions
-preexec_functions+=(taskers__preexec)
-precmd_functions+=(taskers__precmd)
+if autoload -Uz add-zsh-hook 2>/dev/null; then
+  add-zsh-hook preexec taskers__preexec
+  add-zsh-hook precmd taskers__precmd
+  add-zsh-hook chpwd taskers__on_chpwd
+else
+  typeset -ga preexec_functions
+  typeset -ga precmd_functions
+  typeset -ga chpwd_functions
+  preexec_functions+=(taskers__preexec)
+  precmd_functions+=(taskers__precmd)
+  chpwd_functions+=(taskers__on_chpwd)
+fi
 taskers__normalize_backspace
 if [[ -z "${TASKERS_TTY_NAME:-}" ]]; then
   TASKERS_TTY_NAME=$(tty 2>/dev/null || true)
