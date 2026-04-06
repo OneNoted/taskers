@@ -11,6 +11,8 @@ use taskers_control::{
 };
 use taskers_domain::{AppModel, PaneKind, SurfaceId};
 
+const GIT_RECENT_COMMIT_LIMIT: &str = "50";
+
 #[derive(Clone, Default)]
 pub struct VcsService;
 
@@ -263,13 +265,13 @@ impl VcsService {
         let commits_raw = run_command(
             &target.repo_root,
             "git",
-            &["log", "--format=%h\t%s", "--shortstat", "@{upstream}..HEAD"],
+            &git_recent_commit_log_args("@{upstream}..HEAD"),
         )
         .or_else(|_| {
             run_command(
                 &target.repo_root,
                 "git",
-                &["log", "--format=%h\t%s", "--shortstat", "origin/HEAD..HEAD"],
+                &git_recent_commit_log_args("origin/HEAD..HEAD"),
             )
         })
         .map(|o| o.stdout)
@@ -850,6 +852,17 @@ fn normalize_git_numstat_path(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+fn git_recent_commit_log_args(range: &str) -> [&str; 6] {
+    [
+        "log",
+        "-n",
+        GIT_RECENT_COMMIT_LIMIT,
+        "--format=%h\t%s",
+        "--shortstat",
+        range,
+    ]
+}
+
 fn enrich_files_with_stats(
     files: &mut [VcsFileEntry],
     stats: &HashMap<String, (u32, u32)>,
@@ -1066,10 +1079,10 @@ mod tests {
     use std::{collections::HashMap, fs};
 
     use super::{
-        enrich_files_with_stats, enrich_git_files_with_stats, jj_diff_preview,
-        parse_git_log_shortstat, parse_git_numstat, parse_git_status, parse_jj_bookmarks,
-        parse_jj_current, parse_jj_diff_stat, parse_jj_diff_summary, parse_jj_log_stat,
-        resolve_repo_root,
+        GIT_RECENT_COMMIT_LIMIT, enrich_files_with_stats, enrich_git_files_with_stats,
+        git_recent_commit_log_args, jj_diff_preview, parse_git_log_shortstat, parse_git_numstat,
+        parse_git_status, parse_jj_bookmarks, parse_jj_current, parse_jj_diff_stat,
+        parse_jj_diff_summary, parse_jj_log_stat, resolve_repo_root,
     };
     use taskers_control::{VcsFileEntry, VcsFileStatus, VcsMode};
     use tempfile::TempDir;
@@ -1213,6 +1226,21 @@ mod tests {
         let stats = parse_git_numstat(raw);
         assert_eq!(stats["new.txt"], (0, 0));
         assert_eq!(stats["src/main.rs"], (5, 2));
+    }
+
+    #[test]
+    fn git_recent_commit_log_args_include_a_limit() {
+        assert_eq!(
+            git_recent_commit_log_args("@{upstream}..HEAD"),
+            [
+                "log",
+                "-n",
+                GIT_RECENT_COMMIT_LIMIT,
+                "--format=%h\t%s",
+                "--shortstat",
+                "@{upstream}..HEAD",
+            ]
+        );
     }
 
     #[test]
