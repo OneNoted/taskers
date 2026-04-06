@@ -243,14 +243,18 @@ impl VcsService {
             .transpose()?;
         let summary_text = git_summary_text(&git_status);
         let unstaged_stats = parse_git_numstat(
-            &run_command(&target.repo_root, "git", &["diff", "--numstat"])
+            &run_command(&target.repo_root, "git", &["diff", "--numstat", "-z"])
                 .map(|o| o.stdout)
                 .unwrap_or_default(),
         );
         let staged_stats = parse_git_numstat(
-            &run_command(&target.repo_root, "git", &["diff", "--numstat", "--cached"])
-                .map(|o| o.stdout)
-                .unwrap_or_default(),
+            &run_command(
+                &target.repo_root,
+                "git",
+                &["diff", "--numstat", "--cached", "-z"],
+            )
+            .map(|o| o.stdout)
+            .unwrap_or_default(),
         );
         let mut files = git_status.files;
         let (total_insertions, total_deletions) =
@@ -763,15 +767,87 @@ fn parse_jj_diff_stat(raw: &str) -> HashMap<String, (u32, u32)> {
 }
 
 fn parse_git_numstat(raw: &str) -> HashMap<String, (u32, u32)> {
+    if raw.contains('\0') {
+        return parse_git_numstat_z(raw);
+    }
+
     raw.lines()
         .filter_map(|line| {
             let mut parts = line.splitn(3, '\t');
             let ins: u32 = parts.next()?.parse().ok()?;
             let del: u32 = parts.next()?.parse().ok()?;
-            let path = parts.next()?.to_string();
+            let path = normalize_git_numstat_path(parts.next()?);
             Some((path, (ins, del)))
         })
         .collect()
+}
+
+fn parse_git_numstat_z(raw: &str) -> HashMap<String, (u32, u32)> {
+    let mut stats = HashMap::new();
+    let mut fields = raw.split('\0');
+
+    while let Some(header) = fields.next() {
+        if header.is_empty() {
+            continue;
+        }
+        let mut parts = header.splitn(3, '\t');
+        let ins: u32 = match parts.next().and_then(|value| value.parse().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let del: u32 = match parts.next().and_then(|value| value.parse().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let Some(path_field) = parts.next() else {
+            continue;
+        };
+        let path = if path_field.is_empty() {
+            let Some(_old) = fields.next() else {
+                break;
+            };
+            let Some(destination) = fields.next() else {
+                break;
+            };
+            normalize_git_numstat_path(destination)
+        } else {
+            normalize_git_numstat_path(path_field)
+        };
+        stats.insert(path, (ins, del));
+    }
+
+    stats
+}
+
+fn normalize_git_numstat_path(path: &str) -> String {
+    if !path.contains("=>") {
+        return path.to_string();
+    }
+
+    if path.contains('{') && path.contains('}') {
+        let mut normalized = String::new();
+        let mut rest = path;
+        while let Some(start) = rest.find('{') {
+            normalized.push_str(&rest[..start]);
+            let after_start = &rest[start + 1..];
+            let Some(end) = after_start.find('}') else {
+                return path.to_string();
+            };
+            let inner = &after_start[..end];
+            if let Some((_, destination)) = inner.split_once("=>") {
+                normalized.push_str(destination.trim());
+            } else {
+                normalized.push_str(inner);
+            }
+            rest = &after_start[end + 1..];
+        }
+        normalized.push_str(rest);
+        return normalized;
+    }
+
+    path.rsplit_once("=>")
+        .map(|(_, destination)| destination.trim().to_string())
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn enrich_files_with_stats(
@@ -1118,6 +1194,25 @@ mod tests {
         assert_eq!(stats["src/main.rs"], (10, 5));
         assert_eq!(stats["README.md"], (3, 0));
         assert!(!stats.contains_key("binary.png"));
+    }
+
+    #[test]
+    fn parses_git_numstat_rename_paths_to_destination_names() {
+        let raw = concat!(
+            "0\t0\told.txt => new.txt\n",
+            "5\t2\tsrc/{before => after}.rs\n",
+        );
+        let stats = parse_git_numstat(raw);
+        assert_eq!(stats["new.txt"], (0, 0));
+        assert_eq!(stats["src/after.rs"], (5, 2));
+    }
+
+    #[test]
+    fn parses_git_numstat_z_rename_records() {
+        let raw = "0\t0\t\0old.txt\0new.txt\05\t2\tsrc/main.rs\0";
+        let stats = parse_git_numstat(raw);
+        assert_eq!(stats["new.txt"], (0, 0));
+        assert_eq!(stats["src/main.rs"], (5, 2));
     }
 
     #[test]
