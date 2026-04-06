@@ -145,6 +145,8 @@ struct TaskersConfig {
     selected_shortcut_preset: String,
     #[serde(default)]
     notification_preferences: NotificationPreferencesConfig,
+    #[serde(default = "default_true")]
+    render_live_surfaces_in_overview: bool,
     #[serde(default)]
     embedded_terminal_appearance: EmbeddedTerminalAppearance,
 }
@@ -167,6 +169,7 @@ impl Default for TaskersConfig {
             selected_theme_id: default_theme_id(),
             selected_shortcut_preset: default_shortcut_preset_id(),
             notification_preferences: NotificationPreferencesConfig::default(),
+            render_live_surfaces_in_overview: true,
             embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
         }
     }
@@ -278,6 +281,7 @@ impl TaskersConfig {
             notification_preferences: NotificationPreferencesConfig::from_snapshot(
                 settings.notification_preferences,
             ),
+            render_live_surfaces_in_overview: settings.render_live_surfaces_in_overview,
             embedded_terminal_appearance: current.embedded_terminal_appearance,
         }
     }
@@ -1072,6 +1076,7 @@ mod config_tests {
                 alerts_on_completed: true,
                 suppress_when_visible: false,
             },
+            render_live_surfaces_in_overview: false,
         };
 
         let next = TaskersConfig::from_settings(&settings, &current);
@@ -1085,6 +1090,7 @@ mod config_tests {
             next.notification_preferences,
             NotificationPreferencesConfig::from_snapshot(settings.notification_preferences)
         );
+        assert!(!next.render_live_surfaces_in_overview);
     }
 }
 
@@ -1295,6 +1301,7 @@ fn bootstrap_runtime(
         selected_theme_id: config.selected_theme_id.clone(),
         selected_shortcut_preset: config.shortcut_preset(),
         notification_preferences: config.notification_preferences.to_snapshot(),
+        render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
     });
 
     log_runtime_status(diagnostics, &core.snapshot().runtime_status);
@@ -1500,6 +1507,7 @@ fn run_internal_surface_probe(
         selected_theme_id,
         selected_shortcut_preset,
         notification_preferences,
+        render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
     });
     core.set_window_size(PixelSize::new(
         GHOSTTY_PROBE_WINDOW_SIZE_PX,
@@ -2480,7 +2488,7 @@ mod startup_tests {
     #[test]
     fn launcher_bundle_binary_does_not_use_dev_diagnostics() {
         assert!(!looks_like_dev_install(Path::new(
-            "/home/notes/.local/share/taskers/releases/0.5.0/x86_64-unknown-linux-gnu/taskers-gtk"
+            "/home/notes/.local/share/taskers/releases/0.6.0/x86_64-unknown-linux-gnu/taskers-gtk"
         )));
     }
 

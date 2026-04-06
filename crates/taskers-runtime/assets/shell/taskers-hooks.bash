@@ -141,16 +141,16 @@ taskers__collect_metadata() {
 taskers__agent_active_for_kind() {
   case "$1" in
     started|progress|waiting_input)
-      printf '%s' '1'
+      printf '%s' 'true'
       ;;
     completed|error)
-      printf '%s' '0'
+      printf '%s' 'false'
       ;;
     *)
       if [ -n "${TASKERS_ACTIVE_AGENT_KIND:-}" ]; then
-        printf '%s' '1'
+        printf '%s' 'true'
       else
-        printf '%s' '0'
+        printf '%s' 'false'
       fi
       ;;
   esac

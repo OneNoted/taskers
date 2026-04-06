@@ -434,3 +434,98 @@ pub fn aider(size: u32, class: &str) -> Element {
         }
     }
 }
+
+/// Arrow pointing down (fetch/download)
+pub fn arrow_down(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            line { x1: "12", y1: "5", x2: "12", y2: "19" }
+            polyline { points: "19 12 12 19 5 12" }
+        }
+    }
+}
+
+/// Arrow pointing up (push/upload)
+pub fn arrow_up(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            line { x1: "12", y1: "19", x2: "12", y2: "5" }
+            polyline { points: "5 12 12 5 19 12" }
+        }
+    }
+}
+
+/// File diff icon (document with +/-)
+pub fn file_diff(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
+            polyline { points: "14 2 14 8 20 8" }
+            line { x1: "9", y1: "11", x2: "15", y2: "11" }
+            line { x1: "12", y1: "8", x2: "12", y2: "14" }
+            line { x1: "9", y1: "17", x2: "15", y2: "17" }
+        }
+    }
+}
+
+/// Small filled circle for status indicators
+pub fn circle_dot(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "currentColor",
+            stroke: "none",
+            circle { cx: "12", cy: "12", r: "6" }
+        }
+    }
+}
+
+/// Git merge icon (for pull action)
+pub fn git_merge(size: u32, class: &str) -> Element {
+    rsx! {
+        svg {
+            class: "{class}",
+            width: "{size}",
+            height: "{size}",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            stroke_linecap: "round",
+            stroke_linejoin: "round",
+            circle { cx: "18", cy: "18", r: "3" }
+            circle { cx: "6", cy: "6", r: "3" }
+            path { d: "M6 21V9a9 9 0 0 0 9 9" }
+        }
+    }
+}

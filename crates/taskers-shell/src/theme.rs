@@ -279,7 +279,8 @@ input:focus-visible {{
 }}
 
 .vcs-panel {{
-  gap: 10px;
+  gap: 2px;
+  padding: 0 0 8px 0;
 }}
 
 .sidebar-top {{
@@ -940,6 +941,12 @@ input:focus-visible {{
   overflow: hidden;
 }}
 
+.workspace-canvas-overview {{
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0;
+}}
+
 .settings-canvas {{
   padding: 16px;
   overflow-y: auto;
@@ -1005,6 +1012,284 @@ input:focus-visible {{
   inset: auto;
 }}
 
+.workspace-overview-scene {{
+  padding: 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  align-content: start;
+}}
+
+.workspace-overview-live-scene {{
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+}}
+
+.workspace-overview-live-window {{
+  position: absolute;
+  border: 1px solid {border_08};
+  background: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}}
+
+.workspace-overview-live-window-active {{
+  border-color: {accent_24};
+}}
+
+.workspace-overview-live-window-header {{
+  position: absolute;
+  inset: 0 0 auto 0;
+  min-height: {window_toolbar_height}px;
+  padding: 0 4px 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  background: rgba(24, 24, 36, 0.84);
+  border-bottom: 1px solid {border_08};
+  backdrop-filter: blur(8px) saturate(1.2);
+  pointer-events: auto;
+}}
+
+.workspace-overview-live-window-title-row,
+.workspace-overview-live-window-title,
+.workspace-overview-live-window-meta,
+.workspace-overview-live-window-actions {{
+  display: flex;
+  align-items: center;
+}}
+
+.workspace-overview-live-window-title-row {{
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}}
+
+.workspace-overview-live-window-title {{
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 auto;
+  color: {text_bright};
+  font-size: 11px;
+  font-weight: 600;
+}}
+
+.workspace-overview-live-window-title span {{
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.workspace-overview-live-window-runtime-icon,
+.workspace-overview-live-window-stat-icon,
+.workspace-overview-live-window-action-icon {{
+  width: 12px;
+  height: 12px;
+}}
+
+.workspace-overview-live-window-meta {{
+  gap: 4px;
+  color: {text_dim};
+  font-size: 10px;
+  flex: 0 0 auto;
+}}
+
+.workspace-overview-live-window-stat {{
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 18px;
+  padding: 0 4px;
+  border: 1px solid {border_08};
+  background: rgba(15, 17, 23, 0.5);
+}}
+
+.workspace-overview-live-window-actions {{
+  gap: 4px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}}
+
+.workspace-overview-live-window-action {{
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+}}
+
+.workspace-overview-live-pane,
+.workspace-overview-live-surface-frame {{
+  position: absolute;
+  pointer-events: none;
+}}
+
+.workspace-overview-live-pane {{
+  border: 1px solid {border_06};
+  background: rgba(15, 17, 23, 0.12);
+}}
+
+.workspace-overview-live-pane-active {{
+  border-color: {accent_20};
+  box-shadow: inset 0 0 0 1px {accent_12};
+}}
+
+.workspace-overview-live-pane-label {{
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  display: inline-flex;
+  align-items: center;
+  max-width: calc(100% - 12px);
+  padding: 0 6px;
+  min-height: 20px;
+  background: rgba(24, 24, 36, 0.82);
+  border: 1px solid {border_08};
+  color: {text_dim};
+  font-size: 10px;
+  overflow: hidden;
+}}
+
+.workspace-overview-live-pane-title {{
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.workspace-overview-live-surface-frame {{
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+}}
+
+.workspace-overview-empty {{
+  min-height: 220px;
+  border: 1px solid {border_08};
+  background: linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}}
+
+.workspace-overview-empty-title {{
+  color: {text_bright};
+  font-size: 15px;
+  font-weight: 600;
+}}
+
+.workspace-overview-empty-copy {{
+  color: {text_dim};
+  font-size: 13px;
+}}
+
+.workspace-overview-card {{
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 220px;
+  padding: 14px;
+  border: 1px solid {border_08};
+  background:
+    linear-gradient(180deg, {overlay_05} 0%, {overlay_03} 100%);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.18);
+  cursor: pointer;
+}}
+
+.workspace-overview-card:hover {{
+  border-color: {accent_20};
+  box-shadow: 0 6px 18px rgba(0,0,0,0.24);
+}}
+
+.workspace-overview-card-active {{
+  border-color: {accent_24};
+  box-shadow: 0 8px 22px rgba(0,0,0,0.28);
+}}
+
+.workspace-overview-card-header {{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}}
+
+.workspace-overview-card-title-row,
+.workspace-overview-card-meta,
+.workspace-overview-card-runtime,
+.workspace-overview-card-actions {{
+  display: flex;
+  align-items: center;
+}}
+
+.workspace-overview-card-title-row {{
+  justify-content: space-between;
+  gap: 12px;
+}}
+
+.workspace-overview-card-title {{
+  min-width: 0;
+  color: {text_bright};
+  font-size: 14px;
+  font-weight: 600;
+}}
+
+.workspace-overview-card-runtime {{
+  gap: 6px;
+  color: {text_dim};
+  font-size: 12px;
+}}
+
+.workspace-overview-card-runtime-icon,
+.workspace-overview-card-action-icon {{
+  width: 12px;
+  height: 12px;
+}}
+
+.workspace-overview-card-meta {{
+  flex-wrap: wrap;
+  gap: 10px;
+  color: {text_dim};
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}}
+
+.workspace-overview-card-preview-mode {{
+  color: {accent};
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}}
+
+.workspace-overview-card-preview {{
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid {border_06};
+  background: {surface_85};
+}}
+
+.workspace-overview-card-preview-line {{
+  color: {text};
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+.workspace-overview-card-actions {{
+  flex-wrap: wrap;
+  gap: 8px;
+}}
+
+.workspace-overview-card-action {{
+  min-height: 28px;
+  padding: 0 8px;
+}}
+
 .workspace-window-shell {{
   position: absolute;
   display: flex;
@@ -1014,6 +1299,7 @@ input:focus-visible {{
   overflow: hidden;
   border-radius: 0;
   box-shadow: 0 2px 12px rgba(0,0,0,0.24);
+  container-type: inline-size;
 }}
 
 .workspace-window-shell-active {{
@@ -1251,6 +1537,7 @@ input:focus-visible {{
   border: {pane_border_width}px solid {border_10};
   overflow: hidden;
   border-radius: 0;
+  container-type: inline-size;
 }}
 
 .pane-card-active {{
@@ -2209,6 +2496,93 @@ input:focus-visible {{
     {border_03};
 }}
 
+@container (max-width: 260px) {{
+  .workspace-window-toolbar {{
+    padding: 0 4px;
+    gap: 4px;
+  }}
+
+  .workspace-window-toolbar-spacer {{
+    min-width: 12px;
+  }}
+
+  .workspace-window-tab {{
+    max-width: 140px;
+    gap: 0;
+    padding: 0 2px 0 4px;
+  }}
+
+  .workspace-window-tab-button {{
+    gap: 4px;
+  }}
+
+  .workspace-window-tab-close {{
+    display: none;
+  }}
+
+  .workspace-window-tab-add {{
+    width: 18px;
+    height: 18px;
+  }}
+
+  .pane-toolbar {{
+    padding: 0 4px;
+    gap: 4px;
+  }}
+
+  .pane-toolbar-meta {{
+    gap: 4px;
+  }}
+
+  .pane-runtime-badge,
+  .pane-runtime-state,
+  .pane-action-separator {{
+    display: none;
+  }}
+
+  .pane-action-cluster {{
+    gap: 1px;
+  }}
+
+  .surface-tab {{
+    gap: 0;
+    padding: 0 2px 0 4px;
+  }}
+
+  .surface-tab-copy {{
+    gap: 4px;
+  }}
+
+  .surface-tab-runtime-badge,
+  .surface-tab-state,
+  .surface-tab-close {{
+    display: none;
+  }}
+
+  .surface-tab-add {{
+    width: 18px;
+    height: 18px;
+  }}
+}}
+
+@container (max-width: 200px) {{
+  .workspace-window-tab-kind-icon,
+  .surface-tab-kind-icon,
+  .pane-toolbar-meta {{
+    display: none;
+  }}
+
+  .workspace-window-tab {{
+    max-width: 96px;
+  }}
+
+  .surface-tab-add,
+  .workspace-window-tab-add {{
+    width: 16px;
+    height: 16px;
+  }}
+}}
+
 .surface-backdrop-copy {{
   display: flex;
   flex-direction: column;
@@ -2386,123 +2760,514 @@ input:focus-visible {{
   color: {text_bright};
 }}
 
-.vcs-refresh-button {{
+/* VCS panel header */
+.vcs-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 6px;
+}}
+.vcs-header-title {{
+  font-size: 11px;
+  font-weight: 600;
+  color: {text_muted};
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}}
+.vcs-header-btn {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: {text_dim};
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}}
+.vcs-header-btn:hover {{
+  color: {text_bright};
+  background: {border_06};
 }}
 
+/* VCS error */
 .vcs-panel-error {{
   font-size: 11px;
   color: {error};
-  padding: 8px 10px;
+  padding: 6px 12px;
+  margin: 0 12px;
   background: {error_10};
-  border: 1px solid {error_16};
-  border-radius: 0;
+  border-left: 2px solid {error};
 }}
 
-.vcs-panel-summary {{
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}}
-
-.vcs-panel-repo-row {{
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}}
-
-.vcs-actions,
-.vcs-files,
-.vcs-diff {{
-  border-top: 1px solid {border_06};
-  padding-top: 10px;
-}}
-
-.vcs-action-row,
-.vcs-ref-list {{
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}}
-
-.vcs-inline-form {{
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}}
-
-.vcs-input {{
-  flex: 1 1 auto;
-  min-width: 0;
-}}
-
-.vcs-ref-chip {{
-  min-height: 24px;
-  padding: 0 8px;
-  font-size: 10px;
-}}
-
-.vcs-ref-chip-active {{
-  background: {accent_14};
-  border-color: {accent_24};
-  color: {text_bright};
-}}
-
-.vcs-file-list {{
+/* VCS summary */
+.vcs-summary {{
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 220px;
-  overflow-y: auto;
+  padding: 4px 12px 8px;
 }}
-
-.vcs-file-row {{
-  width: 100%;
-  border: 1px solid {border_06};
-  background: {border_03};
+.vcs-summary-repo {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}}
+.vcs-summary-mode {{
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  background: {accent_14};
+  color: {accent};
+}}
+.vcs-summary-name {{
+  font-size: 12px;
+  font-weight: 600;
   color: {text_bright};
-  padding: 8px 10px;
-  border-radius: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.vcs-summary-branch {{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: {text_muted};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+.vcs-summary-branch svg {{
+  flex-shrink: 0;
+  color: {text_dim};
+}}
+.vcs-summary-detail {{
+  font-size: 11px;
+  color: {text_subtle};
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.vcs-summary-stats {{
   display: flex;
   align-items: center;
   gap: 8px;
-  text-align: left;
+  margin-top: 2px;
 }}
-
-.vcs-file-row:hover,
-.vcs-file-row-active {{
-  background: {accent_08};
-  border-color: {accent_24};
-}}
-
-.vcs-diff-preview {{
-  margin: 0;
-  padding: 10px;
-  background: {border_03};
-  border: 1px solid {border_06};
-  border-radius: 0;
-  white-space: pre-wrap;
-  overflow: auto;
-  max-height: 280px;
+.vcs-stat-ins {{
   font-size: 11px;
-  line-height: 1.5;
-  color: {text_subtle};
+  font-weight: 600;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: {completed};
+}}
+.vcs-stat-del {{
+  font-size: 11px;
+  font-weight: 600;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: {error};
+}}
+.vcs-stat-zero {{
+  color: {text_dim};
 }}
 
+/* VCS PR link */
 .vcs-pr-link {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
   text-decoration: none;
-  padding: 8px 10px;
+  padding: 5px 8px;
   background: {border_03};
   border: 1px solid {border_06};
-  border-radius: 0;
+  font-size: 11px;
+  color: {text_muted};
+  transition: background 0.12s ease, border-color 0.12s ease;
 }}
-
 .vcs-pr-link:hover {{
   background: {accent_08};
   border-color: {accent_24};
+  color: {text_bright};
+}}
+.vcs-pr-number {{
+  font-weight: 600;
+  color: {accent};
+}}
+.vcs-pr-title {{
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+
+/* VCS toolbar */
+.vcs-toolbar {{
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 12px;
+  border-top: 1px solid {border_05};
+  border-bottom: 1px solid {border_05};
+}}
+.vcs-toolbar-btn {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: {text_muted};
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}}
+.vcs-toolbar-btn:hover {{
+  color: {text_bright};
+  background: {border_06};
+}}
+.vcs-toolbar-btn-active {{
+  color: {accent};
+  background: {accent_08};
+}}
+.vcs-toolbar-sep {{
+  width: 1px;
+  height: 16px;
+  background: {border_06};
+  margin: 0 4px;
+}}
+
+/* VCS forms (describe, commit, create branch/bookmark) */
+.vcs-form-section {{
+  padding: 6px 12px;
+  border-bottom: 1px solid {border_05};
+}}
+.vcs-inline-form {{
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}}
+.vcs-input {{
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  padding: 4px 8px;
+  height: 26px;
+  background: {border_03};
+  border: 1px solid {border_06};
+  color: {text_bright};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  outline: none;
+  transition: border-color 0.12s ease;
+}}
+.vcs-input:focus {{
+  border-color: {accent_24};
+}}
+.vcs-input::placeholder {{
+  color: {text_dim};
+}}
+.vcs-form-btn {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid {border_06};
+  background: {border_03};
+  color: {text_muted};
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}}
+.vcs-form-btn:hover {{
+  background: {accent_08};
+  border-color: {accent_24};
+  color: {text_bright};
+}}
+
+/* VCS refs (bookmarks/branches) */
+.vcs-refs {{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 12px;
+}}
+.vcs-ref-chip {{
+  min-height: 20px;
+  padding: 0 7px;
+  font-size: 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  border: 1px solid {border_06};
+  background: transparent;
+  color: {text_subtle};
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}}
+.vcs-ref-chip:hover {{
+  background: {border_06};
+  color: {text_bright};
+}}
+.vcs-ref-chip-active {{
+  background: {accent_08};
+  border-color: {accent_24};
+  color: {accent};
+  font-weight: 600;
+}}
+
+/* VCS section headers (Changed Files, Diff) */
+.vcs-section {{
+  display: flex;
+  flex-direction: column;
+}}
+.vcs-section-header {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-top: 1px solid {border_05};
+}}
+.vcs-section-title {{
+  font-size: 10px;
+  font-weight: 600;
+  color: {text_dim};
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}}
+.vcs-section-title svg {{
+  color: {text_dim};
+}}
+.vcs-section-count {{
+  font-size: 10px;
+  font-weight: 600;
+  color: {text_dim};
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+
+/* VCS file list */
+.vcs-file-list {{
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  overflow-y: auto;
+}}
+.vcs-file-row {{
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid {border_03};
+  background: transparent;
+  color: {text_muted};
+  padding: 4px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}}
+.vcs-file-row:last-child {{
+  border-bottom: none;
+}}
+.vcs-file-row:hover {{
+  background: {border_03};
+}}
+.vcs-file-row-active {{
+  background: {accent_08};
+}}
+.vcs-file-row-active:hover {{
+  background: {accent_08};
+}}
+.vcs-file-dot {{
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}}
+.vcs-file-dot-added {{
+  background: {completed};
+}}
+.vcs-file-dot-modified {{
+  background: {waiting};
+}}
+.vcs-file-dot-deleted {{
+  background: {error};
+}}
+.vcs-file-dot-untracked {{
+  background: {text_dim};
+}}
+.vcs-file-dot-conflicted {{
+  background: {error};
+  box-shadow: 0 0 0 2px {error_16};
+}}
+.vcs-file-dot-renamed {{
+  background: {accent};
+}}
+.vcs-file-dot-default {{
+  background: {text_dim};
+}}
+.vcs-file-path {{
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}}
+.vcs-file-dir {{
+  color: {text_dim};
+}}
+.vcs-file-basename {{
+  color: {text_bright};
+}}
+.vcs-file-stats {{
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+.vcs-file-ins {{
+  color: {completed};
+}}
+.vcs-file-del {{
+  color: {error};
+}}
+
+/* VCS diff viewer */
+.vcs-diff {{
+  display: flex;
+  flex-direction: column;
+}}
+.vcs-diff-path {{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  color: {text_muted};
+  background: {border_03};
+  border-top: 1px solid {border_05};
+  border-bottom: 1px solid {border_05};
+}}
+.vcs-diff-path svg {{
+  color: {text_dim};
+  flex-shrink: 0;
+}}
+.vcs-diff-body {{
+  overflow: auto;
+  max-height: 320px;
+  font-size: 11px;
+  line-height: 1.55;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+.vcs-diff-line {{
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}}
+.vcs-diff-line-add {{
+  color: {completed};
+  background: {completed_06};
+}}
+.vcs-diff-line-del {{
+  color: {error};
+  background: {error_06};
+}}
+.vcs-diff-line-hunk {{
+  color: {accent};
+  padding-top: 4px;
+  padding-bottom: 2px;
+  font-weight: 600;
+  font-size: 10px;
+}}
+.vcs-diff-line-ctx {{
+  color: {text_subtle};
+}}
+.vcs-diff-empty {{
+  padding: 12px;
+  font-size: 11px;
+  color: {text_dim};
+  text-align: center;
+}}
+
+/* VCS recent commits */
+.vcs-commit-list {{
+  display: flex;
+  flex-direction: column;
+  max-height: 200px;
+  overflow-y: auto;
+}}
+.vcs-commit-row {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  border-bottom: 1px solid {border_03};
+  font-size: 11px;
+  min-height: 22px;
+}}
+.vcs-commit-row:last-child {{
+  border-bottom: none;
+}}
+.vcs-commit-id {{
+  flex-shrink: 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: {accent};
+  letter-spacing: 0.02em;
+}}
+.vcs-commit-desc {{
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: {text_muted};
+}}
+.vcs-commit-stats {{
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}}
+.vcs-commit-net {{
+  font-size: 10px;
+  font-weight: 600;
+  min-width: 28px;
+  text-align: right;
+}}
+.vcs-commit-net-pos {{
+  color: {completed};
+}}
+.vcs-commit-net-neg {{
+  color: {error};
+}}
+.vcs-commit-net-zero {{
+  color: {text_dim};
+}}
+.vcs-commit-total {{
+  border-top: 1px solid {border_06};
+  border-bottom: none;
+  padding-top: 4px;
+  margin-top: 1px;
+}}
+.vcs-commit-total .vcs-commit-id {{
+  color: {text_dim};
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.04em;
 }}
 
 .agent-session-list {{
@@ -2842,6 +3607,7 @@ input:focus-visible {{
         busy_16 = rgba(p.busy, 0.16),
         busy_text = p.busy_text.to_hex(),
         completed = p.completed.to_hex(),
+        completed_06 = rgba(p.completed, 0.06),
         completed_10 = rgba(p.completed, 0.10),
         completed_12 = rgba(p.completed, 0.12),
         completed_16 = rgba(p.completed, 0.16),
@@ -2852,6 +3618,7 @@ input:focus-visible {{
         waiting_18 = rgba(p.waiting, 0.18),
         waiting_text = p.waiting_text.to_hex(),
         error = p.error.to_hex(),
+        error_06 = rgba(p.error, 0.06),
         error_10 = rgba(p.error, 0.10),
         error_12 = rgba(p.error, 0.12),
         error_16 = rgba(p.error, 0.16),

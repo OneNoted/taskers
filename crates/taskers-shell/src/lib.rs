@@ -10,15 +10,16 @@ use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionRingState, AttentionState,
     BrowserChromeSnapshot, Direction, DragSessionSnapshot, LayoutNodeSnapshot, LivePaneSnapshot,
-    NotificationPreferenceKey, PaneContainerId, PaneId, PaneKind, PaneSnapshot,
-    PaneTabDragSessionSnapshot, PaneTabId, PaneTabLayoutSnapshot, PaneTabSnapshot,
+    NotificationPreferenceKey, OverviewPreviewModeSnapshot, PaneContainerId, PaneId, PaneKind,
+    PaneSnapshot, PaneTabDragSessionSnapshot, PaneTabId, PaneTabLayoutSnapshot, PaneTabSnapshot,
     ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot, RuntimeStateSnapshot,
     RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
     ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot, SurfaceId,
-    SurfaceKind, SurfaceSnapshot, VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode,
-    VcsPanelSnapshot, VcsSnapshot, WindowTabDragSessionSnapshot, WorkspaceId,
-    WorkspaceLogEntrySnapshot, WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget,
-    WorkspaceWindowSnapshot, WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
+    SurfaceKind, SurfaceMountSpec, SurfacePortalPlan, SurfaceSnapshot, VcsCommand, VcsCommitEntry,
+    VcsFileEntry, VcsFileStatus, VcsMode, VcsPanelSnapshot, VcsSnapshot,
+    WindowTabDragSessionSnapshot, WorkspaceDirection, WorkspaceId, WorkspaceLogEntrySnapshot,
+    WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+    WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
 };
 use taskers_shell_core as taskers_core;
 
@@ -187,6 +188,16 @@ fn surface_summary_title(surface: &SurfaceSnapshot) -> String {
     parts.join(" · ")
 }
 
+fn select_active_surface(
+    surfaces: &[SurfaceSnapshot],
+    active_surface_id: SurfaceId,
+) -> Option<&SurfaceSnapshot> {
+    surfaces
+        .iter()
+        .find(|surface| surface.id == active_surface_id)
+        .or_else(|| surfaces.first())
+}
+
 fn compute_surface_drop_index(
     dragged: DraggedSurface,
     target_pane_id: PaneId,
@@ -282,8 +293,21 @@ fn pane_allows_surface_split(
     dragged.is_some_and(|dragged| dragged.pane_id != pane_id || surface_count > 1)
 }
 
-fn show_live_surface_backdrop(surface_kind: SurfaceKind, overview_mode: bool) -> bool {
-    overview_mode || !matches!(surface_kind, SurfaceKind::Browser)
+fn show_surface_backdrop(
+    surface_kind: SurfaceKind,
+    overview_mode: bool,
+    render_live_surfaces_in_overview: bool,
+    resize_preview_active: bool,
+) -> bool {
+    if resize_preview_active {
+        return true;
+    }
+
+    if overview_mode {
+        return !render_live_surfaces_in_overview;
+    }
+
+    !matches!(surface_kind, SurfaceKind::Browser)
 }
 
 fn prime_drag_transfer(event: &Event<DragData>, mime: &str, payload: &str) {
@@ -645,6 +669,14 @@ pub fn TaskersShell(core: SharedCore) -> Element {
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::ToggleVcsPanel)
     };
+    let create_workspace_window = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            })
+        }
+    };
     let drag_source = use_signal(|| None::<WorkspaceId>);
     let drag_target = use_signal(|| None::<WorkspaceId>);
     let mut surface_drop_target = use_signal(|| None::<SurfaceDropTarget>);
@@ -845,6 +877,14 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                     if matches!(snapshot.section, ShellSection::Workspace) {
                         div { class: "workspace-header-actions",
                             button {
+                                class: "pane-action workspace-header-action",
+                                r#type: "button",
+                                onclick: create_workspace_window,
+                                title: "Create workspace window",
+                                {icons::plus(14, "workspace-header-action-icon")}
+                                span { "Window" }
+                            }
+                            button {
                                 class: if snapshot.vcs_panel.visible {
                                     "pane-action workspace-header-action workspace-header-action-active"
                                 } else {
@@ -862,24 +902,28 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 
                 if matches!(snapshot.section, ShellSection::Workspace) {
                     div { class: if snapshot.overview_mode { "workspace-canvas workspace-canvas-overview" } else { "workspace-canvas" },
-                        {render_workspace_strip(
-                            &snapshot.current_workspace,
-                            snapshot.overview_mode,
-                            snapshot.browser_chrome.as_ref(),
-                            core.clone(),
-                            &snapshot.runtime_status,
-                            surface_drop_target,
-                            surface_drag_candidate,
-                            dragged_surface,
-                            window_drag_source,
-                            window_drop_target,
-                            window_tab_drag_candidate,
-                            dragged_window_tab,
-                            window_tab_drop_target,
-                            pane_tab_drag_candidate,
-                            dragged_pane_tab,
-                            pane_tab_drop_target,
-                        )}
+                        if snapshot.overview_mode {
+                            {render_workspace_overview(&snapshot.current_workspace, &snapshot.portal, core.clone())}
+                        } else {
+                            {render_workspace_strip(
+                                &snapshot.current_workspace,
+                                snapshot.overview_mode,
+                                snapshot.browser_chrome.as_ref(),
+                                core.clone(),
+                                &snapshot.runtime_status,
+                                surface_drop_target,
+                                surface_drag_candidate,
+                                dragged_surface,
+                                window_drag_source,
+                                window_drop_target,
+                                window_tab_drag_candidate,
+                                dragged_window_tab,
+                                window_tab_drop_target,
+                                pane_tab_drag_candidate,
+                                dragged_pane_tab,
+                                pane_tab_drop_target,
+                            )}
+                        }
                     }
                 } else {
                     div { class: "settings-canvas",
@@ -1277,6 +1321,8 @@ fn VcsPanel(panel: VcsPanelSnapshot, core: SharedCore) -> Element {
     let commit_message = use_signal(String::new);
     let branch_name = use_signal(String::new);
     let bookmark_name = use_signal(String::new);
+    let show_form = use_signal(|| false);
+    let show_ref_form = use_signal(|| false);
     let refresh = {
         let core = core.clone();
         move |_| core.dispatch_shell_action(ShellAction::RefreshVcsPanel)
@@ -1284,15 +1330,15 @@ fn VcsPanel(panel: VcsPanelSnapshot, core: SharedCore) -> Element {
 
     rsx! {
         aside { class: "attention-panel vcs-panel",
-            div { class: "notification-header",
-                div { class: "sidebar-heading", "Version Control" }
+            // Header
+            div { class: "vcs-header",
+                span { class: "vcs-header-title", "Version Control" }
                 button {
-                    class: "notification-jump-button vcs-refresh-button",
+                    class: "vcs-header-btn",
                     r#type: "button",
                     onclick: refresh,
-                    title: "Refresh repository status",
-                    {icons::refresh(12, "browser-toolbar-icon")}
-                    span { "Refresh" }
+                    title: "Refresh",
+                    {icons::refresh(14, "")}
                 }
             }
 
@@ -1301,47 +1347,80 @@ fn VcsPanel(panel: VcsPanelSnapshot, core: SharedCore) -> Element {
             }
 
             if let Some(snapshot) = &panel.snapshot {
-                section { class: "attention-section",
-                    div { class: "vcs-panel-summary",
-                        div { class: "vcs-panel-repo-row",
-                            span { class: "notification-count-pill notification-count-unread", "{format_vcs_mode(snapshot.mode)}" }
-                            span { class: "workspace-label", "{snapshot.repo_name}" }
+                // Summary
+                div { class: "vcs-summary",
+                    div { class: "vcs-summary-repo",
+                        span { class: "vcs-summary-mode", "{format_vcs_mode(snapshot.mode)}" }
+                        span { class: "vcs-summary-name", "{snapshot.repo_name}" }
+                    }
+                    div { class: "vcs-summary-branch",
+                        {icons::git_branch(12, "")}
+                        span { "{snapshot.headline}" }
+                    }
+                    if let Some(detail) = &snapshot.detail {
+                        div { class: "vcs-summary-detail", "{detail}" }
+                    }
+                    if snapshot.total_insertions > 0 || snapshot.total_deletions > 0 {
+                        div { class: "vcs-summary-stats",
+                            span { class: if snapshot.total_insertions > 0 { "vcs-stat-ins" } else { "vcs-stat-ins vcs-stat-zero" },
+                                "+{snapshot.total_insertions}"
+                            }
+                            span { class: if snapshot.total_deletions > 0 { "vcs-stat-del" } else { "vcs-stat-del vcs-stat-zero" },
+                                "-{snapshot.total_deletions}"
+                            }
                         }
-                        div { class: "workspace-branch-row",
-                            {icons::git_branch(10, "workspace-branch-icon")}
-                            span { "{snapshot.headline}" }
-                        }
-                        if let Some(detail) = &snapshot.detail {
-                            div { class: "workspace-notification workspace-status", "{detail}" }
-                        }
-                        div { class: "workspace-notification", "{snapshot.summary_text}" }
-                        if let Some(pr) = &snapshot.pull_request {
-                            a {
-                                class: "workspace-pr-row vcs-pr-link",
-                                href: "{pr.url}",
-                                target: "_blank",
-                                rel: "noreferrer noopener",
-                                span { class: "workspace-pr-number",
-                                    if let Some(number) = pr.number {
-                                        "#{number}"
-                                    } else {
-                                        "PR"
-                                    }
+                    }
+                    if let Some(pr) = &snapshot.pull_request {
+                        a {
+                            class: "vcs-pr-link",
+                            href: "{pr.url}",
+                            target: "_blank",
+                            rel: "noreferrer noopener",
+                            span { class: "vcs-pr-number",
+                                if let Some(number) = pr.number {
+                                    "#{number}"
+                                } else {
+                                    "PR"
                                 }
-                                span { class: "workspace-pr-title",
-                                    "{pr.title.clone().unwrap_or_else(|| pr.url.clone())}"
-                                }
+                            }
+                            span { class: "vcs-pr-title",
+                                "{pr.title.clone().unwrap_or_else(|| pr.url.clone())}"
                             }
                         }
                     }
                 }
 
-                {render_vcs_action_panel(snapshot, core.clone(), commit_message, branch_name, bookmark_name)}
+                // Toolbar
+                {render_vcs_toolbar(snapshot, core.clone(), show_form, show_ref_form)}
 
-                section { class: "attention-section vcs-files",
-                    div { class: "attention-section-title", "Changed files" }
+                // Conditional form
+                if *show_form.read() {
+                    {render_vcs_form(snapshot, core.clone(), commit_message)}
+                }
+
+                // Refs
+                if !snapshot.refs.is_empty() {
+                    {render_vcs_refs(snapshot, core.clone())}
+                }
+
+                // Conditional ref creation form
+                if *show_ref_form.read() {
+                    {render_vcs_ref_create_form(snapshot, core.clone(), branch_name, bookmark_name)}
+                }
+
+                // Changed files
+                div { class: "vcs-section",
+                    div { class: "vcs-section-header",
+                        div { class: "vcs-section-title",
+                            {icons::file_diff(10, "")}
+                            span { "Changed files" }
+                        }
+                        if !snapshot.files.is_empty() {
+                            span { class: "vcs-section-count", "{snapshot.files.len()}" }
+                        }
+                    }
                     if snapshot.files.is_empty() {
-                        div { class: "notification-empty-subtitle", "No changed files." }
+                        div { class: "vcs-diff-empty", "No changed files" }
                     } else {
                         div { class: "vcs-file-list",
                             for file in &snapshot.files {
@@ -1351,25 +1430,38 @@ fn VcsPanel(panel: VcsPanelSnapshot, core: SharedCore) -> Element {
                     }
                 }
 
-                section { class: "attention-section vcs-diff",
-                    div { class: "attention-section-title", "Diff preview" }
+                // Unpushed commits
+                if !snapshot.recent_commits.is_empty() {
+                    {render_vcs_commits_section(&snapshot.recent_commits)}
+                }
+
+                // Diff preview
+                div { class: "vcs-diff",
+                    if let Some(diff_path) = &snapshot.diff_path {
+                        div { class: "vcs-diff-path",
+                            {icons::file_diff(10, "")}
+                            span { "{diff_path}" }
+                        }
+                    }
                     if let Some(diff) = &snapshot.diff_text {
-                        pre { class: "vcs-diff-preview", "{diff}" }
-                    } else {
-                        div { class: "notification-empty-subtitle", "Select a file to preview its diff." }
+                        div { class: "vcs-diff-body",
+                            {render_vcs_diff_lines(diff)}
+                        }
+                    } else if snapshot.diff_path.is_none() && !snapshot.files.is_empty() {
+                        div { class: "vcs-diff-empty", "Select a file to preview its diff" }
                     }
                 }
             } else {
                 div { class: "notification-empty",
                     {icons::git_branch(24, "notification-empty-icon")}
-                    div { class: "notification-empty-title", "No repository selected" }
+                    div { class: "notification-empty-title", "No repository" }
                     if let Some(title) = &panel.target_surface_title {
                         div { class: "notification-empty-subtitle",
-                            "Focused terminal: {title}"
+                            "Terminal: {title}"
                         }
                     } else {
                         div { class: "notification-empty-subtitle",
-                            "Select a terminal inside a Git or JJ repo to manage version control here."
+                            "Select a terminal in a Git or JJ repo."
                         }
                     }
                 }
@@ -1378,12 +1470,11 @@ fn VcsPanel(panel: VcsPanelSnapshot, core: SharedCore) -> Element {
     }
 }
 
-fn render_vcs_action_panel(
+fn render_vcs_toolbar(
     snapshot: &VcsSnapshot,
     core: SharedCore,
-    mut commit_message: Signal<String>,
-    mut branch_name: Signal<String>,
-    mut bookmark_name: Signal<String>,
+    mut show_form: Signal<bool>,
+    mut show_ref_form: Signal<bool>,
 ) -> Element {
     let surface_id = snapshot.surface_id;
     let mode = snapshot.mode;
@@ -1411,122 +1502,41 @@ fn render_vcs_action_panel(
     };
 
     rsx! {
-        section { class: "attention-section vcs-actions",
-            div { class: "attention-section-title", "Actions" }
-            div { class: "vcs-action-row",
-                button { class: "pane-action", r#type: "button", onclick: fetch, "Fetch" }
-                if snapshot.mode == VcsMode::Git {
-                    button {
-                        class: "pane-action",
-                        r#type: "button",
-                        onclick: {
-                            let core = core.clone();
-                            move |_| {
-                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
-                                    command: VcsCommand::GitPull { surface_id },
-                                });
-                            }
-                        },
-                        "Pull"
-                    }
-                }
-                button { class: "pane-action", r#type: "button", onclick: push, "Push" }
+        div { class: "vcs-toolbar",
+            button {
+                class: "vcs-toolbar-btn",
+                r#type: "button",
+                onclick: fetch,
+                title: "Fetch",
+                {icons::arrow_down(14, "")}
             }
-
             if snapshot.mode == VcsMode::Git {
-                form {
-                    class: "vcs-inline-form",
-                    onsubmit: {
-                        let core = core.clone();
-                        move |_| {
-                            let message = commit_message.read().trim().to_string();
-                            if !message.is_empty() {
-                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
-                                    command: VcsCommand::GitCommit { surface_id, message },
-                                });
-                                commit_message.set(String::new());
-                            }
-                        }
-                    },
-                    input {
-                        class: "browser-address vcs-input",
-                        r#type: "text",
-                        value: "{commit_message}",
-                        placeholder: "Commit message",
-                        oninput: move |event| commit_message.set(event.value()),
-                    }
-                    button { class: "pane-action", r#type: "submit", "Commit" }
-                }
-                div { class: "vcs-ref-list",
-                    for reference in &snapshot.refs {
-                        button {
-                            class: if reference.active { "pane-action vcs-ref-chip vcs-ref-chip-active" } else { "pane-action vcs-ref-chip" },
-                            r#type: "button",
-                            onclick: {
-                                let core = core.clone();
-                                let name = reference.name.clone();
-                                move |_| {
-                                    core.dispatch_shell_action(ShellAction::RunVcsCommand {
-                                        command: VcsCommand::GitSwitchBranch {
-                                            surface_id,
-                                            name: name.clone(),
-                                        },
-                                    });
-                                }
-                            },
-                            "{reference.name}"
-                        }
-                    }
-                }
-                form {
-                    class: "vcs-inline-form",
-                    onsubmit: {
-                        let core = core.clone();
-                        move |_| {
-                            let name = branch_name.read().trim().to_string();
-                            if !name.is_empty() {
-                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
-                                    command: VcsCommand::GitCreateBranch { surface_id, name },
-                                });
-                                branch_name.set(String::new());
-                            }
-                        }
-                    },
-                    input {
-                        class: "browser-address vcs-input",
-                        r#type: "text",
-                        value: "{branch_name}",
-                        placeholder: "New branch name",
-                        oninput: move |event| branch_name.set(event.value()),
-                    }
-                    button { class: "pane-action", r#type: "submit", "Create branch" }
-                }
-            } else {
-                form {
-                    class: "vcs-inline-form",
-                    onsubmit: {
-                        let core = core.clone();
-                        move |_| {
-                            let message = commit_message.read().trim().to_string();
-                            if !message.is_empty() {
-                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
-                                    command: VcsCommand::JjDescribe { surface_id, message },
-                                });
-                                commit_message.set(String::new());
-                            }
-                        }
-                    },
-                    input {
-                        class: "browser-address vcs-input",
-                        r#type: "text",
-                        value: "{commit_message}",
-                        placeholder: "Change description",
-                        oninput: move |event| commit_message.set(event.value()),
-                    }
-                    button { class: "pane-action", r#type: "submit", "Describe change" }
-                }
                 button {
-                    class: "pane-action",
+                    class: "vcs-toolbar-btn",
+                    r#type: "button",
+                    onclick: {
+                        let core = core.clone();
+                        move |_| {
+                            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                command: VcsCommand::GitPull { surface_id },
+                            });
+                        }
+                    },
+                    title: "Pull",
+                    {icons::git_merge(14, "")}
+                }
+            }
+            button {
+                class: "vcs-toolbar-btn",
+                r#type: "button",
+                onclick: push,
+                title: "Push",
+                {icons::arrow_up(14, "")}
+            }
+            div { class: "vcs-toolbar-sep" }
+            if snapshot.mode == VcsMode::Jj {
+                button {
+                    class: "vcs-toolbar-btn",
                     r#type: "button",
                     onclick: {
                         let core = core.clone();
@@ -1539,51 +1549,165 @@ fn render_vcs_action_panel(
                             });
                         }
                     },
-                    "New change"
+                    title: "New change",
+                    {icons::plus(14, "")}
                 }
-                div { class: "vcs-ref-list",
-                    for reference in &snapshot.refs {
-                        button {
-                            class: if reference.active { "pane-action vcs-ref-chip vcs-ref-chip-active" } else { "pane-action vcs-ref-chip" },
-                            r#type: "button",
-                            onclick: {
-                                let core = core.clone();
-                                let name = reference.name.clone();
-                                move |_| {
-                                    core.dispatch_shell_action(ShellAction::RunVcsCommand {
-                                        command: VcsCommand::JjSwitchBookmark {
-                                            surface_id,
-                                            name: name.clone(),
-                                        },
-                                    });
-                                }
-                            },
-                            "{reference.name}"
+            }
+            button {
+                class: if *show_form.read() { "vcs-toolbar-btn vcs-toolbar-btn-active" } else { "vcs-toolbar-btn" },
+                r#type: "button",
+                onclick: move |_| { let v = *show_form.read(); show_form.set(!v); },
+                title: if snapshot.mode == VcsMode::Git { "Commit" } else { "Describe" },
+                {icons::terminal(14, "")}
+            }
+            div { class: "vcs-toolbar-sep" }
+            button {
+                class: if *show_ref_form.read() { "vcs-toolbar-btn vcs-toolbar-btn-active" } else { "vcs-toolbar-btn" },
+                r#type: "button",
+                onclick: move |_| { let v = *show_ref_form.read(); show_ref_form.set(!v); },
+                title: if snapshot.mode == VcsMode::Git { "Create branch" } else { "Create bookmark" },
+                {icons::git_branch(14, "")}
+            }
+        }
+    }
+}
+
+fn render_vcs_form(
+    snapshot: &VcsSnapshot,
+    core: SharedCore,
+    mut commit_message: Signal<String>,
+) -> Element {
+    let surface_id = snapshot.surface_id;
+    let mode = snapshot.mode;
+    rsx! {
+        div { class: "vcs-form-section",
+            form {
+                class: "vcs-inline-form",
+                onsubmit: {
+                    let core = core.clone();
+                    move |_| {
+                        let message = commit_message.read().trim().to_string();
+                        if !message.is_empty() {
+                            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                command: match mode {
+                                    VcsMode::Git => VcsCommand::GitCommit { surface_id, message },
+                                    VcsMode::Jj => VcsCommand::JjDescribe { surface_id, message },
+                                },
+                            });
+                            commit_message.set(String::new());
                         }
                     }
+                },
+                input {
+                    class: "vcs-input",
+                    r#type: "text",
+                    value: "{commit_message}",
+                    placeholder: if mode == VcsMode::Git { "Commit message" } else { "Change description" },
+                    oninput: move |event| commit_message.set(event.value()),
                 }
-                form {
-                    class: "vcs-inline-form",
-                    onsubmit: {
+                button {
+                    class: "vcs-form-btn",
+                    r#type: "submit",
+                    if mode == VcsMode::Git { "Commit" } else { "Describe" }
+                }
+            }
+        }
+    }
+}
+
+fn render_vcs_refs(snapshot: &VcsSnapshot, core: SharedCore) -> Element {
+    let surface_id = snapshot.surface_id;
+    let mode = snapshot.mode;
+    rsx! {
+        div { class: "vcs-refs",
+            for reference in &snapshot.refs {
+                button {
+                    class: if reference.active { "vcs-ref-chip vcs-ref-chip-active" } else { "vcs-ref-chip" },
+                    r#type: "button",
+                    onclick: {
                         let core = core.clone();
+                        let name = reference.name.clone();
                         move |_| {
-                            let name = bookmark_name.read().trim().to_string();
-                            if !name.is_empty() {
-                                core.dispatch_shell_action(ShellAction::RunVcsCommand {
-                                    command: VcsCommand::JjCreateBookmark { surface_id, name },
-                                });
-                                bookmark_name.set(String::new());
-                            }
+                            core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                command: match mode {
+                                    VcsMode::Git => VcsCommand::GitSwitchBranch {
+                                        surface_id,
+                                        name: name.clone(),
+                                    },
+                                    VcsMode::Jj => VcsCommand::JjSwitchBookmark {
+                                        surface_id,
+                                        name: name.clone(),
+                                    },
+                                },
+                            });
                         }
                     },
-                    input {
-                        class: "browser-address vcs-input",
-                        r#type: "text",
-                        value: "{bookmark_name}",
-                        placeholder: "New bookmark name",
-                        oninput: move |event| bookmark_name.set(event.value()),
+                    "{reference.name}"
+                }
+            }
+        }
+    }
+}
+
+fn render_vcs_ref_create_form(
+    snapshot: &VcsSnapshot,
+    core: SharedCore,
+    mut branch_name: Signal<String>,
+    mut bookmark_name: Signal<String>,
+) -> Element {
+    let surface_id = snapshot.surface_id;
+    let mode = snapshot.mode;
+    let input_value = vcs_ref_input_value(
+        mode,
+        branch_name.read().as_str(),
+        bookmark_name.read().as_str(),
+    )
+    .to_owned();
+    rsx! {
+        div { class: "vcs-form-section",
+            form {
+                class: "vcs-inline-form",
+                onsubmit: {
+                    let core = core.clone();
+                    move |_| {
+                        match mode {
+                            VcsMode::Git => {
+                                let name = branch_name.read().trim().to_string();
+                                if !name.is_empty() {
+                                    core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                        command: VcsCommand::GitCreateBranch { surface_id, name },
+                                    });
+                                    branch_name.set(String::new());
+                                }
+                            }
+                            VcsMode::Jj => {
+                                let name = bookmark_name.read().trim().to_string();
+                                if !name.is_empty() {
+                                    core.dispatch_shell_action(ShellAction::RunVcsCommand {
+                                        command: VcsCommand::JjCreateBookmark { surface_id, name },
+                                    });
+                                    bookmark_name.set(String::new());
+                                }
+                            }
+                        }
                     }
-                    button { class: "pane-action", r#type: "submit", "Create bookmark" }
+                },
+                input {
+                    class: "vcs-input",
+                    r#type: "text",
+                    value: "{input_value}",
+                    placeholder: if mode == VcsMode::Git { "New branch name" } else { "New bookmark name" },
+                    oninput: move |event| {
+                        match mode {
+                            VcsMode::Git => branch_name.set(event.value()),
+                            VcsMode::Jj => bookmark_name.set(event.value()),
+                        }
+                    },
+                }
+                button {
+                    class: "vcs-form-btn",
+                    r#type: "submit",
+                    if mode == VcsMode::Git { "Create" } else { "Create" }
                 }
             }
         }
@@ -1602,40 +1726,145 @@ fn render_vcs_file_row(
             path: Some(path.clone()),
         });
     };
+    let dot_class = vcs_file_dot_class(file.status);
     rsx! {
         button {
             class: if selected { "vcs-file-row vcs-file-row-active" } else { "vcs-file-row" },
             r#type: "button",
             onclick: onclick,
-            span { class: "workspace-pr-number", "{format_vcs_file_status(file.status, file.staged)}" }
-            span { class: "workspace-pr-title", "{file.path}" }
+            title: "{file.path}",
+            span { class: "{dot_class}" }
+            span { class: "vcs-file-path", "{file.path}" }
+            if file.insertions.is_some() || file.deletions.is_some() {
+                span { class: "vcs-file-stats",
+                    if let Some(ins) = file.insertions {
+                        span { class: "vcs-file-ins", "+{ins}" }
+                    }
+                    if let Some(del) = file.deletions {
+                        span { class: "vcs-file-del", "-{del}" }
+                    }
+                }
+            }
         }
+    }
+}
+
+fn render_vcs_diff_lines(diff: &str) -> Element {
+    rsx! {
+        for line in diff.lines() {
+            {render_vcs_diff_line(line)}
+        }
+    }
+}
+
+fn render_vcs_diff_line(line: &str) -> Element {
+    let class = vcs_diff_line_class(line);
+    rsx! {
+        div { class: "{class}", "{line}" }
+    }
+}
+
+fn render_vcs_commits_section(commits: &[VcsCommitEntry]) -> Element {
+    let total_ins: u32 = commits.iter().map(|c| c.insertions).sum();
+    let total_del: u32 = commits.iter().map(|c| c.deletions).sum();
+    let (net_class, net_text) = vcs_commit_net_summary(total_ins, total_del);
+    let count = commits.len();
+    rsx! {
+        div { class: "vcs-section",
+            div { class: "vcs-section-header",
+                div { class: "vcs-section-title",
+                    {icons::arrow_up(10, "")}
+                    span { "Unpushed" }
+                }
+                span { class: "vcs-section-count", "{count}" }
+            }
+            div { class: "vcs-commit-list",
+                for commit in commits {
+                    {render_vcs_commit_row(commit)}
+                }
+                // Totals row
+                div { class: "vcs-commit-row vcs-commit-total",
+                    span { class: "vcs-commit-id", "total" }
+                    span { class: "vcs-commit-desc" }
+                    span { class: "vcs-commit-stats",
+                        span { class: "vcs-file-ins", "+{total_ins}" }
+                        span { class: "vcs-file-del", "-{total_del}" }
+                        span { class: "{net_class}", "{net_text}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_vcs_commit_row(commit: &VcsCommitEntry) -> Element {
+    let (net_class, net_text) = vcs_commit_net_summary(commit.insertions, commit.deletions);
+    rsx! {
+        div { class: "vcs-commit-row",
+            span { class: "vcs-commit-id", "{commit.id}" }
+            span { class: "vcs-commit-desc", "{commit.description}" }
+            span { class: "vcs-commit-stats",
+                span { class: "vcs-file-ins", "+{commit.insertions}" }
+                span { class: "vcs-file-del", "-{commit.deletions}" }
+                span { class: "{net_class}", "{net_text}" }
+            }
+        }
+    }
+}
+
+fn vcs_file_dot_class(status: VcsFileStatus) -> &'static str {
+    match status {
+        VcsFileStatus::Added => "vcs-file-dot vcs-file-dot-added",
+        VcsFileStatus::Modified | VcsFileStatus::Changed => "vcs-file-dot vcs-file-dot-modified",
+        VcsFileStatus::Deleted => "vcs-file-dot vcs-file-dot-deleted",
+        VcsFileStatus::Untracked => "vcs-file-dot vcs-file-dot-untracked",
+        VcsFileStatus::Conflicted => "vcs-file-dot vcs-file-dot-conflicted",
+        VcsFileStatus::Renamed | VcsFileStatus::Copied => "vcs-file-dot vcs-file-dot-renamed",
+    }
+}
+
+fn vcs_diff_line_class(line: &str) -> &'static str {
+    if line.starts_with("+++") || line.starts_with("---") {
+        "vcs-diff-line vcs-diff-line-ctx"
+    } else if line.starts_with('+') {
+        "vcs-diff-line vcs-diff-line-add"
+    } else if line.starts_with('-') {
+        "vcs-diff-line vcs-diff-line-del"
+    } else if line.starts_with("@@") {
+        "vcs-diff-line vcs-diff-line-hunk"
+    } else {
+        "vcs-diff-line vcs-diff-line-ctx"
+    }
+}
+
+fn vcs_commit_net_summary(insertions: u32, deletions: u32) -> (&'static str, String) {
+    let net = insertions as i64 - deletions as i64;
+    let class = if net > 0 {
+        "vcs-commit-net vcs-commit-net-pos"
+    } else if net < 0 {
+        "vcs-commit-net vcs-commit-net-neg"
+    } else {
+        "vcs-commit-net vcs-commit-net-zero"
+    };
+    let text = if net > 0 {
+        format!("+{net}")
+    } else {
+        format!("{net}")
+    };
+    (class, text)
+}
+
+fn vcs_ref_input_value<'a>(mode: VcsMode, branch_name: &'a str, bookmark_name: &'a str) -> &'a str {
+    match mode {
+        VcsMode::Git => branch_name,
+        VcsMode::Jj => bookmark_name,
     }
 }
 
 fn format_vcs_mode(mode: VcsMode) -> &'static str {
     match mode {
-        VcsMode::Git => "Git",
+        VcsMode::Git => "GIT",
         VcsMode::Jj => "JJ",
-    }
-}
-
-fn format_vcs_file_status(status: VcsFileStatus, staged: bool) -> &'static str {
-    match (status, staged) {
-        (VcsFileStatus::Added, true) => "A+",
-        (VcsFileStatus::Added, false) => "A",
-        (VcsFileStatus::Deleted, true) => "D+",
-        (VcsFileStatus::Deleted, false) => "D",
-        (VcsFileStatus::Renamed, true) => "R+",
-        (VcsFileStatus::Renamed, false) => "R",
-        (VcsFileStatus::Copied, true) => "C+",
-        (VcsFileStatus::Copied, false) => "C",
-        (VcsFileStatus::Untracked, _) => "??",
-        (VcsFileStatus::Conflicted, _) => "!!",
-        (VcsFileStatus::Changed, true) => "~+",
-        (VcsFileStatus::Changed, false) => "~",
-        (VcsFileStatus::Modified, true) => "M+",
-        (VcsFileStatus::Modified, false) => "M",
     }
 }
 
@@ -1853,6 +2082,375 @@ fn render_workspace_strip(
                             dragged_pane_tab,
                             pane_tab_drop_target,
                         )}
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_workspace_overview(
+    workspace: &WorkspaceViewSnapshot,
+    portal: &SurfacePortalPlan,
+    core: SharedCore,
+) -> Element {
+    if !portal.panes.is_empty() {
+        return render_workspace_overview_live(workspace, portal, core);
+    }
+
+    rsx! {
+        div { class: "workspace-overview-scene",
+            if workspace.overview_scene.cards.is_empty() {
+                div { class: "workspace-overview-empty",
+                    div { class: "workspace-overview-empty-title", "No workspace windows" }
+                    div { class: "workspace-overview-empty-copy",
+                        "Create a new window to populate overview mode."
+                    }
+                }
+            } else {
+                for card in &workspace.overview_scene.cards {
+                    {render_workspace_overview_card(card, core.clone())}
+                }
+            }
+        }
+    }
+}
+
+fn render_workspace_overview_live(
+    workspace: &WorkspaceViewSnapshot,
+    portal: &SurfacePortalPlan,
+    core: SharedCore,
+) -> Element {
+    let scene_style = format!(
+        "width:{}px;height:{}px;",
+        workspace.canvas_width, workspace.canvas_height
+    );
+
+    rsx! {
+        div { class: "workspace-overview-live-scene", style: "{scene_style}",
+            for column in &workspace.columns {
+                for window in &column.windows {
+                    {render_workspace_overview_live_window(window, workspace, core.clone())}
+                }
+            }
+            for plan in &portal.panes {
+                {render_workspace_overview_live_pane(plan, workspace)}
+            }
+        }
+    }
+}
+
+fn render_workspace_overview_live_window(
+    window: &WorkspaceWindowSnapshot,
+    workspace: &WorkspaceViewSnapshot,
+    core: SharedCore,
+) -> Element {
+    let local_x = window.frame.x - workspace.viewport_origin_x;
+    let local_y = window.frame.y - workspace.viewport_origin_y;
+    let style = format!(
+        "left:{}px;top:{}px;width:{}px;height:{}px;",
+        local_x, local_y, window.frame.width, window.frame.height
+    );
+    let window_class = if window.active {
+        "workspace-overview-live-window workspace-overview-live-window-active"
+    } else {
+        "workspace-overview-live-window"
+    };
+    let window_id = window.id;
+    let open_window = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shell_action(ShellAction::ToggleOverview);
+        }
+    };
+    let focus_window = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+        }
+    };
+    let move_window = |direction: ShortcutAction| {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shortcut_action(direction);
+        }
+    };
+    let add_window_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab { window_id });
+        }
+    };
+    let add_window = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            });
+        }
+    };
+
+    rsx! {
+        article { class: "{window_class}", style: "{style}",
+            div { class: "workspace-overview-live-window-header",
+                div { class: "workspace-overview-live-window-title-row",
+                    div { class: "workspace-overview-live-window-title",
+                        {render_runtime_icon(&window.runtime, 12, "workspace-overview-live-window-runtime-icon")}
+                        span { "{window.title}" }
+                    }
+                    div { class: "workspace-overview-live-window-meta",
+                        div { class: "workspace-overview-live-window-stat", title: "{window.pane_count} panes",
+                            {icons::split_horizontal(11, "workspace-overview-live-window-stat-icon")}
+                            span { "{window.pane_count}" }
+                        }
+                        div { class: "workspace-overview-live-window-stat", title: "{window.surface_count} surfaces",
+                            {icons::terminal(11, "workspace-overview-live-window-stat-icon")}
+                            span { "{window.surface_count}" }
+                        }
+                        div { class: "workspace-overview-live-window-stat", title: "{window.tabs.len()} tabs",
+                            {icons::split_vertical(11, "workspace-overview-live-window-stat-icon")}
+                            span { "{window.tabs.len()}" }
+                        }
+                    }
+                }
+                div { class: "workspace-overview-live-window-actions",
+                    button {
+                        class: "pane-action workspace-overview-live-window-action",
+                        r#type: "button",
+                        onclick: add_window_tab,
+                        title: "New window tab",
+                        {icons::plus(12, "workspace-overview-live-window-action-icon")}
+                    }
+                    button {
+                        class: "pane-action workspace-overview-live-window-action",
+                        r#type: "button",
+                        onclick: add_window,
+                        title: "New window",
+                        {icons::split_horizontal(12, "workspace-overview-live-window-action-icon")}
+                    }
+                    button {
+                        class: "pane-action workspace-overview-live-window-action",
+                        r#type: "button",
+                        onclick: focus_window,
+                        title: "Focus window",
+                        {icons::eye(12, "workspace-overview-live-window-action-icon")}
+                    }
+                    button {
+                        class: "pane-action workspace-overview-live-window-action",
+                        r#type: "button",
+                        onclick: open_window,
+                        title: "Open window",
+                        {icons::arrow_right_circle(12, "workspace-overview-live-window-action-icon")}
+                    }
+                    if workspace.columns.len() > 1 {
+                        button {
+                            class: "pane-action workspace-overview-live-window-action",
+                            r#type: "button",
+                            onclick: move_window(ShortcutAction::MoveWindowLeft),
+                            title: "Move window left",
+                            {icons::arrow_left(12, "workspace-overview-live-window-action-icon")}
+                        }
+                        button {
+                            class: "pane-action workspace-overview-live-window-action",
+                            r#type: "button",
+                            onclick: move_window(ShortcutAction::MoveWindowRight),
+                            title: "Move window right",
+                            {icons::arrow_right(12, "workspace-overview-live-window-action-icon")}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn render_workspace_overview_live_pane(
+    plan: &taskers_core::PortalSurfacePlan,
+    workspace: &WorkspaceViewSnapshot,
+) -> Element {
+    let pane_x = plan.pane_frame.x - workspace.viewport_origin_x;
+    let pane_y = plan.pane_frame.y - workspace.viewport_origin_y;
+    let pane_style = format!(
+        "left:{}px;top:{}px;width:{}px;height:{}px;",
+        pane_x, pane_y, plan.pane_frame.width, plan.pane_frame.height
+    );
+    let surface_x = plan.frame.x - workspace.viewport_origin_x;
+    let surface_y = plan.frame.y - workspace.viewport_origin_y;
+    let surface_style = format!(
+        "left:{}px;top:{}px;width:{}px;height:{}px;",
+        surface_x, surface_y, plan.frame.width, plan.frame.height
+    );
+    let pane_class = if plan.active {
+        "workspace-overview-live-pane workspace-overview-live-pane-active"
+    } else {
+        "workspace-overview-live-pane"
+    };
+    let label = match &plan.mount {
+        SurfaceMountSpec::Terminal(spec) => spec.title.trim(),
+        SurfaceMountSpec::Browser(spec) => spec.url.as_str(),
+    };
+    let label = if label.is_empty() {
+        match &plan.mount {
+            SurfaceMountSpec::Terminal(_) => "terminal",
+            SurfaceMountSpec::Browser(_) => "browser",
+        }
+    } else {
+        label
+    };
+
+    rsx! {
+        div { class: "{pane_class}", style: "{pane_style}",
+            div { class: "workspace-overview-live-pane-label",
+                span { class: "workspace-overview-live-pane-title", "{label}" }
+            }
+        }
+        div { class: "workspace-overview-live-surface-frame", style: "{surface_style}" }
+    }
+}
+
+fn render_workspace_overview_card(
+    card: &taskers_core::OverviewWindowCardSnapshot,
+    core: SharedCore,
+) -> Element {
+    let window_id = card.window_id;
+    let open_window = {
+        let core = core.clone();
+        move |_| {
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shell_action(ShellAction::ToggleOverview);
+        }
+    };
+    let focus_window = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+        }
+    };
+    let move_window = |direction: ShortcutAction| {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shortcut_action(direction);
+        }
+    };
+    let add_window_tab = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab { window_id });
+        }
+    };
+    let add_window = {
+        let core = core.clone();
+        move |event: Event<MouseData>| {
+            event.stop_propagation();
+            core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow { window_id });
+            core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+                direction: WorkspaceDirection::Right,
+            });
+        }
+    };
+    let card_class = if card.active {
+        "workspace-overview-card workspace-overview-card-active"
+    } else {
+        "workspace-overview-card"
+    };
+    let preview_mode_label = match card.preview_mode {
+        OverviewPreviewModeSnapshot::Summary => "Preview and jump",
+        OverviewPreviewModeSnapshot::LivePreferred => "Interactive when stable",
+    };
+
+    rsx! {
+        article { class: "{card_class}", onclick: open_window,
+            div { class: "workspace-overview-card-header",
+                div { class: "workspace-overview-card-title-row",
+                    div { class: "workspace-overview-card-title",
+                        "{card.title}"
+                    }
+                    div { class: "workspace-overview-card-runtime",
+                        {render_runtime_icon(&card.runtime, 12, "workspace-overview-card-runtime-icon")}
+                        span { "{card.runtime.label.as_str()}" }
+                    }
+                }
+                div { class: "workspace-overview-card-meta",
+                    span { "{card.pane_count} panes" }
+                    span { "{card.surface_count} surfaces" }
+                    span { "{card.tab_count} tabs" }
+                }
+            }
+            div { class: "workspace-overview-card-preview-mode",
+                "{preview_mode_label}"
+            }
+            div { class: "workspace-overview-card-preview",
+                for line in &card.preview_lines {
+                    div { class: "workspace-overview-card-preview-line", "{line}" }
+                }
+            }
+            div { class: "workspace-overview-card-actions",
+                button {
+                    class: "pane-action workspace-overview-card-action",
+                    r#type: "button",
+                    onclick: add_window_tab,
+                    title: "New window tab",
+                    {icons::plus(12, "workspace-overview-card-action-icon")}
+                }
+                button {
+                    class: "pane-action workspace-overview-card-action",
+                    r#type: "button",
+                    onclick: add_window,
+                    title: "New window",
+                    {icons::split_horizontal(12, "workspace-overview-card-action-icon")}
+                }
+                button {
+                    class: "pane-action workspace-overview-card-action",
+                    r#type: "button",
+                    onclick: focus_window,
+                    title: "Focus window",
+                    "Focus"
+                }
+                if card.can_move_left {
+                    button {
+                        class: "pane-action workspace-overview-card-action",
+                        r#type: "button",
+                        onclick: move_window(ShortcutAction::MoveWindowLeft),
+                        title: "Move window left",
+                        {icons::arrow_left(12, "workspace-overview-card-action-icon")}
+                    }
+                }
+                if card.can_move_right {
+                    button {
+                        class: "pane-action workspace-overview-card-action",
+                        r#type: "button",
+                        onclick: move_window(ShortcutAction::MoveWindowRight),
+                        title: "Move window right",
+                        {icons::arrow_right(12, "workspace-overview-card-action-icon")}
+                    }
+                }
+                if card.can_move_up {
+                    button {
+                        class: "pane-action workspace-overview-card-action",
+                        r#type: "button",
+                        onclick: move_window(ShortcutAction::MoveWindowUp),
+                        title: "Move window up",
+                        "↑"
+                    }
+                }
+                if card.can_move_down {
+                    button {
+                        class: "pane-action workspace-overview-card-action",
+                        r#type: "button",
+                        onclick: move_window(ShortcutAction::MoveWindowDown),
+                        title: "Move window down",
+                        "↓"
                     }
                 }
             }
@@ -2737,34 +3335,31 @@ fn render_live_pane(
     dragged_surface: Option<DraggedSurface>,
 ) -> Element {
     let pane_id = pane.id;
-    let active_surface = pane
-        .surfaces
-        .iter()
-        .find(|surface| surface.id == pane.active_surface)
-        .unwrap_or_else(|| {
-            pane.surfaces
-                .first()
-                .expect("live pane snapshot should contain surfaces")
-        });
-    let active_surface_id = active_surface.id;
+    let active_surface = select_active_surface(&pane.surfaces, pane.active_surface);
+    let active_surface_id = active_surface.map(|surface| surface.id);
     let ordered_surface_ids = pane
         .surfaces
         .iter()
         .map(|surface| surface.id)
         .collect::<Vec<_>>();
-    let active_browser_chrome = browser_chrome
-        .filter(|chrome| chrome.surface_id == active_surface.id)
-        .cloned();
+    let active_browser_chrome = active_surface.and_then(|active_surface| {
+        browser_chrome
+            .filter(|chrome| chrome.surface_id == active_surface.id)
+            .cloned()
+    });
     let toolbar_key = active_browser_chrome
         .as_ref()
-        .map(|chrome| format!("{}-{}", active_surface.id, chrome.url))
+        .map(|chrome| format!("{}-{}", chrome.surface_id, chrome.url))
         .or_else(|| {
-            active_surface
-                .url
-                .as_ref()
-                .map(|url| format!("{}-{}", active_surface.id, url))
+            active_surface.and_then(|surface| {
+                surface
+                    .url
+                    .as_ref()
+                    .map(|url| format!("{}-{}", surface.id, url))
+                    .or_else(|| Some(surface.id.to_string()))
+            })
         })
-        .unwrap_or_else(|| active_surface.id.to_string());
+        .unwrap_or_else(|| pane_id.to_string());
     let pane_allows_split =
         pane_allows_surface_split(dragged_surface, pane_id, pane.surfaces.len());
     let surface_drag_active = dragged_surface.is_some();
@@ -2778,6 +3373,9 @@ fn render_live_pane(
     } else {
         "pane-action-cluster"
     };
+    let render_live_surfaces_in_overview =
+        core.snapshot().settings.render_live_surfaces_in_overview;
+    let resize_preview_active = core.snapshot().resize_preview_active;
 
     let focus_pane = {
         let core = core.clone();
@@ -2844,6 +3442,9 @@ fn render_live_pane(
     let close_surface = {
         let core = core.clone();
         move |event: Event<MouseData>| {
+            let Some(active_surface_id) = active_surface_id else {
+                return;
+            };
             event.stop_propagation();
             core.dispatch_shell_action(ShellAction::CloseSurface {
                 pane_id,
@@ -2857,6 +3458,9 @@ fn render_live_pane(
         "Close current surface"
     };
     let begin_active_surface_drag_candidate = move |event: Event<PointerData>| {
+        let Some(active_surface_id) = active_surface_id else {
+            return;
+        };
         if let Some(candidate) =
             surface_drag_candidate_from_event(&event, workspace_id, pane_id, active_surface_id)
         {
@@ -2919,68 +3523,86 @@ fn render_live_pane(
                     }
                 }
             }
-            if matches!(active_surface.kind, SurfaceKind::Browser) {
-                BrowserToolbar {
-                    key: "{toolbar_key}",
-                    surface: active_surface.clone(),
-                    chrome: active_browser_chrome,
-                    core: core.clone(),
+            if let Some(active_surface) = active_surface {
+                if matches!(active_surface.kind, SurfaceKind::Browser) {
+                    BrowserToolbar {
+                        key: "{toolbar_key}",
+                        surface: active_surface.clone(),
+                        chrome: active_browser_chrome,
+                        core: core.clone(),
+                    }
                 }
             }
             div { class: "pane-body",
-                if show_live_surface_backdrop(active_surface.kind, overview_mode) {
-                    {render_surface_backdrop(active_surface, runtime_status)}
-                }
-                if surface_drag_active {
-                    div { class: "pane-drop-overlay",
-                        {render_surface_pane_drop_target(
-                            "pane-drop-target pane-drop-target-center",
-                            "Move here",
-                            SurfaceDropTarget::AppendToPane { pane_id },
-                            core.clone(),
-                            surface_drop_target,
-                        )}
-                        if pane_allows_split {
+                if let Some(active_surface) = active_surface {
+                    if show_surface_backdrop(
+                        active_surface.kind,
+                        overview_mode,
+                        render_live_surfaces_in_overview,
+                        resize_preview_active,
+                    ) {
+                        {render_surface_backdrop(active_surface, runtime_status)}
+                    }
+                    if surface_drag_active {
+                        div { class: "pane-drop-overlay",
                             {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-left",
-                                "Split ←",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Left,
-                                },
+                                "pane-drop-target pane-drop-target-center",
+                                "Move",
+                                SurfaceDropTarget::AppendToPane { pane_id },
                                 core.clone(),
                                 surface_drop_target,
                             )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-right",
-                                "Split →",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Right,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-top",
-                                "Split ↑",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Up,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
-                            {render_surface_pane_drop_target(
-                                "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
-                                "Split ↓",
-                                SurfaceDropTarget::SplitPane {
-                                    pane_id,
-                                    direction: Direction::Down,
-                                },
-                                core.clone(),
-                                surface_drop_target,
-                            )}
+                            if pane_allows_split {
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-left",
+                                    "",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Left,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-right",
+                                    "",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Right,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-top",
+                                    "",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Up,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                                {render_surface_pane_drop_target(
+                                    "pane-drop-target pane-drop-target-edge pane-drop-target-bottom",
+                                    "",
+                                    SurfaceDropTarget::SplitPane {
+                                        pane_id,
+                                        direction: Direction::Down,
+                                    },
+                                    core.clone(),
+                                    surface_drop_target,
+                                )}
+                            }
+                        }
+                    }
+                } else {
+                    div { class: "surface-backdrop surface-backdrop-empty",
+                        div { class: "surface-backdrop-copy",
+                            div { class: "surface-backdrop-title", "Pane is updating" }
+                            div { class: "surface-backdrop-note",
+                                "This pane temporarily has no active surface. It should repopulate without crashing."
+                            }
                         }
                     }
                 }
@@ -3571,13 +4193,14 @@ fn render_notification_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        SurfaceDragCandidate, SurfaceKind, attention_ring_class, show_live_surface_backdrop,
-        surface_drag_threshold_reached, surface_primary_label, surface_runtime_badge_text,
-        surface_status_text, surface_summary_title,
+        SurfaceDragCandidate, SurfaceKind, attention_ring_class, select_active_surface,
+        show_surface_backdrop, surface_drag_threshold_reached, surface_primary_label,
+        surface_runtime_badge_text, surface_status_text, surface_summary_title,
+        vcs_commit_net_summary, vcs_diff_line_class, vcs_file_dot_class, vcs_ref_input_value,
     };
     use crate::taskers_core::{
         AttentionRingState, AttentionState, BrowserProfileMode, PaneId, RuntimeIdentitySnapshot,
-        RuntimeStateSnapshot, SurfaceId, SurfaceSnapshot, WorkspaceId,
+        RuntimeStateSnapshot, SurfaceId, SurfaceSnapshot, VcsFileStatus, VcsMode, WorkspaceId,
     };
 
     fn sample_surface(
@@ -3618,10 +4241,55 @@ mod tests {
     }
 
     #[test]
-    fn live_browser_panes_skip_decorative_backdrop_outside_overview() {
-        assert!(!show_live_surface_backdrop(SurfaceKind::Browser, false));
-        assert!(show_live_surface_backdrop(SurfaceKind::Browser, true));
-        assert!(show_live_surface_backdrop(SurfaceKind::Terminal, false));
+    fn backdrop_switches_between_live_and_abstract_overview_modes() {
+        assert!(!show_surface_backdrop(
+            SurfaceKind::Browser,
+            false,
+            true,
+            false
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Terminal,
+            false,
+            true,
+            false
+        ));
+        assert!(!show_surface_backdrop(
+            SurfaceKind::Browser,
+            true,
+            true,
+            false
+        ));
+        assert!(!show_surface_backdrop(
+            SurfaceKind::Terminal,
+            true,
+            true,
+            false
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Browser,
+            true,
+            false,
+            false
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Terminal,
+            true,
+            false,
+            false
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Browser,
+            false,
+            true,
+            true
+        ));
+        assert!(show_surface_backdrop(
+            SurfaceKind::Terminal,
+            false,
+            true,
+            true
+        ));
     }
 
     #[test]
@@ -3727,6 +4395,127 @@ mod tests {
 
         assert_eq!(surface_runtime_badge_text(&surface), None);
     }
+
+    #[test]
+    fn select_active_surface_returns_none_for_empty_surface_list() {
+        assert!(select_active_surface(&[], SurfaceId::new()).is_none());
+    }
+
+    #[test]
+    fn select_active_surface_falls_back_to_first_surface_when_active_id_missing() {
+        let first = sample_surface(
+            "terminal",
+            "Terminal",
+            "fish",
+            None,
+            None,
+            RuntimeStateSnapshot::Idle,
+        );
+        let second = sample_surface(
+            "terminal",
+            "Terminal",
+            "notes",
+            None,
+            None,
+            RuntimeStateSnapshot::Idle,
+        );
+        let surfaces = vec![first.clone(), second];
+
+        let selected = select_active_surface(&surfaces, SurfaceId::new()).expect("surface");
+        assert_eq!(selected.id, first.id);
+    }
+
+    #[test]
+    fn vcs_file_dot_class_tracks_each_file_status_group() {
+        assert_eq!(
+            vcs_file_dot_class(VcsFileStatus::Added),
+            "vcs-file-dot vcs-file-dot-added"
+        );
+        assert_eq!(
+            vcs_file_dot_class(VcsFileStatus::Modified),
+            "vcs-file-dot vcs-file-dot-modified"
+        );
+        assert_eq!(
+            vcs_file_dot_class(VcsFileStatus::Changed),
+            "vcs-file-dot vcs-file-dot-modified"
+        );
+        assert_eq!(
+            vcs_file_dot_class(VcsFileStatus::Deleted),
+            "vcs-file-dot vcs-file-dot-deleted"
+        );
+        assert_eq!(
+            vcs_file_dot_class(VcsFileStatus::Untracked),
+            "vcs-file-dot vcs-file-dot-untracked"
+        );
+        assert_eq!(
+            vcs_file_dot_class(VcsFileStatus::Conflicted),
+            "vcs-file-dot vcs-file-dot-conflicted"
+        );
+        assert_eq!(
+            vcs_file_dot_class(VcsFileStatus::Renamed),
+            "vcs-file-dot vcs-file-dot-renamed"
+        );
+        assert_eq!(
+            vcs_file_dot_class(VcsFileStatus::Copied),
+            "vcs-file-dot vcs-file-dot-renamed"
+        );
+    }
+
+    #[test]
+    fn vcs_diff_line_class_prioritizes_context_headers_over_prefixes() {
+        assert_eq!(
+            vcs_diff_line_class("+++ b/src/lib.rs"),
+            "vcs-diff-line vcs-diff-line-ctx"
+        );
+        assert_eq!(
+            vcs_diff_line_class("--- a/src/lib.rs"),
+            "vcs-diff-line vcs-diff-line-ctx"
+        );
+        assert_eq!(
+            vcs_diff_line_class("+added line"),
+            "vcs-diff-line vcs-diff-line-add"
+        );
+        assert_eq!(
+            vcs_diff_line_class("-removed line"),
+            "vcs-diff-line vcs-diff-line-del"
+        );
+        assert_eq!(
+            vcs_diff_line_class("@@ -1,2 +1,3 @@"),
+            "vcs-diff-line vcs-diff-line-hunk"
+        );
+        assert_eq!(
+            vcs_diff_line_class(" unchanged"),
+            "vcs-diff-line vcs-diff-line-ctx"
+        );
+    }
+
+    #[test]
+    fn vcs_commit_net_summary_formats_positive_negative_and_zero() {
+        assert_eq!(
+            vcs_commit_net_summary(7, 3),
+            ("vcs-commit-net vcs-commit-net-pos", "+4".into())
+        );
+        assert_eq!(
+            vcs_commit_net_summary(2, 5),
+            ("vcs-commit-net vcs-commit-net-neg", "-3".into())
+        );
+        assert_eq!(
+            vcs_commit_net_summary(4, 4),
+            ("vcs-commit-net vcs-commit-net-zero", "0".into())
+        );
+    }
+
+    #[test]
+    fn vcs_ref_input_value_tracks_the_active_ref_mode() {
+        assert_eq!(
+            vcs_ref_input_value(VcsMode::Git, "release-0-6-0", "release-bookmark"),
+            "release-0-6-0"
+        );
+        assert_eq!(
+            vcs_ref_input_value(VcsMode::Jj, "release-0-6-0", "release-bookmark"),
+            "release-bookmark"
+        );
+    }
 }
 
 fn render_settings(settings: &SettingsSnapshot, core: SharedCore) -> Element {
@@ -3786,6 +4575,20 @@ fn render_settings(settings: &SettingsSnapshot, core: SharedCore) -> Element {
                         "Skip the desktop banner if the target pane is already visible in the focused Taskers window.",
                         settings.notification_preferences.suppress_when_visible,
                         NotificationPreferenceKey::SuppressWhenVisible,
+                        core.clone(),
+                    )}
+                }
+            }
+            section { class: "settings-card",
+                div { class: "sidebar-heading", "Workspace overview" }
+                div { class: "settings-copy",
+                    "Overview mode now uses dedicated overview cards. When possible it can prefer richer previews, but it should stay stable and readable first."
+                }
+                div { class: "settings-toggle-list",
+                    {render_overview_surface_preference(
+                        "Prefer richer previews",
+                        "Ask overview to prefer richer previews when they are stable enough. Turn this off to keep overview on summary cards and jump into the full window for interaction.",
+                        settings.render_live_surfaces_in_overview,
                         core.clone(),
                     )}
                 }
@@ -3892,6 +4695,34 @@ fn render_notification_preference(
             key,
             enabled: !enabled,
         })
+    };
+    let track_class = if enabled {
+        "toggle-track toggle-track-active"
+    } else {
+        "toggle-track"
+    };
+
+    rsx! {
+        button { class: "settings-toggle-row", onclick: toggle,
+            div { class: "settings-toggle-copy",
+                div { class: "workspace-label", "{label}" }
+                div { class: "settings-copy", "{detail}" }
+            }
+            div { class: "{track_class}",
+                div { class: "toggle-thumb" }
+            }
+        }
+    }
+}
+
+fn render_overview_surface_preference(
+    label: &'static str,
+    detail: &'static str,
+    enabled: bool,
+    core: SharedCore,
+) -> Element {
+    let toggle = move |_| {
+        core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: !enabled })
     };
     let track_class = if enabled {
         "toggle-track toggle-track-active"

@@ -866,6 +866,272 @@ mod tests {
     }
 
     #[test]
+    fn zsh_shell_hook_tracks_directory_changes_for_metadata() {
+        let zsh_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        ));
+
+        assert!(
+            zsh_hooks.contains("add-zsh-hook chpwd taskers__on_chpwd")
+                || zsh_hooks.contains("chpwd_functions+=(taskers__on_chpwd)"),
+            "expected zsh hooks to refresh metadata on directory changes"
+        );
+    }
+
+    #[test]
+    fn zsh_shell_hook_prefers_shell_tty_and_supports_jj_repos() {
+        let zsh_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        ));
+
+        assert!(
+            zsh_hooks.contains("local current_tty=${TTY:-}"),
+            "expected zsh hooks to prefer zsh's built-in TTY variable"
+        );
+        assert!(
+            zsh_hooks.contains("jj root"),
+            "expected zsh hooks to support JJ repo root detection"
+        );
+    }
+
+    #[test]
+    fn shell_hooks_emit_boolean_agent_active_flags() {
+        let bash_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.bash"
+        ));
+        let zsh_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        ));
+        let fish_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.fish"
+        ));
+
+        for asset in [bash_hooks, zsh_hooks, fish_hooks] {
+            assert!(
+                asset.contains("true"),
+                "expected hook asset to emit literal boolean true"
+            );
+            assert!(
+                asset.contains("false"),
+                "expected hook asset to emit literal boolean false"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_zsh_emits_metadata_for_repo_cwd() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = unique_temp_dir("taskers-runtime-zsh-metadata");
+        install_runtime_assets(&runtime_root).expect("install runtime assets");
+
+        let home_dir = runtime_root.join("home");
+        let real_bin_dir = runtime_root.join("real-bin");
+        let repo_dir = runtime_root.join("repo");
+        fs::create_dir_all(&home_dir).expect("home dir");
+        fs::create_dir_all(&real_bin_dir).expect("real bin dir");
+        fs::create_dir_all(&repo_dir).expect("repo dir");
+
+        let taskersctl_path = runtime_root.join("taskersctl");
+        let test_log = runtime_root.join("taskersctl.log");
+        write_executable(
+            &taskersctl_path,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TASKERS_TEST_LOG\"\n",
+        );
+        write_executable(
+            &real_bin_dir.join("git"),
+            "#!/bin/sh\ncwd=\nif [ \"$1\" = \"-C\" ]; then cwd=$2; shift 2; fi\nif [ \"$1\" = \"rev-parse\" ] && [ \"$2\" = \"--show-toplevel\" ]; then printf '%s\\n' \"$cwd\"; exit 0; fi\nif [ \"$1\" = \"symbolic-ref\" ] && [ \"$2\" = \"--quiet\" ] && [ \"$3\" = \"--short\" ] && [ \"$4\" = \"HEAD\" ]; then printf 'main\\n'; exit 0; fi\nif [ \"$1\" = \"rev-parse\" ] && [ \"$2\" = \"--short\" ] && [ \"$3\" = \"HEAD\" ]; then printf 'abc123\\n'; exit 0; fi\nexit 1\n",
+        );
+
+        let original_home = std::env::var_os("HOME");
+        let original_path = std::env::var_os("PATH");
+        let original_zdotdir = std::env::var_os("ZDOTDIR");
+        let zsh_path = resolve_shell_override("zsh").expect("resolve zsh");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+            std::env::remove_var("ZDOTDIR");
+            std::env::remove_var("TASKERS_DISABLE_SHELL_INTEGRATION");
+            std::env::remove_var("TASKERS_SHELL_PROFILE");
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    real_bin_dir.display(),
+                    original_path
+                        .as_deref()
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                ),
+            );
+        }
+
+        let integration = ShellIntegration {
+            root: runtime_root.clone(),
+            wrapper_path: runtime_root.join("taskers-shell-wrapper.sh"),
+            real_shell: zsh_path,
+        };
+        let mut launch = integration.launch_spec();
+        launch.env.insert(
+            "TASKERS_CTL_PATH".into(),
+            taskersctl_path.display().to_string(),
+        );
+        launch
+            .env
+            .insert("TASKERS_WORKSPACE_ID".into(), "ws".into());
+        launch.env.insert("TASKERS_PANE_ID".into(), "pn".into());
+        launch.env.insert("TASKERS_SURFACE_ID".into(), "sf".into());
+        launch
+            .env
+            .insert("TASKERS_TEST_LOG".into(), test_log.display().to_string());
+
+        let mut spec = CommandSpec::new(launch.program.display().to_string());
+        spec.args = launch.args;
+        spec.env = launch.env;
+        spec.cwd = Some(repo_dir.clone());
+
+        let mut spawned = PtySession::spawn(&spec).expect("spawn shell");
+        std::thread::sleep(Duration::from_millis(250));
+        spawned.session.write_all(b"exit\n").expect("exit shell");
+
+        let mut reader = spawned.reader;
+        let mut buffer = [0u8; 1024];
+        while reader.read_into(&mut buffer).unwrap_or(0) > 0 {}
+
+        let log = fs::read_to_string(&test_log).expect("read metadata log");
+        assert!(
+            log.contains("signal --source shell --kind metadata"),
+            "expected zsh shell to emit metadata, got: {log}"
+        );
+        assert!(
+            log.contains(&format!("--cwd {}", repo_dir.display())),
+            "expected metadata cwd in log, got: {log}"
+        );
+        assert!(
+            log.contains("--repo repo"),
+            "expected repo name in log, got: {log}"
+        );
+        assert!(
+            log.contains("--branch main"),
+            "expected git branch in log, got: {log}"
+        );
+
+        restore_env_var("HOME", original_home);
+        restore_env_var("PATH", original_path);
+        restore_env_var("ZDOTDIR", original_zdotdir);
+        fs::remove_dir_all(&runtime_root).expect("cleanup runtime root");
+    }
+
+    #[test]
+    fn embedded_zsh_falls_back_to_jj_branch_when_git_probe_fails() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = unique_temp_dir("taskers-runtime-zsh-jj-fallback");
+        install_runtime_assets(&runtime_root).expect("install runtime assets");
+
+        let home_dir = runtime_root.join("home");
+        let real_bin_dir = runtime_root.join("real-bin");
+        let repo_dir = runtime_root.join("repo");
+        fs::create_dir_all(&home_dir).expect("home dir");
+        fs::create_dir_all(&real_bin_dir).expect("real bin dir");
+        fs::create_dir_all(&repo_dir).expect("repo dir");
+
+        let taskersctl_path = runtime_root.join("taskersctl");
+        let test_log = runtime_root.join("taskersctl.log");
+        write_executable(
+            &taskersctl_path,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TASKERS_TEST_LOG\"\n",
+        );
+        write_executable(&real_bin_dir.join("git"), "#!/bin/sh\nexit 1\n");
+        write_executable(
+            &real_bin_dir.join("jj"),
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"root\" ]; then printf '%s\\n' \"{}\"; exit 0; fi\nif [ \"$1\" = \"log\" ]; then printf 'jj123456\\n'; exit 0; fi\nexit 1\n",
+                repo_dir.display()
+            ),
+        );
+
+        let original_home = std::env::var_os("HOME");
+        let original_path = std::env::var_os("PATH");
+        let original_zdotdir = std::env::var_os("ZDOTDIR");
+        let zsh_path = resolve_shell_override("zsh").expect("resolve zsh");
+        unsafe {
+            std::env::set_var("HOME", &home_dir);
+            std::env::remove_var("ZDOTDIR");
+            std::env::remove_var("TASKERS_DISABLE_SHELL_INTEGRATION");
+            std::env::remove_var("TASKERS_SHELL_PROFILE");
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    real_bin_dir.display(),
+                    original_path
+                        .as_deref()
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                ),
+            );
+        }
+
+        let integration = ShellIntegration {
+            root: runtime_root.clone(),
+            wrapper_path: runtime_root.join("taskers-shell-wrapper.sh"),
+            real_shell: zsh_path,
+        };
+        let mut launch = integration.launch_spec();
+        launch.env.insert(
+            "TASKERS_CTL_PATH".into(),
+            taskersctl_path.display().to_string(),
+        );
+        launch
+            .env
+            .insert("TASKERS_WORKSPACE_ID".into(), "ws".into());
+        launch.env.insert("TASKERS_PANE_ID".into(), "pn".into());
+        launch.env.insert("TASKERS_SURFACE_ID".into(), "sf".into());
+        launch
+            .env
+            .insert("TASKERS_TEST_LOG".into(), test_log.display().to_string());
+
+        let mut spec = CommandSpec::new(launch.program.display().to_string());
+        spec.args = launch.args;
+        spec.env = launch.env;
+        spec.cwd = Some(repo_dir.clone());
+
+        let mut spawned = PtySession::spawn(&spec).expect("spawn shell");
+        std::thread::sleep(Duration::from_millis(250));
+        spawned.session.write_all(b"exit\n").expect("exit shell");
+
+        let mut reader = spawned.reader;
+        let mut buffer = [0u8; 1024];
+        while reader.read_into(&mut buffer).unwrap_or(0) > 0 {}
+
+        let log = fs::read_to_string(&test_log).expect("read metadata log");
+        assert!(
+            log.contains("signal --source shell --kind metadata"),
+            "expected zsh shell to emit metadata, got: {log}"
+        );
+        assert!(
+            log.contains(&format!("--cwd {}", repo_dir.display())),
+            "expected metadata cwd in log, got: {log}"
+        );
+        assert!(
+            log.contains("--repo repo"),
+            "expected repo name in log, got: {log}"
+        );
+        assert!(
+            log.contains("--branch jj123456"),
+            "expected JJ branch fallback in log, got: {log}"
+        );
+
+        restore_env_var("HOME", original_home);
+        restore_env_var("PATH", original_path);
+        restore_env_var("ZDOTDIR", original_zdotdir);
+        fs::remove_dir_all(&runtime_root).expect("cleanup runtime root");
+    }
+
+    #[test]
     fn bash_shell_hook_marks_prompt_only_once_until_preexec_runs() {
         let bash_hooks = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),

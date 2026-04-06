@@ -46,15 +46,32 @@ taskers__osc133_print() {
 }
 
 taskers__repo_root() {
-  command -v git >/dev/null 2>&1 || return 0
-  git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true
+  if command -v git >/dev/null 2>&1; then
+    git -C "$PWD" rev-parse --show-toplevel 2>/dev/null && return 0
+  fi
+  if command -v jj >/dev/null 2>&1; then
+    jj root 2>/dev/null || true
+    return 0
+  fi
+  return 0
 }
 
 taskers__repo_branch() {
-  command -v git >/dev/null 2>&1 || return 0
-  git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null \
-    || git -C "$PWD" rev-parse --short HEAD 2>/dev/null \
-    || true
+  if command -v git >/dev/null 2>&1; then
+    local branch
+    branch=$(git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null \
+      || git -C "$PWD" rev-parse --short HEAD 2>/dev/null \
+      || true)
+    if [[ -n "$branch" ]]; then
+      print -rn -- "$branch"
+      return 0
+    fi
+  fi
+  if command -v jj >/dev/null 2>&1; then
+    jj log -r @ -T 'change_id.shortest(8)' --no-graph 2>/dev/null || true
+    return 0
+  fi
+  return 0
 }
 
 taskers__classify_token() {
@@ -130,16 +147,16 @@ taskers__collect_metadata() {
 taskers__agent_active_for_kind() {
   case "$1" in
     started|progress|waiting_input)
-      print -rn -- '1'
+      print -rn -- 'true'
       ;;
     completed|error)
-      print -rn -- '0'
+      print -rn -- 'false'
       ;;
     *)
       if [[ -n "${TASKERS_ACTIVE_AGENT_KIND:-}" ]]; then
-        print -rn -- '1'
+        print -rn -- 'true'
       else
-        print -rn -- '0'
+        print -rn -- 'false'
       fi
       ;;
   esac
@@ -147,9 +164,11 @@ taskers__agent_active_for_kind() {
 
 taskers__context_tty_matches() {
   local expected_tty=${TASKERS_TTY_NAME:-}
-  local current_tty
   [[ -n "$expected_tty" ]] || return 1
-  current_tty=$(tty 2>/dev/null || true)
+  local current_tty=${TTY:-}
+  if [[ -z "$current_tty" ]]; then
+    current_tty=$(tty 2>/dev/null || true)
+  fi
   [[ "$current_tty" = /dev/* ]] || return 1
   [[ "$current_tty" = "$expected_tty" ]]
 }
@@ -297,6 +316,10 @@ taskers_error() {
   taskers_signal error "$@"
 }
 
+taskers__on_chpwd() {
+  taskers__emit_metadata_if_changed
+}
+
 taskers__normalize_backspace() {
   stty erase '^?' 2>/dev/null || true
   zmodload -F zsh/terminfo b:terminfo 2>/dev/null || true
@@ -315,10 +338,18 @@ taskers__normalize_backspace() {
   fi
 }
 
-typeset -ga preexec_functions
-typeset -ga precmd_functions
-preexec_functions+=(taskers__preexec)
-precmd_functions+=(taskers__precmd)
+if autoload -Uz add-zsh-hook 2>/dev/null; then
+  add-zsh-hook preexec taskers__preexec
+  add-zsh-hook precmd taskers__precmd
+  add-zsh-hook chpwd taskers__on_chpwd
+else
+  typeset -ga preexec_functions
+  typeset -ga precmd_functions
+  typeset -ga chpwd_functions
+  preexec_functions+=(taskers__preexec)
+  precmd_functions+=(taskers__precmd)
+  chpwd_functions+=(taskers__on_chpwd)
+fi
 taskers__normalize_backspace
 if [[ -z "${TASKERS_TTY_NAME:-}" ]]; then
   TASKERS_TTY_NAME=$(tty 2>/dev/null || true)

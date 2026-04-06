@@ -31,6 +31,27 @@ struct Cli {
     command: Command,
 }
 
+fn parse_boolish(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!("invalid boolean value: {value}")),
+    }
+}
+
+#[cfg(test)]
+mod bool_parse_tests {
+    use super::parse_boolish;
+
+    #[test]
+    fn parse_boolish_accepts_numeric_and_text_booleans() {
+        assert_eq!(parse_boolish("1"), Ok(true));
+        assert_eq!(parse_boolish("0"), Ok(false));
+        assert_eq!(parse_boolish("true"), Ok(true));
+        assert_eq!(parse_boolish("false"), Ok(false));
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     Serve {
@@ -66,7 +87,7 @@ enum Command {
         branch: Option<String>,
         #[arg(long)]
         agent: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_boolish)]
         agent_active: Option<bool>,
         #[arg(long)]
         command: Option<String>,

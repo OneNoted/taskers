@@ -18,7 +18,9 @@ use taskers_runtime::ShellLaunchSpec;
 use time::OffsetDateTime;
 use tokio::sync::watch;
 
-pub use taskers_control::{VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode, VcsSnapshot};
+pub use taskers_control::{
+    VcsCommand, VcsCommitEntry, VcsFileEntry, VcsFileStatus, VcsMode, VcsSnapshot,
+};
 pub use taskers_domain::{
     BrowserProfileMode, Direction, PaneContainerId, PaneId, PaneKind, PaneTabId, PaneTabLayoutNode,
     SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowMoveTarget,
@@ -535,6 +537,7 @@ pub struct BootstrapModel {
     pub selected_theme_id: String,
     pub selected_shortcut_preset: ShortcutPreset,
     pub notification_preferences: NotificationPreferencesSnapshot,
+    pub render_live_surfaces_in_overview: bool,
 }
 
 impl Default for BootstrapModel {
@@ -545,6 +548,7 @@ impl Default for BootstrapModel {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: ShortcutPreset::Balanced,
             notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
         }
     }
 }
@@ -935,6 +939,7 @@ pub struct WorkspaceViewSnapshot {
     pub canvas_height: i32,
     pub canvas_offset_x: i32,
     pub canvas_offset_y: i32,
+    pub overview_scene: OverviewSceneSnapshot,
     pub columns: Vec<WorkspaceColumnSnapshot>,
     pub layout: LayoutNodeSnapshot,
 }
@@ -973,6 +978,37 @@ pub struct WorkspaceWindowTabSnapshot {
     pub title: String,
     pub pane_count: usize,
     pub surface_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverviewPreviewModeSnapshot {
+    Summary,
+    LivePreferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewWindowCardSnapshot {
+    pub window_id: WorkspaceWindowId,
+    pub column_id: WorkspaceColumnId,
+    pub title: String,
+    pub runtime: RuntimeIdentitySnapshot,
+    pub attention: AttentionState,
+    pub active: bool,
+    pub pane_count: usize,
+    pub surface_count: usize,
+    pub tab_count: usize,
+    pub preview_mode: OverviewPreviewModeSnapshot,
+    pub preview_lines: Vec<String>,
+    pub can_move_left: bool,
+    pub can_move_right: bool,
+    pub can_move_up: bool,
+    pub can_move_down: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewSceneSnapshot {
+    pub prefer_live_preview: bool,
+    pub cards: Vec<OverviewWindowCardSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1124,6 +1160,7 @@ pub struct SettingsSnapshot {
     pub shortcut_presets: Vec<ShortcutPresetSnapshot>,
     pub shortcuts: Vec<ShortcutBindingSnapshot>,
     pub notification_preferences: NotificationPreferencesSnapshot,
+    pub render_live_surfaces_in_overview: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1495,6 +1532,9 @@ pub enum ShellAction {
         key: NotificationPreferenceKey,
         enabled: bool,
     },
+    SetOverviewLiveSurfaces {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1507,6 +1547,7 @@ struct UiState {
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     notification_preferences: NotificationPreferencesSnapshot,
+    render_live_surfaces_in_overview: bool,
     window_size: PixelSize,
     vcs_panel_visible: bool,
     last_terminal_surface_by_workspace: BTreeMap<WorkspaceId, SurfaceId>,
@@ -1577,6 +1618,7 @@ impl TaskersCore {
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 notification_preferences: bootstrap.notification_preferences,
+                render_live_surfaces_in_overview: bootstrap.render_live_surfaces_in_overview,
                 window_size: PixelSize::new(1440, 900),
                 vcs_panel_visible: false,
                 last_terminal_surface_by_workspace: BTreeMap::new(),
@@ -1665,6 +1707,9 @@ impl TaskersCore {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        let columns = self.workspace_columns_snapshot(workspace, &window_frames);
+        let overview_scene =
+            overview_scene_snapshot(&columns, self.ui.render_live_surfaces_in_overview);
         let resize_handles = if matches!(self.ui.section, ShellSection::Workspace)
             && !self.ui.overview_mode
             && self.ui.drag_mode == ShellDragMode::None
@@ -1708,7 +1753,8 @@ impl TaskersCore {
                 canvas_height: canvas_metrics.height,
                 canvas_offset_x: canvas_metrics.offset_x,
                 canvas_offset_y: canvas_metrics.offset_y,
-                columns: self.workspace_columns_snapshot(workspace, &window_frames),
+                overview_scene,
+                columns,
                 layout: self.snapshot_layout(
                     workspace,
                     active_window
@@ -1729,7 +1775,7 @@ impl TaskersCore {
                 window: Frame::new(0, 0, self.ui.window_size.width, self.ui.window_size.height),
                 content: viewport,
                 panes: if matches!(self.ui.section, ShellSection::Workspace)
-                    && !self.ui.overview_mode
+                    && (!self.ui.overview_mode || self.ui.render_live_surfaces_in_overview)
                 {
                     self.collect_workspace_surface_plans(workspace_id, workspace, &window_frames)
                 } else {
@@ -1775,6 +1821,7 @@ impl TaskersCore {
                 .collect(),
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
             notification_preferences: self.ui.notification_preferences,
+            render_live_surfaces_in_overview: self.ui.render_live_surfaces_in_overview,
         }
     }
 
@@ -3233,6 +3280,14 @@ impl TaskersCore {
                 self.bump_local_revision();
                 true
             }
+            ShellAction::SetOverviewLiveSurfaces { enabled } => {
+                if self.ui.render_live_surfaces_in_overview == enabled {
+                    return false;
+                }
+                self.ui.render_live_surfaces_in_overview = enabled;
+                self.bump_local_revision();
+                true
+            }
         }
     }
 
@@ -3244,19 +3299,22 @@ impl TaskersCore {
             ShortcutAction::FocusLatestUnread => {
                 self.dispatch_shell_action(ShellAction::FocusLatestUnread)
             }
-            ShortcutAction::CloseTerminal => self.run_workspace_shortcut(|core, workspace_id| {
-                let pane_id = core
-                    .app_state
-                    .snapshot_model()
-                    .workspaces
-                    .get(&workspace_id)
-                    .map(|workspace| workspace.active_pane)?;
-                Some(core.dispatch_control(ControlCommand::ClosePane {
-                    workspace_id,
-                    pane_id,
-                }))
-            }),
-            ShortcutAction::OpenBrowserSplit => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::CloseTerminal => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
+                    let pane_id = core
+                        .app_state
+                        .snapshot_model()
+                        .workspaces
+                        .get(&workspace_id)
+                        .map(|workspace| workspace.active_pane)?;
+                    Some(core.dispatch_control(ControlCommand::ClosePane {
+                        workspace_id,
+                        pane_id,
+                    }))
+                },
+            ),
+            ShortcutAction::OpenBrowserSplit => self.run_standard_workspace_shortcut(|core, _| {
                 Some(core.split_with_kind_axis(
                     None,
                     PaneKind::Browser,
@@ -3275,100 +3333,142 @@ impl TaskersCore {
                     core.queue_host_command(HostCommand::BrowserToggleDevtools { surface_id })
                 })
             }
-            ShortcutAction::FocusLeft => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                    workspace_id,
-                    direction: Direction::Left,
-                }))
-            }),
-            ShortcutAction::FocusRight => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                    workspace_id,
-                    direction: Direction::Right,
-                }))
-            }),
-            ShortcutAction::FocusUp => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                    workspace_id,
-                    direction: Direction::Up,
-                }))
-            }),
-            ShortcutAction::FocusDown => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
-                    workspace_id,
-                    direction: Direction::Down,
-                }))
-            }),
-            ShortcutAction::NewWindowLeft => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::FocusLeft => {
+                if self.ui.overview_mode {
+                    self.run_workspace_shortcut(true, |core, _| {
+                        Some(core.focus_active_workspace_window(Direction::Left))
+                    })
+                } else {
+                    self.run_standard_workspace_shortcut(|core, workspace_id| {
+                        Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                            workspace_id,
+                            direction: Direction::Left,
+                        }))
+                    })
+                }
+            }
+            ShortcutAction::FocusRight => {
+                if self.ui.overview_mode {
+                    self.run_workspace_shortcut(true, |core, _| {
+                        Some(core.focus_active_workspace_window(Direction::Right))
+                    })
+                } else {
+                    self.run_standard_workspace_shortcut(|core, workspace_id| {
+                        Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                            workspace_id,
+                            direction: Direction::Right,
+                        }))
+                    })
+                }
+            }
+            ShortcutAction::FocusUp => {
+                if self.ui.overview_mode {
+                    self.run_workspace_shortcut(true, |core, _| {
+                        Some(core.focus_active_workspace_window(Direction::Up))
+                    })
+                } else {
+                    self.run_standard_workspace_shortcut(|core, workspace_id| {
+                        Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                            workspace_id,
+                            direction: Direction::Up,
+                        }))
+                    })
+                }
+            }
+            ShortcutAction::FocusDown => {
+                if self.ui.overview_mode {
+                    self.run_workspace_shortcut(true, |core, _| {
+                        Some(core.focus_active_workspace_window(Direction::Down))
+                    })
+                } else {
+                    self.run_standard_workspace_shortcut(|core, workspace_id| {
+                        Some(core.dispatch_control(ControlCommand::FocusPaneDirection {
+                            workspace_id,
+                            direction: Direction::Down,
+                        }))
+                    })
+                }
+            }
+            ShortcutAction::NewWindowLeft => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Left))
             }),
-            ShortcutAction::NewWindowRight => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::NewWindowRight => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Right))
             }),
-            ShortcutAction::NewWindowUp => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::NewWindowUp => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Up))
             }),
-            ShortcutAction::NewWindowDown => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::NewWindowDown => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window(WorkspaceDirection::Down))
             }),
             ShortcutAction::MoveWindowLeft
             | ShortcutAction::MoveWindowRight
             | ShortcutAction::MoveWindowUp
-            | ShortcutAction::MoveWindowDown => self.run_workspace_shortcut(|core, _| {
-                let direction = match action {
-                    ShortcutAction::MoveWindowLeft => Direction::Left,
-                    ShortcutAction::MoveWindowRight => Direction::Right,
-                    ShortcutAction::MoveWindowUp => Direction::Up,
-                    ShortcutAction::MoveWindowDown => Direction::Down,
-                    _ => unreachable!("move action already matched"),
-                };
-                Some(core.move_active_workspace_window(direction))
-            }),
-            ShortcutAction::ResizeWindowLeft => {
-                self.run_workspace_shortcut(|core, workspace_id| {
+            | ShortcutAction::MoveWindowDown => {
+                self.run_workspace_shortcut(shortcut_preserves_overview(action), |core, _| {
+                    let direction = match action {
+                        ShortcutAction::MoveWindowLeft => Direction::Left,
+                        ShortcutAction::MoveWindowRight => Direction::Right,
+                        ShortcutAction::MoveWindowUp => Direction::Up,
+                        ShortcutAction::MoveWindowDown => Direction::Down,
+                        _ => unreachable!("move action already matched"),
+                    };
+                    Some(core.move_active_workspace_window(direction))
+                })
+            }
+            ShortcutAction::ResizeWindowLeft => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Left,
                         amount: KEYBOARD_RESIZE_STEP,
                     }))
-                })
-            }
-            ShortcutAction::ResizeWindowRight => {
-                self.run_workspace_shortcut(|core, workspace_id| {
+                },
+            ),
+            ShortcutAction::ResizeWindowRight => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Right,
                         amount: KEYBOARD_RESIZE_STEP,
                     }))
-                })
-            }
-            ShortcutAction::ResizeWindowUp => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
-                    workspace_id,
-                    direction: Direction::Up,
-                    amount: KEYBOARD_RESIZE_STEP,
-                }))
-            }),
-            ShortcutAction::ResizeWindowDown => {
-                self.run_workspace_shortcut(|core, workspace_id| {
+                },
+            ),
+            ShortcutAction::ResizeWindowUp => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
+                    Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
+                        workspace_id,
+                        direction: Direction::Up,
+                        amount: KEYBOARD_RESIZE_STEP,
+                    }))
+                },
+            ),
+            ShortcutAction::ResizeWindowDown => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| {
                     Some(core.dispatch_control(ControlCommand::ResizeActiveWindow {
                         workspace_id,
                         direction: Direction::Down,
                         amount: KEYBOARD_RESIZE_STEP,
                     }))
+                },
+            ),
+            ShortcutAction::ResizeSplitLeft => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(
+                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                            workspace_id,
+                            direction: Direction::Left,
+                            amount: KEYBOARD_RESIZE_STEP,
+                        }),
+                    )
                 })
             }
-            ShortcutAction::ResizeSplitLeft => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(
-                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
-                        workspace_id,
-                        direction: Direction::Left,
-                        amount: KEYBOARD_RESIZE_STEP,
-                    }),
-                )
-            }),
             ShortcutAction::ResizeSplitRight => {
-                self.run_workspace_shortcut(|core, workspace_id| {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
                     Some(
                         core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
                             workspace_id,
@@ -3378,25 +3478,29 @@ impl TaskersCore {
                     )
                 })
             }
-            ShortcutAction::ResizeSplitUp => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(
-                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
-                        workspace_id,
-                        direction: Direction::Up,
-                        amount: KEYBOARD_RESIZE_STEP,
-                    }),
-                )
-            }),
-            ShortcutAction::ResizeSplitDown => self.run_workspace_shortcut(|core, workspace_id| {
-                Some(
-                    core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
-                        workspace_id,
-                        direction: Direction::Down,
-                        amount: KEYBOARD_RESIZE_STEP,
-                    }),
-                )
-            }),
-            ShortcutAction::SplitRight => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::ResizeSplitUp => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(
+                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                            workspace_id,
+                            direction: Direction::Up,
+                            amount: KEYBOARD_RESIZE_STEP,
+                        }),
+                    )
+                })
+            }
+            ShortcutAction::ResizeSplitDown => {
+                self.run_standard_workspace_shortcut(|core, workspace_id| {
+                    Some(
+                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                            workspace_id,
+                            direction: Direction::Down,
+                            amount: KEYBOARD_RESIZE_STEP,
+                        }),
+                    )
+                })
+            }
+            ShortcutAction::SplitRight => self.run_standard_workspace_shortcut(|core, _| {
                 Some(core.split_with_kind_axis(
                     None,
                     PaneKind::Terminal,
@@ -3404,7 +3508,7 @@ impl TaskersCore {
                     BrowserProfileMode::PersistentDefault,
                 ))
             }),
-            ShortcutAction::SplitDown => self.run_workspace_shortcut(|core, _| {
+            ShortcutAction::SplitDown => self.run_standard_workspace_shortcut(|core, _| {
                 Some(core.split_with_kind_axis(
                     None,
                     PaneKind::Terminal,
@@ -3445,10 +3549,14 @@ impl TaskersCore {
         let Some(workspace_id) = model.active_workspace_id() else {
             return false;
         };
-        self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
+        let changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
             workspace_id,
             direction: direction.to_domain(),
-        })
+        });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
     }
 
     fn focus_workspace_window(&mut self, window_id: WorkspaceWindowId) -> bool {
@@ -4061,13 +4169,13 @@ impl TaskersCore {
     fn update_surface_metadata(&mut self, surface_id: SurfaceId, patch: PaneMetadataPatch) -> bool {
         let mut changed =
             self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch });
-        if self.ui.vcs_panel_visible
-            && self
-                .ui
-                .vcs_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.surface_id == surface_id)
-        {
+        let model = self.app_state.snapshot_model();
+        let should_refresh_vcs = self.ui.vcs_panel_visible
+            && model
+                .active_workspace_id()
+                .and_then(|workspace_id| self.vcs_target_surface_id(&model, workspace_id))
+                == Some(surface_id);
+        if should_refresh_vcs {
             changed |= self.refresh_vcs_panel();
         }
         changed
@@ -4345,11 +4453,69 @@ impl TaskersCore {
         self.move_workspace_window_by_id(active_window_id, target)
     }
 
+    fn focus_active_workspace_window(&mut self, direction: Direction) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let active_window_id = workspace.active_window;
+        let Some((active_column_id, active_column_index, active_window_index)) = workspace
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(column_index, (column_id, column))| {
+                column
+                    .window_order
+                    .iter()
+                    .position(|candidate| *candidate == active_window_id)
+                    .map(|window_index| (*column_id, column_index, window_index))
+            })
+        else {
+            return false;
+        };
+
+        let target_window_id = match direction {
+            Direction::Left => active_column_index
+                .checked_sub(1)
+                .and_then(|index| workspace.columns.get_index(index))
+                .and_then(|(_, column)| column.window_order.first())
+                .copied(),
+            Direction::Right => workspace
+                .columns
+                .get_index(active_column_index + 1)
+                .and_then(|(_, column)| column.window_order.first())
+                .copied(),
+            Direction::Up => workspace
+                .columns
+                .get(&active_column_id)
+                .and_then(|column| {
+                    active_window_index
+                        .checked_sub(1)
+                        .and_then(|index| column.window_order.get(index))
+                })
+                .copied(),
+            Direction::Down => workspace
+                .columns
+                .get(&active_column_id)
+                .and_then(|column| column.window_order.get(active_window_index + 1))
+                .copied(),
+        };
+
+        let Some(target_window_id) = target_window_id else {
+            return false;
+        };
+        self.focus_workspace_window(target_window_id)
+    }
+
     fn run_workspace_shortcut(
         &mut self,
+        preserve_overview: bool,
         handler: impl FnOnce(&mut Self, WorkspaceId) -> Option<bool>,
     ) -> bool {
-        let Some(workspace_id) = self.prepare_workspace_interaction() else {
+        let Some(workspace_id) = self.prepare_workspace_interaction(preserve_overview) else {
             return false;
         };
         let Some(mut changed) = handler(self, workspace_id) else {
@@ -4357,6 +4523,13 @@ impl TaskersCore {
         };
         changed |= self.ensure_active_window_visible();
         changed
+    }
+
+    fn run_standard_workspace_shortcut(
+        &mut self,
+        handler: impl FnOnce(&mut Self, WorkspaceId) -> Option<bool>,
+    ) -> bool {
+        self.run_workspace_shortcut(false, handler)
     }
 
     fn begin_window_drag(&mut self) -> bool {
@@ -4504,13 +4677,13 @@ impl TaskersCore {
         changed
     }
 
-    fn prepare_workspace_interaction(&mut self) -> Option<WorkspaceId> {
+    fn prepare_workspace_interaction(&mut self, preserve_overview: bool) -> Option<WorkspaceId> {
         let mut changed = false;
         if self.ui.section != ShellSection::Workspace {
             self.ui.section = ShellSection::Workspace;
             changed = true;
         }
-        if self.ui.overview_mode {
+        if self.ui.overview_mode && !preserve_overview {
             self.ui.overview_mode = false;
             changed = true;
         }
@@ -4702,6 +4875,25 @@ impl TaskersCore {
     fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         self.host_commands.drain(..).collect()
     }
+}
+
+fn shortcut_preserves_overview(action: ShortcutAction) -> bool {
+    matches!(
+        action,
+        ShortcutAction::CloseTerminal
+            | ShortcutAction::NewWindowLeft
+            | ShortcutAction::NewWindowRight
+            | ShortcutAction::NewWindowUp
+            | ShortcutAction::NewWindowDown
+            | ShortcutAction::MoveWindowLeft
+            | ShortcutAction::MoveWindowRight
+            | ShortcutAction::MoveWindowUp
+            | ShortcutAction::MoveWindowDown
+            | ShortcutAction::ResizeWindowLeft
+            | ShortcutAction::ResizeWindowRight
+            | ShortcutAction::ResizeWindowUp
+            | ShortcutAction::ResizeWindowDown
+    )
 }
 
 fn apply_resize_preview_to_model(model: &mut AppModel, preview: &ResizePreview) {
@@ -5058,13 +5250,18 @@ fn workspace_window_placements(
     let available_width = (viewport_width - horizontal_gap_total).max(0);
     let preferred_column_widths = ordered_columns
         .iter()
-        .map(|column| column.width.max(1))
+        .map(|column| column.width.max(MIN_WORKSPACE_WINDOW_WIDTH))
         .collect::<Vec<_>>();
-    let column_widths = fit_track_extents(
-        &preferred_column_widths,
-        available_width,
-        MIN_WORKSPACE_WINDOW_WIDTH,
-    );
+    let preferred_total = preferred_column_widths.iter().sum::<i32>();
+    let column_widths = if ordered_columns.len() > 1 && preferred_total > available_width {
+        preferred_column_widths.clone()
+    } else {
+        fit_track_extents(
+            &preferred_column_widths,
+            available_width,
+            MIN_WORKSPACE_WINDOW_WIDTH,
+        )
+    };
 
     let mut placements = Vec::new();
     let mut x = 0;
@@ -5113,6 +5310,90 @@ fn workspace_window_placements(
     }
 
     placements
+}
+
+fn overview_scene_snapshot(
+    columns: &[WorkspaceColumnSnapshot],
+    prefer_live_preview: bool,
+) -> OverviewSceneSnapshot {
+    let mut cards = Vec::new();
+    for (column_index, column) in columns.iter().enumerate() {
+        let last_column_index = columns.len().saturating_sub(1);
+        let last_row_index = column.windows.len().saturating_sub(1);
+        for (row_index, window) in column.windows.iter().enumerate() {
+            cards.push(OverviewWindowCardSnapshot {
+                window_id: window.id,
+                column_id: column.id,
+                title: window.title.clone(),
+                runtime: window.runtime.clone(),
+                attention: window.attention,
+                active: window.active,
+                pane_count: window.pane_count,
+                surface_count: window.surface_count,
+                tab_count: window.tabs.len(),
+                preview_mode: if prefer_live_preview {
+                    OverviewPreviewModeSnapshot::LivePreferred
+                } else {
+                    OverviewPreviewModeSnapshot::Summary
+                },
+                preview_lines: overview_preview_lines(&window.layout),
+                can_move_left: column_index > 0,
+                can_move_right: column_index < last_column_index,
+                can_move_up: row_index > 0,
+                can_move_down: row_index < last_row_index,
+            });
+        }
+    }
+
+    OverviewSceneSnapshot {
+        prefer_live_preview,
+        cards,
+    }
+}
+
+fn overview_preview_lines(layout: &LayoutNodeSnapshot) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_overview_preview_lines(layout, &mut out);
+    out.truncate(3);
+    if out.is_empty() {
+        out.push("No active pane content".to_string());
+    }
+    out
+}
+
+fn collect_overview_preview_lines(node: &LayoutNodeSnapshot, out: &mut Vec<String>) {
+    match node {
+        LayoutNodeSnapshot::Pane(pane) => {
+            if let Some(surface) = pane
+                .surfaces
+                .iter()
+                .find(|surface| surface.id == pane.active_surface)
+                .or_else(|| pane.surfaces.first())
+            {
+                let mut line = surface.runtime.label.clone();
+                if !surface.title.trim().is_empty() {
+                    line.push_str(" · ");
+                    line.push_str(surface.title.trim());
+                }
+                if let Some(status) = surface
+                    .status_label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|status| !status.is_empty())
+                {
+                    line.push_str(" · ");
+                    line.push_str(status);
+                }
+                out.push(line);
+            } else {
+                out.push(format!("{} pane", pane.runtime.label));
+            }
+        }
+        LayoutNodeSnapshot::Split { first, second, .. } => {
+            collect_overview_preview_lines(first, out);
+            collect_overview_preview_lines(second, out);
+        }
+    }
 }
 
 fn workspace_canvas_metrics(
@@ -6372,6 +6653,13 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use crate::PixelSize;
     use taskers_control::ControlCommand;
     use taskers_core::AppState;
@@ -6384,13 +6672,14 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME, Direction,
-        HostCommand, HostEvent, LayoutMetrics, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
-        NotificationPreferencesSnapshot, ResizeHandleTarget, ResizePreview, RuntimeCapability,
-        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection,
-        SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection, WorkspaceWindowSnapshot,
-        default_preview_app_state, default_session_path_for_preview, display_surface_title,
-        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME,
+        DEFAULT_WORKSPACE_WINDOW_GAP, Direction, HostCommand, HostEvent, LayoutMetrics,
+        MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX, NotificationPreferencesSnapshot, ResizeHandleTarget,
+        ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
+        ShellSection, ShortcutAction, SurfaceDragSessionSnapshot, SurfaceMountSpec,
+        WorkspaceDirection, WorkspaceWindowSnapshot, default_preview_app_state,
+        default_session_path_for_preview, display_surface_title, pane_body_frame,
+        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
 
@@ -6408,7 +6697,212 @@ mod tests {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
             notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
         }
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(prefix: &str) -> Self {
+            let unique = format!(
+                "{prefix}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn run_command(command: &mut Command) {
+        let output = command.output().expect("run command");
+        assert!(
+            output.status.success(),
+            "command failed: status={:?}\nstdout={}\nstderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn command_available(program: &str) -> bool {
+        Command::new(program)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn init_git_vcs_fixture() -> TestDir {
+        let fixture = TestDir::new("taskers-shell-core-vcs");
+        let remote_path = fixture.path().join("remote.git");
+        let repo_path = fixture.path().join("repo");
+        fs::create_dir_all(&repo_path).expect("create repo dir");
+
+        run_command(
+            Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(&remote_path),
+        );
+        run_command(Command::new("git").arg("init").arg(&repo_path));
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]));
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "config",
+            "user.name",
+            "Taskers Tests",
+        ]));
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "config",
+            "user.email",
+            "tests@example.com",
+        ]));
+
+        fs::write(repo_path.join("committed.txt"), "base\n").expect("write committed seed");
+        fs::write(repo_path.join("working.txt"), "base\n").expect("write working seed");
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["add", "."]),
+        );
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "commit",
+            "-m",
+            "chore: base fixture",
+        ]));
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["remote", "add", "origin"])
+                .arg(&remote_path),
+        );
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["push", "-u", "origin", "main"]),
+        );
+
+        fs::write(repo_path.join("committed.txt"), "base\nunpushed\n")
+            .expect("write unpushed change");
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["add", "committed.txt"]),
+        );
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "commit",
+            "-m",
+            "feat: add unpushed change",
+        ]));
+
+        fs::write(repo_path.join("working.txt"), "base\nworking tree change\n")
+            .expect("write working tree change");
+
+        fixture
+    }
+
+    fn init_jj_vcs_fixture() -> Option<TestDir> {
+        if !command_available("jj") {
+            return None;
+        }
+
+        let fixture = TestDir::new("taskers-shell-core-jj");
+        let remote_path = fixture.path().join("remote.git");
+        let repo_path = fixture.path().join("repo");
+
+        run_command(
+            Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(&remote_path),
+        );
+        run_command(
+            Command::new("jj")
+                .args(["git", "init", "--colocate"])
+                .arg(&repo_path),
+        );
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["remote", "add", "origin"])
+                .arg(&remote_path),
+        );
+
+        fs::write(repo_path.join("committed.txt"), "base\n").expect("write committed seed");
+        fs::write(repo_path.join("working.txt"), "base\n").expect("write working seed");
+        run_command(Command::new("jj").arg("-R").arg(&repo_path).args([
+            "describe",
+            "-m",
+            "chore: base fixture",
+        ]));
+        run_command(
+            Command::new("jj")
+                .arg("-R")
+                .arg(&repo_path)
+                .args(["bookmark", "create", "main"]),
+        );
+        run_command(Command::new("jj").arg("-R").arg(&repo_path).args([
+            "git",
+            "push",
+            "--bookmark",
+            "main",
+        ]));
+        run_command(Command::new("jj").arg("-R").arg(&repo_path).args([
+            "describe",
+            "-m",
+            "feat: add unpushed change",
+        ]));
+
+        fs::write(repo_path.join("committed.txt"), "base\nunpushed\n")
+            .expect("write unpushed change");
+        fs::write(repo_path.join("working.txt"), "base\nworking tree change\n")
+            .expect("write working tree change");
+
+        Some(fixture)
+    }
+
+    fn model_with_terminal_cwd(cwd: &Path) -> AppModel {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+        let surface = model
+            .workspaces
+            .get_mut(&workspace_id)
+            .and_then(|workspace| workspace.panes.get_mut(&pane_id))
+            .and_then(|pane| pane.surfaces.get_mut(&surface_id))
+            .expect("surface record");
+        surface.metadata.cwd = Some(cwd.display().to_string());
+        model
     }
 
     fn preview_app_state_with_model(model: AppModel, label: &str) -> AppState {
@@ -7627,6 +8121,91 @@ mod tests {
     }
 
     #[test]
+    fn wide_three_column_workspace_keeps_total_width_beyond_viewport() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let workspace_id = core.snapshot().current_workspace.id;
+        let widths = core
+            .snapshot()
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, 720))
+            .collect::<Vec<_>>();
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths,
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        let snapshot = core.snapshot();
+        let total_column_width = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| column.windows.first().expect("column window").frame.width)
+            .sum::<i32>();
+        let total_gap_width = DEFAULT_WORKSPACE_WINDOW_GAP
+            * snapshot.current_workspace.columns.len().saturating_sub(1) as i32;
+
+        assert_eq!(total_column_width, 2160);
+        assert!(
+            snapshot.current_workspace.canvas_width >= total_column_width + total_gap_width,
+            "expected canvas width to grow beyond the viewport for wide workspaces"
+        );
+    }
+
+    #[test]
+    fn resizing_active_window_right_preserves_requested_growth_in_wide_workspace() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let left_window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow {
+            window_id: left_window_id,
+        });
+
+        let before = window_snapshot(&core.snapshot(), left_window_id)
+            .frame
+            .width;
+        let workspace_id = core.snapshot().current_workspace.id;
+        {
+            let mut inner = core.inner.lock();
+            assert!(inner.dispatch_control(ControlCommand::ResizeActiveWindow {
+                workspace_id,
+                direction: Direction::Right,
+                amount: 180,
+            }));
+        }
+
+        let after = window_snapshot(&core.snapshot(), left_window_id)
+            .frame
+            .width;
+        assert_eq!(
+            after,
+            before + 180,
+            "expected active window growth to push the workspace wider instead of being refit"
+        );
+    }
+
+    #[test]
     fn terminal_portal_frames_include_horizontal_gutter() {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
@@ -7928,6 +8507,7 @@ mod tests {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
             notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
         });
 
         core.dispatch_shell_action(ShellAction::ResumeInterruptedAgent {
@@ -8283,7 +8863,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_mode_hides_live_portal_surfaces() {
+    fn overview_mode_keeps_live_portal_surfaces_enabled_by_default() {
         let core = SharedCore::bootstrap(bootstrap());
         assert!(!core.snapshot().portal.panes.is_empty());
 
@@ -8291,7 +8871,20 @@ mod tests {
 
         let snapshot = core.snapshot();
         assert!(snapshot.overview_mode);
+        assert!(!snapshot.portal.panes.is_empty());
+    }
+
+    #[test]
+    fn overview_mode_can_hide_live_portal_surfaces_when_disabled() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: false });
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
         assert!(snapshot.portal.panes.is_empty());
+        assert!(!snapshot.settings.render_live_surfaces_in_overview);
     }
 
     #[test]
@@ -8344,6 +8937,219 @@ mod tests {
     }
 
     #[test]
+    fn overview_scene_contains_one_card_per_workspace_window() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let window_count = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| column.windows.len())
+            .sum::<usize>();
+
+        assert_eq!(
+            snapshot.current_workspace.overview_scene.cards.len(),
+            window_count
+        );
+    }
+
+    #[test]
+    fn overview_scene_preview_lines_summarize_active_surfaces() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let card = snapshot
+            .current_workspace
+            .overview_scene
+            .cards
+            .first()
+            .expect("overview card");
+
+        assert!(!card.preview_lines.is_empty());
+        assert!(
+            card.preview_lines
+                .iter()
+                .any(|line| line.contains("Terminal") || line.contains("Browser")),
+            "expected preview lines to summarize active surfaces: {:?}",
+            card.preview_lines
+        );
+    }
+
+    #[test]
+    fn overview_scene_preview_mode_tracks_live_preview_preference() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        assert!(
+            snapshot
+                .current_workspace
+                .overview_scene
+                .cards
+                .iter()
+                .all(|card| matches!(
+                    card.preview_mode,
+                    super::OverviewPreviewModeSnapshot::LivePreferred
+                ))
+        );
+
+        core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: false });
+        let snapshot = core.snapshot();
+        assert!(
+            snapshot
+                .current_workspace
+                .overview_scene
+                .cards
+                .iter()
+                .all(|card| matches!(
+                    card.preview_mode,
+                    super::OverviewPreviewModeSnapshot::Summary
+                ))
+        );
+    }
+
+    #[test]
+    fn overview_scene_move_capabilities_follow_workspace_topology() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let cards = &snapshot.current_workspace.overview_scene.cards;
+        let movable = cards
+            .iter()
+            .find(|card| {
+                card.can_move_left || card.can_move_right || card.can_move_up || card.can_move_down
+            })
+            .expect("movable card");
+
+        assert!(
+            movable.can_move_left
+                || movable.can_move_right
+                || movable.can_move_up
+                || movable.can_move_down
+        );
+    }
+
+    #[test]
+    fn new_window_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowRight));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        assert_eq!(snapshot.current_workspace.columns.len(), 2);
+    }
+
+    #[test]
+    fn close_terminal_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::CloseTerminal));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        assert_eq!(snapshot.current_workspace.columns.len(), 1);
+    }
+
+    #[test]
+    fn move_window_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        let before = core.snapshot();
+        let active_window_id = before.current_workspace.active_window_id;
+        let before_column_index = before
+            .current_workspace
+            .columns
+            .iter()
+            .position(|column| {
+                column
+                    .windows
+                    .iter()
+                    .any(|window| window.id == active_window_id)
+            })
+            .expect("window column index");
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::MoveWindowLeft));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        let after_column_index = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .position(|column| {
+                column
+                    .windows
+                    .iter()
+                    .any(|window| window.id == active_window_id)
+            })
+            .expect("window column index");
+        assert_ne!(after_column_index, before_column_index);
+    }
+
+    #[test]
+    fn resize_window_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        let before = core.snapshot();
+        let active_window_id = before.current_workspace.active_window_id;
+        let before_width = window_snapshot(&before, active_window_id).frame.width;
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::ResizeWindowLeft));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        let after_width = window_snapshot(&snapshot, active_window_id).frame.width;
+        assert_ne!(after_width, before_width);
+    }
+
+    #[test]
+    fn focus_window_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        let before = core.snapshot();
+        let before_window_id = before.current_workspace.active_window_id;
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::FocusLeft));
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.overview_mode);
+        assert_ne!(
+            snapshot.current_workspace.active_window_id,
+            before_window_id
+        );
+    }
+
+    #[test]
     fn attention_panel_visibility_tracks_activity_content() {
         let empty_snapshot = SharedCore::bootstrap(bootstrap()).snapshot();
         let unread_snapshot = SharedCore::bootstrap(bootstrap_with_notification(false)).snapshot();
@@ -8369,12 +9175,29 @@ mod tests {
     #[test]
     fn horizontal_scroll_host_events_pan_workspace_outside_overview() {
         let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
             direction: WorkspaceDirection::Right,
         });
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
             direction: WorkspaceDirection::Right,
         });
+        let workspace_id = core.snapshot().current_workspace.id;
+        let widths = core
+            .snapshot()
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, 720))
+            .collect::<Vec<_>>();
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths,
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+        core.dispatch_shell_action(ShellAction::ScrollViewport { dx: -50_000, dy: 0 });
         let before = core.snapshot().current_workspace.viewport_x;
 
         core.apply_host_event(HostEvent::ViewportScrolled { dx: 180, dy: 0 });
@@ -8386,6 +9209,53 @@ mod tests {
 
         let overview_snapshot = core.snapshot();
         assert_eq!(overview_snapshot.current_workspace.viewport_x, after);
+    }
+
+    #[test]
+    fn creating_workspace_window_scrolls_new_active_window_into_view() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let before = core.snapshot();
+        let workspace_id = before.current_workspace.id;
+        let widths = before
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, 720))
+            .collect::<Vec<_>>();
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths,
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+        let visible_left = snapshot.current_workspace.viewport_x;
+        let visible_right = visible_left + snapshot.portal.content.width;
+
+        assert!(
+            snapshot.current_workspace.viewport_x > 0,
+            "expected viewport to scroll toward the newly focused window"
+        );
+        assert!(
+            active_window.frame.x >= visible_left,
+            "expected active window left edge to be visible"
+        );
+        assert!(
+            active_window.frame.right() <= visible_right,
+            "expected active window right edge to be visible"
+        );
     }
 
     #[test]
@@ -8872,6 +9742,119 @@ mod tests {
             snapshot.vcs_panel.target_surface_id,
             Some(terminal_surface_id)
         );
+    }
+
+    #[test]
+    fn vcs_panel_reads_git_stats_and_unpushed_commits_from_repo_target() {
+        let fixture = init_git_vcs_fixture();
+        let model = model_with_terminal_cwd(&fixture.path().join("repo"));
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-vcs-git-refresh",
+        ));
+
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.vcs_panel.visible);
+        let vcs = snapshot.vcs_panel.snapshot.expect("vcs snapshot");
+        assert_eq!(vcs.mode, super::VcsMode::Git);
+        assert_eq!(vcs.total_insertions, 1);
+        assert_eq!(vcs.total_deletions, 0);
+        assert_eq!(vcs.recent_commits.len(), 1);
+        assert_eq!(
+            vcs.recent_commits[0].description,
+            "feat: add unpushed change"
+        );
+        let file = vcs
+            .files
+            .iter()
+            .find(|file| file.path == "working.txt")
+            .expect("working tree file");
+        assert_eq!(file.insertions, Some(1));
+        assert_eq!(file.deletions, Some(0));
+    }
+
+    #[test]
+    fn showing_vcs_diff_loads_preview_for_selected_git_file() {
+        let fixture = init_git_vcs_fixture();
+        let model = model_with_terminal_cwd(&fixture.path().join("repo"));
+        let core =
+            SharedCore::bootstrap(bootstrap_with_model(model, "taskers-preview-vcs-git-diff"));
+
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+        core.dispatch_shell_action(ShellAction::ShowVcsDiff {
+            path: Some("working.txt".into()),
+        });
+
+        let snapshot = core.snapshot();
+        let vcs = snapshot.vcs_panel.snapshot.expect("vcs snapshot");
+        assert_eq!(vcs.diff_path.as_deref(), Some("working.txt"));
+        let diff = vcs.diff_text.expect("diff text");
+        assert!(diff.contains("working tree change"));
+        assert!(diff.contains("+++"));
+    }
+
+    #[test]
+    fn vcs_panel_reads_jj_stats_and_unpushed_commits_from_repo_target() {
+        let Some(fixture) = init_jj_vcs_fixture() else {
+            return;
+        };
+        let model = model_with_terminal_cwd(&fixture.path().join("repo"));
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-vcs-jj-refresh",
+        ));
+
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.vcs_panel.visible);
+        let vcs = snapshot.vcs_panel.snapshot.expect("vcs snapshot");
+        assert_eq!(vcs.mode, super::VcsMode::Jj);
+        assert_eq!(vcs.total_insertions, 2);
+        assert_eq!(vcs.total_deletions, 0);
+        assert_eq!(vcs.recent_commits.len(), 1);
+        assert_eq!(
+            vcs.recent_commits[0].description,
+            "feat: add unpushed change"
+        );
+        let working_file = vcs
+            .files
+            .iter()
+            .find(|file| file.path == "working.txt")
+            .expect("working tree file");
+        assert_eq!(working_file.insertions, Some(1));
+        assert_eq!(working_file.deletions, Some(0));
+        let committed_file = vcs
+            .files
+            .iter()
+            .find(|file| file.path == "committed.txt")
+            .expect("committed file");
+        assert_eq!(committed_file.insertions, Some(1));
+        assert_eq!(committed_file.deletions, Some(0));
+    }
+
+    #[test]
+    fn showing_vcs_diff_loads_preview_for_selected_jj_file() {
+        let Some(fixture) = init_jj_vcs_fixture() else {
+            return;
+        };
+        let model = model_with_terminal_cwd(&fixture.path().join("repo"));
+        let core =
+            SharedCore::bootstrap(bootstrap_with_model(model, "taskers-preview-vcs-jj-diff"));
+
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+        core.dispatch_shell_action(ShellAction::ShowVcsDiff {
+            path: Some("working.txt".into()),
+        });
+
+        let snapshot = core.snapshot();
+        let vcs = snapshot.vcs_panel.snapshot.expect("vcs snapshot");
+        assert_eq!(vcs.diff_path.as_deref(), Some("working.txt"));
+        let diff = vcs.diff_text.expect("diff text");
+        assert!(diff.contains("Modified regular file working.txt"));
+        assert!(diff.contains("working tree change"));
     }
 
     #[test]

@@ -37,7 +37,7 @@ On the GTK/Linux shell, embedded terminal panes always keep a few Taskers-owned 
 - Ghostty shell integration stays disabled because Taskers provides its own shell wrapper
 - Ghostty Linux cgroup settings stay disabled for embedded panes
 
-By default, Taskers also keeps the embedded terminal background and pane padding on the Taskers visual contract, even if the user's Ghostty theme differs.
+By default, Taskers also keeps the embedded terminal background and pane padding on the Taskers visual contract, even if the user's Ghostty theme differs. The built-in Taskers default currently applies a horizontal terminal inset roughly equivalent to `window-padding-x = 20` in Ghostty terms.
 
 If you want embedded panes to inherit your Ghostty theme and padding instead, add this to Taskers' config JSON:
 

@@ -487,7 +487,7 @@ mod tests {
         let launcher = PathBuf::from("/home/notes/.cargo/bin/taskers");
         let release_root = temp.path().join("releases");
         let release_exec = release_root
-            .join("0.5.0")
+            .join("0.6.0")
             .join("x86_64-unknown-linux-gnu")
             .join("bin")
             .join("taskers-gtk");

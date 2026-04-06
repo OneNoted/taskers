@@ -39,10 +39,10 @@ pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type ShellActionSink = Rc<dyn Fn(taskers_core::ShellAction) + 'static>;
 pub type DiagnosticsSink = Arc<dyn Fn(DiagnosticRecord) + Send + Sync + 'static>;
 
-// Very thin viewport-edge slivers have been enough to trip native GTK/Ghostty
-// rendering during teardown on Linux/NVIDIA. Once a clipped native surface is
-// below this size, hide it until more of the pane is actually visible.
-const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 200;
+// Extremely thin viewport-edge slivers have been enough to trip native
+// GTK/Ghostty rendering during teardown on Linux/NVIDIA. Keep only a narrow
+// safety valve here so moderately visible edge slices still render.
+const MIN_CLIPPED_NATIVE_SURFACE_WIDTH_PX: i32 = 48;
 const MIN_CLIPPED_NATIVE_SURFACE_HEIGHT_PX: i32 = 120;
 const MIN_RESIZE_SPLIT_RATIO: u16 = 150;
 const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
@@ -665,7 +665,7 @@ impl TaskersHost {
     }
 
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
-        let interactive = native_surfaces_interactive(snapshot.drag_mode);
+        let interactive = native_surfaces_interactive(snapshot.drag_mode, snapshot.overview_mode);
         let visible = native_surfaces_visible(snapshot.drag_mode);
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
@@ -681,7 +681,12 @@ impl TaskersHost {
                 format!("host sync start panes={}", snapshot.portal.panes.len()),
             ),
         );
-        self.sync_browser_surfaces(snapshot, interactive, visible)?;
+        self.sync_browser_surfaces(
+            snapshot,
+            interactive,
+            visible,
+            snapshot.resize_preview_active,
+        )?;
         let _bridge_guard = self.begin_bridge_operation(
             BridgeOperationKind::SurfaceSync,
             Some(snapshot.revision),
@@ -1286,6 +1291,7 @@ impl TaskersHost {
         snapshot: &ShellSnapshot,
         interactive: bool,
         visible: bool,
+        resize_preview_active: bool,
     ) -> Result<()> {
         let desired = browser_plans(&snapshot.portal);
         let desired_by_id = desired
@@ -1327,11 +1333,14 @@ impl TaskersHost {
         }
 
         for entry in snapshot.browser_catalog.iter() {
-            let visible_plan = if visible {
-                desired_by_id.get(&entry.surface_id)
-            } else {
-                None
-            };
+            let visible_plan = native_surface_visible_plan(
+                if visible {
+                    desired_by_id.get(&entry.surface_id)
+                } else {
+                    None
+                },
+                resize_preview_active,
+            );
             match self.browser_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
@@ -1429,11 +1438,14 @@ impl TaskersHost {
         }
 
         for entry in catalog {
-            let visible_plan = if visible {
-                desired_by_id.get(&entry.surface_id)
-            } else {
-                None
-            };
+            let visible_plan = native_surface_visible_plan(
+                if visible {
+                    desired_by_id.get(&entry.surface_id)
+                } else {
+                    None
+                },
+                resize_preview_active,
+            );
             match self.terminal_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
                     &self.root,
@@ -2507,7 +2519,7 @@ fn preview_for_drag(
             workspace_id,
             column_widths,
             leading_index,
-        } => resize_track_pair(
+        } => resize_track_push(
             column_widths,
             *leading_index,
             dx.round() as i32,
@@ -2542,7 +2554,7 @@ fn preview_for_drag(
             window_heights,
             upper_index,
         } => {
-            let next_column_widths = resize_track_pair(
+            let next_column_widths = resize_track_push(
                 column_widths,
                 *leading_index,
                 dx.round() as i32,
@@ -2622,6 +2634,27 @@ fn resize_track_pair<Id: Copy>(
     Some(next)
 }
 
+fn resize_track_push<Id: Copy>(
+    tracks: &[(Id, i32)],
+    leading_index: usize,
+    delta: i32,
+    min_extent: i32,
+) -> Option<Vec<(Id, i32)>> {
+    if delta == 0 || leading_index >= tracks.len() {
+        return None;
+    }
+
+    let leading = tracks[leading_index].1;
+    let clamped_delta = delta.max(min_extent - leading);
+    if clamped_delta == 0 {
+        return None;
+    }
+
+    let mut next = tracks.to_vec();
+    next[leading_index].1 = leading + clamped_delta;
+    Some(next)
+}
+
 fn corrected_drag_delta(widget: &GtkBox, anchor: DragAnchor, dx: f64, dy: f64) -> (f64, f64) {
     let pointer_abs_x = widget.margin_start() + anchor.pointer_offset_x + dx.round() as i32;
     let pointer_abs_y = widget.margin_top() + anchor.pointer_offset_y + dy.round() as i32;
@@ -2661,11 +2694,11 @@ fn split_ratio_preview(
 }
 
 fn native_surface_css(theme_id: &str) -> String {
+    const DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX: i32 = 20;
     format!(
         r#"
 .native-surface-host,
-.native-surface-widget,
-.terminal-output {{
+.native-surface-widget {{
   margin: 0;
   padding: 0;
   border-radius: 0;
@@ -2676,6 +2709,8 @@ fn native_surface_css(theme_id: &str) -> String {
 .native-surface-terminal-widget,
 .terminal-output {{
   background: {};
+  padding-left: {}px;
+  padding-right: {}px;
 }}
 
 .native-surface-browser,
@@ -2698,7 +2733,9 @@ fn native_surface_css(theme_id: &str) -> String {
   background: rgba(255, 255, 255, 0.16);
 }}
  "#,
-        terminal_surface_background(theme_id)
+        terminal_surface_background(theme_id),
+        DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX,
+        DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX
     )
 }
 
@@ -2994,8 +3031,8 @@ fn detach_from_overlay(overlay: &Overlay, widget: &Widget) {
     }
 }
 
-fn native_surfaces_interactive(drag_mode: ShellDragMode) -> bool {
-    drag_mode == ShellDragMode::None
+fn native_surfaces_interactive(drag_mode: ShellDragMode, overview_mode: bool) -> bool {
+    drag_mode == ShellDragMode::None && !overview_mode
 }
 
 fn native_surfaces_visible(drag_mode: ShellDragMode) -> bool {
@@ -3271,20 +3308,34 @@ fn hidden_frame() -> taskers_core::Frame {
     taskers_core::Frame::new(100_000, 100_000, 1, 1)
 }
 
+fn native_surface_visible_plan<'a>(
+    visible_plan: Option<&'a PortalSurfacePlan>,
+    resize_preview_active: bool,
+) -> Option<&'a PortalSurfacePlan> {
+    if resize_preview_active {
+        None
+    } else {
+        visible_plan
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         browser_plans, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
-        native_surface_css, native_surfaces_interactive, native_surfaces_visible, preview_for_drag,
-        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path, terminal_plans,
-        trim_terminal_tail, with_capture_retries, workspace_pan_delta,
+        native_surface_css, native_surface_visible_plan, native_surfaces_interactive,
+        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
+        resolve_screenshot_output_path, terminal_plans, trim_terminal_tail, with_capture_retries,
+        workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
-        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneTabId, PortalSurfacePlan,
-        ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis, SurfaceMountSpec,
-        WorkspaceColumnId, WorkspaceWindowId,
+        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
+        PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis,
+        SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId, WorkspaceWindowId,
     };
 
     #[test]
@@ -3311,11 +3362,15 @@ mod tests {
 
     #[test]
     fn native_surfaces_disable_pointer_targeting_during_shell_drags() {
-        assert!(native_surfaces_interactive(ShellDragMode::None));
-        assert!(!native_surfaces_interactive(ShellDragMode::Window));
-        assert!(!native_surfaces_interactive(ShellDragMode::WindowTab));
-        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab));
-        assert!(!native_surfaces_interactive(ShellDragMode::Surface));
+        assert!(native_surfaces_interactive(ShellDragMode::None, false));
+        assert!(!native_surfaces_interactive(ShellDragMode::None, true));
+        assert!(!native_surfaces_interactive(ShellDragMode::Window, false));
+        assert!(!native_surfaces_interactive(
+            ShellDragMode::WindowTab,
+            false
+        ));
+        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab, false));
+        assert!(!native_surfaces_interactive(ShellDragMode::Surface, false));
     }
 
     #[test]
@@ -3325,6 +3380,33 @@ mod tests {
         assert!(!native_surfaces_visible(ShellDragMode::WindowTab));
         assert!(!native_surfaces_visible(ShellDragMode::PaneTab));
         assert!(!native_surfaces_visible(ShellDragMode::Surface));
+    }
+
+    #[test]
+    fn resize_preview_hides_native_surface_plans() {
+        let plan = PortalSurfacePlan {
+            pane_id: PaneId::new(),
+            surface_id: SurfaceId::new(),
+            pane_frame: Frame::new(0, 0, 320, 240),
+            frame: Frame::new(10, 20, 300, 200),
+            mount: SurfaceMountSpec::Terminal(TerminalMountSpec {
+                title: "Terminal".into(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                command_argv: Vec::new(),
+                env: BTreeMap::new(),
+            }),
+            active: true,
+            notification_ring: None,
+        };
+
+        assert_eq!(
+            native_surface_visible_plan(Some(&plan), false).map(|plan| plan.frame),
+            Some(plan.frame)
+        );
+        assert!(native_surface_visible_plan(Some(&plan), true).is_none());
+        assert!(native_surface_visible_plan(None, true).is_none());
     }
 
     #[test]
@@ -3347,6 +3429,8 @@ mod tests {
         assert!(dark.contains(".native-surface-terminal-widget"));
         assert!(dark.contains(".terminal-output"));
         assert!(dark.contains("background: #0f1117;"));
+        assert!(dark.contains("padding-left: 20px;"));
+        assert!(dark.contains("padding-right: 20px;"));
         assert!(gruvbox.contains("background: #282828;"));
     }
 
@@ -3429,6 +3513,48 @@ mod tests {
     }
 
     #[test]
+    fn keeps_moderately_clipped_surfaces() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        let snapshot = core.snapshot();
+        let plan = snapshot.portal.panes[0].clone();
+
+        let clipped = super::clip_to_content(
+            &PortalSurfacePlan {
+                frame: Frame::new(0, 0, 720, plan.frame.height),
+                pane_frame: Frame::new(0, 0, 720, plan.pane_frame.height),
+                ..plan
+            },
+            &Frame::new(640, 0, 200, 1200),
+        );
+
+        assert!(
+            clipped.is_some(),
+            "expected moderately clipped edge slice to stay renderable"
+        );
+    }
+
+    #[test]
+    fn keeps_moderately_wide_clipped_surfaces() {
+        let core = SharedCore::bootstrap(BootstrapModel::default());
+        let snapshot = core.snapshot();
+        let plan = snapshot.portal.panes[0].clone();
+
+        let clipped = super::clip_to_content(
+            &PortalSurfacePlan {
+                frame: Frame::new(0, 0, 720, plan.frame.height),
+                pane_frame: Frame::new(0, 0, 720, plan.pane_frame.height),
+                ..plan
+            },
+            &Frame::new(600, 0, 160, 1200),
+        );
+
+        assert!(
+            clipped.is_some(),
+            "expected moderately clipped edge surface to remain renderable"
+        );
+    }
+
+    #[test]
     fn preview_for_drag_clamps_workspace_window_dimensions() {
         let workspace_id = taskers_shell_core::WorkspaceId::new();
         let workspace_column_id = WorkspaceColumnId::new();
@@ -3461,11 +3587,44 @@ mod tests {
                 workspace_id,
                 column_widths: vec![
                     (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
-                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 360),
+                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 240),
                 ],
                 window_heights: vec![
                     (workspace_window_id, MIN_WORKSPACE_WINDOW_HEIGHT),
                     (lower_window_id, MIN_WORKSPACE_WINDOW_HEIGHT + 260),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn preview_for_drag_can_grow_workspace_column_without_shrinking_neighbor() {
+        let workspace_id = taskers_shell_core::WorkspaceId::new();
+        let workspace_column_id = WorkspaceColumnId::new();
+        let neighbor_column_id = WorkspaceColumnId::new();
+
+        let preview = preview_for_drag(
+            &ResizeHandleTarget::WorkspaceColumnEdge {
+                workspace_id,
+                column_widths: vec![
+                    (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
+                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
+                ],
+                leading_index: 0,
+            },
+            2,
+            240.0,
+            0.0,
+        )
+        .expect("column preview");
+
+        assert_eq!(
+            preview,
+            ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: vec![
+                    (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 240),
+                    (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
                 ],
             }
         );

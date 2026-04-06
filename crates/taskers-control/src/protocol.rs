@@ -395,12 +395,24 @@ pub struct VcsFileEntry {
     pub path: String,
     pub status: VcsFileStatus,
     pub staged: bool,
+    #[serde(default)]
+    pub insertions: Option<u32>,
+    #[serde(default)]
+    pub deletions: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VcsRefEntry {
     pub name: String,
     pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VcsCommitEntry {
+    pub id: String,
+    pub description: String,
+    pub insertions: u32,
+    pub deletions: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,6 +438,12 @@ pub struct VcsSnapshot {
     pub diff_path: Option<String>,
     pub diff_text: Option<String>,
     pub pull_request: Option<VcsPullRequestInfo>,
+    #[serde(default)]
+    pub total_insertions: u32,
+    #[serde(default)]
+    pub total_deletions: u32,
+    #[serde(default)]
+    pub recent_commits: Vec<VcsCommitEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -913,7 +931,8 @@ impl From<AppModel> for ControlResponse {
 mod tests {
     use super::{
         ControlResponse, ScreenshotCommand, ScreenshotResult, ScreenshotTarget,
-        ScreenshotTargetResult,
+        ScreenshotTargetResult, VcsCommandResult, VcsCommitEntry, VcsFileEntry, VcsFileStatus,
+        VcsMode, VcsSnapshot,
     };
     use taskers_domain::{PaneId, SurfaceId, WorkspaceId, WorkspaceWindowId};
 
@@ -968,5 +987,72 @@ mod tests {
         let round_trip: ScreenshotResult =
             serde_json::from_value(value).expect("deserialize screenshot result");
         assert_eq!(round_trip, window_result);
+    }
+
+    #[test]
+    fn vcs_responses_backfill_recent_stat_fields_from_older_payloads() {
+        let response = ControlResponse::Vcs {
+            result: VcsCommandResult {
+                snapshot: Some(VcsSnapshot {
+                    surface_id: SurfaceId::new(),
+                    mode: VcsMode::Git,
+                    repo_root: "/tmp/repo".into(),
+                    repo_name: "repo".into(),
+                    cwd: "/tmp/repo".into(),
+                    headline: "main".into(),
+                    detail: Some("ahead by 1".into()),
+                    summary_text: "working tree has changes".into(),
+                    files: vec![VcsFileEntry {
+                        path: "src/main.rs".into(),
+                        status: VcsFileStatus::Modified,
+                        staged: false,
+                        insertions: Some(7),
+                        deletions: Some(3),
+                    }],
+                    refs: Vec::new(),
+                    diff_path: Some("src/main.rs".into()),
+                    diff_text: Some("@@ -1 +1 @@".into()),
+                    pull_request: None,
+                    total_insertions: 7,
+                    total_deletions: 3,
+                    recent_commits: vec![VcsCommitEntry {
+                        id: "abc1234".into(),
+                        description: "feat: add stats".into(),
+                        insertions: 7,
+                        deletions: 3,
+                    }],
+                }),
+                message: None,
+            },
+        };
+
+        let mut value = serde_json::to_value(&response).expect("serialize vcs response");
+        let files = value["result"]["snapshot"]["files"]
+            .as_array_mut()
+            .expect("files array");
+        files[0]
+            .as_object_mut()
+            .expect("file object")
+            .retain(|key, _| key != "insertions" && key != "deletions");
+        value["result"]["snapshot"]
+            .as_object_mut()
+            .expect("snapshot object")
+            .retain(|key, _| {
+                key != "total_insertions" && key != "total_deletions" && key != "recent_commits"
+            });
+
+        let round_trip: ControlResponse =
+            serde_json::from_value(value).expect("deserialize vcs response");
+
+        let ControlResponse::Vcs { result } = round_trip else {
+            panic!("expected vcs response");
+        };
+        let snapshot = result.snapshot.expect("snapshot");
+        assert_eq!(snapshot.total_insertions, 0);
+        assert_eq!(snapshot.total_deletions, 0);
+        assert!(snapshot.recent_commits.is_empty());
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files[0].insertions, None);
+        assert_eq!(snapshot.files[0].deletions, None);
     }
 }
