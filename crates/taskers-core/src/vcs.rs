@@ -822,7 +822,7 @@ fn parse_git_numstat_z(raw: &str) -> HashMap<String, (u32, u32)> {
 }
 
 fn normalize_git_numstat_path(path: &str) -> String {
-    if !path.contains("=>") {
+    if !path.contains(" => ") {
         return path.to_string();
     }
 
@@ -836,7 +836,7 @@ fn normalize_git_numstat_path(path: &str) -> String {
                 return path.to_string();
             };
             let inner = &after_start[..end];
-            if let Some((_, destination)) = inner.split_once("=>") {
+            if let Some((_, destination)) = inner.split_once(" => ") {
                 normalized.push_str(destination.trim());
             } else {
                 normalized.push_str(inner);
@@ -847,7 +847,7 @@ fn normalize_git_numstat_path(path: &str) -> String {
         return normalized;
     }
 
-    path.rsplit_once("=>")
+    path.rsplit_once(" => ")
         .map(|(_, destination)| destination.trim().to_string())
         .unwrap_or_else(|| path.to_string())
 }
@@ -1226,6 +1226,17 @@ mod tests {
         let stats = parse_git_numstat(raw);
         assert_eq!(stats["new.txt"], (0, 0));
         assert_eq!(stats["src/main.rs"], (5, 2));
+    }
+
+    #[test]
+    fn preserves_literal_filenames_containing_arrow_text() {
+        let plain = "1\t0\ta=>b.txt\n";
+        let plain_stats = parse_git_numstat(plain);
+        assert_eq!(plain_stats["a=>b.txt"], (1, 0));
+
+        let nul = "2\t1\ta=>b.txt\0";
+        let nul_stats = parse_git_numstat(nul);
+        assert_eq!(nul_stats["a=>b.txt"], (2, 1));
     }
 
     #[test]
