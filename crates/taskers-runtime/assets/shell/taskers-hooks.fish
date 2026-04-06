@@ -89,14 +89,14 @@ end
 function taskers__agent_active_for_kind --argument kind
     switch "$kind"
         case started progress waiting_input
-            printf '%s' 1
+            printf '%s' true
         case completed error
-            printf '%s' 0
+            printf '%s' false
         case '*'
             if set -q TASKERS_ACTIVE_AGENT_KIND
-                printf '%s' 1
+                printf '%s' true
             else
-                printf '%s' 0
+                printf '%s' false
             end
     end
 end

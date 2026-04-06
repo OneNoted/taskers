@@ -897,6 +897,33 @@ mod tests {
     }
 
     #[test]
+    fn shell_hooks_emit_boolean_agent_active_flags() {
+        let bash_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.bash"
+        ));
+        let zsh_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        ));
+        let fish_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.fish"
+        ));
+
+        for asset in [bash_hooks, zsh_hooks, fish_hooks] {
+            assert!(
+                asset.contains("true"),
+                "expected hook asset to emit literal boolean true"
+            );
+            assert!(
+                asset.contains("false"),
+                "expected hook asset to emit literal boolean false"
+            );
+        }
+    }
+
+    #[test]
     fn embedded_zsh_emits_metadata_for_repo_cwd() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let runtime_root = unique_temp_dir("taskers-runtime-zsh-metadata");
