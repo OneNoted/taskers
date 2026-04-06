@@ -242,7 +242,7 @@ impl VcsService {
             .map(|path| git_diff_preview(&target.repo_root, path))
             .transpose()?;
         let summary_text = git_summary_text(&git_status);
-        let mut stat_map = parse_git_numstat(
+        let unstaged_stats = parse_git_numstat(
             &run_command(&target.repo_root, "git", &["diff", "--numstat"])
                 .map(|o| o.stdout)
                 .unwrap_or_default(),
@@ -252,13 +252,9 @@ impl VcsService {
                 .map(|o| o.stdout)
                 .unwrap_or_default(),
         );
-        for (path, (ins, del)) in staged_stats {
-            let entry = stat_map.entry(path).or_insert((0, 0));
-            entry.0 += ins;
-            entry.1 += del;
-        }
         let mut files = git_status.files;
-        let (total_insertions, total_deletions) = enrich_files_with_stats(&mut files, &stat_map);
+        let (total_insertions, total_deletions) =
+            enrich_git_files_with_stats(&mut files, &staged_stats, &unstaged_stats);
         // Try upstream..HEAD first, fall back to origin/HEAD..HEAD, then empty
         let commits_raw = run_command(
             &target.repo_root,
@@ -795,6 +791,37 @@ fn enrich_files_with_stats(
     (total_ins, total_del)
 }
 
+fn enrich_git_files_with_stats(
+    files: &mut [VcsFileEntry],
+    staged_stats: &HashMap<String, (u32, u32)>,
+    unstaged_stats: &HashMap<String, (u32, u32)>,
+) -> (u32, u32) {
+    for file in files.iter_mut() {
+        let stats = if file.staged {
+            staged_stats.get(&file.path)
+        } else {
+            unstaged_stats.get(&file.path)
+        };
+        if let Some(&(ins, del)) = stats {
+            file.insertions = Some(ins);
+            file.deletions = Some(del);
+        }
+    }
+    let total_ins = staged_stats
+        .values()
+        .chain(unstaged_stats.values())
+        .map(|(ins, _)| ins)
+        .copied()
+        .sum();
+    let total_del = staged_stats
+        .values()
+        .chain(unstaged_stats.values())
+        .map(|(_, del)| del)
+        .copied()
+        .sum();
+    (total_ins, total_del)
+}
+
 /// Parse `git log --format="%h%x09%s" --shortstat -n N` output.
 /// Lines alternate between "hash\tdescription" and "N files changed, X insertions(+), Y deletions(-)".
 fn parse_git_log_shortstat(raw: &str) -> Vec<VcsCommitEntry> {
@@ -963,9 +990,10 @@ mod tests {
     use std::{collections::HashMap, fs};
 
     use super::{
-        enrich_files_with_stats, jj_diff_preview, parse_git_log_shortstat, parse_git_numstat,
-        parse_git_status, parse_jj_bookmarks, parse_jj_current, parse_jj_diff_stat,
-        parse_jj_diff_summary, parse_jj_log_stat, resolve_repo_root,
+        enrich_files_with_stats, enrich_git_files_with_stats, jj_diff_preview,
+        parse_git_log_shortstat, parse_git_numstat, parse_git_status, parse_jj_bookmarks,
+        parse_jj_current, parse_jj_diff_stat, parse_jj_diff_summary, parse_jj_log_stat,
+        resolve_repo_root,
     };
     use taskers_control::{VcsFileEntry, VcsFileStatus, VcsMode};
     use tempfile::TempDir;
@@ -1162,5 +1190,48 @@ mod tests {
         assert_eq!(files[0].deletions, Some(2));
         assert_eq!(files[1].insertions, None);
         assert_eq!(files[1].deletions, None);
+    }
+
+    #[test]
+    fn enriches_git_stats_without_double_counting_split_entries() {
+        let mut files = vec![
+            VcsFileEntry {
+                path: "src/main.rs".into(),
+                status: VcsFileStatus::Modified,
+                staged: true,
+                insertions: None,
+                deletions: None,
+            },
+            VcsFileEntry {
+                path: "src/main.rs".into(),
+                status: VcsFileStatus::Modified,
+                staged: false,
+                insertions: None,
+                deletions: None,
+            },
+            VcsFileEntry {
+                path: "README.md".into(),
+                status: VcsFileStatus::Added,
+                staged: false,
+                insertions: None,
+                deletions: None,
+            },
+        ];
+        let staged_stats = HashMap::from([("src/main.rs".to_string(), (2, 1))]);
+        let unstaged_stats = HashMap::from([
+            ("src/main.rs".to_string(), (3, 0)),
+            ("README.md".to_string(), (4, 0)),
+        ]);
+
+        let (total_ins, total_del) =
+            enrich_git_files_with_stats(&mut files, &staged_stats, &unstaged_stats);
+
+        assert_eq!((total_ins, total_del), (9, 1));
+        assert_eq!(files[0].insertions, Some(2));
+        assert_eq!(files[0].deletions, Some(1));
+        assert_eq!(files[1].insertions, Some(3));
+        assert_eq!(files[1].deletions, Some(0));
+        assert_eq!(files[2].insertions, Some(4));
+        assert_eq!(files[2].deletions, Some(0));
     }
 }

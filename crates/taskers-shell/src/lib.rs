@@ -1657,6 +1657,12 @@ fn render_vcs_ref_create_form(
 ) -> Element {
     let surface_id = snapshot.surface_id;
     let mode = snapshot.mode;
+    let input_value = vcs_ref_input_value(
+        mode,
+        branch_name.read().as_str(),
+        bookmark_name.read().as_str(),
+    )
+    .to_owned();
     rsx! {
         div { class: "vcs-form-section",
             form {
@@ -1689,7 +1695,7 @@ fn render_vcs_ref_create_form(
                 input {
                     class: "vcs-input",
                     r#type: "text",
-                    value: if mode == VcsMode::Git { "{branch_name}" } else { "{bookmark_name}" },
+                    value: "{input_value}",
                     placeholder: if mode == VcsMode::Git { "New branch name" } else { "New bookmark name" },
                     oninput: move |event| {
                         match mode {
@@ -1846,6 +1852,13 @@ fn vcs_commit_net_summary(insertions: u32, deletions: u32) -> (&'static str, Str
         format!("{net}")
     };
     (class, text)
+}
+
+fn vcs_ref_input_value<'a>(mode: VcsMode, branch_name: &'a str, bookmark_name: &'a str) -> &'a str {
+    match mode {
+        VcsMode::Git => branch_name,
+        VcsMode::Jj => bookmark_name,
+    }
 }
 
 fn format_vcs_mode(mode: VcsMode) -> &'static str {
@@ -4183,11 +4196,11 @@ mod tests {
         SurfaceDragCandidate, SurfaceKind, attention_ring_class, select_active_surface,
         show_surface_backdrop, surface_drag_threshold_reached, surface_primary_label,
         surface_runtime_badge_text, surface_status_text, surface_summary_title,
-        vcs_commit_net_summary, vcs_diff_line_class, vcs_file_dot_class,
+        vcs_commit_net_summary, vcs_diff_line_class, vcs_file_dot_class, vcs_ref_input_value,
     };
     use crate::taskers_core::{
         AttentionRingState, AttentionState, BrowserProfileMode, PaneId, RuntimeIdentitySnapshot,
-        RuntimeStateSnapshot, SurfaceId, SurfaceSnapshot, VcsFileStatus, WorkspaceId,
+        RuntimeStateSnapshot, SurfaceId, SurfaceSnapshot, VcsFileStatus, VcsMode, WorkspaceId,
     };
 
     fn sample_surface(
@@ -4489,6 +4502,18 @@ mod tests {
         assert_eq!(
             vcs_commit_net_summary(4, 4),
             ("vcs-commit-net vcs-commit-net-zero", "0".into())
+        );
+    }
+
+    #[test]
+    fn vcs_ref_input_value_tracks_the_active_ref_mode() {
+        assert_eq!(
+            vcs_ref_input_value(VcsMode::Git, "release-0-6-0", "release-bookmark"),
+            "release-0-6-0"
+        );
+        assert_eq!(
+            vcs_ref_input_value(VcsMode::Jj, "release-0-6-0", "release-bookmark"),
+            "release-bookmark"
         );
     }
 }
