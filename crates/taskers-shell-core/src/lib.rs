@@ -3549,10 +3549,14 @@ impl TaskersCore {
         let Some(workspace_id) = model.active_workspace_id() else {
             return false;
         };
-        self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
+        let changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
             workspace_id,
             direction: direction.to_domain(),
-        })
+        });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
+        }
+        false
     }
 
     fn focus_workspace_window(&mut self, window_id: WorkspaceWindowId) -> bool {
@@ -9171,12 +9175,29 @@ mod tests {
     #[test]
     fn horizontal_scroll_host_events_pan_workspace_outside_overview() {
         let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
             direction: WorkspaceDirection::Right,
         });
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
             direction: WorkspaceDirection::Right,
         });
+        let workspace_id = core.snapshot().current_workspace.id;
+        let widths = core
+            .snapshot()
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, 720))
+            .collect::<Vec<_>>();
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths,
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+        core.dispatch_shell_action(ShellAction::ScrollViewport { dx: -50_000, dy: 0 });
         let before = core.snapshot().current_workspace.viewport_x;
 
         core.apply_host_event(HostEvent::ViewportScrolled { dx: 180, dy: 0 });
@@ -9188,6 +9209,53 @@ mod tests {
 
         let overview_snapshot = core.snapshot();
         assert_eq!(overview_snapshot.current_workspace.viewport_x, after);
+    }
+
+    #[test]
+    fn creating_workspace_window_scrolls_new_active_window_into_view() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let before = core.snapshot();
+        let workspace_id = before.current_workspace.id;
+        let widths = before
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, 720))
+            .collect::<Vec<_>>();
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths,
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+        let visible_left = snapshot.current_workspace.viewport_x;
+        let visible_right = visible_left + snapshot.portal.content.width;
+
+        assert!(
+            snapshot.current_workspace.viewport_x > 0,
+            "expected viewport to scroll toward the newly focused window"
+        );
+        assert!(
+            active_window.frame.x >= visible_left,
+            "expected active window left edge to be visible"
+        );
+        assert!(
+            active_window.frame.right() <= visible_right,
+            "expected active window right edge to be visible"
+        );
     }
 
     #[test]
