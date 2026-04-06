@@ -1,12 +1,13 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use taskers_control::{
-    VcsCommand, VcsCommandResult, VcsFileEntry, VcsFileStatus, VcsMode, VcsPullRequestInfo,
-    VcsRefEntry, VcsSnapshot,
+    VcsCommand, VcsCommandResult, VcsCommitEntry, VcsFileEntry, VcsFileStatus, VcsMode,
+    VcsPullRequestInfo, VcsRefEntry, VcsSnapshot,
 };
 use taskers_domain::{AppModel, PaneKind, SurfaceId};
 
@@ -240,6 +241,40 @@ impl VcsService {
             .as_deref()
             .map(|path| git_diff_preview(&target.repo_root, path))
             .transpose()?;
+        let summary_text = git_summary_text(&git_status);
+        let mut stat_map = parse_git_numstat(
+            &run_command(&target.repo_root, "git", &["diff", "--numstat"])
+                .map(|o| o.stdout)
+                .unwrap_or_default(),
+        );
+        let staged_stats = parse_git_numstat(
+            &run_command(&target.repo_root, "git", &["diff", "--numstat", "--cached"])
+                .map(|o| o.stdout)
+                .unwrap_or_default(),
+        );
+        for (path, (ins, del)) in staged_stats {
+            let entry = stat_map.entry(path).or_insert((0, 0));
+            entry.0 += ins;
+            entry.1 += del;
+        }
+        let mut files = git_status.files;
+        let (total_insertions, total_deletions) = enrich_files_with_stats(&mut files, &stat_map);
+        // Try upstream..HEAD first, fall back to origin/HEAD..HEAD, then empty
+        let commits_raw = run_command(
+            &target.repo_root,
+            "git",
+            &["log", "--format=%h\t%s", "--shortstat", "@{upstream}..HEAD"],
+        )
+        .or_else(|_| {
+            run_command(
+                &target.repo_root,
+                "git",
+                &["log", "--format=%h\t%s", "--shortstat", "origin/HEAD..HEAD"],
+            )
+        })
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+        let recent_commits = parse_git_log_shortstat(&commits_raw);
         Ok(VcsSnapshot {
             surface_id: target.surface_id,
             mode: VcsMode::Git,
@@ -255,12 +290,15 @@ impl VcsService {
             } else {
                 None
             },
-            summary_text: git_summary_text(&git_status),
-            files: git_status.files,
+            summary_text,
+            files,
             refs,
             diff_path,
             diff_text,
             pull_request,
+            total_insertions,
+            total_deletions,
+            recent_commits,
         })
     }
 
@@ -276,7 +314,7 @@ impl VcsService {
             .stdout,
             current.bookmarks.as_slice(),
         );
-        let files = parse_jj_diff_summary(
+        let mut files = parse_jj_diff_summary(
             &run_command(
                 &target.repo_root,
                 "jj",
@@ -284,11 +322,33 @@ impl VcsService {
             )?
             .stdout,
         );
+        let stat_output = run_command(
+            &target.repo_root,
+            "jj",
+            &["diff", "--stat", "--color=never"],
+        )
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+        let stat_map = parse_jj_diff_stat(&stat_output);
+        let (total_insertions, total_deletions) = enrich_files_with_stats(&mut files, &stat_map);
         let diff_text = diff_path
             .as_deref()
             .map(|path| jj_diff_preview(&target.repo_root, path));
         let current_bookmark = current.bookmarks.first().cloned();
         let pull_request = github_pull_request(&target.repo_root, current_bookmark.as_deref())?;
+        let recent_commits = parse_jj_log_stat(
+            &run_command(
+                &target.repo_root,
+                "jj",
+                &[
+                    "log", "--no-graph", "--color=never", "--stat",
+                    "-T", r#"change_id.short(8) ++ "\t" ++ if(description, description.first_line(), "(no description)") ++ "\n""#,
+                    "-r", "remote_bookmarks()..@",
+                ],
+            )
+            .map(|o| o.stdout)
+            .unwrap_or_default(),
+        );
         Ok(VcsSnapshot {
             surface_id: target.surface_id,
             mode: VcsMode::Jj,
@@ -307,6 +367,9 @@ impl VcsService {
             diff_path,
             diff_text,
             pull_request,
+            total_insertions,
+            total_deletions,
+            recent_commits,
         })
     }
 }
@@ -476,6 +539,8 @@ fn parse_git_status(raw: &str) -> ParsedGitStatus {
                 path: path.to_string(),
                 status: VcsFileStatus::Untracked,
                 staged: false,
+                insertions: None,
+                deletions: None,
             });
             continue;
         }
@@ -508,6 +573,8 @@ fn parse_git_status(raw: &str) -> ParsedGitStatus {
                     path,
                     status: VcsFileStatus::Conflicted,
                     staged: false,
+                    insertions: None,
+                    deletions: None,
                 });
             }
         }
@@ -529,6 +596,8 @@ fn git_file_entries(
             path: path.clone(),
             status: override_status.unwrap_or_else(|| map_git_status(index)),
             staged: true,
+            insertions: None,
+            deletions: None,
         });
     }
     if worktree != '.' {
@@ -536,6 +605,8 @@ fn git_file_entries(
             path,
             status: override_status.unwrap_or_else(|| map_git_status(worktree)),
             staged: false,
+            insertions: None,
+            deletions: None,
         });
     }
     entries
@@ -659,9 +730,183 @@ fn parse_jj_diff_summary(raw: &str) -> Vec<VcsFileEntry> {
                     _ => VcsFileStatus::Changed,
                 },
                 staged: false,
+                insertions: None,
+                deletions: None,
             })
         })
         .collect()
+}
+
+fn parse_jj_diff_stat(raw: &str) -> HashMap<String, (u32, u32)> {
+    let mut stats = HashMap::new();
+    for line in raw.lines() {
+        let Some((left, right)) = line.split_once('|') else {
+            continue;
+        };
+        let path = left.trim().to_string();
+        if path.is_empty() {
+            continue;
+        }
+        let right = right.trim();
+        // First token after | is the total change count
+        let count: u32 = match right.split_whitespace().next().and_then(|s| s.parse().ok()) {
+            Some(n) => n,
+            None => continue, // summary line or unparseable
+        };
+        let plus_count = right.chars().filter(|&c| c == '+').count() as u32;
+        let minus_count = right.chars().filter(|&c| c == '-').count() as u32;
+        let total_chars = plus_count + minus_count;
+        if total_chars == 0 {
+            continue;
+        }
+        let insertions = count * plus_count / total_chars;
+        let deletions = count - insertions;
+        stats.insert(path, (insertions, deletions));
+    }
+    stats
+}
+
+fn parse_git_numstat(raw: &str) -> HashMap<String, (u32, u32)> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let ins: u32 = parts.next()?.parse().ok()?;
+            let del: u32 = parts.next()?.parse().ok()?;
+            let path = parts.next()?.to_string();
+            Some((path, (ins, del)))
+        })
+        .collect()
+}
+
+fn enrich_files_with_stats(
+    files: &mut [VcsFileEntry],
+    stats: &HashMap<String, (u32, u32)>,
+) -> (u32, u32) {
+    let mut total_ins = 0u32;
+    let mut total_del = 0u32;
+    for file in files.iter_mut() {
+        if let Some(&(ins, del)) = stats.get(&file.path) {
+            file.insertions = Some(ins);
+            file.deletions = Some(del);
+            total_ins += ins;
+            total_del += del;
+        }
+    }
+    (total_ins, total_del)
+}
+
+/// Parse `git log --format="%h%x09%s" --shortstat -n N` output.
+/// Lines alternate between "hash\tdescription" and "N files changed, X insertions(+), Y deletions(-)".
+fn parse_git_log_shortstat(raw: &str) -> Vec<VcsCommitEntry> {
+    let mut commits = Vec::new();
+    let mut current_id = String::new();
+    let mut current_desc = String::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((hash, desc)) = trimmed.split_once('\t') {
+            // Flush previous commit if pending
+            if !current_id.is_empty() {
+                commits.push(VcsCommitEntry {
+                    id: std::mem::take(&mut current_id),
+                    description: std::mem::take(&mut current_desc),
+                    insertions: 0,
+                    deletions: 0,
+                });
+            }
+            current_id = hash.to_string();
+            current_desc = desc.to_string();
+        } else if trimmed.contains("changed") {
+            // Stat summary line: "N file(s) changed, X insertion(s)(+), Y deletion(s)(-)"
+            let (ins, del) = parse_shortstat_line(trimmed);
+            commits.push(VcsCommitEntry {
+                id: std::mem::take(&mut current_id),
+                description: std::mem::take(&mut current_desc),
+                insertions: ins,
+                deletions: del,
+            });
+        }
+    }
+    // Flush last commit without stats
+    if !current_id.is_empty() {
+        commits.push(VcsCommitEntry {
+            id: current_id,
+            description: current_desc,
+            insertions: 0,
+            deletions: 0,
+        });
+    }
+    commits
+}
+
+/// Parse `jj log --no-graph --color=never --stat -T 'template'` output.
+/// Template produces "change_id\tdescription" lines interleaved with stat output.
+fn parse_jj_log_stat(raw: &str) -> Vec<VcsCommitEntry> {
+    let mut commits = Vec::new();
+    let mut current_id = String::new();
+    let mut current_desc = String::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((id, desc)) = trimmed.split_once('\t') {
+            // If the "id" part looks like a short change ID (alphanumeric, no spaces, no |)
+            if !id.is_empty() && !id.contains('|') && !id.contains("changed") && id.len() <= 16 {
+                // Flush previous
+                if !current_id.is_empty() {
+                    commits.push(VcsCommitEntry {
+                        id: std::mem::take(&mut current_id),
+                        description: std::mem::take(&mut current_desc),
+                        insertions: 0,
+                        deletions: 0,
+                    });
+                }
+                current_id = id.to_string();
+                current_desc = desc.to_string();
+                continue;
+            }
+        }
+        if trimmed.contains("changed")
+            && (trimmed.contains("insertion") || trimmed.contains("deletion"))
+        {
+            let (ins, del) = parse_shortstat_line(trimmed);
+            commits.push(VcsCommitEntry {
+                id: std::mem::take(&mut current_id),
+                description: std::mem::take(&mut current_desc),
+                insertions: ins,
+                deletions: del,
+            });
+        }
+        // Skip per-file stat lines (contain |)
+    }
+    if !current_id.is_empty() {
+        commits.push(VcsCommitEntry {
+            id: current_id,
+            description: current_desc,
+            insertions: 0,
+            deletions: 0,
+        });
+    }
+    commits
+}
+
+/// Extract insertions/deletions from a shortstat summary line like
+/// "3 files changed, 10 insertions(+), 5 deletions(-)"
+fn parse_shortstat_line(line: &str) -> (u32, u32) {
+    let mut ins = 0u32;
+    let mut del = 0u32;
+    let words: Vec<&str> = line.split_whitespace().collect();
+    for window in words.windows(2) {
+        if window[1].starts_with("insertion") {
+            ins = window[0].parse().unwrap_or(0);
+        } else if window[1].starts_with("deletion") {
+            del = window[0].parse().unwrap_or(0);
+        }
+    }
+    (ins, del)
 }
 
 fn github_pull_request(repo_root: &Path, head: Option<&str>) -> Result<Option<VcsPullRequestInfo>> {
@@ -715,14 +960,14 @@ fn command_exists(program: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashMap, fs};
 
     use super::{
-        jj_diff_preview, parse_git_status, parse_jj_bookmarks, parse_jj_current,
-        parse_jj_diff_summary, resolve_repo_root,
+        enrich_files_with_stats, jj_diff_preview, parse_git_log_shortstat, parse_git_numstat,
+        parse_git_status, parse_jj_bookmarks, parse_jj_current, parse_jj_diff_stat,
+        parse_jj_diff_summary, parse_jj_log_stat, resolve_repo_root,
     };
-    use taskers_control::VcsFileStatus;
-    use taskers_control::VcsMode;
+    use taskers_control::{VcsFileEntry, VcsFileStatus, VcsMode};
     use tempfile::TempDir;
 
     #[test]
@@ -822,5 +1067,100 @@ mod tests {
     fn jj_diff_preview_returns_empty_when_preview_fails() {
         let temp = TempDir::new().expect("tempdir");
         assert_eq!(jj_diff_preview(temp.path(), "missing.txt"), "");
+    }
+
+    #[test]
+    fn parses_jj_diff_stat_output() {
+        let raw = "src/main.rs  | 12 ++++++------\nsrc/lib.rs   |  4 ++++\n2 files changed, 10 insertions(+), 6 deletions(-)\n";
+        let stats = parse_jj_diff_stat(raw);
+        assert_eq!(stats.len(), 2);
+        let (ins, del) = stats["src/main.rs"];
+        assert_eq!(ins, 6);
+        assert_eq!(del, 6);
+        let (ins, del) = stats["src/lib.rs"];
+        assert_eq!(ins, 4);
+        assert_eq!(del, 0);
+    }
+
+    #[test]
+    fn parses_git_numstat_output() {
+        let raw = "10\t5\tsrc/main.rs\n3\t0\tREADME.md\n-\t-\tbinary.png\n";
+        let stats = parse_git_numstat(raw);
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats["src/main.rs"], (10, 5));
+        assert_eq!(stats["README.md"], (3, 0));
+        assert!(!stats.contains_key("binary.png"));
+    }
+
+    #[test]
+    fn parses_git_log_shortstat() {
+        let raw = "abc1234\tfix: handle edge case\n\n 3 files changed, 10 insertions(+), 5 deletions(-)\n\ndef5678\tfeat: add new feature\n\n 1 file changed, 20 insertions(+)\n";
+        let commits = parse_git_log_shortstat(raw);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].id, "abc1234");
+        assert_eq!(commits[0].description, "fix: handle edge case");
+        assert_eq!(commits[0].insertions, 10);
+        assert_eq!(commits[0].deletions, 5);
+        assert_eq!(commits[1].id, "def5678");
+        assert_eq!(commits[1].insertions, 20);
+        assert_eq!(commits[1].deletions, 0);
+    }
+
+    #[test]
+    fn parses_git_log_shortstat_with_statless_commit_before_next_entry() {
+        let raw = "abc1234\tchore: empty change\n\ndef5678\tfeat: add widget\n\n 1 file changed, 2 insertions(+), 1 deletion(-)\n";
+        let commits = parse_git_log_shortstat(raw);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].id, "abc1234");
+        assert_eq!(commits[0].insertions, 0);
+        assert_eq!(commits[0].deletions, 0);
+        assert_eq!(commits[1].id, "def5678");
+        assert_eq!(commits[1].insertions, 2);
+        assert_eq!(commits[1].deletions, 1);
+    }
+
+    #[test]
+    fn parses_jj_log_stat() {
+        let raw = "abcd1234\tfix: centralize state\nsrc/main.rs | 12 ++++++------\nsrc/lib.rs  |  4 ++++\n2 files changed, 10 insertions(+), 6 deletions(-)\nefgh5678\tfeat: add widget\nwidget.rs | 30 ++++++++++++++++++++++++++++++\n1 file changed, 30 insertions(+), 0 deletions(-)\n";
+        let commits = parse_jj_log_stat(raw);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].id, "abcd1234");
+        assert_eq!(commits[0].insertions, 10);
+        assert_eq!(commits[0].deletions, 6);
+        assert_eq!(commits[1].id, "efgh5678");
+        assert_eq!(commits[1].insertions, 30);
+        assert_eq!(commits[1].deletions, 0);
+    }
+
+    #[test]
+    fn enriches_matching_files_with_stats_and_totals() {
+        let mut files = vec![
+            VcsFileEntry {
+                path: "src/main.rs".into(),
+                status: VcsFileStatus::Modified,
+                staged: false,
+                insertions: None,
+                deletions: None,
+            },
+            VcsFileEntry {
+                path: "README.md".into(),
+                status: VcsFileStatus::Added,
+                staged: true,
+                insertions: None,
+                deletions: None,
+            },
+        ];
+        let stats = HashMap::from([
+            ("src/main.rs".to_string(), (5, 2)),
+            ("ignored.rs".to_string(), (9, 9)),
+        ]);
+
+        let (total_ins, total_del) = enrich_files_with_stats(&mut files, &stats);
+
+        assert_eq!((total_ins, total_del), (5, 2));
+        assert_eq!(files[0].insertions, Some(5));
+        assert_eq!(files[0].deletions, Some(2));
+        assert_eq!(files[1].insertions, None);
+        assert_eq!(files[1].deletions, None);
     }
 }

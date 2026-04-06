@@ -18,7 +18,9 @@ use taskers_runtime::ShellLaunchSpec;
 use time::OffsetDateTime;
 use tokio::sync::watch;
 
-pub use taskers_control::{VcsCommand, VcsFileEntry, VcsFileStatus, VcsMode, VcsSnapshot};
+pub use taskers_control::{
+    VcsCommand, VcsCommitEntry, VcsFileEntry, VcsFileStatus, VcsMode, VcsSnapshot,
+};
 pub use taskers_domain::{
     BrowserProfileMode, Direction, PaneContainerId, PaneId, PaneKind, PaneTabId, PaneTabLayoutNode,
     SurfaceId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowMoveTarget,
@@ -6647,6 +6649,13 @@ fn is_local_browser_target(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use crate::PixelSize;
     use taskers_control::ControlCommand;
     use taskers_core::AppState;
@@ -6686,6 +6695,210 @@ mod tests {
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         }
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(prefix: &str) -> Self {
+            let unique = format!(
+                "{prefix}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn run_command(command: &mut Command) {
+        let output = command.output().expect("run command");
+        assert!(
+            output.status.success(),
+            "command failed: status={:?}\nstdout={}\nstderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    fn command_available(program: &str) -> bool {
+        Command::new(program)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn init_git_vcs_fixture() -> TestDir {
+        let fixture = TestDir::new("taskers-shell-core-vcs");
+        let remote_path = fixture.path().join("remote.git");
+        let repo_path = fixture.path().join("repo");
+        fs::create_dir_all(&repo_path).expect("create repo dir");
+
+        run_command(
+            Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(&remote_path),
+        );
+        run_command(Command::new("git").arg("init").arg(&repo_path));
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ]));
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "config",
+            "user.name",
+            "Taskers Tests",
+        ]));
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "config",
+            "user.email",
+            "tests@example.com",
+        ]));
+
+        fs::write(repo_path.join("committed.txt"), "base\n").expect("write committed seed");
+        fs::write(repo_path.join("working.txt"), "base\n").expect("write working seed");
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["add", "."]),
+        );
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "commit",
+            "-m",
+            "chore: base fixture",
+        ]));
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["remote", "add", "origin"])
+                .arg(&remote_path),
+        );
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["push", "-u", "origin", "main"]),
+        );
+
+        fs::write(repo_path.join("committed.txt"), "base\nunpushed\n")
+            .expect("write unpushed change");
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["add", "committed.txt"]),
+        );
+        run_command(Command::new("git").arg("-C").arg(&repo_path).args([
+            "commit",
+            "-m",
+            "feat: add unpushed change",
+        ]));
+
+        fs::write(repo_path.join("working.txt"), "base\nworking tree change\n")
+            .expect("write working tree change");
+
+        fixture
+    }
+
+    fn init_jj_vcs_fixture() -> Option<TestDir> {
+        if !command_available("jj") {
+            return None;
+        }
+
+        let fixture = TestDir::new("taskers-shell-core-jj");
+        let remote_path = fixture.path().join("remote.git");
+        let repo_path = fixture.path().join("repo");
+
+        run_command(
+            Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(&remote_path),
+        );
+        run_command(
+            Command::new("jj")
+                .args(["git", "init", "--colocate"])
+                .arg(&repo_path),
+        );
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["remote", "add", "origin"])
+                .arg(&remote_path),
+        );
+
+        fs::write(repo_path.join("committed.txt"), "base\n").expect("write committed seed");
+        fs::write(repo_path.join("working.txt"), "base\n").expect("write working seed");
+        run_command(Command::new("jj").arg("-R").arg(&repo_path).args([
+            "describe",
+            "-m",
+            "chore: base fixture",
+        ]));
+        run_command(
+            Command::new("jj")
+                .arg("-R")
+                .arg(&repo_path)
+                .args(["bookmark", "create", "main"]),
+        );
+        run_command(Command::new("jj").arg("-R").arg(&repo_path).args([
+            "git",
+            "push",
+            "--bookmark",
+            "main",
+        ]));
+        run_command(Command::new("jj").arg("-R").arg(&repo_path).args([
+            "describe",
+            "-m",
+            "feat: add unpushed change",
+        ]));
+
+        fs::write(repo_path.join("committed.txt"), "base\nunpushed\n")
+            .expect("write unpushed change");
+        fs::write(repo_path.join("working.txt"), "base\nworking tree change\n")
+            .expect("write working tree change");
+
+        Some(fixture)
+    }
+
+    fn model_with_terminal_cwd(cwd: &Path) -> AppModel {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+        let pane_id = model.active_workspace().expect("workspace").active_pane;
+        let surface_id = model
+            .active_workspace()
+            .and_then(|workspace| workspace.panes.get(&pane_id))
+            .map(|pane| pane.active_surface)
+            .expect("surface");
+        let surface = model
+            .workspaces
+            .get_mut(&workspace_id)
+            .and_then(|workspace| workspace.panes.get_mut(&pane_id))
+            .and_then(|pane| pane.surfaces.get_mut(&surface_id))
+            .expect("surface record");
+        surface.metadata.cwd = Some(cwd.display().to_string());
+        model
     }
 
     fn preview_app_state_with_model(model: AppModel, label: &str) -> AppState {
@@ -9461,6 +9674,119 @@ mod tests {
             snapshot.vcs_panel.target_surface_id,
             Some(terminal_surface_id)
         );
+    }
+
+    #[test]
+    fn vcs_panel_reads_git_stats_and_unpushed_commits_from_repo_target() {
+        let fixture = init_git_vcs_fixture();
+        let model = model_with_terminal_cwd(&fixture.path().join("repo"));
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-vcs-git-refresh",
+        ));
+
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.vcs_panel.visible);
+        let vcs = snapshot.vcs_panel.snapshot.expect("vcs snapshot");
+        assert_eq!(vcs.mode, super::VcsMode::Git);
+        assert_eq!(vcs.total_insertions, 1);
+        assert_eq!(vcs.total_deletions, 0);
+        assert_eq!(vcs.recent_commits.len(), 1);
+        assert_eq!(
+            vcs.recent_commits[0].description,
+            "feat: add unpushed change"
+        );
+        let file = vcs
+            .files
+            .iter()
+            .find(|file| file.path == "working.txt")
+            .expect("working tree file");
+        assert_eq!(file.insertions, Some(1));
+        assert_eq!(file.deletions, Some(0));
+    }
+
+    #[test]
+    fn showing_vcs_diff_loads_preview_for_selected_git_file() {
+        let fixture = init_git_vcs_fixture();
+        let model = model_with_terminal_cwd(&fixture.path().join("repo"));
+        let core =
+            SharedCore::bootstrap(bootstrap_with_model(model, "taskers-preview-vcs-git-diff"));
+
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+        core.dispatch_shell_action(ShellAction::ShowVcsDiff {
+            path: Some("working.txt".into()),
+        });
+
+        let snapshot = core.snapshot();
+        let vcs = snapshot.vcs_panel.snapshot.expect("vcs snapshot");
+        assert_eq!(vcs.diff_path.as_deref(), Some("working.txt"));
+        let diff = vcs.diff_text.expect("diff text");
+        assert!(diff.contains("working tree change"));
+        assert!(diff.contains("+++"));
+    }
+
+    #[test]
+    fn vcs_panel_reads_jj_stats_and_unpushed_commits_from_repo_target() {
+        let Some(fixture) = init_jj_vcs_fixture() else {
+            return;
+        };
+        let model = model_with_terminal_cwd(&fixture.path().join("repo"));
+        let core = SharedCore::bootstrap(bootstrap_with_model(
+            model,
+            "taskers-preview-vcs-jj-refresh",
+        ));
+
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+
+        let snapshot = core.snapshot();
+        assert!(snapshot.vcs_panel.visible);
+        let vcs = snapshot.vcs_panel.snapshot.expect("vcs snapshot");
+        assert_eq!(vcs.mode, super::VcsMode::Jj);
+        assert_eq!(vcs.total_insertions, 2);
+        assert_eq!(vcs.total_deletions, 0);
+        assert_eq!(vcs.recent_commits.len(), 1);
+        assert_eq!(
+            vcs.recent_commits[0].description,
+            "feat: add unpushed change"
+        );
+        let working_file = vcs
+            .files
+            .iter()
+            .find(|file| file.path == "working.txt")
+            .expect("working tree file");
+        assert_eq!(working_file.insertions, Some(1));
+        assert_eq!(working_file.deletions, Some(0));
+        let committed_file = vcs
+            .files
+            .iter()
+            .find(|file| file.path == "committed.txt")
+            .expect("committed file");
+        assert_eq!(committed_file.insertions, Some(1));
+        assert_eq!(committed_file.deletions, Some(0));
+    }
+
+    #[test]
+    fn showing_vcs_diff_loads_preview_for_selected_jj_file() {
+        let Some(fixture) = init_jj_vcs_fixture() else {
+            return;
+        };
+        let model = model_with_terminal_cwd(&fixture.path().join("repo"));
+        let core =
+            SharedCore::bootstrap(bootstrap_with_model(model, "taskers-preview-vcs-jj-diff"));
+
+        core.dispatch_shell_action(ShellAction::ToggleVcsPanel);
+        core.dispatch_shell_action(ShellAction::ShowVcsDiff {
+            path: Some("working.txt".into()),
+        });
+
+        let snapshot = core.snapshot();
+        let vcs = snapshot.vcs_panel.snapshot.expect("vcs snapshot");
+        assert_eq!(vcs.diff_path.as_deref(), Some("working.txt"));
+        let diff = vcs.diff_text.expect("diff text");
+        assert!(diff.contains("Modified regular file working.txt"));
+        assert!(diff.contains("working tree change"));
     }
 
     #[test]

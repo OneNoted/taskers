@@ -13,6 +13,7 @@ pub use protocol::{
     ControlQuery, ControlResponse, IdentifyContext, IdentifyResult, RequestFrame, ResponseFrame,
     ScreenshotCommand, ScreenshotResult, ScreenshotTarget, ScreenshotTargetResult,
     TerminalDebugCommand, TerminalDebugResult, TerminalRenderStats, VcsCommand, VcsCommandResult,
-    VcsFileEntry, VcsFileStatus, VcsMode, VcsPullRequestInfo, VcsRefEntry, VcsSnapshot,
+    VcsCommitEntry, VcsFileEntry, VcsFileStatus, VcsMode, VcsPullRequestInfo, VcsRefEntry,
+    VcsSnapshot,
 };
 pub use socket::{bind_socket, serve, serve_with_handler};
