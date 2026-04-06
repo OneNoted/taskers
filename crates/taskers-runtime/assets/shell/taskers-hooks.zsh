@@ -58,10 +58,14 @@ taskers__repo_root() {
 
 taskers__repo_branch() {
   if command -v git >/dev/null 2>&1; then
-    git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null \
+    local branch
+    branch=$(git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null \
       || git -C "$PWD" rev-parse --short HEAD 2>/dev/null \
-      || true
-    return 0
+      || true)
+    if [[ -n "$branch" ]]; then
+      print -rn -- "$branch"
+      return 0
+    fi
   fi
   if command -v jj >/dev/null 2>&1; then
     jj log -r @ -T 'change_id.shortest(8)' --no-graph 2>/dev/null || true
