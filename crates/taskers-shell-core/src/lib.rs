@@ -4163,13 +4163,13 @@ impl TaskersCore {
     fn update_surface_metadata(&mut self, surface_id: SurfaceId, patch: PaneMetadataPatch) -> bool {
         let mut changed =
             self.dispatch_control(ControlCommand::UpdateSurfaceMetadata { surface_id, patch });
-        if self.ui.vcs_panel_visible
-            && self
-                .ui
-                .vcs_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.surface_id == surface_id)
-        {
+        let model = self.app_state.snapshot_model();
+        let should_refresh_vcs = self.ui.vcs_panel_visible
+            && model
+                .active_workspace_id()
+                .and_then(|workspace_id| self.vcs_target_surface_id(&model, workspace_id))
+                == Some(surface_id);
+        if should_refresh_vcs {
             changed |= self.refresh_vcs_panel();
         }
         changed

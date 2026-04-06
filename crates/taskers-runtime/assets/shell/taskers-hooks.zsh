@@ -46,15 +46,28 @@ taskers__osc133_print() {
 }
 
 taskers__repo_root() {
-  command -v git >/dev/null 2>&1 || return 0
-  git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true
+  if command -v git >/dev/null 2>&1; then
+    git -C "$PWD" rev-parse --show-toplevel 2>/dev/null && return 0
+  fi
+  if command -v jj >/dev/null 2>&1; then
+    jj root 2>/dev/null || true
+    return 0
+  fi
+  return 0
 }
 
 taskers__repo_branch() {
-  command -v git >/dev/null 2>&1 || return 0
-  git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null \
-    || git -C "$PWD" rev-parse --short HEAD 2>/dev/null \
-    || true
+  if command -v git >/dev/null 2>&1; then
+    git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null \
+      || git -C "$PWD" rev-parse --short HEAD 2>/dev/null \
+      || true
+    return 0
+  fi
+  if command -v jj >/dev/null 2>&1; then
+    jj log -r @ -T 'change_id.shortest(8)' --no-graph 2>/dev/null || true
+    return 0
+  fi
+  return 0
 }
 
 taskers__classify_token() {
@@ -147,9 +160,11 @@ taskers__agent_active_for_kind() {
 
 taskers__context_tty_matches() {
   local expected_tty=${TASKERS_TTY_NAME:-}
-  local current_tty
   [[ -n "$expected_tty" ]] || return 1
-  current_tty=$(tty 2>/dev/null || true)
+  local current_tty=${TTY:-}
+  if [[ -z "$current_tty" ]]; then
+    current_tty=$(tty 2>/dev/null || true)
+  fi
   [[ "$current_tty" = /dev/* ]] || return 1
   [[ "$current_tty" = "$expected_tty" ]]
 }

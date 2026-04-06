@@ -880,6 +880,23 @@ mod tests {
     }
 
     #[test]
+    fn zsh_shell_hook_prefers_shell_tty_and_supports_jj_repos() {
+        let zsh_hooks = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-hooks.zsh"
+        ));
+
+        assert!(
+            zsh_hooks.contains("local current_tty=${TTY:-}"),
+            "expected zsh hooks to prefer zsh's built-in TTY variable"
+        );
+        assert!(
+            zsh_hooks.contains("jj root"),
+            "expected zsh hooks to support JJ repo root detection"
+        );
+    }
+
+    #[test]
     fn embedded_zsh_emits_metadata_for_repo_cwd() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let runtime_root = unique_temp_dir("taskers-runtime-zsh-metadata");
