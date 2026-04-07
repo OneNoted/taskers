@@ -80,7 +80,11 @@ cargo publish -p taskers-paths
 cargo publish -p taskers-control
 cargo publish -p taskers-runtime
 cargo publish -p taskers-ghostty
+cargo publish -p taskers-core
+cargo publish -p taskers-shell-core
 cargo publish -p taskers-cli
+cargo publish -p taskers-host
+cargo publish -p taskers-shell
 cargo publish -p taskers
 ```
 
