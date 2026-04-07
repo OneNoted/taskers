@@ -116,6 +116,14 @@ struct RuntimePathOverrides {
     terminal_socket_path: PathBuf,
 }
 
+fn should_skip_terminal_sidecar_in_smoke(path_overrides: Option<&RuntimePathOverrides>) -> bool {
+    path_overrides.is_some()
+        && matches!(
+            std::env::var("TASKERS_TERMINAL_BACKEND").ok().as_deref(),
+            Some("mock")
+        )
+}
+
 enum HostAutomationCommand {
     Browser(BrowserControlCommand),
     Screenshot(ScreenshotCommand),
@@ -1355,19 +1363,26 @@ fn resolve_runtime_bootstrap(
     shell_launch
         .env
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
-    let terminal_session_client = match ensure_terminal_session_daemon(&terminal_socket_path) {
-        Ok(()) => {
-            shell_launch.env.insert(
-                "TASKERS_TERMINAL_SOCKET".into(),
-                terminal_socket_path.display().to_string(),
-            );
-            Some(TerminalSessionClient::new(terminal_socket_path))
-        }
-        Err(error) => {
-            startup_notes.push(format!(
-                "terminal session sidecar unavailable; terminals will start fresh shells and will not survive Taskers restart ({error})"
-            ));
-            None
+    let terminal_session_client = if should_skip_terminal_sidecar_in_smoke(path_overrides) {
+        startup_notes.push(
+            "Smoke mode with mock terminal backend skips the terminal session sidecar.".into(),
+        );
+        None
+    } else {
+        match ensure_terminal_session_daemon(&terminal_socket_path) {
+            Ok(()) => {
+                shell_launch.env.insert(
+                    "TASKERS_TERMINAL_SOCKET".into(),
+                    terminal_socket_path.display().to_string(),
+                );
+                Some(TerminalSessionClient::new(terminal_socket_path))
+            }
+            Err(error) => {
+                startup_notes.push(format!(
+                    "terminal session sidecar unavailable; terminals will start fresh shells and will not survive Taskers restart ({error})"
+                ));
+                None
+            }
         }
     };
     let terminal_persistence = if terminal_session_client.is_some() {
@@ -2456,7 +2471,10 @@ fn looks_like_dev_install(path: &Path) -> bool {
 
 #[cfg(test)]
 mod startup_tests {
-    use super::{looks_like_dev_install, should_defer_initial_sync, smoke_runtime_path_overrides};
+    use super::{
+        RuntimePathOverrides, looks_like_dev_install, should_defer_initial_sync,
+        should_skip_terminal_sidecar_in_smoke, smoke_runtime_path_overrides,
+    };
     use std::path::Path;
 
     #[test]
@@ -2503,5 +2521,25 @@ mod startup_tests {
                 .terminal_socket_path
                 .starts_with(&overrides.root_dir)
         );
+    }
+
+    #[test]
+    fn smoke_with_mock_backend_skips_terminal_sidecar() {
+        let overrides = RuntimePathOverrides {
+            root_dir: Path::new("/tmp/taskers-smoke").to_path_buf(),
+            session_path: Path::new("/tmp/taskers-smoke/session.json").to_path_buf(),
+            socket_path: Path::new("/tmp/taskers-smoke/control.sock").to_path_buf(),
+            terminal_socket_path: Path::new("/tmp/taskers-smoke/terminal.sock").to_path_buf(),
+        };
+
+        unsafe { std::env::set_var("TASKERS_TERMINAL_BACKEND", "mock") };
+        assert!(should_skip_terminal_sidecar_in_smoke(Some(&overrides)));
+        unsafe { std::env::set_var("TASKERS_TERMINAL_BACKEND", "ghostty") };
+        assert!(!should_skip_terminal_sidecar_in_smoke(Some(&overrides)));
+        unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
+        assert!(!should_skip_terminal_sidecar_in_smoke(Some(&overrides)));
+        unsafe { std::env::set_var("TASKERS_TERMINAL_BACKEND", "mock") };
+        assert!(!should_skip_terminal_sidecar_in_smoke(None));
+        unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
     }
 }

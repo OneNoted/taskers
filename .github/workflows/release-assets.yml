@@ -49,7 +49,7 @@ jobs:
           "${prefix}/bin/blueprint-compiler" --version
 
       - name: Build debug app for smoke
-        run: cargo build -p taskers --bin taskers --bin taskers-gtk
+        run: cargo build -p taskers --bin taskers --bin taskers-gtk --bin taskersctl --bin taskers-terminald
 
       - name: Run headless app smoke
         run: |
