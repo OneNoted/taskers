@@ -32,11 +32,22 @@ cargo install taskers --locked
 taskers
 ```
 
+Arch Linux (AUR):
+
+```bash
+yay -S taskers-bin
+# or
+yay -S taskers-git
+```
+
 `cargo install taskers` installs the Linux launcher entrypoint. On first launch,
 that launcher ensures the version-matched Linux app bundle is present under the
 user data directory and then starts the bundled `taskers-gtk` host plus its
 helper binaries. The first launch also bootstraps the version-matched Ghostty
 runtime assets when needed.
+
+`taskers-bin` installs the latest published Linux bundle under `/opt/taskers`.
+`taskers-git` builds the current `dev` branch into the same layout.
 
 The Linux app requires GTK4/libadwaita plus the host WebKitGTK 6.0 development
 packages at install time and the WebKitGTK 6.0 runtime at launch time. Taskers

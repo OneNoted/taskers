@@ -10,6 +10,8 @@ asset_name="taskers-linux-bundle-v${version}-${target}.tar.xz"
 stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/taskers-linux-bundle.XXXXXX")"
 prefix_dir="$stage_dir/prefix"
 bundle_dir="$stage_dir/bundle"
+bundle_rustflags="${RUSTFLAGS:-}"
+bundle_rustflags="${bundle_rustflags:+$bundle_rustflags }--remap-path-prefix=${repo_root}=."
 
 cleanup() {
   rm -rf "$stage_dir"
@@ -18,7 +20,9 @@ trap cleanup EXIT
 
 (
   cd "$repo_root"
-  cargo build --release -p taskers --bin taskers --bin taskers-gtk --bin taskersctl --bin taskers-terminald
+  TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED=1 \
+    RUSTFLAGS="$bundle_rustflags" \
+    cargo build --release -p taskers --bin taskers --bin taskers-gtk --bin taskersctl --bin taskers-terminald
 )
 
 (
@@ -29,6 +33,7 @@ trap cleanup EXIT
     -Dgtk-wayland=false \
     -Dstrip=true \
     -Di18n=false \
+    -Dcpu=baseline \
     "-Dversion-string=$ghostty_version" \
     --summary none \
     --prefix "$prefix_dir"

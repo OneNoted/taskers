@@ -195,6 +195,30 @@ pub fn runtime_bridge_path() -> Option<PathBuf> {
         .filter(|path| path.exists())
 }
 
+pub fn runtime_terminfo_dir() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("TERMINFO")
+        .map(PathBuf::from)
+        .filter(|path| terminfo_dir_is_usable(path))
+    {
+        return Some(path);
+    }
+
+    if let Some(path) = explicit_runtime_dir()
+        .and_then(|root| sibling_terminfo_dir(&root))
+        .filter(|path| terminfo_dir_is_usable(path))
+    {
+        return Some(path);
+    }
+
+    if let Some(path) = build_runtime_terminfo_dir() {
+        return Some(path);
+    }
+
+    default_installed_runtime_dir()
+        .and_then(|root| sibling_terminfo_dir(&root))
+        .filter(|path| terminfo_dir_is_usable(path))
+}
+
 fn unpack_bundle<R: Read>(reader: R, staging_root: &Path) -> Result<(), RuntimeBootstrapError> {
     let decoder = XzDecoder::new(reader);
     let mut archive = Archive::new(decoder);
@@ -259,6 +283,12 @@ fn build_runtime_resources_dir() -> Option<PathBuf> {
         .filter(|path| path.exists())
 }
 
+fn build_runtime_terminfo_dir() -> Option<PathBuf> {
+    option_env!("TASKERS_GHOSTTY_BUILD_TERMINFO_DIR")
+        .map(PathBuf::from)
+        .filter(|path| terminfo_dir_is_usable(path))
+}
+
 fn set_runtime_environment_vars(path: &Path) {
     unsafe {
         env::set_var("GHOSTTY_RESOURCES_DIR", path);
@@ -284,6 +314,14 @@ fn default_runtime_bundle_url() -> String {
         version = env!("CARGO_PKG_VERSION"),
         target = option_env!("TASKERS_BUILD_TARGET").unwrap_or("x86_64-unknown-linux-gnu"),
     )
+}
+
+fn sibling_terminfo_dir(runtime_dir: &Path) -> Option<PathBuf> {
+    runtime_dir.parent().map(|root| root.join("terminfo"))
+}
+
+fn terminfo_dir_is_usable(path: &Path) -> bool {
+    path.join(TERMINFO_GHOSTTY_PATH).exists() || path.join(TERMINFO_XTERM_GHOSTTY_PATH).exists()
 }
 
 fn replace_directory(source: &Path, destination: &Path) -> Result<(), RuntimeBootstrapError> {
@@ -322,7 +360,7 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RuntimeBootstrapError> {
 mod tests {
     use super::{
         RUNTIME_VERSION_FILE, RuntimeBootstrap, ensure_runtime_installed, runtime_bridge_path,
-        runtime_resources_dir,
+        runtime_resources_dir, runtime_terminfo_dir,
     };
     use std::{env, fs, path::Path};
     use tar::Builder;
@@ -412,6 +450,7 @@ mod tests {
             Some(runtime_dir.join("lib").join("libtaskers_ghostty_bridge.so"))
         );
         assert_eq!(runtime_resources_dir(), Some(runtime_dir));
+        assert_eq!(runtime_terminfo_dir(), Some(terminfo_dir));
     }
 
     #[test]
@@ -435,6 +474,25 @@ mod tests {
             env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR").map(std::path::PathBuf::from),
             Some(runtime_dir)
         );
+    }
+
+    #[test]
+    fn runtime_terminfo_dir_follows_explicit_runtime_dir() {
+        let temp = tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        let terminfo_dir = temp.path().join("taskers").join("terminfo");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
+        fs::write(terminfo_dir.join("x").join("xterm-ghostty"), b"fake terminfo")
+            .expect("write fake terminfo");
+
+        let _guard = EnvGuard::set([
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.as_os_str())),
+            ("TERMINFO", None),
+            ("XDG_DATA_HOME", None),
+        ]);
+
+        assert_eq!(runtime_terminfo_dir(), Some(terminfo_dir));
     }
 
     fn write_bundle(source_dir: &Path, bundle_path: &Path) {

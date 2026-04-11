@@ -71,6 +71,10 @@ cargo run -p taskers-cli -- notify --help
 - Push the release tag so GitHub Actions can assemble the assets and attach them to a draft GitHub release.
 - Confirm the draft release tagged `v<version>` contains:
   - `taskers-ghostty-runtime-v<version>-x86_64-unknown-linux-gnu.tar.xz`
+  - `taskers-linux-bundle-v<version>-x86_64-unknown-linux-gnu.tar.xz`
+  - `taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz`
+  - `taskers-manifest-v<version>.json`
+  - `taskers-manifest.json`
 - Publish the GitHub release so the Ghostty runtime asset is publicly downloadable before publishing the crates.
 - Publish the crates to crates.io in dependency order:
 
@@ -87,6 +91,13 @@ cargo publish -p taskers-host
 cargo publish -p taskers-shell
 cargo publish -p taskers
 ```
+
+- Regenerate `packaging/aur/*/.SRCINFO` if the desktop file, icon, wrapper, or
+  PKGBUILD changed.
+- Push the updated `taskers-bin` and `taskers-git` package directories to their
+  matching AUR repos. `taskers-bin` tracks the stable
+  `releases/latest/download/taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz`
+  asset, so normal release bumps do not require a PKGBUILD edit.
 
 ## 4. Post-Publish Check
 

@@ -11,5 +11,5 @@ pub use backend::{
 pub use bridge::{GhosttyBridgeInfo, GhosttyError, GhosttyHost};
 pub use runtime::{
     RuntimeBootstrap, RuntimeBootstrapError, configure_runtime_environment,
-    ensure_runtime_installed,
+    ensure_runtime_installed, runtime_terminfo_dir,
 };
