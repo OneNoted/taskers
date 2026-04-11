@@ -1,0 +1,8 @@
+taskers-bin/pkg/
+taskers-bin/src/
+taskers-bin/*.pkg.tar.*
+taskers-bin/taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz
+taskers-git/pkg/
+taskers-git/src/
+taskers-git/taskers/
+taskers-git/*.pkg.tar.*
