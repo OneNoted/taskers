@@ -4,11 +4,15 @@ use std::{
     process::Command,
 };
 
+const SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED";
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(taskers_ghostty_bridge)");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed={SKIP_BUILD_RUNTIME_EMBED_ENV}");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge.zig");
+    println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_glibc_compat.c");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_build_info.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/include/taskers_ghostty_bridge.h");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt.zig");
@@ -23,6 +27,13 @@ fn main() {
     println!("cargo:rustc-cfg=taskers_ghostty_bridge");
     if let Ok(target) = env::var("TARGET") {
         println!("cargo:rustc-env=TASKERS_BUILD_TARGET={target}");
+    }
+
+    if env::var_os(SKIP_BUILD_RUNTIME_EMBED_ENV).is_some() {
+        println!(
+            "cargo:warning=skipping build-time Ghostty runtime embedding because {SKIP_BUILD_RUNTIME_EMBED_ENV} is set"
+        );
+        return;
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
@@ -53,6 +64,10 @@ fn main() {
             .join("lib")
             .join("libtaskers_ghostty_bridge.so")
             .display()
+    );
+    println!(
+        "cargo:rustc-env=TASKERS_GHOSTTY_BUILD_TERMINFO_DIR={}",
+        install_dir.join("share").join("terminfo").display()
     );
     println!("cargo:rustc-cfg=taskers_ghostty_bridge");
 }

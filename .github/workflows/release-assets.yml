@@ -64,6 +64,19 @@ jobs:
       - name: Build Ghostty runtime bundle
         run: bash scripts/build_ghostty_runtime_bundle.sh
 
+      - name: Build Linux app bundle
+        run: bash scripts/build_linux_bundle.sh
+
+      - name: Build release manifest
+        run: python3 scripts/build_release_manifest.py
+
+      - name: Prepare latest-release aliases
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          cp "dist/taskers-linux-bundle-v${version}-x86_64-unknown-linux-gnu.tar.xz" \
+            "dist/taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz"
+          cp "dist/taskers-manifest-v${version}.json" "dist/taskers-manifest.json"
+
       - name: Run installed package smoke
         run: TIMEOUT_SECONDS=90 bash scripts/smoke_linux_release_launcher.sh
 
@@ -71,7 +84,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-assets
-          path: dist/taskers-ghostty-runtime-v*.tar.xz
+          path: |
+            dist/taskers-ghostty-runtime-v*.tar.xz
+            dist/taskers-linux-bundle-v*.tar.xz
+            dist/taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz
+            dist/taskers-manifest-v*.json
+            dist/taskers-manifest.json
 
   upload-github-release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -96,6 +114,10 @@ jobs:
           {
             echo 'files<<EOF'
             echo 'dist/release/taskers-ghostty-runtime-v*.tar.xz'
+            echo 'dist/release/taskers-linux-bundle-v*.tar.xz'
+            echo 'dist/release/taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz'
+            echo 'dist/release/taskers-manifest-v*.json'
+            echo 'dist/release/taskers-manifest.json'
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 

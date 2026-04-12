@@ -16,6 +16,7 @@ use std::{
     future::pending,
     io::{self, Write},
     net::TcpListener,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     rc::Rc,
@@ -34,7 +35,7 @@ use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
 use taskers_ghostty::{
     BackendChoice, EmbeddedTerminalAppearance, GhosttyHost, GhosttyHostOptions,
-    ensure_runtime_installed,
+    ensure_runtime_installed, runtime_terminfo_dir,
 };
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{
@@ -1360,12 +1361,34 @@ fn resolve_runtime_bootstrap(
             },
         ),
     };
+    maybe_export_bundled_terminfo(&mut shell_launch);
+    publish_shell_environment(&shell_launch);
+    let root_x11_guest_lane = should_bypass_terminal_sidecar_in_root_x11_guest(
+        std::env::var_os("DISPLAY").is_some(),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        is_running_as_root(),
+    );
+    maybe_enable_software_gl(
+        &mut startup_notes,
+        should_force_software_gl(
+            std::env::var_os("DISPLAY").is_some(),
+            std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            is_running_as_root(),
+            std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_some(),
+        ),
+    );
     shell_launch
         .env
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
     let terminal_session_client = if should_skip_terminal_sidecar_in_smoke(path_overrides) {
         startup_notes.push(
             "Smoke mode with mock terminal backend skips the terminal session sidecar.".into(),
+        );
+        None
+    } else if root_x11_guest_lane {
+        startup_notes.push(
+            "Root-launched X11 guest session skips terminal sidecar attach and uses direct shells because the attach CLI exits immediately in this environment."
+                .into(),
         );
         None
     } else {
@@ -1408,6 +1431,65 @@ fn resolve_runtime_bootstrap(
         terminal_session_client,
         startup_notes,
     }
+}
+
+fn maybe_export_bundled_terminfo(shell_launch: &mut ShellLaunchSpec) {
+    if let Some(path) = runtime_terminfo_dir() {
+        // Startup scrubs inherited terminal env so the app doesn't inherit the
+        // parent emulator's terminfo. Re-inject Taskers' own bundled terminfo
+        // so embedded Ghostty panes still boot on systems without a global
+        // xterm-ghostty entry.
+        shell_launch
+            .env
+            .insert("TERMINFO".into(), path.display().to_string());
+    }
+}
+
+fn publish_shell_environment(shell_launch: &ShellLaunchSpec) {
+    let shell = shell_launch
+        .env
+        .get("TASKERS_REAL_SHELL")
+        .cloned()
+        .unwrap_or_else(|| shell_launch.program.display().to_string());
+    unsafe {
+        std::env::set_var("TASKERS_REAL_SHELL", &shell);
+        std::env::set_var("SHELL", &shell);
+    }
+}
+
+fn maybe_enable_software_gl(startup_notes: &mut Vec<String>, should_force: bool) {
+    if should_force {
+        unsafe {
+            std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+        }
+        startup_notes.push(
+            "Enabled LIBGL_ALWAYS_SOFTWARE=1 for a root-launched X11 session to keep Ghostty rendering in virtualized desktops."
+                .into(),
+        );
+    }
+}
+
+fn should_force_software_gl(
+    display_present: bool,
+    wayland_present: bool,
+    running_as_root: bool,
+    libgl_already_set: bool,
+) -> bool {
+    display_present && !wayland_present && running_as_root && !libgl_already_set
+}
+
+fn should_bypass_terminal_sidecar_in_root_x11_guest(
+    display_present: bool,
+    wayland_present: bool,
+    running_as_root: bool,
+) -> bool {
+    display_present && !wayland_present && running_as_root
+}
+
+fn is_running_as_root() -> bool {
+    std::fs::metadata("/proc/self")
+        .map(|metadata| metadata.uid() == 0)
+        .unwrap_or(false)
 }
 
 fn smoke_runtime_path_overrides() -> Result<RuntimePathOverrides> {
@@ -2472,10 +2554,13 @@ fn looks_like_dev_install(path: &Path) -> bool {
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        RuntimePathOverrides, looks_like_dev_install, should_defer_initial_sync,
-        should_skip_terminal_sidecar_in_smoke, smoke_runtime_path_overrides,
+        RuntimePathOverrides, looks_like_dev_install, maybe_export_bundled_terminfo,
+        publish_shell_environment, should_defer_initial_sync,
+        should_force_software_gl, should_skip_terminal_sidecar_in_smoke,
+        smoke_runtime_path_overrides,
     };
-    use std::path::Path;
+    use std::{collections::BTreeMap, path::Path, path::PathBuf};
+    use taskers_runtime::ShellLaunchSpec;
 
     #[test]
     fn initial_sync_waits_for_real_allocation() {
@@ -2541,5 +2626,144 @@ mod startup_tests {
         unsafe { std::env::set_var("TASKERS_TERMINAL_BACKEND", "mock") };
         assert!(!should_skip_terminal_sidecar_in_smoke(None));
         unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
+    }
+
+    #[test]
+    fn software_gl_defaults_only_for_root_x11_when_unset() {
+        assert!(should_force_software_gl(true, false, true, false));
+        assert!(!should_force_software_gl(true, true, true, false));
+        assert!(!should_force_software_gl(false, false, true, false));
+        assert!(!should_force_software_gl(true, false, false, false));
+        assert!(!should_force_software_gl(true, false, true, true));
+    }
+
+    #[test]
+    fn root_x11_guest_sidecar_bypass_ignores_existing_software_gl_override() {
+        assert!(super::should_bypass_terminal_sidecar_in_root_x11_guest(
+            true, false, true
+        ));
+        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
+            true, true, true
+        ));
+        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
+            false, false, true
+        ));
+        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
+            true, false, false
+        ));
+    }
+
+    #[test]
+    fn packaged_runtime_terminfo_is_reinjected_after_scrub() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        let terminfo_dir = temp.path().join("taskers").join("terminfo");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
+        std::fs::write(terminfo_dir.join("x").join("xterm-ghostty"), b"fake terminfo")
+            .expect("write terminfo");
+
+        let _guard = EnvGuard::set([
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.clone())),
+            ("TERMINFO", None),
+            ("XDG_DATA_HOME", None),
+        ]);
+
+        let mut shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/bin/sh"),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        };
+        maybe_export_bundled_terminfo(&mut shell_launch);
+
+        assert_eq!(
+            shell_launch.env.get("TERMINFO").map(String::as_str),
+            Some(terminfo_dir.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn publish_shell_environment_prefers_explicit_real_shell() {
+        let _guard = EnvGuard::set([
+            ("TASKERS_REAL_SHELL", None),
+            ("SHELL", None),
+            ("XDG_DATA_HOME", None),
+        ]);
+
+        let mut env = BTreeMap::new();
+        env.insert("TASKERS_REAL_SHELL".into(), "/bedrock/cross/bin/zsh".into());
+        let shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/tmp/taskers-shell-wrapper.sh"),
+            args: Vec::new(),
+            env,
+        };
+
+        publish_shell_environment(&shell_launch);
+
+        assert_eq!(
+            std::env::var("TASKERS_REAL_SHELL").ok().as_deref(),
+            Some("/bedrock/cross/bin/zsh")
+        );
+        assert_eq!(
+            std::env::var("SHELL").ok().as_deref(),
+            Some("/bedrock/cross/bin/zsh")
+        );
+    }
+
+    #[test]
+    fn publish_shell_environment_overwrites_stale_wrapper_shell_values() {
+        let _guard = EnvGuard::set([
+            (
+                "TASKERS_REAL_SHELL",
+                Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh")),
+            ),
+            ("SHELL", Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh"))),
+            ("XDG_DATA_HOME", None),
+        ]);
+
+        let mut env = BTreeMap::new();
+        env.insert("TASKERS_REAL_SHELL".into(), "/bin/bash".into());
+        let shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/tmp/taskers-shell-wrapper.sh"),
+            args: Vec::new(),
+            env,
+        };
+
+        publish_shell_environment(&shell_launch);
+
+        assert_eq!(
+            std::env::var("TASKERS_REAL_SHELL").ok().as_deref(),
+            Some("/bin/bash")
+        );
+        assert_eq!(std::env::var("SHELL").ok().as_deref(), Some("/bin/bash"));
+    }
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set<const N: usize>(entries: [(&'static str, Option<PathBuf>); N]) -> Self {
+            let mut saved = Vec::with_capacity(N);
+            for (key, value) in entries {
+                saved.push((key, std::env::var_os(key)));
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..).rev() {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
     }
 }
