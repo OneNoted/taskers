@@ -92,12 +92,13 @@ cargo publish -p taskers-shell
 cargo publish -p taskers
 ```
 
-- Regenerate `packaging/aur/*/.SRCINFO` if the desktop file, icon, wrapper, or
-  PKGBUILD changed.
+- Bump `packaging/aur/taskers-bin/PKGBUILD` `pkgver` to the new stable release
+  version and regenerate `packaging/aur/*/.SRCINFO`.
 - Push the updated `taskers-bin` and `taskers-git` package directories to their
-  matching AUR repos. `taskers-bin` tracks the stable
+  matching AUR repos. `taskers-bin` should continue pointing at the explicit
+  versioned release asset that matches its committed `pkgver`, while the stable
   `releases/latest/download/taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz`
-  asset, so normal release bumps do not require a PKGBUILD edit.
+  alias remains available for ad-hoc download and verification.
 
 ## 4. Post-Publish Check
 

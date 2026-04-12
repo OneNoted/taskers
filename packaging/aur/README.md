@@ -4,10 +4,9 @@ This directory is the source of truth for Taskers' AUR packages.
 
 Packages:
 
-- `taskers-bin`: installs the latest published GitHub release bundle from the
-  stable `releases/latest/download/taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz`
-  asset. The PKGBUILD derives `pkgver` from the bundle's embedded version marker,
-  so new releases do not require a PKGBUILD edit.
+- `taskers-bin`: installs the published GitHub release bundle matching the
+  committed `pkgver`. Bump `pkgver` and regenerate `.SRCINFO` for every stable
+  Taskers release so AUR helpers can see the update.
 - `taskers-git`: builds the current `dev` branch from source and packages the
   same Linux bundle layout under `/opt/taskers`. Until the upstream `dev`
   branch carries the release-bundle build-runtime toggle, this package applies a
@@ -22,7 +21,8 @@ Packages:
    - `taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz`
    - `taskers-manifest-v<version>.json`
    - `taskers-manifest.json`
-2. Regenerate `.SRCINFO` inside each package directory:
+2. Bump `packaging/aur/taskers-bin/PKGBUILD` `pkgver` to the new stable release
+   version, then regenerate `.SRCINFO` inside each package directory:
 
    ```bash
    cd packaging/aur/taskers-bin && makepkg --printsrcinfo > .SRCINFO

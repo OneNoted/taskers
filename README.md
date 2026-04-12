@@ -46,7 +46,8 @@ user data directory and then starts the bundled `taskers-gtk` host plus its
 helper binaries. The first launch also bootstraps the version-matched Ghostty
 runtime assets when needed.
 
-`taskers-bin` installs the latest published Linux bundle under `/opt/taskers`.
+`taskers-bin` installs the published Linux bundle under `/opt/taskers` that
+matches the current AUR package version.
 `taskers-git` builds the current `dev` branch into the same layout.
 
 The Linux app requires GTK4/libadwaita plus the host WebKitGTK 6.0 development
