@@ -757,28 +757,12 @@ fn process_pending_notifications(
         return;
     }
 
-    #[cfg(feature = "dev-trace")]
-    safe_eprintln(format!(
-        "[dev-trace] process_pending_notifications: {} pending",
-        pending.len()
-    ));
-
     for notification in pending {
-        let visible = prefs.suppress_when_visible
-            && notification_target_visible(&model, window, &notification);
-        let delivery = if visible {
-            #[cfg(feature = "dev-trace")]
-            safe_eprintln(format!(
-                "[dev-trace] notification SUPPRESSED (pane visible): id={} title={:?}",
-                notification.id, notification.title
-            ));
+        let delivery = if prefs.suppress_when_visible
+            && notification_target_visible(&model, window, &notification)
+        {
             NotificationDeliveryState::Suppressed
         } else {
-            #[cfg(feature = "dev-trace")]
-            safe_eprintln(format!(
-                "[dev-trace] notification SHOWN: id={} title={:?} body={:?}",
-                notification.id, notification.title, notification.body
-            ));
             let desktop = gio::Notification::new(&notification.title);
             if let Some(body) = &notification.body {
                 desktop.set_body(Some(body));
@@ -1462,16 +1446,14 @@ fn maybe_export_bundled_terminfo(shell_launch: &mut ShellLaunchSpec) {
 }
 
 fn publish_shell_environment(shell_launch: &ShellLaunchSpec) {
-    let shell = shell_launch.program.display().to_string();
-    if std::env::var_os("TASKERS_REAL_SHELL").is_none() {
-        unsafe {
-            std::env::set_var("TASKERS_REAL_SHELL", &shell);
-        }
-    }
-    if std::env::var_os("SHELL").is_none() {
-        unsafe {
-            std::env::set_var("SHELL", &shell);
-        }
+    let shell = shell_launch
+        .env
+        .get("TASKERS_REAL_SHELL")
+        .cloned()
+        .unwrap_or_else(|| shell_launch.program.display().to_string());
+    unsafe {
+        std::env::set_var("TASKERS_REAL_SHELL", &shell);
+        std::env::set_var("SHELL", &shell);
     }
 }
 
@@ -2573,9 +2555,9 @@ fn looks_like_dev_install(path: &Path) -> bool {
 mod startup_tests {
     use super::{
         RuntimePathOverrides, looks_like_dev_install, maybe_export_bundled_terminfo,
-        should_defer_initial_sync,
-        should_skip_terminal_sidecar_in_smoke, smoke_runtime_path_overrides,
-        should_force_software_gl,
+        publish_shell_environment, should_defer_initial_sync,
+        should_force_software_gl, should_skip_terminal_sidecar_in_smoke,
+        smoke_runtime_path_overrides,
     };
     use std::{collections::BTreeMap, path::Path, path::PathBuf};
     use taskers_runtime::ShellLaunchSpec;
@@ -2698,6 +2680,62 @@ mod startup_tests {
             shell_launch.env.get("TERMINFO").map(String::as_str),
             Some(terminfo_dir.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn publish_shell_environment_prefers_explicit_real_shell() {
+        let _guard = EnvGuard::set([
+            ("TASKERS_REAL_SHELL", None),
+            ("SHELL", None),
+            ("XDG_DATA_HOME", None),
+        ]);
+
+        let mut env = BTreeMap::new();
+        env.insert("TASKERS_REAL_SHELL".into(), "/bedrock/cross/bin/zsh".into());
+        let shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/tmp/taskers-shell-wrapper.sh"),
+            args: Vec::new(),
+            env,
+        };
+
+        publish_shell_environment(&shell_launch);
+
+        assert_eq!(
+            std::env::var("TASKERS_REAL_SHELL").ok().as_deref(),
+            Some("/bedrock/cross/bin/zsh")
+        );
+        assert_eq!(
+            std::env::var("SHELL").ok().as_deref(),
+            Some("/bedrock/cross/bin/zsh")
+        );
+    }
+
+    #[test]
+    fn publish_shell_environment_overwrites_stale_wrapper_shell_values() {
+        let _guard = EnvGuard::set([
+            (
+                "TASKERS_REAL_SHELL",
+                Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh")),
+            ),
+            ("SHELL", Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh"))),
+            ("XDG_DATA_HOME", None),
+        ]);
+
+        let mut env = BTreeMap::new();
+        env.insert("TASKERS_REAL_SHELL".into(), "/bin/bash".into());
+        let shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/tmp/taskers-shell-wrapper.sh"),
+            args: Vec::new(),
+            env,
+        };
+
+        publish_shell_environment(&shell_launch);
+
+        assert_eq!(
+            std::env::var("TASKERS_REAL_SHELL").ok().as_deref(),
+            Some("/bin/bash")
+        );
+        assert_eq!(std::env::var("SHELL").ok().as_deref(), Some("/bin/bash"));
     }
 
     struct EnvGuard {

@@ -1,5 +1,5 @@
 diff --git a/crates/taskers-app/src/main.rs b/crates/taskers-app/src/main.rs
-index dcc7d79..175ef5a 100644
+index dcc7d79..4936b4b 100644
 --- a/crates/taskers-app/src/main.rs
 +++ b/crates/taskers-app/src/main.rs
 @@ -16,6 +16,7 @@ use std::{
@@ -19,39 +19,7 @@ index dcc7d79..175ef5a 100644
  };
  use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
  use taskers_runtime::{
-@@ -756,12 +757,28 @@ fn process_pending_notifications(
-         return;
-     }
- 
-+    #[cfg(feature = "dev-trace")]
-+    safe_eprintln(format!(
-+        "[dev-trace] process_pending_notifications: {} pending",
-+        pending.len()
-+    ));
-+
-     for notification in pending {
--        let delivery = if prefs.suppress_when_visible
--            && notification_target_visible(&model, window, &notification)
--        {
-+        let visible = prefs.suppress_when_visible
-+            && notification_target_visible(&model, window, &notification);
-+        let delivery = if visible {
-+            #[cfg(feature = "dev-trace")]
-+            safe_eprintln(format!(
-+                "[dev-trace] notification SUPPRESSED (pane visible): id={} title={:?}",
-+                notification.id, notification.title
-+            ));
-             NotificationDeliveryState::Suppressed
-         } else {
-+            #[cfg(feature = "dev-trace")]
-+            safe_eprintln(format!(
-+                "[dev-trace] notification SHOWN: id={} title={:?} body={:?}",
-+                notification.id, notification.title, notification.body
-+            ));
-             let desktop = gio::Notification::new(&notification.title);
-             if let Some(body) = &notification.body {
-                 desktop.set_body(Some(body));
-@@ -1360,6 +1377,22 @@ fn resolve_runtime_bootstrap(
+@@ -1360,6 +1361,22 @@ fn resolve_runtime_bootstrap(
              },
          ),
      };
@@ -74,7 +42,7 @@ index dcc7d79..175ef5a 100644
      shell_launch
          .env
          .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
-@@ -1368,6 +1401,12 @@ fn resolve_runtime_bootstrap(
+@@ -1368,6 +1385,12 @@ fn resolve_runtime_bootstrap(
              "Smoke mode with mock terminal backend skips the terminal session sidecar.".into(),
          );
          None
@@ -87,7 +55,7 @@ index dcc7d79..175ef5a 100644
      } else {
          match ensure_terminal_session_daemon(&terminal_socket_path) {
              Ok(()) => {
-@@ -1410,6 +1449,67 @@ fn resolve_runtime_bootstrap(
+@@ -1410,6 +1433,65 @@ fn resolve_runtime_bootstrap(
      }
  }
  
@@ -104,16 +72,14 @@ index dcc7d79..175ef5a 100644
 +}
 +
 +fn publish_shell_environment(shell_launch: &ShellLaunchSpec) {
-+    let shell = shell_launch.program.display().to_string();
-+    if std::env::var_os("TASKERS_REAL_SHELL").is_none() {
-+        unsafe {
-+            std::env::set_var("TASKERS_REAL_SHELL", &shell);
-+        }
-+    }
-+    if std::env::var_os("SHELL").is_none() {
-+        unsafe {
-+            std::env::set_var("SHELL", &shell);
-+        }
++    let shell = shell_launch
++        .env
++        .get("TASKERS_REAL_SHELL")
++        .cloned()
++        .unwrap_or_else(|| shell_launch.program.display().to_string());
++    unsafe {
++        std::env::set_var("TASKERS_REAL_SHELL", &shell);
++        std::env::set_var("SHELL", &shell);
 +    }
 +}
 +
@@ -155,15 +121,16 @@ index dcc7d79..175ef5a 100644
  fn smoke_runtime_path_overrides() -> Result<RuntimePathOverrides> {
      let timestamp = SystemTime::now()
          .duration_since(UNIX_EPOCH)
-@@ -2472,10 +2572,13 @@ fn looks_like_dev_install(path: &Path) -> bool {
+@@ -2472,10 +2554,13 @@ fn looks_like_dev_install(path: &Path) -> bool {
  #[cfg(test)]
  mod startup_tests {
      use super::{
 -        RuntimePathOverrides, looks_like_dev_install, should_defer_initial_sync,
+-        should_skip_terminal_sidecar_in_smoke, smoke_runtime_path_overrides,
 +        RuntimePathOverrides, looks_like_dev_install, maybe_export_bundled_terminfo,
-+        should_defer_initial_sync,
-         should_skip_terminal_sidecar_in_smoke, smoke_runtime_path_overrides,
-+        should_force_software_gl,
++        publish_shell_environment, should_defer_initial_sync,
++        should_force_software_gl, should_skip_terminal_sidecar_in_smoke,
++        smoke_runtime_path_overrides,
      };
 -    use std::path::Path;
 +    use std::{collections::BTreeMap, path::Path, path::PathBuf};
@@ -171,7 +138,7 @@ index dcc7d79..175ef5a 100644
  
      #[test]
      fn initial_sync_waits_for_real_allocation() {
-@@ -2542,4 +2645,87 @@ mod startup_tests {
+@@ -2542,4 +2627,143 @@ mod startup_tests {
          assert!(!should_skip_terminal_sidecar_in_smoke(None));
          unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
      }
@@ -228,6 +195,62 @@ index dcc7d79..175ef5a 100644
 +            shell_launch.env.get("TERMINFO").map(String::as_str),
 +            Some(terminfo_dir.to_string_lossy().as_ref())
 +        );
++    }
++
++    #[test]
++    fn publish_shell_environment_prefers_explicit_real_shell() {
++        let _guard = EnvGuard::set([
++            ("TASKERS_REAL_SHELL", None),
++            ("SHELL", None),
++            ("XDG_DATA_HOME", None),
++        ]);
++
++        let mut env = BTreeMap::new();
++        env.insert("TASKERS_REAL_SHELL".into(), "/bedrock/cross/bin/zsh".into());
++        let shell_launch = ShellLaunchSpec {
++            program: PathBuf::from("/tmp/taskers-shell-wrapper.sh"),
++            args: Vec::new(),
++            env,
++        };
++
++        publish_shell_environment(&shell_launch);
++
++        assert_eq!(
++            std::env::var("TASKERS_REAL_SHELL").ok().as_deref(),
++            Some("/bedrock/cross/bin/zsh")
++        );
++        assert_eq!(
++            std::env::var("SHELL").ok().as_deref(),
++            Some("/bedrock/cross/bin/zsh")
++        );
++    }
++
++    #[test]
++    fn publish_shell_environment_overwrites_stale_wrapper_shell_values() {
++        let _guard = EnvGuard::set([
++            (
++                "TASKERS_REAL_SHELL",
++                Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh")),
++            ),
++            ("SHELL", Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh"))),
++            ("XDG_DATA_HOME", None),
++        ]);
++
++        let mut env = BTreeMap::new();
++        env.insert("TASKERS_REAL_SHELL".into(), "/bin/bash".into());
++        let shell_launch = ShellLaunchSpec {
++            program: PathBuf::from("/tmp/taskers-shell-wrapper.sh"),
++            args: Vec::new(),
++            env,
++        };
++
++        publish_shell_environment(&shell_launch);
++
++        assert_eq!(
++            std::env::var("TASKERS_REAL_SHELL").ok().as_deref(),
++            Some("/bin/bash")
++        );
++        assert_eq!(std::env::var("SHELL").ok().as_deref(), Some("/bin/bash"));
 +    }
 +
 +    struct EnvGuard {
