@@ -1,7 +1,7 @@
 pkgbase = taskers-git
 	pkgdesc = Agent-first terminal workspace (dev branch build)
 	pkgver = 0.6.0.r0.g6ad8cc4
-	pkgrel = 4
+	pkgrel = 6
 	url = https://github.com/OneNoted/taskers
 	arch = x86_64
 	license = MIT
