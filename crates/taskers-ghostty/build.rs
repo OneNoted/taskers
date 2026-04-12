@@ -9,6 +9,7 @@ const SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_E
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(taskers_ghostty_bridge)");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed={SKIP_BUILD_RUNTIME_EMBED_ENV}");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_glibc_compat.c");
