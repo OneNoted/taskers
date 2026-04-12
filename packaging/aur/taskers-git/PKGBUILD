@@ -1,6 +1,6 @@
 pkgname=taskers-git
 pkgver=0.6.0.r0.g6ad8cc4
-pkgrel=3
+pkgrel=4
 pkgdesc='Agent-first terminal workspace (dev branch build)'
 arch=('x86_64')
 url='https://github.com/OneNoted/taskers'
@@ -33,9 +33,17 @@ sha256sums=(
 
 prepare() {
   cd taskers
-  if ! grep -q 'TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED' crates/taskers-ghostty/build.rs; then
+  if patch -Np1 --forward --dry-run -i "${srcdir}/taskers-build-runtime.patch" >/dev/null 2>&1; then
     patch -Np1 -i "${srcdir}/taskers-build-runtime.patch"
+    return
   fi
+
+  grep -q 'cargo:rerun-if-env-changed={SKIP_BUILD_RUNTIME_EMBED_ENV}' \
+    crates/taskers-ghostty/build.rs
+  grep -q 'runtime_terminfo_dir' crates/taskers-ghostty/src/runtime.rs
+  grep -q 'should_bypass_terminal_sidecar_in_root_x11_guest' \
+    crates/taskers-app/src/main.rs
+  grep -q 'publish_shell_environment(&shell_launch)' crates/taskers-app/src/main.rs
 }
 
 pkgver() {
