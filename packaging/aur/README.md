@@ -22,7 +22,8 @@ Packages:
    - `taskers-manifest-v<version>.json`
    - `taskers-manifest.json`
 2. Bump `packaging/aur/taskers-bin/PKGBUILD` `pkgver` to the new stable release
-   version, then regenerate `.SRCINFO` inside each package directory:
+   version, update the bundle SHA-256 in `sha256sums`, then regenerate
+   `.SRCINFO` inside each package directory:
 
    ```bash
    cd packaging/aur/taskers-bin && makepkg --printsrcinfo > .SRCINFO

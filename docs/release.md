@@ -93,7 +93,8 @@ cargo publish -p taskers
 ```
 
 - Bump `packaging/aur/taskers-bin/PKGBUILD` `pkgver` to the new stable release
-  version and regenerate `packaging/aur/*/.SRCINFO`.
+  version, update the release bundle SHA-256 in `sha256sums`, and regenerate
+  `packaging/aur/*/.SRCINFO`.
 - Push the updated `taskers-bin` and `taskers-git` package directories to their
   matching AUR repos. `taskers-bin` should continue pointing at the explicit
   versioned release asset that matches its committed `pkgver`, while the stable

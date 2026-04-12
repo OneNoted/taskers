@@ -1379,13 +1379,20 @@ fn resolve_runtime_bootstrap(
     };
     maybe_export_bundled_terminfo(&mut shell_launch);
     publish_shell_environment(&shell_launch);
-    let root_x11_guest_lane = should_force_software_gl(
+    let root_x11_guest_lane = should_bypass_terminal_sidecar_in_root_x11_guest(
         std::env::var_os("DISPLAY").is_some(),
         std::env::var_os("WAYLAND_DISPLAY").is_some(),
         is_running_as_root(),
-        std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_some(),
     );
-    maybe_enable_software_gl(&mut startup_notes, root_x11_guest_lane);
+    maybe_enable_software_gl(
+        &mut startup_notes,
+        should_force_software_gl(
+            std::env::var_os("DISPLAY").is_some(),
+            std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            is_running_as_root(),
+            std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_some(),
+        ),
+    );
     shell_launch
         .env
         .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
@@ -1487,6 +1494,14 @@ fn should_force_software_gl(
     libgl_already_set: bool,
 ) -> bool {
     display_present && !wayland_present && running_as_root && !libgl_already_set
+}
+
+fn should_bypass_terminal_sidecar_in_root_x11_guest(
+    display_present: bool,
+    wayland_present: bool,
+    running_as_root: bool,
+) -> bool {
+    display_present && !wayland_present && running_as_root
 }
 
 fn is_running_as_root() -> bool {
@@ -2638,6 +2653,22 @@ mod startup_tests {
         assert!(!should_force_software_gl(false, false, true, false));
         assert!(!should_force_software_gl(true, false, false, false));
         assert!(!should_force_software_gl(true, false, true, true));
+    }
+
+    #[test]
+    fn root_x11_guest_sidecar_bypass_ignores_existing_software_gl_override() {
+        assert!(super::should_bypass_terminal_sidecar_in_root_x11_guest(
+            true, false, true
+        ));
+        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
+            true, true, true
+        ));
+        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
+            false, false, true
+        ));
+        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
+            true, false, false
+        ));
     }
 
     #[test]

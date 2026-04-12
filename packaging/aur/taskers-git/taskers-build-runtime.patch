@@ -1,8 +1,8 @@
 diff --git a/crates/taskers-app/src/main.rs b/crates/taskers-app/src/main.rs
-index dcc7d7972e..b8e839dfcc 100644
+index dcc7d79..175ef5a 100644
 --- a/crates/taskers-app/src/main.rs
 +++ b/crates/taskers-app/src/main.rs
-@@ -16,6 +16,7 @@
+@@ -16,6 +16,7 @@ use std::{
      future::pending,
      io::{self, Write},
      net::TcpListener,
@@ -10,7 +10,7 @@ index dcc7d7972e..b8e839dfcc 100644
      path::{Path, PathBuf},
      process::{Command, Stdio},
      rc::Rc,
-@@ -34,7 +35,7 @@
+@@ -34,7 +35,7 @@ use taskers_core::{AppState, default_session_path, load_or_bootstrap};
  use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
  use taskers_ghostty::{
      BackendChoice, EmbeddedTerminalAppearance, GhosttyHost, GhosttyHostOptions,
@@ -19,7 +19,7 @@ index dcc7d7972e..b8e839dfcc 100644
  };
  use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
  use taskers_runtime::{
-@@ -756,12 +757,28 @@
+@@ -756,12 +757,28 @@ fn process_pending_notifications(
          return;
      }
  
@@ -51,23 +51,30 @@ index dcc7d7972e..b8e839dfcc 100644
              let desktop = gio::Notification::new(&notification.title);
              if let Some(body) = &notification.body {
                  desktop.set_body(Some(body));
-@@ -1360,6 +1377,15 @@
+@@ -1360,6 +1377,22 @@ fn resolve_runtime_bootstrap(
              },
          ),
      };
 +    maybe_export_bundled_terminfo(&mut shell_launch);
 +    publish_shell_environment(&shell_launch);
-+    let root_x11_guest_lane = should_force_software_gl(
++    let root_x11_guest_lane = should_bypass_terminal_sidecar_in_root_x11_guest(
 +        std::env::var_os("DISPLAY").is_some(),
 +        std::env::var_os("WAYLAND_DISPLAY").is_some(),
 +        is_running_as_root(),
-+        std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_some(),
 +    );
-+    maybe_enable_software_gl(&mut startup_notes, root_x11_guest_lane);
++    maybe_enable_software_gl(
++        &mut startup_notes,
++        should_force_software_gl(
++            std::env::var_os("DISPLAY").is_some(),
++            std::env::var_os("WAYLAND_DISPLAY").is_some(),
++            is_running_as_root(),
++            std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_some(),
++        ),
++    );
      shell_launch
          .env
          .insert("TASKERS_SOCKET".into(), socket_path.display().to_string());
-@@ -1368,6 +1394,12 @@
+@@ -1368,6 +1401,12 @@ fn resolve_runtime_bootstrap(
              "Smoke mode with mock terminal backend skips the terminal session sidecar.".into(),
          );
          None
@@ -80,7 +87,7 @@ index dcc7d7972e..b8e839dfcc 100644
      } else {
          match ensure_terminal_session_daemon(&terminal_socket_path) {
              Ok(()) => {
-@@ -1410,6 +1442,59 @@
+@@ -1410,6 +1449,67 @@ fn resolve_runtime_bootstrap(
      }
  }
  
@@ -131,6 +138,14 @@ index dcc7d7972e..b8e839dfcc 100644
 +    display_present && !wayland_present && running_as_root && !libgl_already_set
 +}
 +
++fn should_bypass_terminal_sidecar_in_root_x11_guest(
++    display_present: bool,
++    wayland_present: bool,
++    running_as_root: bool,
++) -> bool {
++    display_present && !wayland_present && running_as_root
++}
++
 +fn is_running_as_root() -> bool {
 +    std::fs::metadata("/proc/self")
 +        .map(|metadata| metadata.uid() == 0)
@@ -140,7 +155,7 @@ index dcc7d7972e..b8e839dfcc 100644
  fn smoke_runtime_path_overrides() -> Result<RuntimePathOverrides> {
      let timestamp = SystemTime::now()
          .duration_since(UNIX_EPOCH)
-@@ -2472,10 +2557,13 @@
+@@ -2472,10 +2572,13 @@ fn looks_like_dev_install(path: &Path) -> bool {
  #[cfg(test)]
  mod startup_tests {
      use super::{
@@ -156,7 +171,7 @@ index dcc7d7972e..b8e839dfcc 100644
  
      #[test]
      fn initial_sync_waits_for_real_allocation() {
-@@ -2542,4 +2630,71 @@
+@@ -2542,4 +2645,87 @@ mod startup_tests {
          assert!(!should_skip_terminal_sidecar_in_smoke(None));
          unsafe { std::env::remove_var("TASKERS_TERMINAL_BACKEND") };
      }
@@ -168,6 +183,22 @@ index dcc7d7972e..b8e839dfcc 100644
 +        assert!(!should_force_software_gl(false, false, true, false));
 +        assert!(!should_force_software_gl(true, false, false, false));
 +        assert!(!should_force_software_gl(true, false, true, true));
++    }
++
++    #[test]
++    fn root_x11_guest_sidecar_bypass_ignores_existing_software_gl_override() {
++        assert!(super::should_bypass_terminal_sidecar_in_root_x11_guest(
++            true, false, true
++        ));
++        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
++            true, true, true
++        ));
++        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
++            false, false, true
++        ));
++        assert!(!super::should_bypass_terminal_sidecar_in_root_x11_guest(
++            true, false, false
++        ));
 +    }
 +
 +    #[test]
@@ -229,10 +260,10 @@ index dcc7d7972e..b8e839dfcc 100644
 +    }
  }
 diff --git a/crates/taskers-ghostty/build.rs b/crates/taskers-ghostty/build.rs
-index 3ad289e058..b17837f036 100644
+index 3ad289e..45dc95a 100644
 --- a/crates/taskers-ghostty/build.rs
 +++ b/crates/taskers-ghostty/build.rs
-@@ -4,11 +4,14 @@
+@@ -4,11 +4,15 @@ use std::{
      process::Command,
  };
  
@@ -241,14 +272,14 @@ index 3ad289e058..b17837f036 100644
  fn main() {
      println!("cargo:rustc-check-cfg=cfg(taskers_ghostty_bridge)");
      println!("cargo:rerun-if-changed=build.rs");
-     println!("cargo:rerun-if-env-changed={SKIP_BUILD_RUNTIME_EMBED_ENV}");
++    println!("cargo:rerun-if-env-changed={SKIP_BUILD_RUNTIME_EMBED_ENV}");
      println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig");
      println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge.zig");
 +    println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_glibc_compat.c");
      println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_build_info.zig");
      println!("cargo:rerun-if-changed=../../vendor/ghostty/include/taskers_ghostty_bridge.h");
      println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt.zig");
-@@ -25,6 +28,13 @@
+@@ -25,6 +29,13 @@ fn main() {
          println!("cargo:rustc-env=TASKERS_BUILD_TARGET={target}");
      }
  
@@ -262,7 +293,7 @@ index 3ad289e058..b17837f036 100644
      let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
      let workspace_root = manifest_dir
          .ancestors()
-@@ -54,6 +64,10 @@
+@@ -54,6 +65,10 @@ fn main() {
              .join("libtaskers_ghostty_bridge.so")
              .display()
      );
@@ -274,10 +305,10 @@ index 3ad289e058..b17837f036 100644
  }
  
 diff --git a/crates/taskers-ghostty/src/lib.rs b/crates/taskers-ghostty/src/lib.rs
-index c105811153..9de0717ee5 100644
+index c105811..9de0717 100644
 --- a/crates/taskers-ghostty/src/lib.rs
 +++ b/crates/taskers-ghostty/src/lib.rs
-@@ -11,5 +11,5 @@
+@@ -11,5 +11,5 @@ pub use backend::{
  pub use bridge::{GhosttyBridgeInfo, GhosttyError, GhosttyHost};
  pub use runtime::{
      RuntimeBootstrap, RuntimeBootstrapError, configure_runtime_environment,
@@ -285,10 +316,10 @@ index c105811153..9de0717ee5 100644
 +    ensure_runtime_installed, runtime_terminfo_dir,
  };
 diff --git a/crates/taskers-ghostty/src/runtime.rs b/crates/taskers-ghostty/src/runtime.rs
-index 03a716dc7d..361687c359 100644
+index 03a716d..361687c 100644
 --- a/crates/taskers-ghostty/src/runtime.rs
 +++ b/crates/taskers-ghostty/src/runtime.rs
-@@ -195,6 +195,30 @@
+@@ -195,6 +195,30 @@ pub fn runtime_bridge_path() -> Option<PathBuf> {
          .filter(|path| path.exists())
  }
  
@@ -319,7 +350,7 @@ index 03a716dc7d..361687c359 100644
  fn unpack_bundle<R: Read>(reader: R, staging_root: &Path) -> Result<(), RuntimeBootstrapError> {
      let decoder = XzDecoder::new(reader);
      let mut archive = Archive::new(decoder);
-@@ -259,6 +283,12 @@
+@@ -259,6 +283,12 @@ fn build_runtime_resources_dir() -> Option<PathBuf> {
          .filter(|path| path.exists())
  }
  
@@ -332,7 +363,7 @@ index 03a716dc7d..361687c359 100644
  fn set_runtime_environment_vars(path: &Path) {
      unsafe {
          env::set_var("GHOSTTY_RESOURCES_DIR", path);
-@@ -286,6 +316,14 @@
+@@ -286,6 +316,14 @@ fn default_runtime_bundle_url() -> String {
      )
  }
  
@@ -347,7 +378,7 @@ index 03a716dc7d..361687c359 100644
  fn replace_directory(source: &Path, destination: &Path) -> Result<(), RuntimeBootstrapError> {
      if let Some(parent) = destination.parent() {
          fs::create_dir_all(parent).map_err(|error| RuntimeBootstrapError::CreateDir {
-@@ -322,7 +360,7 @@
+@@ -322,7 +360,7 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RuntimeBootstrapError> {
  mod tests {
      use super::{
          RUNTIME_VERSION_FILE, RuntimeBootstrap, ensure_runtime_installed, runtime_bridge_path,
@@ -356,7 +387,7 @@ index 03a716dc7d..361687c359 100644
      };
      use std::{env, fs, path::Path};
      use tar::Builder;
-@@ -412,6 +450,7 @@
+@@ -412,6 +450,7 @@ mod tests {
              Some(runtime_dir.join("lib").join("libtaskers_ghostty_bridge.so"))
          );
          assert_eq!(runtime_resources_dir(), Some(runtime_dir));
@@ -364,7 +395,7 @@ index 03a716dc7d..361687c359 100644
      }
  
      #[test]
-@@ -437,6 +476,25 @@
+@@ -437,6 +476,25 @@ mod tests {
          );
      }
  
@@ -391,10 +422,10 @@ index 03a716dc7d..361687c359 100644
          let file = fs::File::create(bundle_path).expect("create bundle");
          let encoder = XzEncoder::new(file, 9);
 diff --git a/scripts/build_linux_bundle.sh b/scripts/build_linux_bundle.sh
-index 674983299d..12ef06748a 100755
+index 6749832..12ef067 100755
 --- a/scripts/build_linux_bundle.sh
 +++ b/scripts/build_linux_bundle.sh
-@@ -10,6 +10,8 @@
+@@ -10,6 +10,8 @@ asset_name="taskers-linux-bundle-v${version}-${target}.tar.xz"
  stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/taskers-linux-bundle.XXXXXX")"
  prefix_dir="$stage_dir/prefix"
  bundle_dir="$stage_dir/bundle"
@@ -403,7 +434,7 @@ index 674983299d..12ef06748a 100755
  
  cleanup() {
    rm -rf "$stage_dir"
-@@ -18,7 +20,9 @@
+@@ -18,7 +20,9 @@ trap cleanup EXIT
  
  (
    cd "$repo_root"
@@ -414,7 +445,7 @@ index 674983299d..12ef06748a 100755
  )
  
  (
-@@ -29,6 +33,7 @@
+@@ -29,6 +33,7 @@ trap cleanup EXIT
      -Dgtk-wayland=false \
      -Dstrip=true \
      -Di18n=false \
