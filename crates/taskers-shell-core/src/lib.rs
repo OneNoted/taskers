@@ -684,7 +684,7 @@ impl Default for LayoutMetrics {
             pane_header_height: 24,
             browser_toolbar_height: 30,
             surface_tab_height: 24,
-            terminal_gutter_x: 4,
+            terminal_gutter_x: 0,
         }
     }
 }
@@ -8206,7 +8206,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_portal_frames_include_horizontal_gutter() {
+    fn terminal_portal_frames_use_tight_terminal_gutter_by_default() {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
         let metrics = LayoutMetrics::default();
@@ -8217,6 +8217,7 @@ mod tests {
             .find(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
             .expect("terminal plan");
 
+        assert_eq!(metrics.terminal_gutter_x, 0);
         assert_eq!(
             terminal_plan.frame.x,
             terminal_plan.pane_frame.x + metrics.pane_border_width + metrics.terminal_gutter_x
