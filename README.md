@@ -1,19 +1,44 @@
-# Taskers
+<h1 align="center">Taskers</h1>
 
-Taskers is a Linux-first terminal workspace for agent-heavy work. It combines:
+<p align="center">A Linux-first terminal workspace for agent-heavy work.<br />Top-level workspace windows, panes, tabs, an attention rail, and a local control CLI for notifications, browser automation, and debugging.</p>
 
-- top-level workspace windows that behave like a tiling canvas
-- panes inside each window
-- tabs inside each pane
-- an attention rail for unread, waiting, error, and completed work
-- a local control CLI for notifications, agent state, browser automation, and debugging
-- the ability to next more terminals then you'll ever know what to do with!
+<p align="center">
+  <img alt="Status: active development" src="https://img.shields.io/badge/status-active%20development-2f855a?style=flat-square" />
+  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-1f2937?style=flat-square" />
+  <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-linux-0f766e?style=flat-square" />
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-111827?style=flat-square" />
+</p>
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/6d5bdbc7-f3f7-4f63-9dfc-d9f9aa2c5037" alt="Taskers showing workspace windows, panes, tabs, and the attention rail" width="100%" />
+</p>
+
+<p align="center">
+  <a href="#install"><strong>Install</strong></a>
+  ·
+  <a href="docs/usage.md"><strong>Daily usage</strong></a>
+  ·
+  <a href="docs/taskersctl.md"><strong>Taskersctl guide</strong></a>
+  ·
+  <a href="docs/notifications.md"><strong>Notifications</strong></a>
+  ·
+  <a href="docs/release.md"><strong>Release checklist</strong></a>
+</p>
+
+Taskers gives agent-heavy terminal work a native workspace model: top-level
+windows that behave like a tiling canvas, panes inside each window, tabs inside
+each pane, and an attention rail for unread, waiting, error, and completed
+work. The local `taskersctl` CLI ties those surfaces together with
+notifications, agent-state inspection, browser automation, and debugging tools.
 
 The active product lives at the repo root. Archived pre-cutover GTK/AppKit code
 is kept under `taskers-old/` for reference only.
 
-<img width="2630" height="1419" alt="image" src="https://github.com/user-attachments/assets/6d5bdbc7-f3f7-4f63-9dfc-d9f9aa2c5037" />
+## What it does
 
+- Organizes large amounts of terminal work into workspace windows, panes, and tabs instead of one flat tab strip.
+- Surfaces unread, waiting, error, and completed states through the attention rail so operators can triage quickly.
+- Ships a local control CLI for notifications, browser snapshots, shell integration, and runtime debugging.
 
 ## Documentation
 
