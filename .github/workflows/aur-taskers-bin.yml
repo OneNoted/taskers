@@ -70,15 +70,18 @@ jobs:
       - name: Configure SSH for AUR
         shell: bash
         run: |
-          install -dm700 ~/.ssh
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          AUR_SSH_DIR="${RUNNER_TEMP}/aur-ssh"
+          install -dm700 "$AUR_SSH_DIR"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$AUR_SSH_DIR/id_ed25519"
+          chmod 600 "$AUR_SSH_DIR/id_ed25519"
+          ssh-keyscan -H aur.archlinux.org > "$AUR_SSH_DIR/known_hosts"
 
       - name: Clone AUR package repo
         shell: bash
         run: |
-          git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" aur-repo
+          AUR_SSH_DIR="${RUNNER_TEMP}/aur-ssh"
+          git -c core.sshCommand="ssh -i '$AUR_SSH_DIR/id_ed25519' -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$AUR_SSH_DIR/known_hosts'" \
+            clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" aur-repo
 
       - name: Render taskers-bin package sources
         shell: bash
@@ -110,4 +113,6 @@ jobs:
             exit 0
           fi
           git commit -m "Update to v${{ steps.release.outputs.version }}-${{ steps.release.outputs.pkgrel }}"
-          git push origin HEAD
+          AUR_SSH_DIR="${RUNNER_TEMP}/aur-ssh"
+          git -c core.sshCommand="ssh -i '$AUR_SSH_DIR/id_ed25519' -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$AUR_SSH_DIR/known_hosts'" \
+            push origin HEAD
