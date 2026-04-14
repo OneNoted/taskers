@@ -491,6 +491,46 @@ mod tests {
     }
 
     #[test]
+    fn config_path_override_only_changes_config_derived_paths() {
+        let env = EnvPaths {
+            home: Some(PathBuf::from("/home/notes")),
+            xdg_config_home: Some(PathBuf::from("/tmp/config")),
+            xdg_state_home: Some(PathBuf::from("/tmp/state")),
+            xdg_cache_home: Some(PathBuf::from("/tmp/cache")),
+            xdg_data_home: Some(PathBuf::from("/tmp/data")),
+            xdg_runtime_dir: Some(PathBuf::from("/tmp/runtime")),
+            taskers_config_path: Some(PathBuf::from("/work/taskers/config.json")),
+            ..EnvPaths::default()
+        };
+        let paths = TaskersPaths::from_env(HostPlatform::Linux, &env);
+
+        assert_eq!(paths.config_dir(), &PathBuf::from("/work/taskers"));
+        assert_eq!(paths.config_path(), &PathBuf::from("/work/taskers/config.json"));
+        assert_eq!(paths.theme_dir(), &PathBuf::from("/work/taskers/themes"));
+
+        assert_eq!(paths.state_dir(), &PathBuf::from("/tmp/state/taskers"));
+        assert_eq!(
+            paths.session_path(),
+            &PathBuf::from("/tmp/state/taskers/session.json")
+        );
+        assert_eq!(paths.cache_dir(), &PathBuf::from("/tmp/cache/taskers"));
+        assert_eq!(paths.data_dir(), &PathBuf::from("/tmp/data/taskers"));
+        assert_eq!(
+            paths.shell_runtime_dir(),
+            &PathBuf::from("/tmp/runtime/taskers/shell")
+        );
+        assert_eq!(
+            paths.ghostty_runtime_dir(),
+            &PathBuf::from("/tmp/data/taskers/ghostty")
+        );
+        assert_eq!(paths.socket_path(), &PathBuf::from("/tmp/taskers.sock"));
+        assert_eq!(
+            paths.terminal_socket_path(),
+            &PathBuf::from("/tmp/runtime/taskers/terminal.sock")
+        );
+    }
+
+    #[test]
     fn release_install_roots_follow_platform_defaults() {
         let mac = EnvPaths {
             home: Some(PathBuf::from("/Users/notes")),
