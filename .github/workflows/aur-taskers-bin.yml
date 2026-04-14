@@ -1,0 +1,113 @@
+name: Sync AUR taskers-bin
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to sync (with or without a leading v)
+        required: true
+      pkgrel:
+        description: PKGBUILD pkgrel override
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  sync-taskers-bin:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    env:
+      AUR_PACKAGE: taskers-bin
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_TASKERS_BIN_SSH_PRIVATE_KEY }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Arch tooling
+        run: |
+          pacman -Syu --noconfirm --needed git openssh python
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Resolve release inputs
+        id: release
+        shell: bash
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            raw_version='${{ github.event.inputs.version }}'
+            pkgrel='${{ github.event.inputs.pkgrel }}'
+          else
+            raw_version='${{ github.event.release.tag_name }}'
+            pkgrel='1'
+          fi
+
+          version="${raw_version#v}"
+          if [ -z "$version" ]; then
+            echo 'failed to determine release version' >&2
+            exit 1
+          fi
+          if [ -z "$pkgrel" ]; then
+            pkgrel='1'
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "pkgrel=$pkgrel" >> "$GITHUB_OUTPUT"
+
+      - name: Verify AUR SSH key is configured
+        shell: bash
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo 'AUR_TASKERS_BIN_SSH_PRIVATE_KEY is not configured' >&2
+            exit 1
+          fi
+
+      - name: Configure SSH for AUR
+        shell: bash
+        run: |
+          install -dm700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Clone AUR package repo
+        shell: bash
+        run: |
+          git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" aur-repo
+
+      - name: Render taskers-bin package sources
+        shell: bash
+        run: |
+          find aur-repo -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          for attempt in 1 2 3 4 5; do
+            if python scripts/render_taskers_bin_aur.py \
+              --version '${{ steps.release.outputs.version }}' \
+              --pkgrel '${{ steps.release.outputs.pkgrel }}' \
+              --repository '${{ github.repository }}' \
+              --output-dir aur-repo; then
+              exit 0
+            fi
+            echo "render attempt ${attempt} failed; retrying in 15s" >&2
+            sleep 15
+          done
+          echo 'failed to render taskers-bin sources from the published release manifest' >&2
+          exit 1
+
+      - name: Commit and push AUR update
+        shell: bash
+        run: |
+          cd aur-repo
+          git config user.name 'Taskers Release Bot'
+          git config user.email 'taskers-release-bot@users.noreply.github.com'
+          git add PKGBUILD .SRCINFO taskers-entrypoint.sh dev.taskers.app.desktop taskers.svg LICENSE
+          if git diff --cached --quiet; then
+            echo 'No taskers-bin AUR changes to push.'
+            exit 0
+          fi
+          git commit -m "Update to v${{ steps.release.outputs.version }}-${{ steps.release.outputs.pkgrel }}"
+          git push origin HEAD
