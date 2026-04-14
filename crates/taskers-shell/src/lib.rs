@@ -4524,6 +4524,7 @@ mod tests {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     Appearance,
+    Terminal,
     Notifications,
     Workspace,
     Keyboard,
@@ -4533,6 +4534,7 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             SettingsTab::Appearance => "Appearance",
+            SettingsTab::Terminal => "Terminal",
             SettingsTab::Notifications => "Notifications",
             SettingsTab::Workspace => "Workspace",
             SettingsTab::Keyboard => "Keyboard",
@@ -4548,7 +4550,7 @@ fn SettingsView(settings: SettingsSnapshot, core: SharedCore) -> Element {
     rsx! {
         div { class: "settings-shell",
             nav { class: "settings-nav",
-                for tab in [SettingsTab::Appearance, SettingsTab::Notifications, SettingsTab::Workspace, SettingsTab::Keyboard] {
+                for tab in [SettingsTab::Appearance, SettingsTab::Terminal, SettingsTab::Notifications, SettingsTab::Workspace, SettingsTab::Keyboard] {
                     button {
                         key: "{tab.label()}",
                         r#type: "button",
@@ -4565,6 +4567,7 @@ fn SettingsView(settings: SettingsSnapshot, core: SharedCore) -> Element {
             div { class: "settings-content",
                 match current {
                     SettingsTab::Appearance => render_appearance_tab(&settings, core.clone()),
+                    SettingsTab::Terminal => render_terminal_tab(&settings, core.clone()),
                     SettingsTab::Notifications => render_notifications_tab(&settings, core.clone()),
                     SettingsTab::Workspace => render_workspace_tab(&settings, core.clone()),
                     SettingsTab::Keyboard => render_keyboard_tab(&settings),
@@ -4631,6 +4634,104 @@ fn render_appearance_tab(settings: &SettingsSnapshot, core: SharedCore) -> Eleme
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+fn render_terminal_tab(settings: &SettingsSnapshot, core: SharedCore) -> Element {
+    let select_core = core.clone();
+    let input_core = core.clone();
+    let system_default_shell_detail = format!(
+        "Use your login shell by default (currently {}). Changes apply to new Taskers launches.",
+        settings.default_shell_label
+    );
+
+    rsx! {
+        section { class: "settings-section",
+            div { class: "settings-section-heading", "Terminal" }
+            div { class: "settings-section-helper",
+                "Configure how new Taskers terminal panes launch. Shell changes apply to new Taskers launches."
+            }
+            div { class: "settings-row",
+                div { class: "settings-row-copy",
+                    div { class: "settings-row-label", "Shell chooser" }
+                    div { class: "settings-row-helper",
+                        "Pick a common shell quickly, or switch to Custom and enter any shell command or absolute path below."
+                    }
+                }
+                div { class: "settings-row-control",
+                    select {
+                        class: "settings-select",
+                        onchange: move |evt| {
+                            match evt.value().as_str() {
+                                "system" => {
+                                    select_core.dispatch_shell_action(ShellAction::SetConfiguredShell {
+                                        shell: None,
+                                    });
+                                }
+                                "bash" | "zsh" | "fish" => {
+                                    select_core.dispatch_shell_action(ShellAction::SetConfiguredShell {
+                                        shell: Some(evt.value()),
+                                    });
+                                }
+                                _ => {}
+                            }
+                        },
+                        option {
+                            value: "system",
+                            selected: settings.configured_shell.is_none(),
+                            "System default"
+                        }
+                        option {
+                            value: "bash",
+                            selected: configured_shell_matches_option(settings.configured_shell.as_deref(), "bash"),
+                            "Bash"
+                        }
+                        option {
+                            value: "zsh",
+                            selected: configured_shell_matches_option(settings.configured_shell.as_deref(), "zsh"),
+                            "Zsh"
+                        }
+                        option {
+                            value: "fish",
+                            selected: configured_shell_matches_option(settings.configured_shell.as_deref(), "fish"),
+                            "Fish"
+                        }
+                        option {
+                            value: "custom",
+                            selected: configured_shell_is_custom(settings.configured_shell.as_deref()),
+                            "Custom command…"
+                        }
+                    }
+                }
+            }
+            div { class: "settings-row",
+                div { class: "settings-row-copy",
+                    div { class: "settings-row-label", "Custom shell command" }
+                    div { class: "settings-row-helper",
+                        "Leave this blank to use the system login shell. Enter `bash`, `zsh`, `fish`, or any absolute shell path for a custom override."
+                    }
+                }
+                div { class: "settings-row-control",
+                    input {
+                        class: "vcs-input",
+                        r#type: "text",
+                        value: "{settings.configured_shell.clone().unwrap_or_default()}",
+                        placeholder: "{settings.default_shell_label}",
+                        oninput: move |event| {
+                            input_core.dispatch_shell_action(ShellAction::SetConfiguredShell {
+                                shell: Some(event.value()),
+                            });
+                        },
+                    }
+                }
+            }
+            div { class: "settings-row",
+                div { class: "settings-row-copy",
+                    div { class: "settings-row-label", "System default" }
+                    div { class: "settings-row-helper", "{system_default_shell_detail}" }
                 }
             }
         }
@@ -4707,6 +4808,25 @@ fn render_keyboard_tab(settings: &SettingsSnapshot) -> Element {
             }
         }
     }
+}
+
+fn configured_shell_matches_option(configured_shell: Option<&str>, option: &str) -> bool {
+    configured_shell.is_some_and(|configured_shell| {
+        let trimmed = configured_shell.trim();
+        trimmed == option
+            || std::path::Path::new(trimmed)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some(option)
+    })
+}
+
+fn configured_shell_is_custom(configured_shell: Option<&str>) -> bool {
+    configured_shell.is_some_and(|configured_shell| {
+        !configured_shell_matches_option(Some(configured_shell), "bash")
+            && !configured_shell_matches_option(Some(configured_shell), "zsh")
+            && !configured_shell_matches_option(Some(configured_shell), "fish")
+    })
 }
 
 fn render_shortcut_group(

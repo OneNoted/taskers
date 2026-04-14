@@ -14,7 +14,7 @@ use taskers_domain::{
     WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
-use taskers_runtime::ShellLaunchSpec;
+use taskers_runtime::{ShellLaunchSpec, default_shell_program};
 use time::OffsetDateTime;
 use tokio::sync::watch;
 
@@ -536,6 +536,7 @@ pub struct BootstrapModel {
     pub runtime_status: RuntimeStatus,
     pub selected_theme_id: String,
     pub selected_shortcut_preset: ShortcutPreset,
+    pub configured_shell: Option<String>,
     pub notification_preferences: NotificationPreferencesSnapshot,
     pub render_live_surfaces_in_overview: bool,
 }
@@ -547,6 +548,7 @@ impl Default for BootstrapModel {
             runtime_status: RuntimeStatus::default(),
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: ShortcutPreset::Balanced,
+            configured_shell: None,
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         }
@@ -1159,6 +1161,8 @@ pub struct SettingsSnapshot {
     pub theme_options: Vec<ThemeOptionSnapshot>,
     pub shortcut_presets: Vec<ShortcutPresetSnapshot>,
     pub shortcuts: Vec<ShortcutBindingSnapshot>,
+    pub configured_shell: Option<String>,
+    pub default_shell_label: String,
     pub notification_preferences: NotificationPreferencesSnapshot,
     pub render_live_surfaces_in_overview: bool,
 }
@@ -1528,6 +1532,9 @@ pub enum ShellAction {
     SelectShortcutPreset {
         preset_id: String,
     },
+    SetConfiguredShell {
+        shell: Option<String>,
+    },
     SetNotificationPreference {
         key: NotificationPreferenceKey,
         enabled: bool,
@@ -1546,6 +1553,7 @@ struct UiState {
     resize_preview: Option<ResizePreview>,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
+    configured_shell: Option<String>,
     notification_preferences: NotificationPreferencesSnapshot,
     render_live_surfaces_in_overview: bool,
     window_size: PixelSize,
@@ -1617,6 +1625,7 @@ impl TaskersCore {
                 resize_preview: None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
+                configured_shell: normalize_configured_shell(bootstrap.configured_shell.as_deref()),
                 notification_preferences: bootstrap.notification_preferences,
                 render_live_surfaces_in_overview: bootstrap.render_live_surfaces_in_overview,
                 window_size: PixelSize::new(1440, 900),
@@ -1820,6 +1829,8 @@ impl TaskersCore {
                 })
                 .collect(),
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
+            configured_shell: self.ui.configured_shell.clone(),
+            default_shell_label: default_shell_program().display().to_string(),
             notification_preferences: self.ui.notification_preferences,
             render_live_surfaces_in_overview: self.ui.render_live_surfaces_in_overview,
         }
@@ -3255,6 +3266,15 @@ impl TaskersCore {
                     return false;
                 }
                 self.ui.selected_shortcut_preset = preset;
+                self.bump_local_revision();
+                true
+            }
+            ShellAction::SetConfiguredShell { shell } => {
+                let shell = normalize_configured_shell(shell.as_deref());
+                if self.ui.configured_shell == shell {
+                    return false;
+                }
+                self.ui.configured_shell = shell;
                 self.bump_local_revision();
                 true
             }
@@ -6705,6 +6725,13 @@ fn is_local_browser_target(value: &str) -> bool {
         || value.contains(":8080")
 }
 
+fn normalize_configured_shell(shell: Option<&str>) -> Option<String> {
+    shell.and_then(|shell| {
+        let trimmed = shell.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -6750,6 +6777,7 @@ mod tests {
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
+            configured_shell: None,
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         }
@@ -8673,6 +8701,7 @@ mod tests {
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
+            configured_shell: None,
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         });
@@ -9052,6 +9081,26 @@ mod tests {
         assert!(snapshot.overview_mode);
         assert!(snapshot.portal.panes.is_empty());
         assert!(!snapshot.settings.render_live_surfaces_in_overview);
+    }
+
+    #[test]
+    fn configured_shell_setting_normalizes_blank_values() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::SetConfiguredShell {
+            shell: Some("  /bin/fish  ".into()),
+        });
+        let snapshot = core.snapshot();
+        assert_eq!(
+            snapshot.settings.configured_shell.as_deref(),
+            Some("/bin/fish")
+        );
+        assert!(!snapshot.settings.default_shell_label.is_empty());
+
+        core.dispatch_shell_action(ShellAction::SetConfiguredShell {
+            shell: Some("   ".into()),
+        });
+        assert_eq!(core.snapshot().settings.configured_shell, None);
     }
 
     #[test]
