@@ -153,6 +153,8 @@ struct TaskersConfig {
     #[serde(default = "default_shortcut_preset_id")]
     selected_shortcut_preset: String,
     #[serde(default)]
+    configured_shell: Option<String>,
+    #[serde(default)]
     notification_preferences: NotificationPreferencesConfig,
     #[serde(default = "default_true")]
     render_live_surfaces_in_overview: bool,
@@ -177,6 +179,7 @@ impl Default for TaskersConfig {
         Self {
             selected_theme_id: default_theme_id(),
             selected_shortcut_preset: default_shortcut_preset_id(),
+            configured_shell: None,
             notification_preferences: NotificationPreferencesConfig::default(),
             render_live_surfaces_in_overview: true,
             embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
@@ -227,6 +230,13 @@ fn default_true() -> bool {
     true
 }
 
+fn normalize_configured_shell_value(shell: Option<&str>) -> Option<String> {
+    shell.and_then(|shell| {
+        let trimmed = shell.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 fn safe_eprintln(message: impl std::fmt::Display) {
     let mut stderr = io::stderr().lock();
     let _ = writeln!(stderr, "{message}");
@@ -258,8 +268,10 @@ impl TaskersConfig {
                     .with_context(|| format!("failed to read config {}", path.display()));
             }
         };
-        let config: Self = serde_json::from_str(&data)
+        let mut config: Self = serde_json::from_str(&data)
             .with_context(|| format!("failed to parse config {}", path.display()))?;
+        config.configured_shell =
+            normalize_configured_shell_value(config.configured_shell.as_deref());
         Ok(config)
     }
 
@@ -287,6 +299,9 @@ impl TaskersConfig {
                 .find(|preset| preset.active)
                 .map(|preset| preset.id.clone())
                 .unwrap_or_else(default_shortcut_preset_id),
+            configured_shell: normalize_configured_shell_value(
+                settings.configured_shell.as_deref(),
+            ),
             notification_preferences: NotificationPreferencesConfig::from_snapshot(
                 settings.notification_preferences,
             ),
@@ -1065,6 +1080,7 @@ mod config_tests {
             TaskersConfig::default().embedded_terminal_appearance,
             EmbeddedTerminalAppearance::Taskers
         );
+        assert_eq!(TaskersConfig::default().configured_shell, None);
     }
 
     #[test]
@@ -1079,6 +1095,8 @@ mod config_tests {
             theme_options: Vec::new(),
             shortcut_presets: Vec::new(),
             shortcuts: Vec::new(),
+            configured_shell: Some(" /bin/fish ".into()),
+            default_shell_label: "/bin/zsh".into(),
             notification_preferences: NotificationPreferencesSnapshot {
                 alerts_on_waiting: false,
                 alerts_on_error: true,
@@ -1091,6 +1109,7 @@ mod config_tests {
         let next = TaskersConfig::from_settings(&settings, &current);
 
         assert_eq!(next.selected_theme_id, "gruvbox-dark");
+        assert_eq!(next.configured_shell.as_deref(), Some("/bin/fish"));
         assert_eq!(
             next.embedded_terminal_appearance,
             EmbeddedTerminalAppearance::Ghostty
@@ -1100,6 +1119,140 @@ mod config_tests {
             NotificationPreferencesConfig::from_snapshot(settings.notification_preferences)
         );
         assert!(!next.render_live_surfaces_in_overview);
+    }
+}
+
+#[cfg(test)]
+mod runtime_bootstrap_tests {
+    use super::{TaskersConfig, resolve_runtime_bootstrap};
+    use std::{env, fs, os::unix::fs::PermissionsExt, sync::Mutex};
+    use taskers_ghostty::EmbeddedTerminalAppearance;
+    use taskers_shell_core::{NotificationPreferencesSnapshot, SettingsSnapshot};
+    use tempfile::TempDir;
+
+    static PATH_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct PathGuard(Option<std::ffi::OsString>);
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(path) = self.0.as_ref() {
+                    env::set_var("PATH", path);
+                } else {
+                    env::remove_var("PATH");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_bootstrap_uses_configured_shell_override_in_launch_spec() {
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let temp = TempDir::new().expect("tempdir");
+        let shell_path = temp.path().join("fish");
+        fs::write(&shell_path, "#!/bin/sh\nexit 0\n").expect("write shell");
+        let mut permissions = fs::metadata(&shell_path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shell_path, permissions).expect("chmod");
+
+        let runtime = resolve_runtime_bootstrap(
+            EmbeddedTerminalAppearance::Taskers,
+            Some(shell_path.to_str().expect("shell path utf8")),
+            None,
+        );
+
+        assert_eq!(
+            runtime
+                .shell_launch
+                .env
+                .get("TASKERS_REAL_SHELL")
+                .map(String::as_str),
+            Some(shell_path.to_str().expect("shell path utf8"))
+        );
+        assert!(
+            runtime
+                .shell_launch
+                .args
+                .iter()
+                .any(|arg| arg == "--interactive"),
+            "expected configured fish shell to launch interactively"
+        );
+        assert!(
+            runtime
+                .shell_launch
+                .args
+                .iter()
+                .any(|arg| arg.contains("taskers-hooks.fish")),
+            "expected fish launch spec to source the fish shell hooks"
+        );
+    }
+
+    #[test]
+    fn runtime_bootstrap_invalid_configured_shell_falls_back_with_note() {
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let runtime = resolve_runtime_bootstrap(
+            EmbeddedTerminalAppearance::Taskers,
+            Some("/definitely/missing/taskers-shell"),
+            None,
+        );
+
+        assert!(
+            runtime.startup_notes.iter().any(|note| {
+                note.contains("Configured shell '/definitely/missing/taskers-shell' is unavailable")
+                    && note.contains("falling back to the system default shell")
+            }),
+            "expected fallback startup note when configured shell is invalid"
+        );
+    }
+
+    #[test]
+    fn configured_shell_round_trips_from_settings_into_relaunch_bootstrap() {
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let temp = TempDir::new().expect("tempdir");
+        let shell_path = temp.path().join("fish");
+        fs::write(&shell_path, "#!/bin/sh\nexit 0\n").expect("write shell");
+        let mut permissions = fs::metadata(&shell_path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shell_path, permissions).expect("chmod");
+        let original_path = env::var_os("PATH");
+        let _restore_path = PathGuard(original_path);
+        unsafe {
+            env::set_var("PATH", temp.path());
+        }
+
+        let settings = SettingsSnapshot {
+            selected_theme_id: "dark".into(),
+            theme_options: Vec::new(),
+            shortcut_presets: Vec::new(),
+            shortcuts: Vec::new(),
+            configured_shell: Some(" fish ".into()),
+            default_shell_label: "/bin/zsh".into(),
+            notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
+        };
+        let next = TaskersConfig::from_settings(&settings, &TaskersConfig::default());
+        let persisted = serde_json::to_string(&next).expect("serialize config");
+        let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
+
+        let runtime = resolve_runtime_bootstrap(
+            reloaded.embedded_terminal_appearance,
+            reloaded.configured_shell.as_deref(),
+            None,
+        );
+
+        assert_eq!(
+            runtime
+                .shell_launch
+                .env
+                .get("TASKERS_REAL_SHELL")
+                .map(String::as_str),
+            Some(shell_path.to_str().expect("shell path utf8")),
+            "reloaded configured_shell={:?} path={:?} startup_notes={:?}",
+            reloaded.configured_shell,
+            env::var_os("PATH"),
+            runtime.startup_notes
+        );
     }
 }
 
@@ -1207,8 +1360,11 @@ fn bootstrap_runtime(
     let path_overrides = smoke_script
         .map(|_| smoke_runtime_path_overrides())
         .transpose()?;
-    let runtime =
-        resolve_runtime_bootstrap(config.embedded_terminal_appearance, path_overrides.as_ref());
+    let runtime = resolve_runtime_bootstrap(
+        config.embedded_terminal_appearance,
+        config.configured_shell.as_deref(),
+        path_overrides.as_ref(),
+    );
     let mut startup_notes = runtime.startup_notes;
     if let Some(note) = config_note {
         push_startup_note(&mut startup_notes, diagnostics, note);
@@ -1309,6 +1465,7 @@ fn bootstrap_runtime(
         runtime_status,
         selected_theme_id: config.selected_theme_id.clone(),
         selected_shortcut_preset: config.shortcut_preset(),
+        configured_shell: config.configured_shell.clone(),
         notification_preferences: config.notification_preferences.to_snapshot(),
         render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
     });
@@ -1327,6 +1484,7 @@ fn bootstrap_runtime(
 
 fn resolve_runtime_bootstrap(
     embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    configured_shell: Option<&str>,
     path_overrides: Option<&RuntimePathOverrides>,
 ) -> RuntimeBootstrap {
     scrub_inherited_terminal_env();
@@ -1352,8 +1510,23 @@ fn resolve_runtime_bootstrap(
         },
     };
 
-    let (mut shell_launch, shell_integration) = match install_shell_integration(None) {
+    let (mut shell_launch, shell_integration) = match install_shell_integration(configured_shell) {
         Ok(integration) => (integration.launch_spec(), RuntimeCapability::Ready),
+        Err(error) if configured_shell.is_some() => {
+            startup_notes.push(format!(
+                "Configured shell '{}' is unavailable; falling back to the system default shell ({error})",
+                configured_shell.expect("checked is_some")
+            ));
+            match install_shell_integration(None) {
+                Ok(integration) => (integration.launch_spec(), RuntimeCapability::Ready),
+                Err(fallback_error) => (
+                    ShellLaunchSpec::fallback(),
+                    RuntimeCapability::Fallback {
+                        message: format!("Shell integration unavailable: {fallback_error}"),
+                    },
+                ),
+            }
+        }
         Err(error) => (
             ShellLaunchSpec::fallback(),
             RuntimeCapability::Fallback {
@@ -1519,7 +1692,11 @@ fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
 
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     let config = TaskersConfig::load().unwrap_or_default();
-    let runtime = resolve_runtime_bootstrap(config.embedded_terminal_appearance, None);
+    let runtime = resolve_runtime_bootstrap(
+        config.embedded_terminal_appearance,
+        config.configured_shell.as_deref(),
+        None,
+    );
     let host = match GhosttyHost::new_with_options(&runtime.host_options) {
         Ok(host) => {
             let _ = host.tick();
@@ -1603,6 +1780,7 @@ fn run_internal_surface_probe(
         },
         selected_theme_id,
         selected_shortcut_preset,
+        configured_shell: config.configured_shell.clone(),
         notification_preferences,
         render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
     });

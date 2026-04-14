@@ -342,9 +342,7 @@ input:focus-visible {{
   color: {text_bright};
 }}
 
-.workspace-button,
-.theme-card,
-.preset-card {{
+.workspace-button {{
   width: 100%;
   padding: 0;
   border: 0;
@@ -690,8 +688,7 @@ input:focus-visible {{
   font-size: 11px;
 }}
 
-.runtime-card,
-.settings-card {{
+.runtime-card {{
   background: transparent;
   border: 1px solid {border_06};
   padding: 10px;
@@ -709,33 +706,13 @@ input:focus-visible {{
   gap: 4px;
 }}
 
-.settings-toggle-list {{
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}}
-
-.settings-toggle-row {{
-  border: 1px solid {border_06};
-  background: {surface};
-  padding: 10px;
-  display: flex;
+.settings-toggle {{
+  background: transparent;
+  border: 0;
+  padding: 0;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  text-align: left;
-  border-radius: 0;
-}}
-
-.settings-toggle-row:hover {{
-  border-color: {accent_24};
-  background: {accent_08};
-}}
-
-.settings-toggle-copy {{
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  cursor: pointer;
 }}
 
 .toggle-track {{
@@ -857,15 +834,13 @@ input:focus-visible {{
 .surface-meta,
 .activity-header,
 .activity-item-shell,
-.shortcut-row,
 .workspace-header-actions {{
   display: flex;
   align-items: center;
   gap: 8px;
 }}
 
-.workspace-header-main,
-.shortcut-row {{
+.workspace-header-main {{
   justify-content: flex-start;
 }}
 
@@ -948,7 +923,7 @@ input:focus-visible {{
 }}
 
 .settings-canvas {{
-  padding: 16px;
+  padding: 32px 24px 64px;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -1585,8 +1560,9 @@ input:focus-visible {{
 
 .pane-toolbar-meta,
 .shortcut-label {{
-  color: {text_subtle};
-  font-size: 11px;
+  color: {text_bright};
+  font-size: 12px;
+  font-weight: 500;
 }}
 
 .pane-toolbar-meta {{
@@ -3493,77 +3469,254 @@ input:focus-visible {{
   line-height: 1.4;
 }}
 
-.settings-grid {{
+.settings-shell {{
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 40px;
+  align-items: start;
 }}
 
-.settings-card-span {{
-  grid-column: 1 / -1;
+.settings-nav {{
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 4px;
 }}
 
-.theme-grid,
-.preset-grid {{
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+.settings-nav-item {{
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: {text_muted};
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
 }}
 
-.theme-card,
-.preset-card {{
-  border: 1px solid {border_08};
-  padding: 10px;
-  border-radius: 0;
-}}
-
-.theme-card:hover,
-.preset-card:hover {{
+.settings-nav-item:hover {{
   background: {border_05};
-  border-color: {border_12};
+  color: {text_bright};
 }}
 
-.theme-card-active,
-.preset-card-active {{
+.settings-nav-item-active {{
   background: {accent_12};
+  color: {text_bright};
   border-color: {accent_24};
+}}
+
+.settings-nav-item:focus-visible {{
+  outline: none;
+  border-color: {accent_24};
+}}
+
+.settings-content {{
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}}
+
+.settings-section {{
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 28px;
+}}
+
+.settings-section-heading {{
+  font-size: 13px;
+  font-weight: 600;
+  color: {text_bright};
+  letter-spacing: 0;
+  text-transform: none;
+  margin: 0 0 4px;
+}}
+
+.settings-section-helper {{
+  font-size: 12px;
+  color: {text_subtle};
+  line-height: 1.5;
+  margin: 0 0 16px;
+}}
+
+.settings-row {{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 0;
+  border-top: 1px solid {border_06};
+}}
+
+.settings-row:first-of-type,
+.settings-section-helper + .settings-row {{
+  border-top: 0;
+  padding-top: 0;
+}}
+
+.settings-row-copy {{
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}}
+
+.settings-row-label {{
+  font-size: 13px;
+  font-weight: 500;
+  color: {text_bright};
+  line-height: 1.3;
+}}
+
+.settings-row-helper {{
+  font-size: 12px;
+  color: {text_subtle};
+  line-height: 1.5;
+}}
+
+.settings-row-control {{
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}}
+
+.settings-select {{
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background: {surface};
+  color: {text_bright};
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 28px 6px 10px;
+  border: 1px solid {border_10};
+  border-radius: 4px;
+  min-width: 168px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%239aa0aa' stroke-width='1.4'><path d='M2.5 4 L5 6.5 L7.5 4'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 10px 10px;
+}}
+
+.settings-select:hover {{
+  border-color: {border_12};
+  background-color: {elevated};
+}}
+
+.settings-select:focus-visible {{
+  outline: none;
+  border-color: {accent_24};
+  box-shadow: 0 0 0 2px {accent_12};
+}}
+
+.settings-select option {{
+  background: {surface};
+  color: {text_bright};
 }}
 
 .shortcut-groups {{
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 4px;
 }}
 
 .shortcut-group {{
+  border-top: 1px solid {border_06};
+}}
+
+.shortcut-group:last-of-type {{
+  border-bottom: 1px solid {border_06};
+}}
+
+.shortcut-group-summary {{
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 8px;
+  padding: 12px 4px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: {text_bright};
+  user-select: none;
+}}
+
+.shortcut-group-summary::-webkit-details-marker {{
+  display: none;
+}}
+
+.shortcut-group-chevron {{
+  display: inline-flex;
+  width: 12px;
+  justify-content: center;
+  font-size: 13px;
+  color: {text_dim};
+  transition: transform 0.14s ease-in-out;
+}}
+
+.shortcut-group[open] > .shortcut-group-summary > .shortcut-group-chevron {{
+  transform: rotate(90deg);
+}}
+
+.shortcut-group-label {{
+  flex: 1 1 auto;
+}}
+
+.shortcut-group-count {{
+  font-size: 11px;
+  font-weight: 500;
+  color: {text_dim};
+  background: {border_06};
+  padding: 1px 6px;
+  border-radius: 999px;
+  min-width: 18px;
+  text-align: center;
 }}
 
 .shortcut-list {{
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  padding: 0 4px 8px 24px;
 }}
 
 .shortcut-row {{
+  display: flex;
   align-items: flex-start;
-  border-top: 1px solid {border_06};
-  padding-top: 8px;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid {border_03};
 }}
 
 .shortcut-row:first-child {{
   border-top: 0;
-  padding-top: 0;
+}}
+
+.shortcut-row-copy {{
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }}
 
 .shortcut-accelerators {{
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 6px;
-  max-width: 40%;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-width: 50%;
 }}
 
 @media (max-width: 1180px) {{
@@ -3573,6 +3726,18 @@ input:focus-visible {{
 
   .attention-panel {{
     display: none;
+  }}
+
+  .settings-shell {{
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }}
+
+  .settings-nav {{
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
   }}
 }}
 "#,

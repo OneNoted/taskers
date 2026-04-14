@@ -2694,7 +2694,7 @@ fn split_ratio_preview(
 }
 
 fn native_surface_css(theme_id: &str) -> String {
-    const DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX: i32 = 20;
+    const DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX: i32 = 0;
     format!(
         r#"
 .native-surface-host,
@@ -3429,8 +3429,8 @@ mod tests {
         assert!(dark.contains(".native-surface-terminal-widget"));
         assert!(dark.contains(".terminal-output"));
         assert!(dark.contains("background: #0f1117;"));
-        assert!(dark.contains("padding-left: 20px;"));
-        assert!(dark.contains("padding-right: 20px;"));
+        assert!(dark.contains("padding-left: 0px;"));
+        assert!(dark.contains("padding-right: 0px;"));
         assert!(gruvbox.contains("background: #282828;"));
     }
 

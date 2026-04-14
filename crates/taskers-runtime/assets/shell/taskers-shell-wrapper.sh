@@ -5,6 +5,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 REAL_SHELL=${TASKERS_REAL_SHELL:-${SHELL:-/bin/sh}}
 SHELL_NAME=${REAL_SHELL##*/}
 SHELL_NAME=${SHELL_NAME#-}
+SHELL_PROFILE=${TASKERS_SHELL_PROFILE:-default}
 export TASKERS_EMBEDDED=1
 export TERM_PROGRAM=taskers
 current_tty=$(tty 2>/dev/null || true)
@@ -37,22 +38,43 @@ elif [ -n "${TASKERS_TERMINAL_SOCKET:-}" ] && [ -n "${TASKERS_TERMINAL_SESSION_I
 fi
 
 if [ "${TASKERS_DISABLE_SHELL_INTEGRATION:-0}" = "1" ]; then
+  if [ "$#" -eq 0 ]; then
+    case "$SHELL_NAME" in
+      bash)
+        set -- --noprofile --norc -i
+        ;;
+      fish)
+        set -- --no-config --interactive
+        ;;
+      zsh)
+        set -- -d -f -i
+        ;;
+    esac
+  fi
+  exec "$REAL_SHELL" "$@"
+fi
+
+if [ "$#" -eq 0 ]; then
   case "$SHELL_NAME" in
     bash)
-      exec "$REAL_SHELL" --noprofile --norc -i "$@"
+      export TASKERS_USER_BASHRC="${TASKERS_USER_BASHRC:-$HOME/.bashrc}"
+      set -- --rcfile "$SCRIPT_DIR/bash/taskers.bashrc" -i
       ;;
-    *)
-      exec "$REAL_SHELL" "$@"
+    fish)
+      if [ "$SHELL_PROFILE" = "clean" ]; then
+        set -- --no-config --interactive --init-command "source \"$TASKERS_SHELL_INTEGRATION_DIR/taskers-hooks.fish\""
+      else
+        set -- --interactive --init-command "source \"$TASKERS_SHELL_INTEGRATION_DIR/taskers-hooks.fish\""
+      fi
+      ;;
+    zsh)
+      if [ "$SHELL_PROFILE" = "clean" ]; then
+        set -- -d -i
+      else
+        set -- -i
+      fi
       ;;
   esac
 fi
 
-case "$SHELL_NAME" in
-  bash)
-    export TASKERS_USER_BASHRC="${TASKERS_USER_BASHRC:-$HOME/.bashrc}"
-    exec "$REAL_SHELL" --rcfile "$SCRIPT_DIR/bash/taskers.bashrc" -i "$@"
-    ;;
-  *)
-    exec "$REAL_SHELL" "$@"
-    ;;
-esac
+exec "$REAL_SHELL" "$@"

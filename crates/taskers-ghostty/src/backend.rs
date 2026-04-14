@@ -68,8 +68,18 @@ impl GhosttyHostOptions {
     pub fn from_shell_launch(shell_launch: &ShellLaunchSpec) -> Self {
         let mut env = BTreeMap::new();
         env.extend(shell_launch.env.clone());
+        let command_argv = if shell_launch
+            .program
+            .file_name()
+            .and_then(|value| value.to_str())
+            == Some("taskers-shell-wrapper.sh")
+        {
+            vec![shell_launch.program.display().to_string()]
+        } else {
+            shell_launch.program_and_args()
+        };
         Self {
-            command_argv: shell_launch.program_and_args(),
+            command_argv,
             env,
             embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
         }
@@ -263,6 +273,33 @@ mod tests {
         assert_eq!(
             options.embedded_terminal_appearance,
             EmbeddedTerminalAppearance::Taskers
+        );
+    }
+
+    #[test]
+    fn host_options_collapse_wrapper_shell_args_for_embedded_ghostty() {
+        let mut env = BTreeMap::new();
+        env.insert("TASKERS_REAL_SHELL".into(), "/usr/bin/fish".into());
+        env.insert("TASKERS_SHELL_PROFILE".into(), "default".into());
+        let shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/tmp/taskers-runtime/taskers-shell-wrapper.sh"),
+            args: vec![
+                "--interactive".into(),
+                "--init-command".into(),
+                r#"source "$TASKERS_SHELL_INTEGRATION_DIR/taskers-hooks.fish""#.into(),
+            ],
+            env,
+        };
+
+        let options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+
+        assert_eq!(
+            options.command_argv,
+            vec!["/tmp/taskers-runtime/taskers-shell-wrapper.sh"]
+        );
+        assert_eq!(
+            options.env.get("TASKERS_REAL_SHELL").map(String::as_str),
+            Some("/usr/bin/fish")
         );
     }
 

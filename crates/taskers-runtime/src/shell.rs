@@ -127,6 +127,7 @@ impl ShellIntegration {
                     "TASKERS_REAL_SHELL".into(),
                     self.real_shell.display().to_string(),
                 );
+                env.insert("TASKERS_SHELL_PROFILE".into(), profile.clone());
 
                 let mut args = Vec::new();
                 if profile == "clean" {
@@ -153,6 +154,7 @@ impl ShellIntegration {
                     "TASKERS_REAL_SHELL".into(),
                     self.real_shell.display().to_string(),
                 );
+                env.insert("TASKERS_SHELL_PROFILE".into(), profile.clone());
                 env.insert(
                     "ZDOTDIR".into(),
                     zsh_runtime_dir(&self.root).display().to_string(),
@@ -757,6 +759,81 @@ mod tests {
             wrapper.contains("session attach"),
             "expected wrapper to delegate continuity startup to taskersctl session attach"
         );
+    }
+
+    #[test]
+    fn shell_wrapper_handles_fish_and_zsh_default_launch_modes() {
+        let wrapper = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/shell/taskers-shell-wrapper.sh"
+        ));
+        assert!(
+            wrapper.contains("SHELL_PROFILE=${TASKERS_SHELL_PROFILE:-default}"),
+            "expected wrapper to honor TASKERS_SHELL_PROFILE when synthesizing default shell args"
+        );
+        assert!(
+            wrapper.contains("--init-command"),
+            "expected wrapper to synthesize fish init-command integration when no explicit args are passed"
+        );
+        assert!(
+            wrapper.contains("set -- -d -i"),
+            "expected wrapper to synthesize zsh default launch flags when no explicit args are passed"
+        );
+        assert!(
+            wrapper.contains("set -- --no-config --interactive --init-command"),
+            "expected clean-profile fish launches to keep sourcing taskers-hooks.fish"
+        );
+    }
+
+    #[test]
+    fn fish_and_zsh_launch_specs_preserve_shell_profile_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let original_profile = std::env::var_os("TASKERS_SHELL_PROFILE");
+        let original_disabled = std::env::var_os("TASKERS_DISABLE_SHELL_INTEGRATION");
+        unsafe {
+            std::env::set_var("TASKERS_SHELL_PROFILE", "clean");
+            std::env::remove_var("TASKERS_DISABLE_SHELL_INTEGRATION");
+        }
+
+        let fish_integration = ShellIntegration {
+            root: PathBuf::from("/tmp/taskers-runtime"),
+            wrapper_path: PathBuf::from("/tmp/taskers-runtime/taskers-shell-wrapper.sh"),
+            real_shell: PathBuf::from("/usr/bin/fish"),
+        };
+        let zsh_integration = ShellIntegration {
+            root: PathBuf::from("/tmp/taskers-runtime"),
+            wrapper_path: PathBuf::from("/tmp/taskers-runtime/taskers-shell-wrapper.sh"),
+            real_shell: PathBuf::from("/usr/bin/zsh"),
+        };
+
+        let fish_spec = fish_integration.launch_spec();
+        let zsh_spec = zsh_integration.launch_spec();
+
+        assert_eq!(
+            fish_spec
+                .env
+                .get("TASKERS_SHELL_PROFILE")
+                .map(String::as_str),
+            Some("clean")
+        );
+        assert_eq!(
+            zsh_spec
+                .env
+                .get("TASKERS_SHELL_PROFILE")
+                .map(String::as_str),
+            Some("clean")
+        );
+
+        unsafe {
+            match original_profile {
+                Some(value) => std::env::set_var("TASKERS_SHELL_PROFILE", value),
+                None => std::env::remove_var("TASKERS_SHELL_PROFILE"),
+            }
+            match original_disabled {
+                Some(value) => std::env::set_var("TASKERS_DISABLE_SHELL_INTEGRATION", value),
+                None => std::env::remove_var("TASKERS_DISABLE_SHELL_INTEGRATION"),
+            }
+        }
     }
 
     #[test]

@@ -37,6 +37,10 @@ pub enum ControlCommand {
     CreateWorkspaceWindow {
         workspace_id: WorkspaceId,
         direction: Direction,
+        #[serde(default)]
+        preferred_column_width: Option<i32>,
+        #[serde(default)]
+        preferred_window_height: Option<i32>,
     },
     FocusWorkspaceWindow {
         workspace_id: WorkspaceId,

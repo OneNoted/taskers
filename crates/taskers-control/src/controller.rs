@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use taskers_domain::{
-    AppModel, BrowserProfileMode, DomainError, PaneId, PaneKind, SurfaceId, SurfaceRecord,
-    WindowId, WorkspaceId,
+    AppModel, BrowserProfileMode, Direction, DomainError, PaneId, PaneKind, SurfaceId,
+    SurfaceRecord, WindowId, WorkspaceId,
 };
 
 use crate::protocol::{
@@ -112,8 +112,40 @@ impl InMemoryController {
             ControlCommand::CreateWorkspaceWindow {
                 workspace_id,
                 direction,
+                preferred_column_width,
+                preferred_window_height,
             } => {
                 let new_pane_id = model.create_workspace_window(workspace_id, direction)?;
+                match direction {
+                    Direction::Left | Direction::Right => {
+                        if let Some(width) = preferred_column_width
+                            && let Some(workspace_column_id) = model
+                                .workspaces
+                                .get(&workspace_id)
+                                .and_then(|workspace| workspace.active_column_id())
+                        {
+                            model.set_workspace_column_width(
+                                workspace_id,
+                                workspace_column_id,
+                                width,
+                            )?;
+                        }
+                    }
+                    Direction::Up | Direction::Down => {
+                        if let Some(height) = preferred_window_height
+                            && let Some(workspace_window_id) = model
+                                .workspaces
+                                .get(&workspace_id)
+                                .map(|workspace| workspace.active_window)
+                        {
+                            model.set_workspace_window_height(
+                                workspace_id,
+                                workspace_window_id,
+                                height,
+                            )?;
+                        }
+                    }
+                }
                 (
                     ControlResponse::WorkspaceWindowCreated {
                         pane_id: new_pane_id,
@@ -1143,6 +1175,39 @@ mod tests {
             .expect("emit signal");
 
         assert_eq!(controller.revision(), 1);
+    }
+
+    #[test]
+    fn create_workspace_window_applies_preferred_column_width_when_requested() {
+        let controller = InMemoryController::new(AppModel::new("Main"));
+        let snapshot = controller.snapshot();
+        let workspace_id = snapshot.model.active_workspace_id().expect("workspace");
+
+        controller
+            .handle(ControlCommand::CreateWorkspaceWindow {
+                workspace_id,
+                direction: taskers_domain::Direction::Right,
+                preferred_column_width: Some(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH),
+                preferred_window_height: None,
+            })
+            .expect("create workspace window");
+
+        let snapshot = controller.snapshot();
+        let workspace = snapshot
+            .model
+            .workspaces
+            .get(&workspace_id)
+            .expect("workspace");
+        let active_column_id = workspace.active_column_id().expect("active column");
+        let active_column = workspace
+            .columns
+            .get(&active_column_id)
+            .expect("active column record");
+
+        assert_eq!(
+            active_column.width,
+            taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH
+        );
     }
 
     #[test]

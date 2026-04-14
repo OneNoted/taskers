@@ -14,7 +14,7 @@ use taskers_domain::{
     WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
 };
 use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
-use taskers_runtime::ShellLaunchSpec;
+use taskers_runtime::{ShellLaunchSpec, default_shell_program};
 use time::OffsetDateTime;
 use tokio::sync::watch;
 
@@ -536,6 +536,7 @@ pub struct BootstrapModel {
     pub runtime_status: RuntimeStatus,
     pub selected_theme_id: String,
     pub selected_shortcut_preset: ShortcutPreset,
+    pub configured_shell: Option<String>,
     pub notification_preferences: NotificationPreferencesSnapshot,
     pub render_live_surfaces_in_overview: bool,
 }
@@ -547,6 +548,7 @@ impl Default for BootstrapModel {
             runtime_status: RuntimeStatus::default(),
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: ShortcutPreset::Balanced,
+            configured_shell: None,
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         }
@@ -684,7 +686,7 @@ impl Default for LayoutMetrics {
             pane_header_height: 24,
             browser_toolbar_height: 30,
             surface_tab_height: 24,
-            terminal_gutter_x: 4,
+            terminal_gutter_x: 0,
         }
     }
 }
@@ -1159,6 +1161,8 @@ pub struct SettingsSnapshot {
     pub theme_options: Vec<ThemeOptionSnapshot>,
     pub shortcut_presets: Vec<ShortcutPresetSnapshot>,
     pub shortcuts: Vec<ShortcutBindingSnapshot>,
+    pub configured_shell: Option<String>,
+    pub default_shell_label: String,
     pub notification_preferences: NotificationPreferencesSnapshot,
     pub render_live_surfaces_in_overview: bool,
 }
@@ -1528,6 +1532,9 @@ pub enum ShellAction {
     SelectShortcutPreset {
         preset_id: String,
     },
+    SetConfiguredShell {
+        shell: Option<String>,
+    },
     SetNotificationPreference {
         key: NotificationPreferenceKey,
         enabled: bool,
@@ -1546,6 +1553,7 @@ struct UiState {
     resize_preview: Option<ResizePreview>,
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
+    configured_shell: Option<String>,
     notification_preferences: NotificationPreferencesSnapshot,
     render_live_surfaces_in_overview: bool,
     window_size: PixelSize,
@@ -1617,6 +1625,7 @@ impl TaskersCore {
                 resize_preview: None,
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
+                configured_shell: normalize_configured_shell(bootstrap.configured_shell.as_deref()),
                 notification_preferences: bootstrap.notification_preferences,
                 render_live_surfaces_in_overview: bootstrap.render_live_surfaces_in_overview,
                 window_size: PixelSize::new(1440, 900),
@@ -1820,6 +1829,8 @@ impl TaskersCore {
                 })
                 .collect(),
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
+            configured_shell: self.ui.configured_shell.clone(),
+            default_shell_label: default_shell_program().display().to_string(),
             notification_preferences: self.ui.notification_preferences,
             render_live_surfaces_in_overview: self.ui.render_live_surfaces_in_overview,
         }
@@ -3258,6 +3269,15 @@ impl TaskersCore {
                 self.bump_local_revision();
                 true
             }
+            ShellAction::SetConfiguredShell { shell } => {
+                let shell = normalize_configured_shell(shell.as_deref());
+                if self.ui.configured_shell == shell {
+                    return false;
+                }
+                self.ui.configured_shell = shell;
+                self.bump_local_revision();
+                true
+            }
             ShellAction::SetNotificationPreference { key, enabled } => {
                 let changed = match key {
                     NotificationPreferenceKey::AlertsOnWaiting => {
@@ -3544,14 +3564,53 @@ impl TaskersCore {
         self.dispatch_control(ControlCommand::CreateWorkspace { label })
     }
 
+    fn resize_active_workspace_window_for_viewport(
+        &mut self,
+        workspace_id: WorkspaceId,
+        direction: Direction,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
+        let target_column_width = (viewport.width / 2).max(MIN_WORKSPACE_WINDOW_WIDTH);
+        let target_window_height = (viewport.height / 2).max(MIN_WORKSPACE_WINDOW_HEIGHT);
+
+        model
+            .workspaces
+            .get(&workspace_id)
+            .map(|workspace| match direction {
+                Direction::Left | Direction::Right => {
+                    workspace
+                        .active_column_id()
+                        .is_some_and(|workspace_column_id| {
+                            self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+                                workspace_id,
+                                workspace_column_id,
+                                width: target_column_width,
+                            })
+                        })
+                }
+                Direction::Up | Direction::Down => {
+                    self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                        workspace_id,
+                        workspace_window_id: workspace.active_window,
+                        height: target_window_height,
+                    })
+                }
+            })
+            .unwrap_or(false)
+    }
+
     fn create_workspace_window(&mut self, direction: WorkspaceDirection) -> bool {
         let model = self.app_state.snapshot_model();
         let Some(workspace_id) = model.active_workspace_id() else {
             return false;
         };
+        let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
         let changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
             workspace_id,
             direction: direction.to_domain(),
+            preferred_column_width: Some((viewport.width / 2).max(MIN_WORKSPACE_WINDOW_WIDTH)),
+            preferred_window_height: Some((viewport.height / 2).max(MIN_WORKSPACE_WINDOW_HEIGHT)),
         });
         if changed {
             return self.ensure_active_window_visible() || changed;
@@ -3672,7 +3731,16 @@ impl TaskersCore {
             target,
         });
         if changed {
-            return self.ensure_active_window_visible() || changed;
+            let resized = self.resize_active_workspace_window_for_viewport(
+                workspace_id,
+                match target {
+                    WorkspaceWindowMoveTarget::ColumnBefore { .. }
+                    | WorkspaceWindowMoveTarget::ColumnAfter { .. } => Direction::Right,
+                    WorkspaceWindowMoveTarget::StackAbove { .. }
+                    | WorkspaceWindowMoveTarget::StackBelow { .. } => Direction::Down,
+                },
+            );
+            return self.ensure_active_window_visible() || resized || changed;
         }
         false
     }
@@ -4070,7 +4138,9 @@ impl TaskersCore {
         };
         let changed = matches!(response, ControlResponse::SurfaceMovedToWorkspace { .. });
         if changed {
-            return self.ensure_active_window_visible() || changed;
+            let resized = self
+                .resize_active_workspace_window_for_viewport(target_workspace_id, Direction::Right);
+            return self.ensure_active_window_visible() || resized || changed;
         }
         false
     }
@@ -4728,12 +4798,16 @@ impl TaskersCore {
         let mut next_viewport = current_viewport;
         let visible_right = next_viewport.x + viewport_frame.width;
         let visible_bottom = next_viewport.y + viewport_frame.height;
-        if active_frame.x < next_viewport.x {
+        if active_frame.width > viewport_frame.width {
+            next_viewport.x = active_frame.x;
+        } else if active_frame.x < next_viewport.x {
             next_viewport.x = active_frame.x;
         } else if active_frame.right() > visible_right {
             next_viewport.x = active_frame.right() - viewport_frame.width;
         }
-        if active_frame.y < next_viewport.y {
+        if active_frame.height > viewport_frame.height {
+            next_viewport.y = active_frame.y;
+        } else if active_frame.y < next_viewport.y {
             next_viewport.y = active_frame.y;
         } else if active_frame.bottom() > visible_bottom {
             next_viewport.y = active_frame.bottom() - viewport_frame.height;
@@ -6651,6 +6725,13 @@ fn is_local_browser_target(value: &str) -> bool {
         || value.contains(":8080")
 }
 
+fn normalize_configured_shell(shell: Option<&str>) -> Option<String> {
+    shell.and_then(|shell| {
+        let trimmed = shell.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -6677,9 +6758,9 @@ mod tests {
         MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX, NotificationPreferencesSnapshot, ResizeHandleTarget,
         ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
         ShellSection, ShortcutAction, SurfaceDragSessionSnapshot, SurfaceMountSpec,
-        WorkspaceDirection, WorkspaceWindowSnapshot, default_preview_app_state,
-        default_session_path_for_preview, display_surface_title, pane_body_frame,
-        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        WorkspaceDirection, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+        default_preview_app_state, default_session_path_for_preview, display_surface_title,
+        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
 
@@ -6696,6 +6777,7 @@ mod tests {
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
+            configured_shell: None,
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         }
@@ -8121,6 +8203,118 @@ mod tests {
     }
 
     #[test]
+    fn creating_horizontal_workspace_window_uses_half_viewport_width() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let before = core.snapshot();
+        let first_window_id = before.current_workspace.active_window_id;
+        let expected_width =
+            (before.portal.content.width / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let first_window = window_snapshot(&snapshot, first_window_id);
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+
+        assert_eq!(active_window.frame.width, expected_width);
+        assert!(
+            snapshot.current_workspace.canvas_width
+                >= first_window.frame.width
+                    + active_window.frame.width
+                    + DEFAULT_WORKSPACE_WINDOW_GAP
+        );
+    }
+
+    #[test]
+    fn creating_vertical_workspace_window_uses_half_viewport_height() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let before = core.snapshot();
+        let expected_height =
+            (before.portal.content.height / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_HEIGHT);
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+
+        assert!(
+            (active_window.frame.height - expected_height).abs() <= 2,
+            "expected active window height to stay near half the visible viewport (expected {expected_height}, got {})",
+            active_window.frame.height
+        );
+    }
+
+    #[test]
+    fn extracting_window_tab_uses_half_viewport_width() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(700, 900));
+        let source_window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab {
+            window_id: source_window_id,
+        });
+        let before = core.snapshot();
+        let active_window = window_snapshot(&before, source_window_id);
+        let tab_id = active_window.tabs[1].id;
+        let expected_width =
+            (before.portal.content.width / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
+
+        core.dispatch_shell_action(ShellAction::ExtractWorkspaceWindowTab {
+            source_window_id,
+            tab_id,
+            target: WorkspaceWindowMoveTarget::ColumnAfter {
+                column_id: active_window.column_id,
+            },
+        });
+
+        let snapshot = core.snapshot();
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+        assert_eq!(active_window.frame.width, expected_width);
+    }
+
+    #[test]
+    fn moving_surface_to_workspace_uses_half_viewport_width() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(700, 900));
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
+        let before = core.snapshot();
+        let moved_surface_id = find_pane(&before.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.active)
+            .map(|workspace| workspace.id)
+            .expect("target workspace");
+        let expected_width = (core.snapshot().portal.content.width / 2)
+            .max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
+
+        core.dispatch_shell_action(ShellAction::MoveSurfaceToWorkspace {
+            source_pane_id,
+            surface_id: moved_surface_id,
+            target_workspace_id,
+        });
+
+        let snapshot = core.snapshot();
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+        assert_eq!(active_window.frame.width, expected_width);
+    }
+
+    #[test]
     fn wide_three_column_workspace_keeps_total_width_beyond_viewport() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
@@ -8206,7 +8400,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_portal_frames_include_horizontal_gutter() {
+    fn terminal_portal_frames_use_tight_terminal_gutter_by_default() {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
         let metrics = LayoutMetrics::default();
@@ -8217,6 +8411,7 @@ mod tests {
             .find(|plan| matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
             .expect("terminal plan");
 
+        assert_eq!(metrics.terminal_gutter_x, 0);
         assert_eq!(
             terminal_plan.frame.x,
             terminal_plan.pane_frame.x + metrics.pane_border_width + metrics.terminal_gutter_x
@@ -8506,6 +8701,7 @@ mod tests {
             },
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
+            configured_shell: None,
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         });
@@ -8888,6 +9084,26 @@ mod tests {
     }
 
     #[test]
+    fn configured_shell_setting_normalizes_blank_values() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::SetConfiguredShell {
+            shell: Some("  /bin/fish  ".into()),
+        });
+        let snapshot = core.snapshot();
+        assert_eq!(
+            snapshot.settings.configured_shell.as_deref(),
+            Some("/bin/fish")
+        );
+        assert!(!snapshot.settings.default_shell_label.is_empty());
+
+        core.dispatch_shell_action(ShellAction::SetConfiguredShell {
+            shell: Some("   ".into()),
+        });
+        assert_eq!(core.snapshot().settings.configured_shell, None);
+    }
+
+    #[test]
     fn single_window_fills_normal_mode_viewport_when_attention_panel_hidden() {
         let core = SharedCore::bootstrap(bootstrap());
         let snapshot = core.snapshot();
@@ -9241,7 +9457,7 @@ mod tests {
 
         let snapshot = core.snapshot();
         let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
-        let visible_left = snapshot.current_workspace.viewport_x;
+        let visible_left = snapshot.current_workspace.viewport_origin_x;
         let visible_right = visible_left + snapshot.portal.content.width;
 
         assert!(
@@ -9252,10 +9468,17 @@ mod tests {
             active_window.frame.x >= visible_left,
             "expected active window left edge to be visible"
         );
-        assert!(
-            active_window.frame.right() <= visible_right,
-            "expected active window right edge to be visible"
-        );
+        if active_window.frame.width <= snapshot.portal.content.width {
+            assert!(
+                active_window.frame.right() <= visible_right,
+                "expected active window right edge to be visible"
+            );
+        } else {
+            assert_eq!(
+                visible_left, active_window.frame.x,
+                "expected oversized active window to align its left edge with the viewport"
+            );
+        }
     }
 
     #[test]
