@@ -4728,12 +4728,16 @@ impl TaskersCore {
         let mut next_viewport = current_viewport;
         let visible_right = next_viewport.x + viewport_frame.width;
         let visible_bottom = next_viewport.y + viewport_frame.height;
-        if active_frame.x < next_viewport.x {
+        if active_frame.width > viewport_frame.width {
+            next_viewport.x = active_frame.x;
+        } else if active_frame.x < next_viewport.x {
             next_viewport.x = active_frame.x;
         } else if active_frame.right() > visible_right {
             next_viewport.x = active_frame.right() - viewport_frame.width;
         }
-        if active_frame.y < next_viewport.y {
+        if active_frame.height > viewport_frame.height {
+            next_viewport.y = active_frame.y;
+        } else if active_frame.y < next_viewport.y {
             next_viewport.y = active_frame.y;
         } else if active_frame.bottom() > visible_bottom {
             next_viewport.y = active_frame.bottom() - viewport_frame.height;
@@ -8121,6 +8125,36 @@ mod tests {
     }
 
     #[test]
+    fn creating_horizontal_workspace_window_keeps_roomy_default_width() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let first_window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let first_window = window_snapshot(&snapshot, first_window_id);
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+
+        assert_eq!(
+            first_window.frame.width,
+            taskers_domain::DEFAULT_WORKSPACE_WINDOW_WIDTH
+        );
+        assert_eq!(
+            active_window.frame.width,
+            taskers_domain::DEFAULT_WORKSPACE_WINDOW_WIDTH
+        );
+        assert!(
+            snapshot.current_workspace.canvas_width
+                >= first_window.frame.width
+                    + active_window.frame.width
+                    + DEFAULT_WORKSPACE_WINDOW_GAP
+        );
+    }
+
+    #[test]
     fn wide_three_column_workspace_keeps_total_width_beyond_viewport() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
@@ -9242,7 +9276,7 @@ mod tests {
 
         let snapshot = core.snapshot();
         let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
-        let visible_left = snapshot.current_workspace.viewport_x;
+        let visible_left = snapshot.current_workspace.viewport_origin_x;
         let visible_right = visible_left + snapshot.portal.content.width;
 
         assert!(
@@ -9253,10 +9287,17 @@ mod tests {
             active_window.frame.x >= visible_left,
             "expected active window left edge to be visible"
         );
-        assert!(
-            active_window.frame.right() <= visible_right,
-            "expected active window right edge to be visible"
-        );
+        if active_window.frame.width <= snapshot.portal.content.width {
+            assert!(
+                active_window.frame.right() <= visible_right,
+                "expected active window right edge to be visible"
+            );
+        } else {
+            assert_eq!(
+                visible_left, active_window.frame.x,
+                "expected oversized active window to align its left edge with the viewport"
+            );
+        }
     }
 
     #[test]
