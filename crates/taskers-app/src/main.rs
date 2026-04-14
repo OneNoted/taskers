@@ -2684,7 +2684,7 @@ mod startup_tests {
     #[test]
     fn launcher_bundle_binary_does_not_use_dev_diagnostics() {
         assert!(!looks_like_dev_install(Path::new(
-            "/home/notes/.local/share/taskers/releases/0.6.0/x86_64-unknown-linux-gnu/taskers-gtk"
+            "/home/notes/.local/share/taskers/releases/0.7.0/x86_64-unknown-linux-gnu/taskers-gtk"
         )));
     }
 

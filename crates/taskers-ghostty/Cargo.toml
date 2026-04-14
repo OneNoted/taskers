@@ -13,9 +13,9 @@ build = "build.rs"
 libloading = "0.8"
 serde.workspace = true
 tar.workspace = true
-taskers-domain = { version = "0.6.0", path = "../taskers-domain" }
+taskers-domain = { version = "0.7.0", path = "../taskers-domain" }
 taskers-paths.workspace = true
-taskers-runtime = { version = "0.6.0", path = "../taskers-runtime" }
+taskers-runtime = { version = "0.7.0", path = "../taskers-runtime" }
 thiserror.workspace = true
 ureq.workspace = true
 xz2 = "0.1"

@@ -4,7 +4,7 @@
 
 <p align="center">
   <img alt="Status: active development" src="https://img.shields.io/badge/status-active%20development-2f855a?style=flat-square" />
-  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-1f2937?style=flat-square" />
+  <img alt="Version 0.7.0" src="https://img.shields.io/badge/version-0.7.0-1f2937?style=flat-square" />
   <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-linux-0f766e?style=flat-square" />
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-111827?style=flat-square" />
 </p>
