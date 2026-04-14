@@ -12,8 +12,8 @@ use crate::{
 };
 
 pub const SESSION_SCHEMA_VERSION: u32 = 7;
-pub const DEFAULT_WORKSPACE_WINDOW_WIDTH: i32 = 1280;
-pub const DEFAULT_WORKSPACE_WINDOW_HEIGHT: i32 = 860;
+pub const DEFAULT_WORKSPACE_WINDOW_WIDTH: i32 = 2560;
+pub const DEFAULT_WORKSPACE_WINDOW_HEIGHT: i32 = 1720;
 pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 10;
 pub const MIN_WORKSPACE_WINDOW_WIDTH: i32 = 480;
 pub const MIN_WORKSPACE_WINDOW_HEIGHT: i32 = 420;
@@ -5216,6 +5216,19 @@ mod tests {
     use crate::SignalPaneMetadata;
 
     #[test]
+    fn bootstrap_workspace_uses_default_internal_window_size() {
+        let model = AppModel::new("Main");
+        let workspace = model.active_workspace().expect("workspace");
+        let column = workspace.columns.values().next().expect("column");
+        let window = workspace.windows.values().next().expect("window");
+
+        assert_eq!(column.width, DEFAULT_WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(window.height, DEFAULT_WORKSPACE_WINDOW_HEIGHT);
+        assert_eq!(WindowFrame::root().width, DEFAULT_WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(WindowFrame::root().height, DEFAULT_WORKSPACE_WINDOW_HEIGHT);
+    }
+
+    #[test]
     fn creating_workspace_windows_creates_columns_and_stacks() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
@@ -5570,10 +5583,11 @@ mod tests {
         let workspace = model.workspaces.get(&workspace_id).expect("workspace");
         let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
         assert_eq!(ordered_columns.len(), 2);
+        let expected_split_width = (DEFAULT_WORKSPACE_WINDOW_WIDTH + 400) / 2;
         assert_eq!(ordered_columns[0].window_order, vec![first_window_id]);
-        assert_eq!(ordered_columns[0].width, 840);
+        assert_eq!(ordered_columns[0].width, expected_split_width);
         assert_eq!(ordered_columns[1].window_order, vec![lower_window_id]);
-        assert_eq!(ordered_columns[1].width, 840);
+        assert_eq!(ordered_columns[1].width, expected_split_width);
         assert_eq!(workspace.active_window, lower_window_id);
     }
 
