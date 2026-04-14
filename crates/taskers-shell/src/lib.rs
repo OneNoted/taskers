@@ -927,7 +927,10 @@ pub fn TaskersShell(core: SharedCore) -> Element {
                     }
                 } else {
                     div { class: "settings-canvas",
-                        {render_settings(&snapshot.settings, core.clone())}
+                        SettingsView {
+                            settings: snapshot.settings.clone(),
+                            core: core.clone(),
+                        }
                     }
                 }
             }
@@ -4518,86 +4521,115 @@ mod tests {
     }
 }
 
-fn render_settings(settings: &SettingsSnapshot, core: SharedCore) -> Element {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Appearance,
+    Notifications,
+    Workspace,
+    Keyboard,
+}
+
+impl SettingsTab {
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Notifications => "Notifications",
+            SettingsTab::Workspace => "Workspace",
+            SettingsTab::Keyboard => "Keyboard",
+        }
+    }
+}
+
+#[component]
+fn SettingsView(settings: SettingsSnapshot, core: SharedCore) -> Element {
+    let mut active_tab = use_signal(|| SettingsTab::Appearance);
+    let current = active_tab();
+
     rsx! {
-        div { class: "settings-grid",
-            section { class: "settings-card",
-                div { class: "sidebar-heading", "Themes" }
-                div { class: "settings-copy",
-                    "Use the legacy Taskers palette vocabulary as the visual source of truth for the shared shell."
-                }
-                div { class: "theme-grid",
-                    for theme in &settings.theme_options {
-                        {render_theme_option(theme, core.clone())}
+        div { class: "settings-shell",
+            nav { class: "settings-nav",
+                for tab in [SettingsTab::Appearance, SettingsTab::Notifications, SettingsTab::Workspace, SettingsTab::Keyboard] {
+                    button {
+                        key: "{tab.label()}",
+                        r#type: "button",
+                        class: if current == tab {
+                            "settings-nav-item settings-nav-item-active"
+                        } else {
+                            "settings-nav-item"
+                        },
+                        onclick: move |_| active_tab.set(tab),
+                        "{tab.label()}"
                     }
                 }
             }
-            section { class: "settings-card",
-                div { class: "sidebar-heading", "Shortcut Presets" }
-                div { class: "settings-copy",
-                    "Balanced keeps common navigation bound. Power User restores dense directional resizing and split controls."
+            div { class: "settings-content",
+                match current {
+                    SettingsTab::Appearance => render_appearance_tab(&settings, core.clone()),
+                    SettingsTab::Notifications => render_notifications_tab(&settings, core.clone()),
+                    SettingsTab::Workspace => render_workspace_tab(&settings, core.clone()),
+                    SettingsTab::Keyboard => render_keyboard_tab(&settings),
                 }
-                div { class: "preset-grid",
-                    for preset in &settings.shortcut_presets {
-                        {render_shortcut_preset(preset, core.clone())}
+            }
+        }
+    }
+}
+
+fn render_appearance_tab(settings: &SettingsSnapshot, core: SharedCore) -> Element {
+    let theme_core = core.clone();
+    let preset_core = core.clone();
+    rsx! {
+        section { class: "settings-section",
+            div { class: "settings-section-heading", "Appearance" }
+            div { class: "settings-section-helper",
+                "Tune the visual identity of the shared shell."
+            }
+            div { class: "settings-row",
+                div { class: "settings-row-copy",
+                    div { class: "settings-row-label", "Theme" }
+                    div { class: "settings-row-helper",
+                        "Use the legacy Taskers palette as the visual source of truth."
+                    }
+                }
+                div { class: "settings-row-control",
+                    select {
+                        class: "settings-select",
+                        onchange: move |evt| {
+                            theme_core.dispatch_shell_action(ShellAction::SelectTheme {
+                                theme_id: evt.value(),
+                            });
+                        },
+                        for theme in &settings.theme_options {
+                            option {
+                                value: "{theme.id}",
+                                selected: theme.active,
+                                "{theme.label}"
+                            }
+                        }
                     }
                 }
             }
-            section { class: "settings-card",
-                div { class: "sidebar-heading", "Notifications" }
-                div { class: "settings-copy",
-                    "Desktop alerts follow the active Taskers lifecycle policy. Manual notifications always alert unless the target is already visible."
+            div { class: "settings-row",
+                div { class: "settings-row-copy",
+                    div { class: "settings-row-label", "Shortcut preset" }
+                    div { class: "settings-row-helper",
+                        "Balanced keeps common navigation bound. Power User restores dense directional resizing and split controls."
+                    }
                 }
-                div { class: "settings-toggle-list",
-                    {render_notification_preference(
-                        "Alert on waiting",
-                        "Show a desktop notification when an agent needs input.",
-                        settings.notification_preferences.alerts_on_waiting,
-                        NotificationPreferenceKey::AlertsOnWaiting,
-                        core.clone(),
-                    )}
-                    {render_notification_preference(
-                        "Alert on errors",
-                        "Show a desktop notification when an agent exits with an error.",
-                        settings.notification_preferences.alerts_on_error,
-                        NotificationPreferenceKey::AlertsOnError,
-                        core.clone(),
-                    )}
-                    {render_notification_preference(
-                        "Alert on completion",
-                        "Show a desktop notification when an agent finishes successfully.",
-                        settings.notification_preferences.alerts_on_completed,
-                        NotificationPreferenceKey::AlertsOnCompleted,
-                        core.clone(),
-                    )}
-                    {render_notification_preference(
-                        "Suppress when visible",
-                        "Skip the desktop banner if the target pane is already visible in the focused Taskers window.",
-                        settings.notification_preferences.suppress_when_visible,
-                        NotificationPreferenceKey::SuppressWhenVisible,
-                        core.clone(),
-                    )}
-                }
-            }
-            section { class: "settings-card",
-                div { class: "sidebar-heading", "Workspace overview" }
-                div { class: "settings-copy",
-                    "Overview mode now uses dedicated overview cards. When possible it can prefer richer previews, but it should stay stable and readable first."
-                }
-                div { class: "settings-toggle-list",
-                    {render_overview_surface_preference(
-                        "Prefer richer previews",
-                        "Ask overview to prefer richer previews when they are stable enough. Turn this off to keep overview on summary cards and jump into the full window for interaction.",
-                        settings.render_live_surfaces_in_overview,
-                        core.clone(),
-                    )}
-                }
-            }
-            section { class: "settings-card settings-card-span",
-                div { class: "sidebar-heading", "Shortcut Reference" }
-                div { class: "shortcut-groups",
-                    for category in ["General", "Browser", "Focus", "Top-level windows", "Pane splits", "Advanced resize"] {
-                        {render_shortcut_group(category, &settings.shortcuts)}
+                div { class: "settings-row-control",
+                    select {
+                        class: "settings-select",
+                        onchange: move |evt| {
+                            preset_core.dispatch_shell_action(ShellAction::SelectShortcutPreset {
+                                preset_id: evt.value(),
+                            });
+                        },
+                        for preset in &settings.shortcut_presets {
+                            option {
+                                value: "{preset.id}",
+                                selected: preset.active,
+                                "{preset.label}"
+                            }
+                        }
                     }
                 }
             }
@@ -4605,50 +4637,83 @@ fn render_settings(settings: &SettingsSnapshot, core: SharedCore) -> Element {
     }
 }
 
-fn render_theme_option(option: &taskers_core::ThemeOptionSnapshot, core: SharedCore) -> Element {
-    let option_id = option.id.clone();
-    let select = move |_| {
-        core.dispatch_shell_action(ShellAction::SelectTheme {
-            theme_id: option_id.clone(),
-        })
-    };
-    let class = if option.active {
-        "theme-card theme-card-active"
-    } else {
-        "theme-card"
-    };
+fn render_notifications_tab(settings: &SettingsSnapshot, core: SharedCore) -> Element {
     rsx! {
-        button { class: "{class}", onclick: select,
-            div { class: "workspace-label", "{option.label}" }
-            div { class: "workspace-meta", "{option.family}" }
+        section { class: "settings-section",
+            div { class: "settings-section-heading", "Notifications" }
+            div { class: "settings-section-helper",
+                "Desktop alerts follow the active Taskers lifecycle policy. Manual notifications always alert unless the target is already visible."
+            }
+            {render_notification_preference(
+                "Alert on waiting",
+                "Show a desktop notification when an agent needs input.",
+                settings.notification_preferences.alerts_on_waiting,
+                NotificationPreferenceKey::AlertsOnWaiting,
+                core.clone(),
+            )}
+            {render_notification_preference(
+                "Alert on errors",
+                "Show a desktop notification when an agent exits with an error.",
+                settings.notification_preferences.alerts_on_error,
+                NotificationPreferenceKey::AlertsOnError,
+                core.clone(),
+            )}
+            {render_notification_preference(
+                "Alert on completion",
+                "Show a desktop notification when an agent finishes successfully.",
+                settings.notification_preferences.alerts_on_completed,
+                NotificationPreferenceKey::AlertsOnCompleted,
+                core.clone(),
+            )}
+            {render_notification_preference(
+                "Suppress when visible",
+                "Skip the desktop banner if the target pane is already visible in the focused Taskers window.",
+                settings.notification_preferences.suppress_when_visible,
+                NotificationPreferenceKey::SuppressWhenVisible,
+                core.clone(),
+            )}
         }
     }
 }
 
-fn render_shortcut_preset(
-    preset: &taskers_core::ShortcutPresetSnapshot,
-    core: SharedCore,
+fn render_workspace_tab(settings: &SettingsSnapshot, core: SharedCore) -> Element {
+    rsx! {
+        section { class: "settings-section",
+            div { class: "settings-section-heading", "Workspace" }
+            div { class: "settings-section-helper",
+                "Overview mode uses dedicated overview cards. When possible it can prefer richer previews, but it should stay stable and readable first."
+            }
+            {render_overview_surface_preference(
+                "Prefer richer previews",
+                "Ask overview to prefer richer previews when they are stable enough. Turn this off to keep overview on summary cards and jump into the full window for interaction.",
+                settings.render_live_surfaces_in_overview,
+                core.clone(),
+            )}
+        }
+    }
+}
+
+fn render_keyboard_tab(settings: &SettingsSnapshot) -> Element {
+    rsx! {
+        section { class: "settings-section",
+            div { class: "settings-section-heading", "Keyboard" }
+            div { class: "settings-section-helper",
+                "Bindings reflect the active shortcut preset. Expand a category to see its keys."
+            }
+            div { class: "shortcut-groups",
+                for (idx, category) in ["General", "Browser", "Focus", "Top-level windows", "Pane splits", "Advanced resize"].iter().enumerate() {
+                    {render_shortcut_group(category, &settings.shortcuts, idx == 0)}
+                }
+            }
+        }
+    }
+}
+
+fn render_shortcut_group(
+    category: &'static str,
+    bindings: &[ShortcutBindingSnapshot],
+    default_open: bool,
 ) -> Element {
-    let preset_id = preset.id.clone();
-    let select = move |_| {
-        core.dispatch_shell_action(ShellAction::SelectShortcutPreset {
-            preset_id: preset_id.clone(),
-        })
-    };
-    let class = if preset.active {
-        "preset-card preset-card-active"
-    } else {
-        "preset-card"
-    };
-    rsx! {
-        button { class: "{class}", onclick: select,
-            div { class: "workspace-label", "{preset.label}" }
-            div { class: "settings-copy", "{preset.detail}" }
-        }
-    }
-}
-
-fn render_shortcut_group(category: &'static str, bindings: &[ShortcutBindingSnapshot]) -> Element {
     let entries = bindings
         .iter()
         .filter(|binding| binding.category == category)
@@ -4658,12 +4723,16 @@ fn render_shortcut_group(category: &'static str, bindings: &[ShortcutBindingSnap
     }
 
     rsx! {
-        section { class: "shortcut-group",
-            div { class: "workspace-label", "{category}" }
+        details { class: "shortcut-group", open: default_open,
+            summary { class: "shortcut-group-summary",
+                span { class: "shortcut-group-chevron", "›" }
+                span { class: "shortcut-group-label", "{category}" }
+                span { class: "shortcut-group-count", "{entries.len()}" }
+            }
             div { class: "shortcut-list",
                 for binding in entries {
                     div { class: "shortcut-row",
-                        div {
+                        div { class: "shortcut-row-copy",
                             div { class: "shortcut-label", "{binding.label}" }
                             div { class: "settings-copy", "{binding.detail}" }
                         }
@@ -4696,23 +4765,7 @@ fn render_notification_preference(
             enabled: !enabled,
         })
     };
-    let track_class = if enabled {
-        "toggle-track toggle-track-active"
-    } else {
-        "toggle-track"
-    };
-
-    rsx! {
-        button { class: "settings-toggle-row", onclick: toggle,
-            div { class: "settings-toggle-copy",
-                div { class: "workspace-label", "{label}" }
-                div { class: "settings-copy", "{detail}" }
-            }
-            div { class: "{track_class}",
-                div { class: "toggle-thumb" }
-            }
-        }
-    }
+    render_settings_toggle_row(label, detail, enabled, toggle)
 }
 
 fn render_overview_surface_preference(
@@ -4724,6 +4777,15 @@ fn render_overview_surface_preference(
     let toggle = move |_| {
         core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: !enabled })
     };
+    render_settings_toggle_row(label, detail, enabled, toggle)
+}
+
+fn render_settings_toggle_row(
+    label: &'static str,
+    detail: &'static str,
+    enabled: bool,
+    on_toggle: impl FnMut(Event<MouseData>) + 'static,
+) -> Element {
     let track_class = if enabled {
         "toggle-track toggle-track-active"
     } else {
@@ -4731,13 +4793,18 @@ fn render_overview_surface_preference(
     };
 
     rsx! {
-        button { class: "settings-toggle-row", onclick: toggle,
-            div { class: "settings-toggle-copy",
-                div { class: "workspace-label", "{label}" }
-                div { class: "settings-copy", "{detail}" }
+        div { class: "settings-row",
+            div { class: "settings-row-copy",
+                div { class: "settings-row-label", "{label}" }
+                div { class: "settings-row-helper", "{detail}" }
             }
-            div { class: "{track_class}",
-                div { class: "toggle-thumb" }
+            button {
+                r#type: "button",
+                class: "settings-toggle",
+                onclick: on_toggle,
+                div { class: "{track_class}",
+                    div { class: "toggle-thumb" }
+                }
             }
         }
     }
