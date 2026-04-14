@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import stat
 import subprocess
 import sys
@@ -10,8 +11,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "render_taskers_bin_aur.py"
-WRAPPER_SOURCE = REPO_ROOT / "packaging" / "aur" / "taskers-git" / "taskers-wrapper.sh"
+WRAPPER_SOURCE = REPO_ROOT / "packaging" / "aur" / "taskers-bin" / "taskers-wrapper.sh"
 DESKTOP_TEMPLATE = REPO_ROOT / "crates" / "taskers-app" / "assets" / "taskers.desktop.in"
+ICON_SOURCE = REPO_ROOT / "crates" / "taskers-app" / "assets" / "taskers.svg"
+LICENSE_SOURCE = REPO_ROOT / "LICENSE"
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 class RenderTaskersBinAurTests(unittest.TestCase):
@@ -75,6 +82,10 @@ class RenderTaskersBinAurTests(unittest.TestCase):
                 "{{EXEC}}", "taskers"
             )
             self.assertEqual(desktop_path.read_text(encoding="utf-8"), expected_desktop)
+            expected_desktop_sha = sha256_bytes(expected_desktop.encode("utf-8"))
+            expected_wrapper_sha = sha256_bytes(WRAPPER_SOURCE.read_bytes())
+            expected_icon_sha = sha256_bytes(ICON_SOURCE.read_bytes())
+            expected_license_sha = sha256_bytes(LICENSE_SOURCE.read_bytes())
 
             pkgbuild = (output_dir / "PKGBUILD").read_text(encoding="utf-8")
             self.assertIn("pkgver=1.2.3", pkgbuild)
@@ -84,11 +95,19 @@ class RenderTaskersBinAurTests(unittest.TestCase):
                 pkgbuild,
             )
             self.assertIn("'abcdef1234567890'", pkgbuild)
+            self.assertIn(f"'{expected_wrapper_sha}'", pkgbuild)
+            self.assertIn(f"'{expected_desktop_sha}'", pkgbuild)
+            self.assertIn(f"'{expected_icon_sha}'", pkgbuild)
+            self.assertIn(f"'{expected_license_sha}'", pkgbuild)
 
             srcinfo = (output_dir / ".SRCINFO").read_text(encoding="utf-8")
             self.assertIn("pkgver = 1.2.3", srcinfo)
             self.assertIn("pkgrel = 7", srcinfo)
             self.assertIn("sha256sums = abcdef1234567890", srcinfo)
+            self.assertIn(f"sha256sums = {expected_wrapper_sha}", srcinfo)
+            self.assertIn(f"sha256sums = {expected_desktop_sha}", srcinfo)
+            self.assertIn(f"sha256sums = {expected_icon_sha}", srcinfo)
+            self.assertIn(f"sha256sums = {expected_license_sha}", srcinfo)
 
     def test_fails_when_manifest_version_does_not_match(self) -> None:
         manifest = {

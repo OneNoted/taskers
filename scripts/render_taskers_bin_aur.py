@@ -17,52 +17,13 @@ WRAPPER_NAME = "taskers-entrypoint.sh"
 DESKTOP_NAME = "dev.taskers.app.desktop"
 ICON_NAME = "taskers.svg"
 LICENSE_NAME = "LICENSE"
-
-WRAPPER_SCRIPT = dedent(
-    """\
-    #!/bin/sh
-    set -eu
-
-    root='/opt/taskers'
-    cmd="$(basename "$0")"
-
-    case "$cmd" in
-      taskers)
-        export TASKERS_CTL_PATH="$root/bin/taskersctl"
-        export TASKERS_GHOSTTY_RUNTIME_DIR="$root/ghostty"
-        export GHOSTTY_RESOURCES_DIR="$root/ghostty"
-        export TERMINFO="$root/terminfo"
-        export TASKERS_DISABLE_GHOSTTY_RUNTIME_BOOTSTRAP=1
-        exec "$root/bin/taskers" "$@"
-        ;;
-      taskersctl)
-        exec "$root/bin/taskersctl" "$@"
-        ;;
-      taskers-terminald)
-        export TASKERS_GHOSTTY_RUNTIME_DIR="$root/ghostty"
-        export GHOSTTY_RESOURCES_DIR="$root/ghostty"
-        export TERMINFO="$root/terminfo"
-        export TASKERS_DISABLE_GHOSTTY_RUNTIME_BOOTSTRAP=1
-        exec "$root/bin/taskers-terminald" "$@"
-        ;;
-      *)
-        printf 'unknown Taskers entrypoint: %s\\n' "$cmd" >&2
-        exit 1
-        ;;
-    esac
-    """
-)
+WRAPPER_SOURCE = REPO_ROOT / "packaging/aur/taskers-bin/taskers-wrapper.sh"
 
 PKGBUILD_TEMPLATE = """# Maintained automatically from {repository}\npkgname=taskers-bin\npkgver={version}\npkgrel={pkgrel}\npkgdesc='Agent-first terminal workspace (published Linux bundle)'\narch=('x86_64')\nurl='https://github.com/{repository}'\nlicense=('MIT')\ndepends=('glibc' 'gtk4' 'libadwaita' 'webkitgtk-6.0')\noptdepends=(\n  'niri: focus an existing Taskers window from desktop launches'\n  'xdg-desktop-portal-gtk: improve desktop portal support'\n)\nconflicts=('taskers' 'taskers-git')\nprovides=('taskers')\nsource=(\n  'taskers-linux-bundle-v{version}-{target_triple}.tar.xz::{bundle_url}'\n  '{wrapper_name}'\n  '{desktop_name}'\n  '{icon_name}'\n  '{license_name}'\n)\nsha256sums=(\n  '{bundle_sha256}'\n  '{wrapper_sha256}'\n  '{desktop_sha256}'\n  '{icon_sha256}'\n  '{license_sha256}'\n)\n\npackage() {{\n  install -dm755 \"$pkgdir/opt/taskers\" \"$pkgdir/usr/bin\" \\\n    \"$pkgdir/usr/share/applications\" \\\n    \"$pkgdir/usr/share/icons/hicolor/scalable/apps\" \\\n    \"$pkgdir/usr/share/licenses/${{pkgname}}\"\n\n  cp -a \"$srcdir/bin\" \"$pkgdir/opt/taskers/\"\n  cp -a \"$srcdir/ghostty\" \"$pkgdir/opt/taskers/\"\n  cp -a \"$srcdir/terminfo\" \"$pkgdir/opt/taskers/\"\n\n  for bin in taskers taskersctl taskers-terminald; do\n    install -m755 \"$srcdir/{wrapper_name}\" \"$pkgdir/usr/bin/$bin\"\n  done\n\n  install -m644 \"$srcdir/{desktop_name}\" \\\n    \"$pkgdir/usr/share/applications/dev.taskers.app.desktop\"\n  install -m644 \"$srcdir/{icon_name}\" \\\n    \"$pkgdir/usr/share/icons/hicolor/scalable/apps/taskers.svg\"\n  install -m644 \"$srcdir/{license_name}\" \\\n    \"$pkgdir/usr/share/licenses/${{pkgname}}/LICENSE\"\n}}\n"""
 
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def sha256_path(path: Path) -> str:
-    return sha256_bytes(path.read_bytes())
-
 
 def read_source_bytes(source: str) -> bytes:
     parsed = urlparse(source)
@@ -99,6 +60,12 @@ def render_desktop_entry() -> bytes:
     return template.replace("{{EXEC}}", "taskers").encode("utf-8")
 
 
+def write_asset(path: Path, content: bytes, executable: bool = False) -> None:
+    path.write_bytes(content)
+    if executable:
+        path.chmod(0o755)
+
+
 def write_text(path: Path, content: str, executable: bool = False) -> None:
     path.write_text(content, encoding="utf-8")
     if executable:
@@ -122,17 +89,20 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     wrapper_path = output_dir / WRAPPER_NAME
-    write_text(wrapper_path, WRAPPER_SCRIPT, executable=True)
+    wrapper_bytes = WRAPPER_SOURCE.read_bytes()
+    write_asset(wrapper_path, wrapper_bytes, executable=True)
 
     desktop_bytes = render_desktop_entry()
     desktop_path = output_dir / DESKTOP_NAME
-    desktop_path.write_bytes(desktop_bytes)
+    write_asset(desktop_path, desktop_bytes)
 
     icon_path = output_dir / ICON_NAME
-    icon_path.write_bytes((REPO_ROOT / "crates/taskers-app/assets/taskers.svg").read_bytes())
+    icon_bytes = (REPO_ROOT / "crates/taskers-app/assets/taskers.svg").read_bytes()
+    write_asset(icon_path, icon_bytes)
 
     license_path = output_dir / LICENSE_NAME
-    license_path.write_bytes((REPO_ROOT / "LICENSE").read_bytes())
+    license_bytes = (REPO_ROOT / "LICENSE").read_bytes()
+    write_asset(license_path, license_bytes)
 
     pkgbuild = PKGBUILD_TEMPLATE.format(
         repository=args.repository,
@@ -142,13 +112,13 @@ def main() -> int:
         bundle_url=bundle_url,
         bundle_sha256=bundle_sha256,
         wrapper_name=WRAPPER_NAME,
-        wrapper_sha256=sha256_path(wrapper_path),
+        wrapper_sha256=sha256_bytes(wrapper_bytes),
         desktop_name=DESKTOP_NAME,
         desktop_sha256=sha256_bytes(desktop_bytes),
         icon_name=ICON_NAME,
-        icon_sha256=sha256_path(icon_path),
+        icon_sha256=sha256_bytes(icon_bytes),
         license_name=LICENSE_NAME,
-        license_sha256=sha256_path(license_path),
+        license_sha256=sha256_bytes(license_bytes),
     )
     pkgbuild_path = output_dir / "PKGBUILD"
     write_text(pkgbuild_path, pkgbuild)
@@ -177,10 +147,10 @@ def main() -> int:
         	source = {ICON_NAME}
         	source = {LICENSE_NAME}
         	sha256sums = {bundle_sha256}
-        	sha256sums = {sha256_path(wrapper_path)}
+        	sha256sums = {sha256_bytes(wrapper_bytes)}
         	sha256sums = {sha256_bytes(desktop_bytes)}
-        	sha256sums = {sha256_path(icon_path)}
-        	sha256sums = {sha256_path(license_path)}
+        	sha256sums = {sha256_bytes(icon_bytes)}
+        	sha256sums = {sha256_bytes(license_bytes)}
 
         pkgname = taskers-bin
         """
