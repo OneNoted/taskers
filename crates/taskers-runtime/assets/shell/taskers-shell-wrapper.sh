@@ -62,7 +62,7 @@ if [ "$#" -eq 0 ]; then
       ;;
     fish)
       if [ "$SHELL_PROFILE" = "clean" ]; then
-        set -- --no-config --interactive
+        set -- --no-config --interactive --init-command "source \"$TASKERS_SHELL_INTEGRATION_DIR/taskers-hooks.fish\""
       else
         set -- --interactive --init-command "source \"$TASKERS_SHELL_INTEGRATION_DIR/taskers-hooks.fish\""
       fi

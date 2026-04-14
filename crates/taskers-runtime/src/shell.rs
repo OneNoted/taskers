@@ -779,6 +779,10 @@ mod tests {
             wrapper.contains("set -- -d -i"),
             "expected wrapper to synthesize zsh default launch flags when no explicit args are passed"
         );
+        assert!(
+            wrapper.contains("set -- --no-config --interactive --init-command"),
+            "expected clean-profile fish launches to keep sourcing taskers-hooks.fish"
+        );
     }
 
     #[test]
