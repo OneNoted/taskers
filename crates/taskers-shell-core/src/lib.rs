@@ -3549,12 +3549,38 @@ impl TaskersCore {
         let Some(workspace_id) = model.active_workspace_id() else {
             return false;
         };
+        let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
+        let target_column_width = (viewport.width / 2).max(MIN_WORKSPACE_WINDOW_WIDTH);
+        let target_window_height = (viewport.height / 2).max(MIN_WORKSPACE_WINDOW_HEIGHT);
         let changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
             workspace_id,
             direction: direction.to_domain(),
         });
         if changed {
-            return self.ensure_active_window_visible() || changed;
+            let post_model = self.app_state.snapshot_model();
+            let resized = post_model
+                .workspaces
+                .get(&workspace_id)
+                .map(|workspace| match direction {
+                    WorkspaceDirection::Left | WorkspaceDirection::Right => workspace
+                        .active_column_id()
+                        .is_some_and(|workspace_column_id| {
+                            self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+                                workspace_id,
+                                workspace_column_id,
+                                width: target_column_width,
+                            })
+                        }),
+                    WorkspaceDirection::Up | WorkspaceDirection::Down => {
+                        self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                            workspace_id,
+                            workspace_window_id: workspace.active_window,
+                            height: target_window_height,
+                        })
+                    }
+                })
+                .unwrap_or(false);
+            return self.ensure_active_window_visible() || resized || changed;
         }
         false
     }
@@ -8125,10 +8151,13 @@ mod tests {
     }
 
     #[test]
-    fn creating_horizontal_workspace_window_keeps_roomy_default_width() {
+    fn creating_horizontal_workspace_window_uses_half_viewport_width() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
-        let first_window_id = core.snapshot().current_workspace.active_window_id;
+        let before = core.snapshot();
+        let first_window_id = before.current_workspace.active_window_id;
+        let expected_width =
+            (before.portal.content.width / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
 
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
             direction: WorkspaceDirection::Right,
@@ -8138,19 +8167,34 @@ mod tests {
         let first_window = window_snapshot(&snapshot, first_window_id);
         let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
 
-        assert_eq!(
-            first_window.frame.width,
-            taskers_domain::DEFAULT_WORKSPACE_WINDOW_WIDTH
-        );
-        assert_eq!(
-            active_window.frame.width,
-            taskers_domain::DEFAULT_WORKSPACE_WINDOW_WIDTH
-        );
+        assert_eq!(active_window.frame.width, expected_width);
         assert!(
             snapshot.current_workspace.canvas_width
                 >= first_window.frame.width
                     + active_window.frame.width
                     + DEFAULT_WORKSPACE_WINDOW_GAP
+        );
+    }
+
+    #[test]
+    fn creating_vertical_workspace_window_uses_half_viewport_height() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let before = core.snapshot();
+        let expected_height =
+            (before.portal.content.height / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_HEIGHT);
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+
+        assert!(
+            (active_window.frame.height - expected_height).abs() <= 2,
+            "expected active window height to stay near half the visible viewport (expected {expected_height}, got {})",
+            active_window.frame.height
         );
     }
 
