@@ -1121,6 +1121,140 @@ mod config_tests {
     }
 }
 
+#[cfg(test)]
+mod runtime_bootstrap_tests {
+    use super::{TaskersConfig, resolve_runtime_bootstrap};
+    use std::{env, fs, os::unix::fs::PermissionsExt, sync::Mutex};
+    use taskers_ghostty::EmbeddedTerminalAppearance;
+    use taskers_shell_core::{NotificationPreferencesSnapshot, SettingsSnapshot};
+    use tempfile::TempDir;
+
+    static PATH_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct PathGuard(Option<std::ffi::OsString>);
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(path) = self.0.as_ref() {
+                    env::set_var("PATH", path);
+                } else {
+                    env::remove_var("PATH");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_bootstrap_uses_configured_shell_override_in_launch_spec() {
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let temp = TempDir::new().expect("tempdir");
+        let shell_path = temp.path().join("fish");
+        fs::write(&shell_path, "#!/bin/sh\nexit 0\n").expect("write shell");
+        let mut permissions = fs::metadata(&shell_path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shell_path, permissions).expect("chmod");
+
+        let runtime = resolve_runtime_bootstrap(
+            EmbeddedTerminalAppearance::Taskers,
+            Some(shell_path.to_str().expect("shell path utf8")),
+            None,
+        );
+
+        assert_eq!(
+            runtime
+                .shell_launch
+                .env
+                .get("TASKERS_REAL_SHELL")
+                .map(String::as_str),
+            Some(shell_path.to_str().expect("shell path utf8"))
+        );
+        assert!(
+            runtime
+                .shell_launch
+                .args
+                .iter()
+                .any(|arg| arg == "--interactive"),
+            "expected configured fish shell to launch interactively"
+        );
+        assert!(
+            runtime
+                .shell_launch
+                .args
+                .iter()
+                .any(|arg| arg.contains("taskers-hooks.fish")),
+            "expected fish launch spec to source the fish shell hooks"
+        );
+    }
+
+    #[test]
+    fn runtime_bootstrap_invalid_configured_shell_falls_back_with_note() {
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let runtime = resolve_runtime_bootstrap(
+            EmbeddedTerminalAppearance::Taskers,
+            Some("/definitely/missing/taskers-shell"),
+            None,
+        );
+
+        assert!(
+            runtime.startup_notes.iter().any(|note| {
+                note.contains("Configured shell '/definitely/missing/taskers-shell' is unavailable")
+                    && note.contains("falling back to the system default shell")
+            }),
+            "expected fallback startup note when configured shell is invalid"
+        );
+    }
+
+    #[test]
+    fn configured_shell_round_trips_from_settings_into_relaunch_bootstrap() {
+        let _guard = PATH_MUTEX.lock().expect("path mutex");
+        let temp = TempDir::new().expect("tempdir");
+        let shell_path = temp.path().join("fish");
+        fs::write(&shell_path, "#!/bin/sh\nexit 0\n").expect("write shell");
+        let mut permissions = fs::metadata(&shell_path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shell_path, permissions).expect("chmod");
+        let original_path = env::var_os("PATH");
+        let _restore_path = PathGuard(original_path);
+        unsafe {
+            env::set_var("PATH", temp.path());
+        }
+
+        let settings = SettingsSnapshot {
+            selected_theme_id: "dark".into(),
+            theme_options: Vec::new(),
+            shortcut_presets: Vec::new(),
+            shortcuts: Vec::new(),
+            configured_shell: Some(" fish ".into()),
+            default_shell_label: "/bin/zsh".into(),
+            notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
+        };
+        let next = TaskersConfig::from_settings(&settings, &TaskersConfig::default());
+        let persisted = serde_json::to_string(&next).expect("serialize config");
+        let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
+
+        let runtime = resolve_runtime_bootstrap(
+            reloaded.embedded_terminal_appearance,
+            reloaded.configured_shell.as_deref(),
+            None,
+        );
+
+        assert_eq!(
+            runtime
+                .shell_launch
+                .env
+                .get("TASKERS_REAL_SHELL")
+                .map(String::as_str),
+            Some(shell_path.to_str().expect("shell path utf8")),
+            "reloaded configured_shell={:?} path={:?} startup_notes={:?}",
+            reloaded.configured_shell,
+            env::var_os("PATH"),
+            runtime.startup_notes
+        );
+    }
+}
+
 fn is_modifier_key(key: gdk::Key) -> bool {
     matches!(
         key,

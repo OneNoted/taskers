@@ -4196,10 +4196,11 @@ fn render_notification_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        SurfaceDragCandidate, SurfaceKind, attention_ring_class, select_active_surface,
-        show_surface_backdrop, surface_drag_threshold_reached, surface_primary_label,
-        surface_runtime_badge_text, surface_status_text, surface_summary_title,
-        vcs_commit_net_summary, vcs_diff_line_class, vcs_file_dot_class, vcs_ref_input_value,
+        SurfaceDragCandidate, SurfaceKind, attention_ring_class, configured_shell_is_custom,
+        configured_shell_matches_option, select_active_surface, show_surface_backdrop,
+        surface_drag_threshold_reached, surface_primary_label, surface_runtime_badge_text,
+        surface_status_text, surface_summary_title, vcs_commit_net_summary, vcs_diff_line_class,
+        vcs_file_dot_class, vcs_ref_input_value,
     };
     use crate::taskers_core::{
         AttentionRingState, AttentionState, BrowserProfileMode, PaneId, RuntimeIdentitySnapshot,
@@ -4429,6 +4430,26 @@ mod tests {
     }
 
     #[test]
+    fn configured_shell_option_matching_accepts_names_and_paths() {
+        assert!(configured_shell_matches_option(Some("fish"), "fish"));
+        assert!(configured_shell_matches_option(
+            Some("/usr/bin/fish"),
+            "fish"
+        ));
+        assert!(!configured_shell_matches_option(
+            Some("/usr/bin/zsh"),
+            "fish"
+        ));
+    }
+
+    #[test]
+    fn configured_shell_custom_detection_excludes_common_shells() {
+        assert!(!configured_shell_is_custom(Some("fish")));
+        assert!(!configured_shell_is_custom(Some("/usr/bin/zsh")));
+        assert!(configured_shell_is_custom(Some("/opt/homebrew/bin/nu")));
+    }
+
+    #[test]
     fn vcs_file_dot_class_tracks_each_file_status_group() {
         assert_eq!(
             vcs_file_dot_class(VcsFileStatus::Added),
@@ -4652,7 +4673,7 @@ fn render_terminal_tab(settings: &SettingsSnapshot, core: SharedCore) -> Element
         section { class: "settings-section",
             div { class: "settings-section-heading", "Terminal" }
             div { class: "settings-section-helper",
-                "Configure how new Taskers terminal panes launch. Shell changes apply to new Taskers launches."
+                "Configure how new Taskers terminal panes launch. Fully quit and relaunch Taskers to apply shell changes to new panes."
             }
             div { class: "settings-row",
                 div { class: "settings-row-copy",
