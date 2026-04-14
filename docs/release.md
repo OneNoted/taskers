@@ -75,7 +75,9 @@ cargo run -p taskers-cli -- notify --help
   - `taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz`
   - `taskers-manifest-v<version>.json`
   - `taskers-manifest.json`
-- Publish the GitHub release so the Ghostty runtime asset is publicly downloadable before publishing the crates.
+- Publish the GitHub release so the runtime, Linux bundle, and manifest assets are publicly downloadable before publishing the crates.
+- After the GitHub release is published, the `Sync AUR taskers-bin` workflow will automatically render and push the `taskers-bin` AUR package if the `AUR_TASKERS_BIN_SSH_PRIVATE_KEY` secret is configured.
+- If the AUR sync fails or you need a `pkgrel` bump without cutting a new Taskers release, rerun `Sync AUR taskers-bin` with `workflow_dispatch` and the target version / pkgrel.
 - Publish the crates to crates.io in dependency order:
 
 ```bash
@@ -92,14 +94,7 @@ cargo publish -p taskers-shell
 cargo publish -p taskers
 ```
 
-- Bump `packaging/aur/taskers-bin/PKGBUILD` `pkgver` to the new stable release
-  version, update the release bundle SHA-256 in `sha256sums`, and regenerate
-  `packaging/aur/*/.SRCINFO`.
-- Push the updated `taskers-bin` and `taskers-git` package directories to their
-  matching AUR repos. `taskers-bin` should continue pointing at the explicit
-  versioned release asset that matches its committed `pkgver`, while the stable
-  `releases/latest/download/taskers-linux-bundle-x86_64-unknown-linux-gnu.tar.xz`
-  alias remains available for ad-hoc download and verification.
+- If you still maintain `taskers-git`, push any needed VCS-package updates to its separate AUR repo after the stable release flow finishes.
 
 ## 4. Post-Publish Check
 
