@@ -3544,25 +3544,22 @@ impl TaskersCore {
         self.dispatch_control(ControlCommand::CreateWorkspace { label })
     }
 
-    fn create_workspace_window(&mut self, direction: WorkspaceDirection) -> bool {
+    fn resize_active_workspace_window_for_viewport(
+        &mut self,
+        workspace_id: WorkspaceId,
+        direction: Direction,
+    ) -> bool {
         let model = self.app_state.snapshot_model();
-        let Some(workspace_id) = model.active_workspace_id() else {
-            return false;
-        };
         let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
         let target_column_width = (viewport.width / 2).max(MIN_WORKSPACE_WINDOW_WIDTH);
         let target_window_height = (viewport.height / 2).max(MIN_WORKSPACE_WINDOW_HEIGHT);
-        let changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
-            workspace_id,
-            direction: direction.to_domain(),
-        });
-        if changed {
-            let post_model = self.app_state.snapshot_model();
-            let resized = post_model
-                .workspaces
-                .get(&workspace_id)
-                .map(|workspace| match direction {
-                    WorkspaceDirection::Left | WorkspaceDirection::Right => workspace
+
+        model
+            .workspaces
+            .get(&workspace_id)
+            .map(|workspace| match direction {
+                Direction::Left | Direction::Right => {
+                    workspace
                         .active_column_id()
                         .is_some_and(|workspace_column_id| {
                             self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
@@ -3570,17 +3567,33 @@ impl TaskersCore {
                                 workspace_column_id,
                                 width: target_column_width,
                             })
-                        }),
-                    WorkspaceDirection::Up | WorkspaceDirection::Down => {
-                        self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
-                            workspace_id,
-                            workspace_window_id: workspace.active_window,
-                            height: target_window_height,
                         })
-                    }
-                })
-                .unwrap_or(false);
-            return self.ensure_active_window_visible() || resized || changed;
+                }
+                Direction::Up | Direction::Down => {
+                    self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                        workspace_id,
+                        workspace_window_id: workspace.active_window,
+                        height: target_window_height,
+                    })
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    fn create_workspace_window(&mut self, direction: WorkspaceDirection) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
+        let changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
+            workspace_id,
+            direction: direction.to_domain(),
+            preferred_column_width: Some((viewport.width / 2).max(MIN_WORKSPACE_WINDOW_WIDTH)),
+            preferred_window_height: Some((viewport.height / 2).max(MIN_WORKSPACE_WINDOW_HEIGHT)),
+        });
+        if changed {
+            return self.ensure_active_window_visible() || changed;
         }
         false
     }
@@ -3698,7 +3711,16 @@ impl TaskersCore {
             target,
         });
         if changed {
-            return self.ensure_active_window_visible() || changed;
+            let resized = self.resize_active_workspace_window_for_viewport(
+                workspace_id,
+                match target {
+                    WorkspaceWindowMoveTarget::ColumnBefore { .. }
+                    | WorkspaceWindowMoveTarget::ColumnAfter { .. } => Direction::Right,
+                    WorkspaceWindowMoveTarget::StackAbove { .. }
+                    | WorkspaceWindowMoveTarget::StackBelow { .. } => Direction::Down,
+                },
+            );
+            return self.ensure_active_window_visible() || resized || changed;
         }
         false
     }
@@ -4096,7 +4118,9 @@ impl TaskersCore {
         };
         let changed = matches!(response, ControlResponse::SurfaceMovedToWorkspace { .. });
         if changed {
-            return self.ensure_active_window_visible() || changed;
+            let resized = self
+                .resize_active_workspace_window_for_viewport(target_workspace_id, Direction::Right);
+            return self.ensure_active_window_visible() || resized || changed;
         }
         false
     }
@@ -6707,9 +6731,9 @@ mod tests {
         MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX, NotificationPreferencesSnapshot, ResizeHandleTarget,
         ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
         ShellSection, ShortcutAction, SurfaceDragSessionSnapshot, SurfaceMountSpec,
-        WorkspaceDirection, WorkspaceWindowSnapshot, default_preview_app_state,
-        default_session_path_for_preview, display_surface_title, pane_body_frame,
-        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        WorkspaceDirection, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+        default_preview_app_state, default_session_path_for_preview, display_surface_title,
+        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
 
@@ -8196,6 +8220,70 @@ mod tests {
             "expected active window height to stay near half the visible viewport (expected {expected_height}, got {})",
             active_window.frame.height
         );
+    }
+
+    #[test]
+    fn extracting_window_tab_uses_half_viewport_width() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(700, 900));
+        let source_window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindowTab {
+            window_id: source_window_id,
+        });
+        let before = core.snapshot();
+        let active_window = window_snapshot(&before, source_window_id);
+        let tab_id = active_window.tabs[1].id;
+        let expected_width =
+            (before.portal.content.width / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
+
+        core.dispatch_shell_action(ShellAction::ExtractWorkspaceWindowTab {
+            source_window_id,
+            tab_id,
+            target: WorkspaceWindowMoveTarget::ColumnAfter {
+                column_id: active_window.column_id,
+            },
+        });
+
+        let snapshot = core.snapshot();
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+        assert_eq!(active_window.frame.width, expected_width);
+    }
+
+    #[test]
+    fn moving_surface_to_workspace_uses_half_viewport_width() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(700, 900));
+        let source_pane_id = core.snapshot().current_workspace.active_pane;
+        core.dispatch_shell_action(ShellAction::AddBrowserSurface {
+            pane_id: Some(source_pane_id),
+            profile_mode: BrowserProfileMode::PersistentDefault,
+        });
+        let before = core.snapshot();
+        let moved_surface_id = find_pane(&before.current_workspace.layout, source_pane_id)
+            .map(|pane| pane.active_surface)
+            .expect("added surface");
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.active)
+            .map(|workspace| workspace.id)
+            .expect("target workspace");
+        let expected_width = (core.snapshot().portal.content.width / 2)
+            .max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
+
+        core.dispatch_shell_action(ShellAction::MoveSurfaceToWorkspace {
+            source_pane_id,
+            surface_id: moved_surface_id,
+            target_workspace_id,
+        });
+
+        let snapshot = core.snapshot();
+        let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
+        assert_eq!(active_window.frame.width, expected_width);
     }
 
     #[test]

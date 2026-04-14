@@ -1,1 +1,0 @@
-/home/notes/Projects/taskers/packaging/aur/taskers-bin/taskers-wrapper.sh

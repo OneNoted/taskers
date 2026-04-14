@@ -42,8 +42,21 @@ fn insert_window_relative_to_active(
 
     match direction {
         Direction::Left | Direction::Right => {
+            let source_width = workspace
+                .columns
+                .get(&source_column_id)
+                .map(|column| column.width)
+                .expect("active column should exist");
+            let (retained_width, new_width) =
+                split_top_level_extent(source_width, MIN_WORKSPACE_WINDOW_WIDTH);
+            let column = workspace
+                .columns
+                .get_mut(&source_column_id)
+                .expect("active column should exist");
+            column.width = retained_width;
+
             let mut new_column = WorkspaceColumnRecord::new(workspace_window_id);
-            new_column.width = DEFAULT_WORKSPACE_WINDOW_WIDTH;
+            new_column.width = new_width;
             let insert_index = if matches!(direction, Direction::Left) {
                 source_column_index
             } else {
@@ -5240,12 +5253,12 @@ mod tests {
         assert_eq!(workspace.windows.len(), 3);
         assert_eq!(workspace.columns.len(), 2);
         assert_eq!(workspace.active_pane, stacked_pane);
-        assert_eq!(right_column.width, DEFAULT_WORKSPACE_WINDOW_WIDTH);
+        assert_eq!(right_column.width, DEFAULT_WORKSPACE_WINDOW_WIDTH / 2);
         assert_eq!(right_column.window_order.len(), 2);
         assert_ne!(workspace.active_window, first_window_id);
         assert!(workspace.columns.values().any(|column| {
             column.window_order == vec![first_window_id]
-                && column.width == DEFAULT_WORKSPACE_WINDOW_WIDTH
+                && column.width == DEFAULT_WORKSPACE_WINDOW_WIDTH / 2
         }));
         let upper_window_id = right_column.window_order[0];
         assert_eq!(
@@ -5276,7 +5289,7 @@ mod tests {
     }
 
     #[test]
-    fn creating_workspace_window_keeps_existing_width_and_gives_new_column_default_width() {
+    fn creating_workspace_window_clamps_split_column_width_to_minimum() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
         let workspace = model.active_workspace().expect("workspace");
@@ -5297,10 +5310,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             widths,
-            vec![
-                MIN_WORKSPACE_WINDOW_WIDTH + 80,
-                DEFAULT_WORKSPACE_WINDOW_WIDTH,
-            ]
+            vec![MIN_WORKSPACE_WINDOW_WIDTH, MIN_WORKSPACE_WINDOW_WIDTH]
         );
     }
 

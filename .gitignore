@@ -13,3 +13,11 @@ greenfield/target/
 .codex/skills/.system/**
 !.codex/prompts/
 !.codex/prompts/**
+packaging/aur/taskers-bin/pkg/
+packaging/aur/taskers-bin/src/
+packaging/aur/taskers-bin/*.pkg.tar.zst
+packaging/aur/taskers-bin/taskers-linux-bundle-*.tar.xz
+packaging/aur/taskers-git/pkg/
+packaging/aur/taskers-git/src/
+packaging/aur/taskers-git/taskers/
+packaging/aur/taskers-git/*.pkg.tar.zst

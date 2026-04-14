@@ -2496,6 +2496,8 @@ pub async fn run() -> anyhow::Result<()> {
                     .send(ControlCommand::CreateWorkspaceWindow {
                         workspace_id: workspace,
                         direction: direction.into(),
+                        preferred_column_width: None,
+                        preferred_window_height: None,
                     })
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
