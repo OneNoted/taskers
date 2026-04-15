@@ -2323,7 +2323,7 @@ impl NativeSurfaceShell {
         root.set_valign(Align::Start);
         root.set_overflow(Overflow::Hidden);
         root.set_focusable(false);
-        root.set_can_target(interactive);
+        root.set_can_target(native_surface_shell_can_target(interactive));
         root.add_css_class("native-surface-host");
         root.add_css_class(kind_class);
         Self {
@@ -2376,7 +2376,8 @@ impl NativeSurfaceShell {
     }
 
     fn set_interactive(&self, interactive: bool) {
-        self.root.set_can_target(interactive);
+        self.root
+            .set_can_target(native_surface_shell_can_target(interactive));
     }
 
     fn detach(&self, scene: &Fixed) {
@@ -2659,7 +2660,13 @@ fn preview_for_drag(
                 taskers_core::WorkspaceOuterEdge::Left => -(dx.round() as i32),
                 taskers_core::WorkspaceOuterEdge::Right => dx.round() as i32,
             };
-            resize_track_push(column_widths, *column_index, delta, MIN_WORKSPACE_WINDOW_WIDTH).map(
+            resize_track_push(
+                column_widths,
+                *column_index,
+                delta,
+                MIN_WORKSPACE_WINDOW_WIDTH,
+            )
+            .map(
                 |widths| taskers_core::ResizePreview::WorkspaceColumnWidths {
                     workspace_id: *workspace_id,
                     widths,
@@ -3259,6 +3266,10 @@ fn native_surfaces_interactive(drag_mode: ShellDragMode, overview_mode: bool) ->
     drag_mode == ShellDragMode::None && !overview_mode
 }
 
+fn native_surface_shell_can_target(_interactive: bool) -> bool {
+    false
+}
+
 fn native_surfaces_visible(drag_mode: ShellDragMode) -> bool {
     drag_mode == ShellDragMode::None
 }
@@ -3559,8 +3570,9 @@ mod tests {
     use gtk::prelude::WidgetExt;
 
     use super::{
-        browser_plans, build_native_surface_scene_layers, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
-        native_surface_css, native_surface_visible_plan, native_surfaces_interactive,
+        browser_plans, build_native_surface_scene_layers, clamp_frame_to_widget,
+        host_attention_palette, native_surface_classes, native_surface_css,
+        native_surface_shell_can_target, native_surface_visible_plan, native_surfaces_interactive,
         native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
         resolve_screenshot_output_path, should_defer_terminal_surface_creations_after_removals,
         terminal_padding_value_px, terminal_plans, trim_terminal_tail, with_capture_retries,
@@ -3669,6 +3681,12 @@ mod tests {
         assert!(!scene.can_target());
         assert!(!viewport.is_focusable());
         assert!(!scene.is_focusable());
+    }
+
+    #[test]
+    fn native_surface_shell_does_not_compete_for_pointer_targeting() {
+        assert!(!native_surface_shell_can_target(true));
+        assert!(!native_surface_shell_can_target(false));
     }
 
     #[test]

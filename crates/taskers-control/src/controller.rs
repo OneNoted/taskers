@@ -365,12 +365,36 @@ impl InMemoryController {
                 workspace_id,
                 pane_id,
             } => {
+                let before = model.workspaces.get(&workspace_id).map(|workspace| {
+                    (
+                        workspace.active_pane,
+                        workspace
+                            .notifications
+                            .iter()
+                            .filter(|notification| {
+                                notification.pane_id == pane_id && notification.unread()
+                            })
+                            .count(),
+                    )
+                });
                 model.focus_pane(workspace_id, pane_id)?;
+                let after = model.workspaces.get(&workspace_id).map(|workspace| {
+                    (
+                        workspace.active_pane,
+                        workspace
+                            .notifications
+                            .iter()
+                            .filter(|notification| {
+                                notification.pane_id == pane_id && notification.unread()
+                            })
+                            .count(),
+                    )
+                });
                 (
                     ControlResponse::Ack {
                         message: "pane focused".into(),
                     },
-                    true,
+                    before != after,
                 )
             }
             ControlCommand::FocusPaneDirection {

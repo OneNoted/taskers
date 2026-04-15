@@ -4157,21 +4157,23 @@ impl TaskersCore {
     }
 
     fn focus_pane_by_id(&mut self, pane_id: PaneId) -> bool {
-        let Some((workspace_id, _)) =
-            self.resolve_workspace_pane(&self.app_state.snapshot_model(), pane_id)
-        else {
+        let model = self.app_state.snapshot_model();
+        let Some((workspace_id, _)) = self.resolve_workspace_pane(&model, pane_id) else {
             return false;
         };
-        if self.app_state.snapshot_model().active_workspace_id() != Some(workspace_id) {
-            let _ = self.dispatch_control(ControlCommand::SwitchWorkspace {
+        let starting_app_revision = self.app_state.revision();
+        let mut changed = false;
+        if model.active_workspace_id() != Some(workspace_id) {
+            changed |= self.dispatch_control(ControlCommand::SwitchWorkspace {
                 window_id: None,
                 workspace_id,
             });
         }
-        let mut changed = self.dispatch_control(ControlCommand::FocusPane {
+        let _ = self.dispatch_control_with_response(ControlCommand::FocusPane {
             workspace_id,
             pane_id,
         });
+        changed |= self.app_state.revision() != starting_app_revision;
         changed |= self.sync_terminal_focus_for_workspace(workspace_id);
         if self.ui.vcs_panel_visible {
             changed |= self.refresh_vcs_panel();
@@ -4969,17 +4971,15 @@ impl TaskersCore {
             self.ui.workspace_window_gap,
             workspace.viewport.clone(),
         );
-        let Some(active_frame) =
-            workspace_window_placements(
-                workspace,
-                (viewport_frame.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2).max(1),
-                viewport_frame.height,
-                self.ui.workspace_window_gap,
-            )
-                .into_iter()
-                .find(|placement| placement.window_id == workspace.active_window)
-                .map(|placement| placement.frame)
-        else {
+        let Some(active_frame) = workspace_window_placements(
+            workspace,
+            (viewport_frame.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2).max(1),
+            viewport_frame.height,
+            self.ui.workspace_window_gap,
+        )
+        .into_iter()
+        .find(|placement| placement.window_id == workspace.active_window)
+        .map(|placement| placement.frame) else {
             return false;
         };
 
@@ -5476,11 +5476,15 @@ fn workspace_render_context(
         };
     }
 
-    let base_frames =
-        workspace_window_placements(workspace, viewport_width, viewport_height, workspace_window_gap)
-        .into_iter()
-        .map(|placement| placement.frame)
-        .collect::<Vec<_>>();
+    let base_frames = workspace_window_placements(
+        workspace,
+        viewport_width,
+        viewport_height,
+        workspace_window_gap,
+    )
+    .into_iter()
+    .map(|placement| placement.frame)
+    .collect::<Vec<_>>();
     let base_metrics = canvas_metrics_from_frames(&base_frames, 0, 0);
     let outer_padding_x = metrics.workspace_padding;
     let outer_padding_y = metrics.workspace_padding;
@@ -5681,11 +5685,7 @@ fn clamped_workspace_viewport(
         viewport_height,
         workspace_window_gap,
     );
-    let canvas = workspace_canvas_metrics(
-        &placements,
-        WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX,
-        0,
-    );
+    let canvas = workspace_canvas_metrics(&placements, WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX, 0);
     let max_x = (canvas.width - viewport_width).max(0);
     let max_y = (canvas.height - viewport_height).max(0);
 
@@ -8355,7 +8355,8 @@ mod tests {
     }
 
     #[test]
-    fn creating_horizontal_workspace_window_preserves_existing_width_and_applies_new_window_default_width() {
+    fn creating_horizontal_workspace_window_preserves_existing_width_and_applies_new_window_default_width()
+     {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
         let before = core.snapshot();
@@ -8382,7 +8383,8 @@ mod tests {
     }
 
     #[test]
-    fn creating_vertical_workspace_window_preserves_existing_height_and_applies_new_window_default_height() {
+    fn creating_vertical_workspace_window_preserves_existing_height_and_applies_new_window_default_height()
+     {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
         let before = core.snapshot();
@@ -8545,14 +8547,21 @@ mod tests {
             .columns
             .iter()
             .filter(|column| column.windows.len() == 1)
-            .flat_map(|column| column.windows.iter().map(|window| (window.id, window.frame.height)))
+            .flat_map(|column| {
+                column
+                    .windows
+                    .iter()
+                    .map(|window| (window.id, window.frame.height))
+            })
             .collect::<Vec<_>>();
-        window_heights.extend(right_column
-            .windows
-            .iter()
-            .enumerate()
-            .map(|(index, window)| (window.id, if index == 0 { 520 } else { 680 }))
-            .collect::<Vec<_>>());
+        window_heights.extend(
+            right_column
+                .windows
+                .iter()
+                .enumerate()
+                .map(|(index, window)| (window.id, if index == 0 { 520 } else { 680 }))
+                .collect::<Vec<_>>(),
+        );
 
         core.dispatch_shell_action(ShellAction::PreviewResize {
             preview: ResizePreview::WorkspaceColumnWidths {
@@ -9242,6 +9251,51 @@ mod tests {
 
         assert!(core.revision() > before);
         assert!(matches!(core.snapshot().section, ShellSection::Settings));
+    }
+
+    #[test]
+    fn redundant_host_pane_focus_event_does_not_advance_revision() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let before = core.revision();
+        let pane_id = core.snapshot().current_workspace.active_pane;
+        let mut revisions = core.subscribe_revisions();
+        revisions.borrow_and_update();
+
+        core.apply_host_event(HostEvent::PaneFocused { pane_id });
+
+        assert_eq!(core.revision(), before);
+        assert_eq!(core.snapshot().current_workspace.active_pane, pane_id);
+        assert!(!revisions.has_changed().expect("watch status"));
+    }
+
+    #[test]
+    fn host_pane_focus_event_for_other_workspace_still_notifies_subscribers() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspace);
+        let target_workspace_id = core.snapshot().current_workspace.id;
+        let target_pane_id = core.snapshot().current_workspace.active_pane;
+        let original_workspace_id = core
+            .snapshot()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id != target_workspace_id)
+            .map(|workspace| workspace.id)
+            .expect("original workspace");
+        core.dispatch_shell_action(ShellAction::FocusWorkspace {
+            workspace_id: original_workspace_id,
+        });
+
+        let before = core.revision();
+        let mut revisions = core.subscribe_revisions();
+        revisions.borrow_and_update();
+
+        core.apply_host_event(HostEvent::PaneFocused {
+            pane_id: target_pane_id,
+        });
+
+        assert!(core.revision() > before);
+        assert_eq!(core.snapshot().current_workspace.id, target_workspace_id);
+        assert!(revisions.has_changed().expect("watch status"));
     }
 
     #[test]
