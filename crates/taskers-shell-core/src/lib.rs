@@ -705,6 +705,7 @@ impl Frame {
 
 const RESIZE_HANDLE_THICKNESS_PX: i32 = 12;
 const RESIZE_CORNER_SIZE_PX: i32 = 16;
+const WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX: i32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayoutMetrics {
@@ -1274,12 +1275,24 @@ pub struct ResizeHandleSnapshot {
     pub target: ResizeHandleTarget,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceOuterEdge {
+    Left,
+    Right,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResizeHandleTarget {
     WorkspaceColumnEdge {
         workspace_id: WorkspaceId,
         column_widths: Vec<(WorkspaceColumnId, i32)>,
         leading_index: usize,
+    },
+    WorkspaceColumnOuterEdge {
+        workspace_id: WorkspaceId,
+        column_widths: Vec<(WorkspaceColumnId, i32)>,
+        column_index: usize,
+        edge: WorkspaceOuterEdge,
     },
     WorkspaceWindowBottomEdge {
         workspace_id: WorkspaceId,
@@ -1657,7 +1670,8 @@ struct CanvasMetrics {
 struct WorkspaceRenderContext {
     overview_mode: bool,
     overview_scale: f64,
-    outer_padding: i32,
+    outer_padding_x: i32,
+    outer_padding_y: i32,
     viewport_width: i32,
     viewport_height: i32,
 }
@@ -1771,7 +1785,11 @@ impl TaskersCore {
             render_context,
             self.ui.workspace_window_gap,
         );
-        let canvas_metrics = workspace_canvas_metrics(&placements, render_context.outer_padding);
+        let canvas_metrics = workspace_canvas_metrics(
+            &placements,
+            render_context.outer_padding_x,
+            render_context.outer_padding_y,
+        );
         let window_frames = placements
             .iter()
             .map(|placement| {
@@ -2734,7 +2752,9 @@ impl TaskersCore {
                         .map(|(_, frame)| (*window_id, frame.height))
                 })
                 .collect::<Vec<_>>();
+            let is_leftmost_column = column_index == 0;
             let has_right_neighbor = column_index + 1 < ordered_columns.len();
+            let is_rightmost_column = !has_right_neighbor;
 
             for (window_index, window_id) in window_ids.iter().enumerate() {
                 let Some(window) = workspace.windows.get(window_id) else {
@@ -2744,6 +2764,23 @@ impl TaskersCore {
                     continue;
                 };
                 let has_bottom_neighbor = window_index + 1 < window_ids.len();
+
+                if is_leftmost_column {
+                    handles.push(ResizeHandleSnapshot {
+                        id: format!("workspace-column-outer-left-{}-{}", column.id, window.id),
+                        frame: workspace_window_outer_edge_handle_frame(
+                            *frame,
+                            WorkspaceOuterEdge::Left,
+                        ),
+                        cursor: ResizeHandleCursor::EastWest,
+                        target: ResizeHandleTarget::WorkspaceColumnOuterEdge {
+                            workspace_id,
+                            column_widths: column_widths.clone(),
+                            column_index,
+                            edge: WorkspaceOuterEdge::Left,
+                        },
+                    });
+                }
 
                 if has_right_neighbor {
                     handles.push(ResizeHandleSnapshot {
@@ -2758,6 +2795,23 @@ impl TaskersCore {
                             workspace_id,
                             column_widths: column_widths.clone(),
                             leading_index: column_index,
+                        },
+                    });
+                }
+
+                if is_rightmost_column {
+                    handles.push(ResizeHandleSnapshot {
+                        id: format!("workspace-column-outer-right-{}-{}", column.id, window.id),
+                        frame: workspace_window_outer_edge_handle_frame(
+                            *frame,
+                            WorkspaceOuterEdge::Right,
+                        ),
+                        cursor: ResizeHandleCursor::EastWest,
+                        target: ResizeHandleTarget::WorkspaceColumnOuterEdge {
+                            workspace_id,
+                            column_widths: column_widths.clone(),
+                            column_index,
+                            edge: WorkspaceOuterEdge::Right,
                         },
                     });
                 }
@@ -4938,7 +4992,7 @@ impl TaskersCore {
         let Some(active_frame) =
             workspace_window_placements(
                 workspace,
-                viewport_frame.width,
+                (viewport_frame.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2).max(1),
                 viewport_frame.height,
                 self.ui.workspace_window_gap,
             )
@@ -4950,14 +5004,16 @@ impl TaskersCore {
         };
 
         let mut next_viewport = current_viewport;
-        let visible_right = next_viewport.x + viewport_frame.width;
+        let visible_width =
+            (viewport_frame.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2).max(1);
+        let visible_right = next_viewport.x + visible_width;
         let visible_bottom = next_viewport.y + viewport_frame.height;
-        if active_frame.width > viewport_frame.width {
+        if active_frame.width > visible_width {
             next_viewport.x = active_frame.x;
         } else if active_frame.x < next_viewport.x {
             next_viewport.x = active_frame.x;
         } else if active_frame.right() > visible_right {
-            next_viewport.x = active_frame.right() - viewport_frame.width;
+            next_viewport.x = active_frame.right().saturating_sub(visible_width);
         }
         if active_frame.height > viewport_frame.height {
             next_viewport.y = active_frame.y;
@@ -5205,6 +5261,20 @@ fn workspace_window_edge_handle_frame(frame: Frame, right_edge: bool, gap: i32) 
     }
 }
 
+fn workspace_window_outer_edge_handle_frame(frame: Frame, edge: WorkspaceOuterEdge) -> Frame {
+    let x = match edge {
+        WorkspaceOuterEdge::Left => frame.x - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX,
+        WorkspaceOuterEdge::Right => frame.right(),
+    };
+
+    Frame::new(
+        x,
+        frame.y,
+        WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX,
+        frame.height.max(1),
+    )
+}
+
 fn workspace_window_corner_handle_frame(frame: Frame, gap: i32) -> Frame {
     let center_x = frame.right() + gap / 2;
     let center_y = frame.bottom() + gap / 2;
@@ -5419,7 +5489,8 @@ fn workspace_render_context(
         return WorkspaceRenderContext {
             overview_mode: false,
             overview_scale: 1.0,
-            outer_padding: 0,
+            outer_padding_x: WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX,
+            outer_padding_y: 0,
             viewport_width,
             viewport_height,
         };
@@ -5430,10 +5501,11 @@ fn workspace_render_context(
         .into_iter()
         .map(|placement| placement.frame)
         .collect::<Vec<_>>();
-    let base_metrics = canvas_metrics_from_frames(&base_frames, 0);
-    let outer_padding = metrics.workspace_padding;
-    let available_width = (viewport_width - outer_padding * 2).max(1);
-    let available_height = (viewport_height - outer_padding * 2).max(1);
+    let base_metrics = canvas_metrics_from_frames(&base_frames, 0, 0);
+    let outer_padding_x = metrics.workspace_padding;
+    let outer_padding_y = metrics.workspace_padding;
+    let available_width = (viewport_width - outer_padding_x * 2).max(1);
+    let available_height = (viewport_height - outer_padding_y * 2).max(1);
     let overview_scale = (f64::from(available_width) / f64::from(base_metrics.width.max(1)))
         .min(f64::from(available_height) / f64::from(base_metrics.height.max(1)))
         .clamp(0.05, 1.0);
@@ -5441,7 +5513,8 @@ fn workspace_render_context(
     WorkspaceRenderContext {
         overview_mode: true,
         overview_scale,
-        outer_padding,
+        outer_padding_x,
+        outer_padding_y,
         viewport_width,
         viewport_height,
     }
@@ -5452,10 +5525,20 @@ fn workspace_display_window_placements(
     render_context: WorkspaceRenderContext,
     workspace_window_gap: i32,
 ) -> Vec<WorkspaceWindowPlacement> {
+    let layout_viewport_width = if render_context.overview_mode {
+        render_context.viewport_width
+    } else {
+        (render_context.viewport_width - render_context.outer_padding_x * 2).max(1)
+    };
+    let layout_viewport_height = if render_context.overview_mode {
+        render_context.viewport_height
+    } else {
+        (render_context.viewport_height - render_context.outer_padding_y * 2).max(1)
+    };
     workspace_window_placements(
         workspace,
-        render_context.viewport_width,
-        render_context.viewport_height,
+        layout_viewport_width,
+        layout_viewport_height,
         workspace_window_gap,
     )
     .into_iter()
@@ -5631,13 +5714,14 @@ fn collect_overview_preview_lines(node: &LayoutNodeSnapshot, out: &mut Vec<Strin
 
 fn workspace_canvas_metrics(
     placements: &[WorkspaceWindowPlacement],
-    outer_padding: i32,
+    outer_padding_x: i32,
+    outer_padding_y: i32,
 ) -> CanvasMetrics {
     let frames = placements
         .iter()
         .map(|placement| placement.frame)
         .collect::<Vec<_>>();
-    canvas_metrics_from_frames(&frames, outer_padding)
+    canvas_metrics_from_frames(&frames, outer_padding_x, outer_padding_y)
 }
 
 fn clamped_workspace_viewport(
@@ -5649,11 +5733,15 @@ fn clamped_workspace_viewport(
 ) -> taskers_domain::WorkspaceViewport {
     let placements = workspace_window_placements(
         workspace,
-        viewport_width,
+        (viewport_width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2).max(1),
         viewport_height,
         workspace_window_gap,
     );
-    let canvas = workspace_canvas_metrics(&placements, 0);
+    let canvas = workspace_canvas_metrics(
+        &placements,
+        WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX,
+        0,
+    );
     let max_x = (canvas.width - viewport_width).max(0);
     let max_y = (canvas.height - viewport_height).max(0);
 
@@ -5663,21 +5751,25 @@ fn clamped_workspace_viewport(
     }
 }
 
-fn canvas_metrics_from_frames(frames: &[WindowFrame], outer_padding: i32) -> CanvasMetrics {
+fn canvas_metrics_from_frames(
+    frames: &[WindowFrame],
+    outer_padding_x: i32,
+    outer_padding_y: i32,
+) -> CanvasMetrics {
     let min_x = frames.iter().map(|frame| frame.x).min().unwrap_or(0);
     let min_y = frames.iter().map(|frame| frame.y).min().unwrap_or(0);
-    let offset_x = outer_padding - min_x;
-    let offset_y = outer_padding - min_y;
+    let offset_x = outer_padding_x - min_x;
+    let offset_y = outer_padding_y - min_y;
     let width = frames
         .iter()
-        .map(|frame| frame.right() + offset_x + outer_padding)
+        .map(|frame| frame.right() + offset_x + outer_padding_x)
         .max()
-        .unwrap_or(outer_padding.saturating_mul(2));
+        .unwrap_or(outer_padding_x.saturating_mul(2));
     let height = frames
         .iter()
-        .map(|frame| frame.bottom() + offset_y + outer_padding)
+        .map(|frame| frame.bottom() + offset_y + outer_padding_y)
         .max()
-        .unwrap_or(outer_padding.saturating_mul(2));
+        .unwrap_or(outer_padding_y.saturating_mul(2));
 
     CanvasMetrics {
         offset_x,
@@ -6924,10 +7016,11 @@ mod tests {
         MIN_WORKSPACE_WINDOW_GAP, NotificationPreferencesSnapshot, ResizeHandleTarget,
         ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
         ShellSection, ShortcutAction, SurfaceDragSessionSnapshot, SurfaceMountSpec,
-        WorkspaceDirection, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
-        default_preview_app_state, default_session_path_for_preview, display_surface_title,
-        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri,
-        split_frame, workspace_window_content_frame,
+        WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX, WorkspaceDirection, WorkspaceOuterEdge,
+        WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot, default_preview_app_state,
+        default_session_path_for_preview, display_surface_title, pane_body_frame,
+        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -8320,6 +8413,50 @@ mod tests {
     }
 
     #[test]
+    fn single_workspace_window_exposes_outer_edge_resize_handles() {
+        let core = SharedCore::bootstrap(bootstrap());
+        let snapshot = core.snapshot();
+        let active_window = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == snapshot.current_workspace.active_window_id)
+            .expect("active window");
+        let left_handle = snapshot
+            .resize_handles
+            .iter()
+            .find(|handle| {
+                matches!(
+                    &handle.target,
+                    ResizeHandleTarget::WorkspaceColumnOuterEdge {
+                        column_index: 0,
+                        edge: WorkspaceOuterEdge::Left,
+                        ..
+                    }
+                )
+            })
+            .expect("left outer edge handle");
+        let right_handle = snapshot
+            .resize_handles
+            .iter()
+            .find(|handle| {
+                matches!(
+                    &handle.target,
+                    ResizeHandleTarget::WorkspaceColumnOuterEdge {
+                        column_index: 0,
+                        edge: WorkspaceOuterEdge::Right,
+                        ..
+                    }
+                )
+            })
+            .expect("right outer edge handle");
+
+        assert!(left_handle.frame.right() <= active_window.frame.x);
+        assert!(right_handle.frame.x >= active_window.frame.right());
+    }
+
+    #[test]
     fn wide_three_column_workspace_can_shrink_left_column_below_old_limit() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(2048, 900));
@@ -9339,17 +9476,26 @@ mod tests {
         assert!(!snapshot.attention_panel_visible);
         assert_eq!(snapshot.portal.content.x, snapshot.metrics.sidebar_width);
         assert_eq!(snapshot.portal.content.y, snapshot.metrics.toolbar_height);
-        assert_eq!(active_window.frame.x, snapshot.portal.content.x);
+        assert_eq!(
+            active_window.frame.x,
+            snapshot.portal.content.x + WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX
+        );
         assert_eq!(active_window.frame.y, snapshot.portal.content.y);
-        assert_eq!(active_window.frame.width, snapshot.portal.content.width);
+        assert_eq!(
+            active_window.frame.width,
+            snapshot.portal.content.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2
+        );
         assert_eq!(active_window.frame.height, snapshot.portal.content.height);
     }
 
     #[test]
-    fn normal_mode_canvas_offsets_are_zero() {
+    fn normal_mode_canvas_offsets_include_outer_resize_gutter() {
         let snapshot = SharedCore::bootstrap(bootstrap()).snapshot();
 
-        assert_eq!(snapshot.current_workspace.canvas_offset_x, 0);
+        assert_eq!(
+            snapshot.current_workspace.canvas_offset_x,
+            WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX
+        );
         assert_eq!(snapshot.current_workspace.canvas_offset_y, 0);
     }
 
@@ -9679,7 +9825,8 @@ mod tests {
         let snapshot = core.snapshot();
         let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
         let visible_left = snapshot.current_workspace.viewport_origin_x;
-        let visible_right = visible_left + snapshot.portal.content.width;
+        let visible_right =
+            visible_left + snapshot.portal.content.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX;
 
         assert!(
             snapshot.current_workspace.viewport_x > 0,
@@ -9689,7 +9836,9 @@ mod tests {
             active_window.frame.x >= visible_left,
             "expected active window left edge to be visible"
         );
-        if active_window.frame.width <= snapshot.portal.content.width {
+        if active_window.frame.width
+            <= snapshot.portal.content.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2
+        {
             assert!(
                 active_window.frame.right() <= visible_right,
                 "expected active window right edge to be visible"

@@ -2611,6 +2611,23 @@ fn preview_for_drag(
                 widths,
             },
         ),
+        taskers_core::ResizeHandleTarget::WorkspaceColumnOuterEdge {
+            workspace_id,
+            column_widths,
+            column_index,
+            edge,
+        } => {
+            let delta = match edge {
+                taskers_core::WorkspaceOuterEdge::Left => -(dx.round() as i32),
+                taskers_core::WorkspaceOuterEdge::Right => dx.round() as i32,
+            };
+            resize_track_push(column_widths, *column_index, delta, MIN_WORKSPACE_WINDOW_WIDTH).map(
+                |widths| taskers_core::ResizePreview::WorkspaceColumnWidths {
+                    workspace_id: *workspace_id,
+                    widths,
+                },
+            )
+        }
         taskers_core::ResizeHandleTarget::WorkspaceWindowBottomEdge {
             workspace_id,
             window_heights,
@@ -3438,7 +3455,8 @@ mod tests {
     use taskers_shell_core::{
         AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
         PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis,
-        SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId, WorkspaceWindowId,
+        SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId, WorkspaceOuterEdge,
+        WorkspaceWindowId,
     };
 
     #[test]
@@ -3747,6 +3765,52 @@ mod tests {
                     (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 240),
                     (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn preview_for_drag_resizes_workspace_outer_edges() {
+        let workspace_id = taskers_shell_core::WorkspaceId::new();
+        let workspace_column_id = WorkspaceColumnId::new();
+
+        let right_preview = preview_for_drag(
+            &ResizeHandleTarget::WorkspaceColumnOuterEdge {
+                workspace_id,
+                column_widths: vec![(workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH)],
+                column_index: 0,
+                edge: WorkspaceOuterEdge::Right,
+            },
+            2,
+            180.0,
+            0.0,
+        )
+        .expect("right outer edge preview");
+        assert_eq!(
+            right_preview,
+            ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: vec![(workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 180)],
+            }
+        );
+
+        let left_preview = preview_for_drag(
+            &ResizeHandleTarget::WorkspaceColumnOuterEdge {
+                workspace_id,
+                column_widths: vec![(workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 180)],
+                column_index: 0,
+                edge: WorkspaceOuterEdge::Left,
+            },
+            2,
+            180.0,
+            0.0,
+        )
+        .expect("left outer edge preview");
+        assert_eq!(
+            left_preview,
+            ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: vec![(workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH)],
             }
         );
     }
