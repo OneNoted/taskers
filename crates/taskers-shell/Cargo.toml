@@ -10,4 +10,5 @@ version.workspace = true
 
 [dependencies]
 dioxus.workspace = true
+dioxus-document.workspace = true
 taskers-shell-core.workspace = true

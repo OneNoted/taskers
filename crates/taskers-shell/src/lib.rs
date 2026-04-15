@@ -614,12 +614,33 @@ fn apply_surface_drop(
     }
 }
 
-fn app_css(snapshot: &ShellSnapshot) -> String {
+pub fn shell_stylesheet(snapshot: &ShellSnapshot) -> String {
     theme::generate_css(
         &theme::resolve_palette(&snapshot.settings.selected_theme_id),
         snapshot.metrics,
         snapshot.attention_panel_visible || snapshot.vcs_panel.visible,
     )
+}
+
+// Keep the shell CSS in <head>; body-mounted <style> nodes were not reliably
+// applied in the embedded LiveView/WebKit shell.
+fn sync_shell_stylesheet(stylesheet: &str) {
+    let stylesheet_js = format!("{stylesheet:?}");
+    let script = format!(
+        r#"
+const stylesheetId = "taskers-shell-style";
+let stylesheetNode = document.getElementById(stylesheetId);
+if (!stylesheetNode) {{
+    stylesheetNode = document.createElement("style");
+    stylesheetNode.id = stylesheetId;
+    document.head.appendChild(stylesheetNode);
+}}
+if (stylesheetNode.textContent !== {stylesheet_js}) {{
+    stylesheetNode.textContent = {stylesheet_js};
+}}
+"#
+    );
+    let _ = dioxus_document::eval(&script);
 }
 
 #[component]
@@ -644,8 +665,11 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 
     let _ = revision();
     let snapshot = core.snapshot();
+    let stylesheet = shell_stylesheet(&snapshot);
+    use_effect(use_reactive!(|stylesheet| {
+        sync_shell_stylesheet(&stylesheet);
+    }));
     let unread_activity = snapshot.activity.iter().filter(|item| item.unread).count();
-    let stylesheet = app_css(&snapshot);
     let toggle_settings = {
         let core = core.clone();
         let section = snapshot.section;
@@ -830,7 +854,6 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     };
 
     rsx! {
-        style { "{stylesheet}" }
         div {
             class: "app-shell",
             onpointermove: track_pointer_drag,

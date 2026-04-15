@@ -604,7 +604,8 @@ fn build_ui_result(
         &bootstrap.core.snapshot().runtime_status,
     );
 
-    let shell_url = launch_liveview_server(bootstrap.core.clone())?;
+    let initial_shell_stylesheet = taskers_shell::shell_stylesheet(&bootstrap.core.snapshot());
+    let shell_url = launch_liveview_server(bootstrap.core.clone(), initial_shell_stylesheet)?;
     let settings = WebKitSettings::builder()
         .enable_developer_extras(true)
         .build();
@@ -1207,8 +1208,8 @@ mod notification_tests {
 mod config_tests {
     use super::{
         DEFAULT_WORKSPACE_WINDOW_GAP, NotificationPreferencesConfig, TaskersConfig,
-        legacy_embedded_terminal_appearance_for_migration, normalize_workspace_window_gap_value,
-        persist_embedded_terminal_migration_marker,
+        legacy_embedded_terminal_appearance_for_migration, liveview_index_html,
+        normalize_workspace_window_gap_value, persist_embedded_terminal_migration_marker,
     };
     use taskers_ghostty::EmbeddedTerminalAppearance;
     use taskers_shell_core::{
@@ -1271,6 +1272,17 @@ mod config_tests {
         assert_eq!(normalize_workspace_window_gap_value(DEFAULT_WORKSPACE_WINDOW_GAP), 0);
         assert_eq!(normalize_workspace_window_gap_value(-5), 0);
         assert_eq!(normalize_workspace_window_gap_value(999), 64);
+    }
+
+    #[test]
+    fn liveview_index_html_inlines_shell_stylesheet() {
+        let css = ".app-shell { display: grid; }";
+        let html = liveview_index_html(css);
+
+        assert!(html.contains(r#"<style id="taskers-shell-style">"#));
+        assert!(html.contains(css));
+        assert!(html.contains(r#"<div id="main"></div>"#));
+        assert!(html.contains(r#"__dioxusGetWsUrl("/ws")"#));
     }
 
     #[test]
@@ -2593,7 +2605,7 @@ fn spawn_control_server(
     note
 }
 
-fn launch_liveview_server(core: SharedCore) -> Result<String> {
+fn launch_liveview_server(core: SharedCore, initial_shell_stylesheet: String) -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0").context("failed to bind loopback port")?;
     listener
         .set_nonblocking(true)
@@ -2614,22 +2626,9 @@ fn launch_liveview_server(core: SharedCore) -> Result<String> {
             let router = Router::new()
                 .route(
                     "/",
-                    get(|| async move {
-                        Html(format!(
-                            r#"<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Taskers</title>
-  </head>
-  <body>
-    <div id="main"></div>
-  </body>
-  {}
-</html>"#,
-                            dioxus_liveview::interpreter_glue("/ws")
-                        ))
+                    get(move || {
+                        let initial_shell_stylesheet = initial_shell_stylesheet.clone();
+                        async move { Html(liveview_index_html(&initial_shell_stylesheet)) }
                     }),
                 )
                 .route(
@@ -2658,6 +2657,26 @@ fn launch_liveview_server(core: SharedCore) -> Result<String> {
     });
 
     Ok(url)
+}
+
+fn liveview_index_html(initial_shell_stylesheet: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Taskers</title>
+    <style id="taskers-shell-style">{}</style>
+  </head>
+  <body>
+    <div id="main"></div>
+  </body>
+  {}
+</html>"#,
+        initial_shell_stylesheet,
+        dioxus_liveview::interpreter_glue("/ws")
+    )
 }
 
 fn spawn_smoke_script(
