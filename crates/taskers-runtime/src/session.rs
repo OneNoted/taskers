@@ -347,17 +347,14 @@ impl TerminalSessionDaemon {
             let session = sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| anyhow!("session {session_id} was not created"))?;
-            let redraw_after_attach =
-                !created && session.needs_redraw && session.transcript.is_empty();
+            let (transcript, redraw_after_attach) =
+                attach_transcript_for_client(created, session.needs_redraw, &session.transcript);
             session.clients.insert(client_id, tx.clone());
             if redraw_after_attach {
                 session.needs_redraw = false;
+                session.transcript.clear();
             }
-            (
-                session.transcript.clone(),
-                redraw_after_attach,
-                Arc::clone(&session.pty),
-            )
+            (transcript, redraw_after_attach, Arc::clone(&session.pty))
         };
 
         tx.send(SessionEvent::Attached).ok();
@@ -513,6 +510,24 @@ impl TerminalSessionDaemon {
             }
         });
     }
+}
+
+fn should_force_redraw_on_attach(created: bool, needs_redraw: bool) -> bool {
+    !created && needs_redraw
+}
+
+fn attach_transcript_for_client(
+    created: bool,
+    needs_redraw: bool,
+    transcript: &[u8],
+) -> (Vec<u8>, bool) {
+    let redraw_after_attach = should_force_redraw_on_attach(created, needs_redraw);
+    let transcript = if redraw_after_attach {
+        Vec::new()
+    } else {
+        transcript.to_vec()
+    };
+    (transcript, redraw_after_attach)
 }
 
 fn build_command_spec(
@@ -814,7 +829,10 @@ enum SessionEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_attach_env, terminal_size};
+    use super::{
+        attach_transcript_for_client, collect_attach_env, should_force_redraw_on_attach,
+        terminal_size,
+    };
 
     #[test]
     fn collect_attach_env_preserves_terminal_session_identity() {
@@ -840,5 +858,23 @@ mod tests {
             }
             None => {}
         }
+    }
+
+    #[test]
+    fn existing_sessions_force_redraw_after_detach() {
+        assert!(should_force_redraw_on_attach(false, true));
+        assert!(!should_force_redraw_on_attach(false, false));
+        assert!(!should_force_redraw_on_attach(true, true));
+    }
+
+    #[test]
+    fn redraw_attach_discards_stale_transcript_bytes() {
+        let (transcript, redraw) = attach_transcript_for_client(false, true, b"partial prompt");
+        assert!(redraw);
+        assert!(transcript.is_empty());
+
+        let (transcript, redraw) = attach_transcript_for_client(false, false, b"stable");
+        assert!(!redraw);
+        assert_eq!(transcript, b"stable");
     }
 }
