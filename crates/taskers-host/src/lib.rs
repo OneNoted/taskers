@@ -2311,11 +2311,20 @@ impl NativeSurfaceShell {
     }
 
     fn position(&self, overlay: &Overlay, frame: taskers_core::Frame) {
-        position_widget(
-            overlay,
-            self.root.upcast_ref(),
-            inset_frame(frame, self.padding_x.get(), self.padding_y.get()),
-        );
+        self.apply_content_padding(frame);
+        position_widget(overlay, self.root.upcast_ref(), frame);
+    }
+
+    fn apply_content_padding(&self, frame: taskers_core::Frame) {
+        let Some(child) = self.root.first_child() else {
+            return;
+        };
+        let (padding_x, padding_y) =
+            clamped_terminal_padding(frame, self.padding_x.get(), self.padding_y.get());
+        child.set_margin_start(padding_x);
+        child.set_margin_end(padding_x);
+        child.set_margin_top(padding_y);
+        child.set_margin_bottom(padding_y);
     }
 
     fn show_at(&self, overlay: &Overlay, frame: taskers_core::Frame) {
@@ -3388,24 +3397,16 @@ fn hidden_frame() -> taskers_core::Frame {
     taskers_core::Frame::new(100_000, 100_000, 1, 1)
 }
 
-fn inset_frame(frame: taskers_core::Frame, padding_x: i32, padding_y: i32) -> taskers_core::Frame {
+fn clamped_terminal_padding(
+    frame: taskers_core::Frame,
+    padding_x: i32,
+    padding_y: i32,
+) -> (i32, i32) {
     let max_padding_x = frame.width.saturating_sub(1) / 2;
     let max_padding_y = frame.height.saturating_sub(1) / 2;
-    let padding_x = padding_x.max(0).min(max_padding_x);
-    let padding_y = padding_y.max(0).min(max_padding_y);
-    let width = frame
-        .width
-        .saturating_sub(padding_x.saturating_mul(2))
-        .max(1);
-    let height = frame
-        .height
-        .saturating_sub(padding_y.saturating_mul(2))
-        .max(1);
-    taskers_core::Frame::new(
-        frame.x.saturating_add(padding_x),
-        frame.y.saturating_add(padding_y),
-        width,
-        height,
+    (
+        padding_x.max(0).min(max_padding_x),
+        padding_y.max(0).min(max_padding_y),
     )
 }
 
@@ -3425,12 +3426,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        browser_plans, clamp_frame_to_widget, host_attention_palette, inset_frame,
-        native_surface_classes, native_surface_css, native_surface_visible_plan,
-        native_surfaces_interactive, native_surfaces_visible, preview_for_drag,
-        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
-        should_defer_terminal_surface_creations_after_removals, terminal_padding_value_px,
-        terminal_plans, trim_terminal_tail, with_capture_retries, workspace_pan_delta,
+        browser_plans, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
+        native_surface_css, native_surface_visible_plan, native_surfaces_interactive,
+        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
+        resolve_screenshot_output_path, should_defer_terminal_surface_creations_after_removals,
+        terminal_padding_value_px, terminal_plans, trim_terminal_tail, with_capture_retries,
+        workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
@@ -3552,14 +3553,6 @@ mod tests {
         assert_eq!(terminal_padding_value_px("22,18"), 22);
         assert_eq!(terminal_padding_value_px(" 20 "), 20);
         assert_eq!(terminal_padding_value_px("bad"), 0);
-    }
-
-    #[test]
-    fn inset_frame_applies_terminal_padding_inside_host_frame() {
-        assert_eq!(
-            inset_frame(Frame::new(10, 20, 300, 200), 22, 20),
-            Frame::new(32, 40, 256, 160)
-        );
     }
 
     #[test]
