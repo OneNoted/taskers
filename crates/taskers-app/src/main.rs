@@ -1222,10 +1222,7 @@ mod config_tests {
             EmbeddedTerminalAppearance::Taskers
         );
         assert_eq!(TaskersConfig::default().configured_shell, None);
-        assert_eq!(
-            TaskersConfig::default().workspace_window_gap,
-            DEFAULT_WORKSPACE_WINDOW_GAP
-        );
+        assert_eq!(TaskersConfig::default().workspace_window_gap, 0);
     }
 
     #[test]
@@ -1271,10 +1268,7 @@ mod config_tests {
 
     #[test]
     fn workspace_window_gap_normalization_clamps_values() {
-        assert_eq!(
-            normalize_workspace_window_gap_value(DEFAULT_WORKSPACE_WINDOW_GAP),
-            DEFAULT_WORKSPACE_WINDOW_GAP
-        );
+        assert_eq!(normalize_workspace_window_gap_value(DEFAULT_WORKSPACE_WINDOW_GAP), 0);
         assert_eq!(normalize_workspace_window_gap_value(-5), 0);
         assert_eq!(normalize_workspace_window_gap_value(999), 64);
     }

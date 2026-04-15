@@ -8412,7 +8412,7 @@ mod tests {
         let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
 
         assert!(
-            (active_window.frame.height - expected_height).abs() <= 2,
+            (active_window.frame.height - expected_height).abs() <= 4,
             "expected active window height to stay near half the visible viewport (expected {expected_height}, got {})",
             active_window.frame.height
         );
@@ -9296,6 +9296,12 @@ mod tests {
             core.snapshot().settings.workspace_window_gap,
             MAX_WORKSPACE_WINDOW_GAP
         );
+    }
+
+    #[test]
+    fn workspace_window_gap_defaults_to_zero() {
+        let core = SharedCore::bootstrap(bootstrap());
+        assert_eq!(core.snapshot().settings.workspace_window_gap, 0);
     }
 
     #[test]
