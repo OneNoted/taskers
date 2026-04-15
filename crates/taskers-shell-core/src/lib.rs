@@ -4549,17 +4549,15 @@ impl TaskersCore {
         if !is_terminal_surface {
             return false;
         }
-        let previous = self
+        let _previous = self
             .ui
             .last_terminal_surface_by_workspace
             .insert(workspace_id, surface_id);
-        if previous == Some(surface_id) {
-            return false;
-        }
+        let mut changed = false;
         if self.app_state.snapshot_model().active_workspace_id() == Some(workspace_id) {
-            self.ui.vcs_diff_path = None;
+            changed = self.ui.vcs_diff_path.take().is_some();
         }
-        true
+        changed
     }
 
     fn clear_vcs_surface_target(&mut self, surface_id: SurfaceId) {
@@ -6873,6 +6871,34 @@ mod tests {
     fn bootstrap() -> BootstrapModel {
         BootstrapModel {
             app_state: default_preview_app_state(),
+            runtime_status: RuntimeStatus {
+                ghostty_runtime: RuntimeCapability::Ready,
+                shell_integration: RuntimeCapability::Ready,
+                terminal_host: RuntimeCapability::Fallback {
+                    message: "Probe failed".into(),
+                },
+                terminal_persistence: RuntimeCapability::Ready,
+            },
+            selected_theme_id: "dark".into(),
+            selected_shortcut_preset: super::ShortcutPreset::Balanced,
+            configured_shell: None,
+            embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
+            notification_preferences: NotificationPreferencesSnapshot::default(),
+            render_live_surfaces_in_overview: true,
+            workspace_window_gap: DEFAULT_WORKSPACE_WINDOW_GAP,
+        }
+    }
+
+    fn terminal_only_bootstrap() -> BootstrapModel {
+        BootstrapModel {
+            app_state: AppState::new(
+                AppModel::new("Main"),
+                default_session_path_for_preview("taskers-preview-terminal-only"),
+                BackendChoice::Mock,
+                ShellLaunchSpec::fallback(),
+                None,
+            )
+            .expect("terminal-only app state"),
             runtime_status: RuntimeStatus {
                 ghostty_runtime: RuntimeCapability::Ready,
                 shell_integration: RuntimeCapability::Ready,
@@ -9256,6 +9282,21 @@ mod tests {
     #[test]
     fn redundant_host_pane_focus_event_does_not_advance_revision() {
         let core = SharedCore::bootstrap(bootstrap());
+        let before = core.revision();
+        let pane_id = core.snapshot().current_workspace.active_pane;
+        let mut revisions = core.subscribe_revisions();
+        revisions.borrow_and_update();
+
+        core.apply_host_event(HostEvent::PaneFocused { pane_id });
+
+        assert_eq!(core.revision(), before);
+        assert_eq!(core.snapshot().current_workspace.active_pane, pane_id);
+        assert!(!revisions.has_changed().expect("watch status"));
+    }
+
+    #[test]
+    fn redundant_host_terminal_focus_event_does_not_advance_revision_when_tracking_is_empty() {
+        let core = SharedCore::bootstrap(terminal_only_bootstrap());
         let before = core.revision();
         let pane_id = core.snapshot().current_workspace.active_pane;
         let mut revisions = core.subscribe_revisions();
