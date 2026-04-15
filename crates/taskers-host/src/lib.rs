@@ -25,8 +25,8 @@ use taskers_control::{
 };
 use taskers_core::{
     BrowserSurfaceCatalogEntry, HostCommand, HostEvent, PaneId, PortalSurfacePlan, ShellDragMode,
-    ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
-    TerminalSurfaceCatalogEntry, WorkspaceId, WorkspaceViewSnapshot,
+    ShellSection, ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan,
+    TerminalMountSpec, TerminalSurfaceCatalogEntry, WorkspaceId, WorkspaceViewSnapshot,
 };
 use taskers_domain::{
     BrowserProfileMode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind,
@@ -685,8 +685,12 @@ impl TaskersHost {
 
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
         self.pending_terminal_create_retry = false;
-        let interactive = native_surfaces_interactive(snapshot.drag_mode, snapshot.overview_mode);
-        let visible = native_surfaces_visible(snapshot.drag_mode);
+        let interactive = native_surfaces_interactive(
+            snapshot.section,
+            snapshot.drag_mode,
+            snapshot.overview_mode,
+        );
+        let visible = native_surfaces_visible(snapshot.section, snapshot.drag_mode);
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
         sync_native_surface_scene(
@@ -695,6 +699,8 @@ impl TaskersHost {
             &self.native_surface_scene,
             &snapshot.portal,
             &snapshot.current_workspace,
+            visible,
+            interactive,
         );
         let next_padding_x =
             terminal_padding_value_px(&snapshot.settings.embedded_terminal.window_padding_x);
@@ -3145,7 +3151,15 @@ fn sync_native_surface_scene(
     scene: &Fixed,
     portal: &SurfacePortalPlan,
     workspace: &WorkspaceViewSnapshot,
+    visible: bool,
+    interactive: bool,
 ) {
+    viewport.set_visible(visible);
+    viewport.set_can_target(interactive);
+    scene.set_can_target(interactive);
+    if !visible {
+        return;
+    }
     position_widget(root, viewport.upcast_ref(), portal.content);
     position_widget_in_fixed(
         viewport,
@@ -3262,16 +3276,22 @@ fn detach_from_fixed(fixed: &Fixed, widget: &Widget) {
     }
 }
 
-fn native_surfaces_interactive(drag_mode: ShellDragMode, overview_mode: bool) -> bool {
-    drag_mode == ShellDragMode::None && !overview_mode
+fn native_surfaces_interactive(
+    section: ShellSection,
+    drag_mode: ShellDragMode,
+    overview_mode: bool,
+) -> bool {
+    matches!(section, ShellSection::Workspace)
+        && drag_mode == ShellDragMode::None
+        && !overview_mode
 }
 
-fn native_surface_shell_can_target(_interactive: bool) -> bool {
-    false
+fn native_surface_shell_can_target(interactive: bool) -> bool {
+    interactive
 }
 
-fn native_surfaces_visible(drag_mode: ShellDragMode) -> bool {
-    drag_mode == ShellDragMode::None
+fn native_surfaces_visible(section: ShellSection, drag_mode: ShellDragMode) -> bool {
+    matches!(section, ShellSection::Workspace) && drag_mode == ShellDragMode::None
 }
 
 fn ensure_visible_workspace(
@@ -3567,24 +3587,26 @@ fn native_surface_visible_plan<'a>(
 mod tests {
     use std::collections::BTreeMap;
 
+    use gtk::{Button, DrawingArea, Overlay, PickFlags, Window};
     use gtk::prelude::WidgetExt;
 
     use super::{
         browser_plans, build_native_surface_scene_layers, clamp_frame_to_widget,
         host_attention_palette, native_surface_classes, native_surface_css,
         native_surface_shell_can_target, native_surface_visible_plan, native_surfaces_interactive,
-        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
-        resolve_screenshot_output_path, should_defer_terminal_surface_creations_after_removals,
+        native_surfaces_visible, position_widget, position_widget_in_fixed, preview_for_drag,
+        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
+        settle_capture_main_loop, should_defer_terminal_surface_creations_after_removals,
         terminal_padding_value_px, terminal_plans, trim_terminal_tail, with_capture_retries,
-        workspace_pan_delta,
+        workspace_pan_delta, NativeSurfaceShell,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
         AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
-        PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis,
-        SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId, WorkspaceOuterEdge,
-        WorkspaceWindowId,
+        PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode,
+        ShellSection, SplitAxis, SurfaceId, SurfaceMountSpec, TerminalMountSpec,
+        WorkspaceColumnId, WorkspaceOuterEdge, WorkspaceWindowId,
     };
 
     #[test]
@@ -3611,24 +3633,69 @@ mod tests {
 
     #[test]
     fn native_surfaces_disable_pointer_targeting_during_shell_drags() {
-        assert!(native_surfaces_interactive(ShellDragMode::None, false));
-        assert!(!native_surfaces_interactive(ShellDragMode::None, true));
-        assert!(!native_surfaces_interactive(ShellDragMode::Window, false));
+        assert!(native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::None,
+            false
+        ));
         assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::None,
+            true
+        ));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::Window,
+            false
+        ));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
             ShellDragMode::WindowTab,
             false
         ));
-        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab, false));
-        assert!(!native_surfaces_interactive(ShellDragMode::Surface, false));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::PaneTab,
+            false
+        ));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::Surface,
+            false
+        ));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Settings,
+            ShellDragMode::None,
+            false
+        ));
     }
 
     #[test]
     fn native_surfaces_hide_during_shell_drags() {
-        assert!(native_surfaces_visible(ShellDragMode::None));
-        assert!(!native_surfaces_visible(ShellDragMode::Window));
-        assert!(!native_surfaces_visible(ShellDragMode::WindowTab));
-        assert!(!native_surfaces_visible(ShellDragMode::PaneTab));
-        assert!(!native_surfaces_visible(ShellDragMode::Surface));
+        assert!(native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::None
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::Window
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::WindowTab
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::PaneTab
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::Surface
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Settings,
+            ShellDragMode::None
+        ));
     }
 
     #[test]
@@ -3684,10 +3751,85 @@ mod tests {
     }
 
     #[test]
-    fn native_surface_shell_does_not_compete_for_pointer_targeting() {
-        assert!(!native_surface_shell_can_target(true));
+    fn native_surface_shell_becomes_targetable_only_when_interactive() {
+        assert!(native_surface_shell_can_target(true));
         assert!(!native_surface_shell_can_target(false));
     }
+
+    fn native_overlay_pick_target(
+        viewport_targetable: bool,
+        scene_targetable: bool,
+        shell_targetable: bool,
+    ) -> String {
+        let _ = gtk::init();
+
+        let shell_underlay = DrawingArea::new();
+        shell_underlay.set_widget_name("shell-underlay");
+        shell_underlay.set_can_target(true);
+        shell_underlay.set_focusable(false);
+        shell_underlay.set_size_request(220, 220);
+
+        let root = Overlay::new();
+        root.set_size_request(220, 220);
+        root.set_child(Some(&shell_underlay));
+
+        let viewport = gtk::Fixed::new();
+        viewport.set_widget_name("native-viewport");
+        viewport.set_can_target(viewport_targetable);
+        let scene = gtk::Fixed::new();
+        scene.set_widget_name("native-scene");
+        scene.set_can_target(scene_targetable);
+        root.add_overlay(&viewport);
+        root.set_measure_overlay(&viewport, false);
+        root.set_clip_overlay(&viewport, false);
+        viewport.put(&scene, 0.0, 0.0);
+
+        let shell = NativeSurfaceShell::new("native-surface-terminal", shell_targetable);
+        shell.root.set_widget_name("native-shell");
+        let child = Button::with_label("native-child");
+        child.set_widget_name("native-child");
+        child.set_can_target(true);
+        child.set_focusable(true);
+        shell.mount_child(child.upcast_ref());
+
+        position_widget(&root, viewport.upcast_ref(), Frame::new(0, 0, 220, 220));
+        position_widget_in_fixed(&viewport, scene.upcast_ref(), Frame::new(0, 0, 220, 220));
+        shell.show_at(&scene, Frame::new(20, 20, 140, 140));
+
+        let window = Window::builder()
+            .default_width(220)
+            .default_height(220)
+            .child(&root)
+            .build();
+        window.show();
+        settle_capture_main_loop();
+
+        let picked = root
+            .pick(40.0, 40.0, PickFlags::DEFAULT)
+            .expect("picked widget");
+        let result = picked.widget_name().to_string();
+        window.close();
+        result
+    }
+
+    #[test]
+    fn non_targetable_native_ancestors_skip_the_native_subtree_in_pick() {
+        let picked = native_overlay_pick_target(false, false, true);
+        assert_eq!(picked, "shell-underlay");
+    }
+
+    #[test]
+    fn targetable_native_ancestors_route_pick_to_the_native_child() {
+        let picked = native_overlay_pick_target(true, true, true);
+        assert_eq!(picked, "native-child");
+    }
+
+    #[test]
+    fn non_targetable_native_shell_blocks_picking_the_native_child() {
+        let picked = native_overlay_pick_target(true, true, false);
+        assert_eq!(picked, "shell-underlay");
+    }
+
 
     #[test]
     fn native_surface_css_tracks_selected_theme_terminal_background() {
