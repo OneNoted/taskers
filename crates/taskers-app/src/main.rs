@@ -34,17 +34,20 @@ use taskers_control::{
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
 use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
 use taskers_ghostty::{
-    BackendChoice, EmbeddedTerminalAppearance, GhosttyHost, GhosttyHostOptions,
-    ensure_runtime_installed, runtime_terminfo_dir,
+    BackendChoice, EmbeddedTerminalAppearance, EmbeddedTerminalConfig, EmbeddedTerminalConfigPaths,
+    GhosttyHost, GhosttyHostOptions, OptionalBoolValue, ensure_runtime_installed,
+    load_or_initialize_embedded_terminal_config, runtime_terminfo_dir,
+    save_embedded_terminal_config,
 };
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{
     ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
 };
 use taskers_shell_core::{
-    BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PaneTabLayoutSnapshot,
-    PixelSize, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection,
-    ShortcutAction, ShortcutPreset, SurfaceKind,
+    BootstrapModel, EmbeddedTerminalSettingsSnapshot, LayoutNodeSnapshot,
+    NotificationPreferencesSnapshot, OptionalSettingChoice, PaneTabLayoutSnapshot, PixelSize,
+    RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
+    ShortcutPreset, SurfaceKind,
 };
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
@@ -95,6 +98,7 @@ struct BootstrapContext {
     socket_path: PathBuf,
     ghostty_host: Option<GhosttyHost>,
     config: TaskersConfig,
+    embedded_terminal_config: EmbeddedTerminalConfig,
     startup_notes: Vec<String>,
 }
 
@@ -160,6 +164,8 @@ struct TaskersConfig {
     render_live_surfaces_in_overview: bool,
     #[serde(default)]
     embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    #[serde(default)]
+    embedded_terminal_config_initialized: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +189,7 @@ impl Default for TaskersConfig {
             notification_preferences: NotificationPreferencesConfig::default(),
             render_live_surfaces_in_overview: true,
             embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
+            embedded_terminal_config_initialized: false,
         }
     }
 }
@@ -307,7 +314,87 @@ impl TaskersConfig {
             ),
             render_live_surfaces_in_overview: settings.render_live_surfaces_in_overview,
             embedded_terminal_appearance: current.embedded_terminal_appearance,
+            embedded_terminal_config_initialized: current.embedded_terminal_config_initialized,
         }
+    }
+}
+
+fn legacy_embedded_terminal_appearance_for_migration(
+    config: &TaskersConfig,
+) -> Option<EmbeddedTerminalAppearance> {
+    (!config.embedded_terminal_config_initialized).then_some(config.embedded_terminal_appearance)
+}
+
+fn persist_embedded_terminal_migration_marker(
+    config: &mut TaskersConfig,
+    init_succeeded: bool,
+) -> Option<String> {
+    if !init_succeeded || config.embedded_terminal_config_initialized {
+        return None;
+    }
+
+    config.embedded_terminal_config_initialized = true;
+    config
+        .save()
+        .err()
+        .map(|error| format!("failed to persist embedded terminal migration marker: {error}"))
+}
+
+fn embedded_terminal_settings_snapshot(
+    config: &EmbeddedTerminalConfig,
+    paths: &EmbeddedTerminalConfigPaths,
+) -> EmbeddedTerminalSettingsSnapshot {
+    EmbeddedTerminalSettingsSnapshot {
+        theme: config.theme.clone().unwrap_or_default(),
+        font_family: config.font_family.clone().unwrap_or_default(),
+        font_size: config.font_size.clone().unwrap_or_default(),
+        window_padding_x: config.window_padding_x.clone().unwrap_or_default(),
+        window_padding_y: config.window_padding_y.clone().unwrap_or_default(),
+        cursor_style: config.cursor_style.clone().unwrap_or_default(),
+        cursor_style_blink: optional_setting_choice(config.cursor_style_blink),
+        scrollback_limit: config.scrollback_limit.clone().unwrap_or_default(),
+        background_opacity: config.background_opacity.clone().unwrap_or_default(),
+        background_opacity_cells: optional_setting_choice(config.background_opacity_cells),
+        base_config_path: paths.base.display().to_string(),
+        override_config_path: paths.override_file.display().to_string(),
+    }
+}
+
+fn embedded_terminal_config_from_settings(
+    settings: &EmbeddedTerminalSettingsSnapshot,
+) -> EmbeddedTerminalConfig {
+    EmbeddedTerminalConfig {
+        theme: non_empty_setting(&settings.theme),
+        font_family: non_empty_setting(&settings.font_family),
+        font_size: non_empty_setting(&settings.font_size),
+        window_padding_x: non_empty_setting(&settings.window_padding_x),
+        window_padding_y: non_empty_setting(&settings.window_padding_y),
+        cursor_style: non_empty_setting(&settings.cursor_style),
+        cursor_style_blink: optional_bool_value(settings.cursor_style_blink),
+        scrollback_limit: non_empty_setting(&settings.scrollback_limit),
+        background_opacity: non_empty_setting(&settings.background_opacity),
+        background_opacity_cells: optional_bool_value(settings.background_opacity_cells),
+    }
+}
+
+fn non_empty_setting(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn optional_setting_choice(value: OptionalBoolValue) -> OptionalSettingChoice {
+    match value {
+        OptionalBoolValue::Default => OptionalSettingChoice::Default,
+        OptionalBoolValue::Enabled => OptionalSettingChoice::Enabled,
+        OptionalBoolValue::Disabled => OptionalSettingChoice::Disabled,
+    }
+}
+
+fn optional_bool_value(value: OptionalSettingChoice) -> OptionalBoolValue {
+    match value {
+        OptionalSettingChoice::Default => OptionalBoolValue::Default,
+        OptionalSettingChoice::Enabled => OptionalBoolValue::Enabled,
+        OptionalSettingChoice::Disabled => OptionalBoolValue::Disabled,
     }
 }
 
@@ -564,6 +651,8 @@ fn build_ui_result(
         safe_eprintln(note);
     }
     let persisted_config = Rc::new(RefCell::new(bootstrap.config.clone()));
+    let persisted_embedded_terminal_config =
+        Rc::new(RefCell::new(bootstrap.embedded_terminal_config.clone()));
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -652,6 +741,7 @@ fn build_ui_result(
     let tick_app = app.clone();
     let tick_app_state = bootstrap.app_state.clone();
     let tick_config = persisted_config.clone();
+    let tick_embedded_terminal_config = persisted_embedded_terminal_config.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
         sync_window(
             &tick_window,
@@ -668,7 +758,12 @@ fn build_ui_result(
             &tick_app_state,
             tick_diagnostics.as_ref(),
         );
-        persist_settings_if_needed(&tick_core, &tick_config, tick_diagnostics.as_ref());
+        persist_settings_if_needed(
+            &tick_core,
+            &tick_config,
+            &tick_embedded_terminal_config,
+            tick_diagnostics.as_ref(),
+        );
         glib::ControlFlow::Continue
     });
 
@@ -907,29 +1002,54 @@ fn notification_target_visible(
 fn persist_settings_if_needed(
     core: &SharedCore,
     persisted_config: &Rc<RefCell<TaskersConfig>>,
+    persisted_embedded_terminal_config: &Rc<RefCell<EmbeddedTerminalConfig>>,
     diagnostics: Option<&DiagnosticsWriter>,
 ) {
     let snapshot = core.snapshot();
     let current = persisted_config.borrow().clone();
+    let current_embedded = persisted_embedded_terminal_config.borrow().clone();
     let next = TaskersConfig::from_settings(&snapshot.settings, &current);
-    if current == next {
+    let next_embedded =
+        embedded_terminal_config_from_settings(&snapshot.settings.embedded_terminal);
+    let config_changed = current != next;
+    let embedded_changed = current_embedded != next_embedded;
+    if !config_changed && !embedded_changed {
         return;
     }
 
-    if let Err(error) = next.save() {
-        log_diagnostic(
-            diagnostics,
-            DiagnosticRecord::new(
-                DiagnosticCategory::Startup,
-                Some(core.revision()),
-                format!("failed to persist config: {error:?}"),
-            ),
-        );
-        safe_eprintln(format!("taskers config save failed: {error:?}"));
-        return;
+    if config_changed {
+        if let Err(error) = next.save() {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Startup,
+                    Some(core.revision()),
+                    format!("failed to persist config: {error:?}"),
+                ),
+            );
+            safe_eprintln(format!("taskers config save failed: {error:?}"));
+            return;
+        }
+
+        *persisted_config.borrow_mut() = next;
     }
 
-    *persisted_config.borrow_mut() = next;
+    if embedded_changed {
+        if let Err(error) = save_embedded_terminal_config(&next_embedded) {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Startup,
+                    Some(core.revision()),
+                    format!("failed to persist embedded terminal config: {error:?}"),
+                ),
+            );
+            safe_eprintln(format!("embedded terminal config save failed: {error:?}"));
+            return;
+        }
+
+        *persisted_embedded_terminal_config.borrow_mut() = next_embedded;
+    }
 }
 
 #[cfg(test)]
@@ -1070,9 +1190,15 @@ mod notification_tests {
 
 #[cfg(test)]
 mod config_tests {
-    use super::{NotificationPreferencesConfig, TaskersConfig};
+    use super::{
+        NotificationPreferencesConfig, TaskersConfig,
+        legacy_embedded_terminal_appearance_for_migration,
+        persist_embedded_terminal_migration_marker,
+    };
     use taskers_ghostty::EmbeddedTerminalAppearance;
-    use taskers_shell_core::{NotificationPreferencesSnapshot, SettingsSnapshot};
+    use taskers_shell_core::{
+        EmbeddedTerminalSettingsSnapshot, NotificationPreferencesSnapshot, SettingsSnapshot,
+    };
 
     #[test]
     fn taskers_config_defaults_to_taskers_embedded_terminal_appearance() {
@@ -1097,6 +1223,7 @@ mod config_tests {
             shortcuts: Vec::new(),
             configured_shell: Some(" /bin/fish ".into()),
             default_shell_label: "/bin/zsh".into(),
+            embedded_terminal: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot {
                 alerts_on_waiting: false,
                 alerts_on_error: true,
@@ -1120,14 +1247,74 @@ mod config_tests {
         );
         assert!(!next.render_live_surfaces_in_overview);
     }
+
+    #[test]
+    fn embedded_terminal_legacy_migration_runs_only_once_after_save_reload() {
+        let mut config = TaskersConfig {
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Ghostty,
+            ..TaskersConfig::default()
+        };
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&config),
+            Some(EmbeddedTerminalAppearance::Ghostty)
+        );
+
+        config.embedded_terminal_config_initialized = true;
+        let persisted = serde_json::to_string(&config).expect("serialize config");
+        let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
+
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&reloaded),
+            None
+        );
+    }
+
+    #[test]
+    fn embedded_terminal_legacy_migration_waits_for_successful_initialization() {
+        let mut config = TaskersConfig {
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Ghostty,
+            ..TaskersConfig::default()
+        };
+
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&config),
+            Some(EmbeddedTerminalAppearance::Ghostty)
+        );
+
+        assert_eq!(
+            persist_embedded_terminal_migration_marker(&mut config, false),
+            None
+        );
+        let persisted = serde_json::to_string(&config).expect("serialize config");
+        let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
+
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&reloaded),
+            Some(EmbeddedTerminalAppearance::Ghostty)
+        );
+
+        let mut reloaded = reloaded;
+        assert_eq!(
+            persist_embedded_terminal_migration_marker(&mut reloaded, true),
+            None
+        );
+        let persisted = serde_json::to_string(&reloaded).expect("serialize config");
+        let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
+
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&reloaded),
+            None
+        );
+    }
 }
 
 #[cfg(test)]
 mod runtime_bootstrap_tests {
     use super::{TaskersConfig, resolve_runtime_bootstrap};
     use std::{env, fs, os::unix::fs::PermissionsExt, sync::Mutex};
-    use taskers_ghostty::EmbeddedTerminalAppearance;
-    use taskers_shell_core::{NotificationPreferencesSnapshot, SettingsSnapshot};
+    use taskers_shell_core::{
+        EmbeddedTerminalSettingsSnapshot, NotificationPreferencesSnapshot, SettingsSnapshot,
+    };
     use tempfile::TempDir;
 
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
@@ -1157,7 +1344,7 @@ mod runtime_bootstrap_tests {
         fs::set_permissions(&shell_path, permissions).expect("chmod");
 
         let runtime = resolve_runtime_bootstrap(
-            EmbeddedTerminalAppearance::Taskers,
+            &taskers_ghostty::embedded_terminal_config_paths(),
             Some(shell_path.to_str().expect("shell path utf8")),
             None,
         );
@@ -1192,7 +1379,7 @@ mod runtime_bootstrap_tests {
     fn runtime_bootstrap_invalid_configured_shell_falls_back_with_note() {
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let runtime = resolve_runtime_bootstrap(
-            EmbeddedTerminalAppearance::Taskers,
+            &taskers_ghostty::embedded_terminal_config_paths(),
             Some("/definitely/missing/taskers-shell"),
             None,
         );
@@ -1228,6 +1415,7 @@ mod runtime_bootstrap_tests {
             shortcuts: Vec::new(),
             configured_shell: Some(" fish ".into()),
             default_shell_label: "/bin/zsh".into(),
+            embedded_terminal: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         };
@@ -1236,7 +1424,7 @@ mod runtime_bootstrap_tests {
         let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
 
         let runtime = resolve_runtime_bootstrap(
-            reloaded.embedded_terminal_appearance,
+            &taskers_ghostty::embedded_terminal_config_paths(),
             reloaded.configured_shell.as_deref(),
             None,
         );
@@ -1350,23 +1538,57 @@ fn bootstrap_runtime(
     diagnostics: Option<&DiagnosticsWriter>,
     smoke_script: Option<SmokeScript>,
 ) -> Result<BootstrapContext> {
-    let (config, config_note) = match TaskersConfig::load() {
+    let (mut config, config_note) = match TaskersConfig::load() {
         Ok(config) => (config, None),
         Err(error) => (
             TaskersConfig::default(),
             Some(format!("Taskers config unavailable: {error}")),
         ),
     };
+    let (embedded_terminal_state, embedded_terminal_init_succeeded) =
+        match load_or_initialize_embedded_terminal_config(
+            legacy_embedded_terminal_appearance_for_migration(&config),
+        ) {
+            Ok(state) => (state, true),
+            Err(error) => {
+                let paths = taskers_ghostty::embedded_terminal_config_paths();
+                let mut startup_notes = vec![format!(
+                    "Embedded terminal config unavailable; using in-memory defaults until it can be written ({error})"
+                )];
+                startup_notes.push(format!(
+                    "Embedded terminal managed config path {}",
+                    paths.base.display()
+                ));
+                startup_notes.push(format!(
+                    "Embedded terminal advanced override path {}",
+                    paths.override_file.display()
+                ));
+                (
+                    taskers_ghostty::EmbeddedTerminalConfigState {
+                        paths,
+                        managed: EmbeddedTerminalConfig::default(),
+                        startup_notes,
+                    },
+                    false,
+                )
+            }
+        };
+    let migration_marker_note =
+        persist_embedded_terminal_migration_marker(&mut config, embedded_terminal_init_succeeded);
     let path_overrides = smoke_script
         .map(|_| smoke_runtime_path_overrides())
         .transpose()?;
     let runtime = resolve_runtime_bootstrap(
-        config.embedded_terminal_appearance,
+        &embedded_terminal_state.paths,
         config.configured_shell.as_deref(),
         path_overrides.as_ref(),
     );
     let mut startup_notes = runtime.startup_notes;
+    startup_notes.extend(embedded_terminal_state.startup_notes.clone());
     if let Some(note) = config_note {
+        push_startup_note(&mut startup_notes, diagnostics, note);
+    }
+    if let Some(note) = migration_marker_note {
         push_startup_note(&mut startup_notes, diagnostics, note);
     }
     if let Some(path_overrides) = path_overrides.as_ref() {
@@ -1466,6 +1688,10 @@ fn bootstrap_runtime(
         selected_theme_id: config.selected_theme_id.clone(),
         selected_shortcut_preset: config.shortcut_preset(),
         configured_shell: config.configured_shell.clone(),
+        embedded_terminal_settings: embedded_terminal_settings_snapshot(
+            &embedded_terminal_state.managed,
+            &embedded_terminal_state.paths,
+        ),
         notification_preferences: config.notification_preferences.to_snapshot(),
         render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
     });
@@ -1478,12 +1704,13 @@ fn bootstrap_runtime(
         socket_path: runtime.socket_path,
         ghostty_host,
         config,
+        embedded_terminal_config: embedded_terminal_state.managed,
         startup_notes,
     })
 }
 
 fn resolve_runtime_bootstrap(
-    embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    embedded_terminal_paths: &EmbeddedTerminalConfigPaths,
     configured_shell: Option<&str>,
     path_overrides: Option<&RuntimePathOverrides>,
 ) -> RuntimeBootstrap {
@@ -1592,7 +1819,10 @@ fn resolve_runtime_bootstrap(
     };
 
     let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch)
-        .with_embedded_terminal_appearance(embedded_terminal_appearance);
+        .with_embedded_config_paths(
+            embedded_terminal_paths.base.display().to_string(),
+            embedded_terminal_paths.override_file.display().to_string(),
+        );
 
     RuntimeBootstrap {
         ghostty_runtime,
@@ -1693,7 +1923,7 @@ fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     let config = TaskersConfig::load().unwrap_or_default();
     let runtime = resolve_runtime_bootstrap(
-        config.embedded_terminal_appearance,
+        &taskers_ghostty::embedded_terminal_config_paths(),
         config.configured_shell.as_deref(),
         None,
     );
@@ -1781,6 +2011,7 @@ fn run_internal_surface_probe(
         selected_theme_id,
         selected_shortcut_preset,
         configured_shell: config.configured_shell.clone(),
+        embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
         notification_preferences,
         render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
     });
@@ -2733,12 +2964,13 @@ fn looks_like_dev_install(path: &Path) -> bool {
 mod startup_tests {
     use super::{
         RuntimePathOverrides, looks_like_dev_install, maybe_export_bundled_terminfo,
-        publish_shell_environment, should_defer_initial_sync,
-        should_force_software_gl, should_skip_terminal_sidecar_in_smoke,
-        smoke_runtime_path_overrides,
+        publish_shell_environment, should_defer_initial_sync, should_force_software_gl,
+        should_skip_terminal_sidecar_in_smoke, smoke_runtime_path_overrides,
     };
-    use std::{collections::BTreeMap, path::Path, path::PathBuf};
+    use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
     use taskers_runtime::ShellLaunchSpec;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn initial_sync_waits_for_real_allocation() {
@@ -2788,6 +3020,7 @@ mod startup_tests {
 
     #[test]
     fn smoke_with_mock_backend_skips_terminal_sidecar() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
         let overrides = RuntimePathOverrides {
             root_dir: Path::new("/tmp/taskers-smoke").to_path_buf(),
             session_path: Path::new("/tmp/taskers-smoke/session.json").to_path_buf(),
@@ -2833,13 +3066,17 @@ mod startup_tests {
 
     #[test]
     fn packaged_runtime_terminfo_is_reinjected_after_scrub() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime_dir = temp.path().join("taskers").join("ghostty");
         let terminfo_dir = temp.path().join("taskers").join("terminfo");
         std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
         std::fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
-        std::fs::write(terminfo_dir.join("x").join("xterm-ghostty"), b"fake terminfo")
-            .expect("write terminfo");
+        std::fs::write(
+            terminfo_dir.join("x").join("xterm-ghostty"),
+            b"fake terminfo",
+        )
+        .expect("write terminfo");
 
         let _guard = EnvGuard::set([
             ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.clone())),
@@ -2862,6 +3099,7 @@ mod startup_tests {
 
     #[test]
     fn publish_shell_environment_prefers_explicit_real_shell() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
         let _guard = EnvGuard::set([
             ("TASKERS_REAL_SHELL", None),
             ("SHELL", None),
@@ -2890,12 +3128,16 @@ mod startup_tests {
 
     #[test]
     fn publish_shell_environment_overwrites_stale_wrapper_shell_values() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
         let _guard = EnvGuard::set([
             (
                 "TASKERS_REAL_SHELL",
                 Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh")),
             ),
-            ("SHELL", Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh"))),
+            (
+                "SHELL",
+                Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh")),
+            ),
             ("XDG_DATA_HOME", None),
         ]);
 

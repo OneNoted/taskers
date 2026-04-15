@@ -21,23 +21,14 @@ const bridge_build_id_z = cString(std.fmt.comptimePrint(
     .{ vendor_version, vendor_fingerprint },
 ));
 
-const EmbeddedTerminalAppearance = enum {
-    taskers,
-    ghostty,
-
-    fn parse(raw: ?[*:0]const u8) EmbeddedTerminalAppearance {
-        const value = raw orelse return .taskers;
-        if (std.mem.eql(u8, std.mem.span(value), "ghostty")) return .ghostty;
-        return .taskers;
-    }
-};
-
 pub const Host = struct {
     core_app: *CoreApp,
     rt_app: GtkRuntimeApp,
     command_argv: []const [:0]u8,
     env_entries: []const [:0]u8,
-    embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    base_config_path: ?[:0]u8,
+    override_config_path: ?[:0]u8,
+    config_diagnostics_logged: bool = false,
     shutting_down: bool = false,
 };
 
@@ -46,7 +37,8 @@ pub const HostOptions = extern struct {
     command_argc: usize = 0,
     env_entries: ?[*]const [*:0]const u8 = null,
     env_count: usize = 0,
-    embedded_terminal_appearance: ?[*:0]const u8 = null,
+    base_config_path: ?[*:0]const u8 = null,
+    override_config_path: ?[*:0]const u8 = null,
 };
 
 pub const SurfaceOptions = extern struct {
@@ -104,21 +96,44 @@ pub export fn taskers_ghostty_host_new(options: ?*const HostOptions) ?*Host {
     };
     errdefer freeStringList(alloc, env_entries);
 
+    const base_config_path = duplicateOptionalString(alloc, opts.base_config_path) catch |err| {
+        std.log.err("failed to copy Ghostty base config path err={}", .{err});
+        freeStringList(alloc, env_entries);
+        freeStringList(alloc, command_argv);
+        core_app.destroy();
+        alloc.destroy(host);
+        return null;
+    };
+    errdefer freeOptionalString(alloc, base_config_path);
+
+    const override_config_path = duplicateOptionalString(alloc, opts.override_config_path) catch |err| {
+        std.log.err("failed to copy Ghostty override config path err={}", .{err});
+        freeOptionalString(alloc, base_config_path);
+        freeStringList(alloc, env_entries);
+        freeStringList(alloc, command_argv);
+        core_app.destroy();
+        alloc.destroy(host);
+        return null;
+    };
+    errdefer freeOptionalString(alloc, override_config_path);
+
     host.* = .{
         .core_app = core_app,
         .rt_app = undefined,
         .command_argv = command_argv,
         .env_entries = env_entries,
-        .embedded_terminal_appearance = EmbeddedTerminalAppearance.parse(opts.embedded_terminal_appearance),
+        .base_config_path = base_config_path,
+        .override_config_path = override_config_path,
+        .config_diagnostics_logged = false,
         .shutting_down = false,
     };
-    std.log.info(
-        "Taskers embedded terminal appearance={s}",
-        .{@tagName(host.embedded_terminal_appearance)},
-    );
+    std.log.info("Taskers embedded terminal base config={?s}", .{host.base_config_path});
+    std.log.info("Taskers embedded terminal override config={?s}", .{host.override_config_path});
 
     host.rt_app.init(core_app, .{}) catch |err| {
         std.log.err("failed to initialize Ghostty GTK runtime err={}", .{err});
+        freeOptionalString(alloc, override_config_path);
+        freeOptionalString(alloc, base_config_path);
         freeStringList(alloc, env_entries);
         freeStringList(alloc, command_argv);
         core_app.destroy();
@@ -134,6 +149,8 @@ pub export fn taskers_ghostty_host_free(host: ?*Host) void {
     const alloc = state.alloc;
     ptr.shutting_down = true;
     ptr.rt_app.terminate();
+    freeOptionalString(alloc, ptr.override_config_path);
+    freeOptionalString(alloc, ptr.base_config_path);
     freeStringList(alloc, ptr.env_entries);
     freeStringList(alloc, ptr.command_argv);
     ptr.core_app.destroy();
@@ -179,7 +196,7 @@ pub export fn taskers_ghostty_surface_new(
         .working_directory = if (opts.working_directory) |value| std.mem.span(value) else null,
         .title = if (opts.title) |value| std.mem.span(value) else null,
     });
-    const config = taskersSurfaceConfig(ptr.rt_app.app, ptr, opts) catch |err| {
+    const config = taskersSurfaceConfig(ptr, opts) catch |err| {
         std.log.err("failed to configure Taskers Ghostty surface err={}", .{err});
         return null;
     };
@@ -263,19 +280,21 @@ pub export fn taskers_ghostty_surface_free_text(text: ?*Text) void {
     ptr.* = .{};
 }
 
-fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOptions) !*Config {
+fn taskersSurfaceConfig(ptr: *Host, opts: *const SurfaceOptions) !*Config {
     const alloc = state.alloc;
-    const base = app.getConfig();
-    defer base.unref();
 
-    var cloned = try base.get().clone(alloc);
+    var cloned = try configpkg.Config.default(alloc);
     defer cloned.deinit();
+
+    try loadOptionalConfigFile(&cloned, alloc, ptr.base_config_path);
+    try loadOptionalConfigFile(&cloned, alloc, ptr.override_config_path);
+    try cloned.finalize();
 
     try applyTaskersEmbeddedSurfaceInvariants(
         alloc,
         &cloned,
         ptr.command_argv,
-        ptr.embedded_terminal_appearance,
+        !ptr.config_diagnostics_logged,
     );
     for (ptr.env_entries) |entry| {
         try cloned.env.parseCLI(alloc, entry);
@@ -286,19 +305,32 @@ fn taskersSurfaceConfig(app: anytype, ptr: *const Host, opts: *const SurfaceOpti
         }
     }
 
-    return try Config.new(alloc, &cloned);
+    const config = try Config.new(alloc, &cloned);
+    if (!ptr.config_diagnostics_logged and config.hasDiagnostics()) {
+        logEffectiveConfigDiagnostics(config);
+        ptr.config_diagnostics_logged = true;
+    }
+    return config;
 }
 
 fn applyTaskersEmbeddedSurfaceInvariants(
     _: std.mem.Allocator,
     config: *configpkg.Config,
     command_argv: []const [:0]const u8,
-    embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    log_conflicts: bool,
 ) !void {
     const alloc = config.arenaAlloc();
 
-    // Embedded panes inherit the user's loaded Ghostty config and only pin
-    // the handful of settings Taskers must own for layout and shell startup.
+    if (log_conflicts and config.command != null) {
+        std.log.warn("Taskers embedded config command override ignored in favor of Taskers-owned launch command", .{});
+    }
+    if (log_conflicts and config.@"shell-integration" != .none) {
+        std.log.warn("Taskers embedded config shell-integration override ignored for embedded panes", .{});
+    }
+    if (log_conflicts and config.@"linux-cgroup" != .never) {
+        std.log.warn("Taskers embedded config linux-cgroup override ignored for embedded panes", .{});
+    }
+
     config.command = if (command_argv.len == 0) null else command: {
         const direct = configpkg.Command{ .direct = command_argv };
         break :command try direct.clone(alloc);
@@ -306,18 +338,6 @@ fn applyTaskersEmbeddedSurfaceInvariants(
     config.@"shell-integration" = .none;
     config.@"shell-integration-features" = .{};
     config.@"linux-cgroup" = .never;
-
-    if (embedded_terminal_appearance == .taskers) {
-        config.theme = null;
-        config.background = .{ .r = 0x0F, .g = 0x11, .b = 0x17 };
-        config.@"background-image" = null;
-        config.@"background-opacity" = 0.0;
-        config.@"background-opacity-cells" = false;
-        config.@"window-padding-x" = .{ .top_left = 0, .bottom_right = 0 };
-        config.@"window-padding-y" = .{ .top_left = 0, .bottom_right = 0 };
-        config.@"window-padding-balance" = false;
-        config.@"window-padding-color" = .background;
-    }
 }
 
 fn logConfigDiagnostics(host: *const Host) void {
@@ -335,6 +355,34 @@ fn logConfigDiagnostics(host: *const Host) void {
         };
         std.log.warn("ghostty config diagnostic: {s}", .{buf[0..writer.end]});
     }
+}
+
+fn logEffectiveConfigDiagnostics(config: *Config) void {
+    if (!config.hasDiagnostics()) return;
+
+    var buf: [4095:0]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    for (config.get()._diagnostics.items()) |diag| {
+        writer.end = 0;
+        diag.format(&writer) catch |err| {
+            std.log.warn("failed to format Taskers embedded config diagnostic err={}", .{err});
+            continue;
+        };
+        std.log.warn("Taskers embedded config diagnostic: {s}", .{buf[0..writer.end]});
+    }
+}
+
+fn loadOptionalConfigFile(
+    config: *configpkg.Config,
+    alloc: std.mem.Allocator,
+    path_opt: ?[:0]const u8,
+) !void {
+    const path = path_opt orelse return;
+    std.fs.accessAbsolute(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    try config.loadFile(alloc, path);
 }
 
 fn duplicateStringList(
@@ -360,6 +408,15 @@ fn duplicateStringList(
 fn freeStringList(alloc: std.mem.Allocator, entries: []const [:0]u8) void {
     for (entries) |entry| alloc.free(entry);
     alloc.free(entries);
+}
+
+fn duplicateOptionalString(alloc: std.mem.Allocator, value: ?[*:0]const u8) !?[:0]u8 {
+    const raw = value orelse return null;
+    return try alloc.dupeZ(u8, std.mem.span(raw));
+}
+
+fn freeOptionalString(alloc: std.mem.Allocator, value: ?[:0]const u8) void {
+    if (value) |entry| alloc.free(entry);
 }
 
 fn cString(comptime value: []const u8) [value.len:0]u8 {
@@ -395,7 +452,7 @@ test "taskers embedded config preserves user settings beyond required invariants
         testing.allocator,
         &config,
         command_argv[0..],
-        .ghostty,
+        false,
     );
 
     try testing.expectEqual(@as(f32, 19), config.@"font-size");
@@ -427,13 +484,13 @@ test "taskers embedded config clears user command when taskers does not provide 
     config.@"font-size" = 17;
     config.command = .{ .shell = try testing.allocator.dupeZ(u8, "echo from-user-config") };
 
-    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, &.{}, .ghostty);
+    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, &.{}, false);
 
     try testing.expectEqual(@as(f32, 17), config.@"font-size");
     try testing.expect(config.command == null);
 }
 
-test "taskers embedded appearance enforces taskers background contract" {
+test "taskers embedded config preserves non-invariant visual settings" {
     const testing = std.testing;
     var config = try configpkg.Config.default(testing.allocator);
     defer config.deinit();
@@ -446,15 +503,16 @@ test "taskers embedded appearance enforces taskers background contract" {
     config.@"window-padding-balance" = true;
     config.@"window-padding-color" = .extend;
 
-    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, &.{}, .taskers);
+    try applyTaskersEmbeddedSurfaceInvariants(testing.allocator, &config, &.{}, false);
 
-    try testing.expect(config.theme == null);
-    try testing.expectEqual(configpkg.Color{ .r = 0x0F, .g = 0x11, .b = 0x17 }, config.background);
-    try testing.expectEqual(@as(f64, 0.0), config.@"background-opacity");
-    try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".top_left);
-    try testing.expectEqual(@as(u32, 0), config.@"window-padding-x".bottom_right);
-    try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".top_left);
-    try testing.expectEqual(@as(u32, 0), config.@"window-padding-y".bottom_right);
-    try testing.expect(!config.@"window-padding-balance");
-    try testing.expectEqual(configpkg.WindowPaddingColor.background, config.@"window-padding-color");
+    try testing.expectEqualStrings("Catppuccin Latte", config.theme.?.light);
+    try testing.expectEqualStrings("Catppuccin Mocha", config.theme.?.dark);
+    try testing.expectEqual(configpkg.Color{ .r = 0x1E, .g = 0x1E, .b = 0x2E }, config.background);
+    try testing.expectEqual(@as(f64, 0.5), config.@"background-opacity");
+    try testing.expectEqual(@as(u32, 7), config.@"window-padding-x".top_left);
+    try testing.expectEqual(@as(u32, 9), config.@"window-padding-x".bottom_right);
+    try testing.expectEqual(@as(u32, 11), config.@"window-padding-y".top_left);
+    try testing.expectEqual(@as(u32, 13), config.@"window-padding-y".bottom_right);
+    try testing.expect(config.@"window-padding-balance");
+    try testing.expectEqual(configpkg.WindowPaddingColor.extend, config.@"window-padding-color");
 }

@@ -537,6 +537,7 @@ pub struct BootstrapModel {
     pub selected_theme_id: String,
     pub selected_shortcut_preset: ShortcutPreset,
     pub configured_shell: Option<String>,
+    pub embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot,
     pub notification_preferences: NotificationPreferencesSnapshot,
     pub render_live_surfaces_in_overview: bool,
 }
@@ -549,6 +550,7 @@ impl Default for BootstrapModel {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: ShortcutPreset::Balanced,
             configured_shell: None,
+            embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         }
@@ -580,6 +582,48 @@ pub enum NotificationPreferenceKey {
     AlertsOnError,
     AlertsOnCompleted,
     SuppressWhenVisible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OptionalSettingChoice {
+    #[default]
+    Default,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedTerminalTextSettingKey {
+    Theme,
+    FontFamily,
+    FontSize,
+    WindowPaddingX,
+    WindowPaddingY,
+    CursorStyle,
+    ScrollbackLimit,
+    BackgroundOpacity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedTerminalBoolSettingKey {
+    CursorStyleBlink,
+    BackgroundOpacityCells,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EmbeddedTerminalSettingsSnapshot {
+    pub theme: String,
+    pub font_family: String,
+    pub font_size: String,
+    pub window_padding_x: String,
+    pub window_padding_y: String,
+    pub cursor_style: String,
+    pub cursor_style_blink: OptionalSettingChoice,
+    pub scrollback_limit: String,
+    pub background_opacity: String,
+    pub background_opacity_cells: OptionalSettingChoice,
+    pub base_config_path: String,
+    pub override_config_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1163,6 +1207,7 @@ pub struct SettingsSnapshot {
     pub shortcuts: Vec<ShortcutBindingSnapshot>,
     pub configured_shell: Option<String>,
     pub default_shell_label: String,
+    pub embedded_terminal: EmbeddedTerminalSettingsSnapshot,
     pub notification_preferences: NotificationPreferencesSnapshot,
     pub render_live_surfaces_in_overview: bool,
 }
@@ -1535,6 +1580,14 @@ pub enum ShellAction {
     SetConfiguredShell {
         shell: Option<String>,
     },
+    SetEmbeddedTerminalTextSetting {
+        key: EmbeddedTerminalTextSettingKey,
+        value: String,
+    },
+    SetEmbeddedTerminalBoolSetting {
+        key: EmbeddedTerminalBoolSettingKey,
+        value: OptionalSettingChoice,
+    },
     SetNotificationPreference {
         key: NotificationPreferenceKey,
         enabled: bool,
@@ -1554,6 +1607,7 @@ struct UiState {
     selected_theme_id: String,
     selected_shortcut_preset: ShortcutPreset,
     configured_shell: Option<String>,
+    embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot,
     notification_preferences: NotificationPreferencesSnapshot,
     render_live_surfaces_in_overview: bool,
     window_size: PixelSize,
@@ -1626,6 +1680,7 @@ impl TaskersCore {
                 selected_theme_id: bootstrap.selected_theme_id,
                 selected_shortcut_preset: bootstrap.selected_shortcut_preset,
                 configured_shell: normalize_configured_shell(bootstrap.configured_shell.as_deref()),
+                embedded_terminal_settings: bootstrap.embedded_terminal_settings,
                 notification_preferences: bootstrap.notification_preferences,
                 render_live_surfaces_in_overview: bootstrap.render_live_surfaces_in_overview,
                 window_size: PixelSize::new(1440, 900),
@@ -1831,6 +1886,7 @@ impl TaskersCore {
             shortcuts: shortcut_bindings(self.ui.selected_shortcut_preset),
             configured_shell: self.ui.configured_shell.clone(),
             default_shell_label: default_shell_program().display().to_string(),
+            embedded_terminal: self.ui.embedded_terminal_settings.clone(),
             notification_preferences: self.ui.notification_preferences,
             render_live_surfaces_in_overview: self.ui.render_live_surfaces_in_overview,
         }
@@ -3275,6 +3331,57 @@ impl TaskersCore {
                     return false;
                 }
                 self.ui.configured_shell = shell;
+                self.bump_local_revision();
+                true
+            }
+            ShellAction::SetEmbeddedTerminalTextSetting { key, value } => {
+                let normalized = value.trim().to_string();
+                let field = match key {
+                    EmbeddedTerminalTextSettingKey::Theme => {
+                        &mut self.ui.embedded_terminal_settings.theme
+                    }
+                    EmbeddedTerminalTextSettingKey::FontFamily => {
+                        &mut self.ui.embedded_terminal_settings.font_family
+                    }
+                    EmbeddedTerminalTextSettingKey::FontSize => {
+                        &mut self.ui.embedded_terminal_settings.font_size
+                    }
+                    EmbeddedTerminalTextSettingKey::WindowPaddingX => {
+                        &mut self.ui.embedded_terminal_settings.window_padding_x
+                    }
+                    EmbeddedTerminalTextSettingKey::WindowPaddingY => {
+                        &mut self.ui.embedded_terminal_settings.window_padding_y
+                    }
+                    EmbeddedTerminalTextSettingKey::CursorStyle => {
+                        &mut self.ui.embedded_terminal_settings.cursor_style
+                    }
+                    EmbeddedTerminalTextSettingKey::ScrollbackLimit => {
+                        &mut self.ui.embedded_terminal_settings.scrollback_limit
+                    }
+                    EmbeddedTerminalTextSettingKey::BackgroundOpacity => {
+                        &mut self.ui.embedded_terminal_settings.background_opacity
+                    }
+                };
+                if *field == normalized {
+                    return false;
+                }
+                *field = normalized;
+                self.bump_local_revision();
+                true
+            }
+            ShellAction::SetEmbeddedTerminalBoolSetting { key, value } => {
+                let field = match key {
+                    EmbeddedTerminalBoolSettingKey::CursorStyleBlink => {
+                        &mut self.ui.embedded_terminal_settings.cursor_style_blink
+                    }
+                    EmbeddedTerminalBoolSettingKey::BackgroundOpacityCells => {
+                        &mut self.ui.embedded_terminal_settings.background_opacity_cells
+                    }
+                };
+                if *field == value {
+                    return false;
+                }
+                *field = value;
                 self.bump_local_revision();
                 true
             }
@@ -6754,13 +6861,14 @@ mod tests {
 
     use super::{
         BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME,
-        DEFAULT_WORKSPACE_WINDOW_GAP, Direction, HostCommand, HostEvent, LayoutMetrics,
-        MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX, NotificationPreferencesSnapshot, ResizeHandleTarget,
-        ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
-        ShellSection, ShortcutAction, SurfaceDragSessionSnapshot, SurfaceMountSpec,
-        WorkspaceDirection, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
-        default_preview_app_state, default_session_path_for_preview, display_surface_title,
-        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
+        DEFAULT_WORKSPACE_WINDOW_GAP, Direction, EmbeddedTerminalSettingsSnapshot, HostCommand,
+        HostEvent, LayoutMetrics, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
+        NotificationPreferencesSnapshot, ResizeHandleTarget, ResizePreview, RuntimeCapability,
+        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection, ShortcutAction,
+        SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection,
+        WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot, default_preview_app_state,
+        default_session_path_for_preview, display_surface_title, pane_body_frame,
+        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
         workspace_window_content_frame,
     };
 
@@ -6778,6 +6886,7 @@ mod tests {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
             configured_shell: None,
+            embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         }
@@ -8702,6 +8811,7 @@ mod tests {
             selected_theme_id: "dark".into(),
             selected_shortcut_preset: super::ShortcutPreset::Balanced,
             configured_shell: None,
+            embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
         });

@@ -31,23 +31,29 @@ Each pane can hold one or more surface tabs of either kind. The active surface t
 
 ## Embedded Ghostty Config
 
-On the GTK/Linux shell, embedded terminal panes always keep a few Taskers-owned invariants:
+Taskers now owns embedded-terminal configuration through Ghostty-format files under:
 
-- the launch command stays Taskers-owned
-- Ghostty shell integration stays disabled because Taskers provides its own shell wrapper
-- Ghostty Linux cgroup settings stay disabled for embedded panes
+- `~/.config/taskers/ghostty/base.conf`
+- `~/.config/taskers/ghostty/override.conf`
 
-By default, Taskers also keeps the embedded terminal background and pane padding on the Taskers visual contract, even if the user's Ghostty theme differs. The built-in Taskers default currently applies a horizontal terminal inset roughly equivalent to `window-padding-x = 20` in Ghostty terms.
+The ownership boundary is:
 
-If you want embedded panes to inherit your Ghostty theme and padding instead, add this to Taskers' config JSON:
+- `base.conf` is written by the Taskers GUI
+- `override.conf` is optional and reserved for advanced manual edits
+- embedded panes still keep a small set of Taskers-owned invariants:
+  - the launch command stays Taskers-owned
+  - Ghostty shell integration stays disabled
+  - Ghostty Linux cgroup settings stay disabled
 
-```json
-{
-  "embedded_terminal_appearance": "ghostty"
-}
-```
+Effective embedded-terminal config resolves in this order:
 
-With that opt-in enabled, Ghostty settings such as fonts, theme, colors, cursor behavior, scrollback, and window padding carry over into embedded Taskers panes.
+1. `base.conf`
+2. `override.conf`
+3. Taskers invariants
+
+Most common embedded-terminal settings can now be changed from the **Terminal** settings tab, including theme, font family, font size, padding, cursor style, scrollback, and opacity options.
+
+Advanced Ghostty keys that Taskers does not manage from the GUI can still be added manually to `override.conf`.
 
 ## A Typical Session
 
