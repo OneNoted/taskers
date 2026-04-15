@@ -996,10 +996,11 @@ pub const Surface = extern struct {
             return;
         }
 
-        // If we have a vadjustment we MUST have the signal group since
-        // it is setup in the prop handler.
         const priv = self.private();
-        const group = priv.vadj_signal_group.?;
+        const group = priv.vadj_signal_group orelse {
+            log.warn("missing vadjustment signal group during scrollbar update; skipping update", .{});
+            return;
+        };
 
         // During manual scrollbar changes from Ghostty core we don't
         // want to emit value-changed signals so we block them. This would
@@ -1097,7 +1098,10 @@ pub const Surface = extern struct {
 
     /// The progress bar hasn't been updated by the TUI recently, remove it.
     fn progressBarTimer(ud: ?*anyopaque) callconv(.c) c_int {
-        const self: *Self = @ptrCast(@alignCast(ud.?));
+        const self: *Self = @ptrCast(@alignCast(ud orelse {
+            log.warn("progressBarTimer invoked with null user data", .{});
+            return @intFromBool(glib.SOURCE_REMOVE);
+        }));
         const priv = self.private();
         priv.progress_bar_timer = null;
         self.setProgressReport(.{ .state = .remove });
@@ -3400,16 +3404,27 @@ pub const Surface = extern struct {
         // Initialize our surface configuration.
         var config = try apprt.surface.newConfig(
             app.core(),
-            priv.config.?.get(),
+            (priv.config orelse {
+                log.warn("surface initialization missing config object", .{});
+                self.setError(true);
+                return error.SurfaceError;
+            }).get(),
             priv.context,
         );
         defer config.deinit();
 
+        _ = config._arena orelse {
+            log.warn("surface initialization config arena missing", .{});
+            self.setError(true);
+            return error.SurfaceError;
+        };
+        const config_alloc = config.arenaAlloc();
+
         if (priv.overrides.command) |c| {
-            config.command = try c.clone(config._arena.?.allocator());
+            config.command = try c.clone(config_alloc);
         }
         if (priv.overrides.working_directory) |wd| {
-            config.@"working-directory" = try config._arena.?.allocator().dupeZ(u8, wd);
+            config.@"working-directory" = try config_alloc.dupeZ(u8, wd);
         }
 
         // Properties that can impact surface init
@@ -3424,13 +3439,20 @@ pub const Surface = extern struct {
             app.rt(),
             &priv.rt_surface,
         ) catch |err| {
-            log.warn("failed to initialize surface err={}", .{err});
+            log.warn("failed to initialize surface err={} width={} height={} context={}", .{
+                err,
+                priv.size.width,
+                priv.size.height,
+                priv.context,
+            });
+            self.setError(true);
             return error.SurfaceError;
         };
         errdefer surface.deinit();
 
         // Store it!
         priv.core_surface = surface;
+        self.setError(false);
 
         // Emit the signal that we initialized the surface.
         Surface.signals.init.impl.emit(
