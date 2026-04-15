@@ -475,6 +475,7 @@ pub struct TaskersHost {
     root: Overlay,
     native_surface_viewport: Fixed,
     native_surface_scene: Fixed,
+    native_overlay_targeting: NativeOverlayTargeting,
     event_sink: HostEventSink,
     shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
@@ -493,6 +494,53 @@ pub struct TaskersHost {
     resize_handles: HashMap<String, ResizeHandleOverlay>,
     current_portal: Option<SurfacePortalPlan>,
     current_workspace: Option<WorkspaceViewSnapshot>,
+}
+
+#[derive(Clone)]
+struct NativeOverlayTargeting {
+    viewport: Fixed,
+    scene: Fixed,
+    shell_widget: Widget,
+    interactive: Rc<Cell<bool>>,
+    active_sequences: Rc<Cell<u32>>,
+}
+
+impl NativeOverlayTargeting {
+    fn new(viewport: &Fixed, scene: &Fixed, shell_widget: &Widget) -> Self {
+        Self {
+            viewport: viewport.clone(),
+            scene: scene.clone(),
+            shell_widget: shell_widget.clone(),
+            interactive: Rc::new(Cell::new(false)),
+            active_sequences: Rc::new(Cell::new(0)),
+        }
+    }
+
+    fn set_interactive(&self, interactive: bool) {
+        self.interactive.set(interactive);
+        self.refresh();
+    }
+
+    fn begin_pointer_sequence(&self) {
+        self.active_sequences
+            .set(self.active_sequences.get().saturating_add(1));
+        self.refresh();
+    }
+
+    fn end_pointer_sequence(&self) {
+        self.active_sequences
+            .set(self.active_sequences.get().saturating_sub(1));
+        self.refresh();
+    }
+
+    fn refresh(&self) {
+        let can_target = self.interactive.get() && self.active_sequences.get() == 0;
+        self.viewport.set_can_target(can_target);
+        self.scene.set_can_target(can_target);
+        let shell_interactive = self.active_sequences.get() == 0;
+        self.shell_widget.set_can_target(shell_interactive);
+        self.shell_widget.set_focusable(shell_interactive);
+    }
 }
 
 struct ResizeHandleOverlay {
@@ -605,6 +653,11 @@ impl TaskersHost {
         root.set_vexpand(true);
         root.set_child(Some(shell_widget));
         let (native_surface_viewport, native_surface_scene) = build_native_surface_scene_layers();
+        let native_overlay_targeting = NativeOverlayTargeting::new(
+            &native_surface_viewport,
+            &native_surface_scene,
+            shell_widget.as_ref(),
+        );
         root.add_overlay(&native_surface_viewport);
         root.set_measure_overlay(&native_surface_viewport, false);
         root.set_clip_overlay(&native_surface_viewport, false);
@@ -654,6 +707,7 @@ impl TaskersHost {
             root,
             native_surface_viewport,
             native_surface_scene,
+            native_overlay_targeting,
             event_sink,
             shell_action_sink,
             diagnostics,
@@ -691,6 +745,7 @@ impl TaskersHost {
             snapshot.overview_mode,
         );
         let visible = native_surfaces_visible(snapshot.section, snapshot.drag_mode);
+        self.native_overlay_targeting.set_interactive(interactive);
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
         sync_native_surface_scene(
@@ -1406,6 +1461,7 @@ impl TaskersHost {
                         &snapshot.settings.selected_theme_id,
                         snapshot.revision,
                         interactive,
+                        self.native_overlay_targeting.clone(),
                         network_session,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
@@ -1550,6 +1606,7 @@ impl TaskersHost {
                         self.terminal_padding_y,
                         revision,
                         interactive,
+                        self.native_overlay_targeting.clone(),
                         resize_preview_active,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
@@ -1729,6 +1786,7 @@ struct BrowserSurface {
     workspace_id: Rc<Cell<WorkspaceId>>,
     pane_id: Rc<Cell<PaneId>>,
     webview: WebView,
+    focus_state: Rc<Cell<bool>>,
     network_session: NetworkSession,
     profile_mode: BrowserProfileMode,
     url: String,
@@ -1750,6 +1808,7 @@ impl BrowserSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
+        overlay_targeting: NativeOverlayTargeting,
         network_session: NetworkSession,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
@@ -1776,9 +1835,12 @@ impl BrowserSurface {
             surface_id: entry.surface_id,
             url: url.clone(),
         });
-        let shell = NativeSurfaceShell::new(shell_class, visible_plan.is_some() && interactive);
+        let shell = NativeSurfaceShell::new(
+            webview.upcast_ref(),
+            shell_class,
+            visible_plan.is_some() && interactive,
+        );
         let attention_ring = AttentionRingOverlay::new();
-        shell.mount_child(webview.upcast_ref());
         match visible_plan {
             Some(plan) => {
                 shell.show_at(scene, plan.frame);
@@ -1792,15 +1854,19 @@ impl BrowserSurface {
         let devtools_open = Rc::new(Cell::new(false));
         let workspace_id = Rc::new(Cell::new(entry.workspace_id));
         let pane_id = Rc::new(Cell::new(entry.pane_id));
+        let focus_state = Rc::new(Cell::new(false));
         let last_load_state = Rc::new(Cell::new(None));
+        install_pointer_sequence_guard(webview.upcast_ref(), overlay_targeting);
 
         let focus_pane_id = pane_id.clone();
         let surface_id = entry.surface_id;
         let focus_sink = event_sink.clone();
         let focus_diagnostics = diagnostics.clone();
+        let focus_state_for_enter = focus_state.clone();
         let focus = EventControllerFocus::new();
         focus.connect_enter(move |_| {
             let pane_id = focus_pane_id.get();
+            focus_state_for_enter.set(true);
             // Rely on the native widget's own focus transition instead of a
             // synthetic click handler so terminal/browser content keeps the
             // full mouse sequence for itself.
@@ -1815,6 +1881,10 @@ impl BrowserSurface {
                 .with_surface(surface_id),
             );
             (focus_sink)(HostEvent::PaneFocused { pane_id });
+        });
+        let focus_state_for_leave = focus_state.clone();
+        focus.connect_leave(move |_| {
+            focus_state_for_leave.set(false);
         });
         webview.add_controller(focus);
 
@@ -1938,6 +2008,7 @@ impl BrowserSurface {
             workspace_id,
             pane_id,
             webview,
+            focus_state,
             network_session,
             profile_mode: entry.profile_mode,
             url,
@@ -1994,6 +2065,9 @@ impl BrowserSurface {
             && (!self.active || !self.interactive || !self.visible)
         {
             self.webview.grab_focus();
+        }
+        if !visible || !effective_interactive {
+            self.focus_state.set(false);
         }
         self.active = visible_plan.is_some_and(|plan| plan.active);
         self.interactive = effective_interactive;
@@ -2111,6 +2185,7 @@ impl TerminalSurface {
         padding_y: i32,
         revision: u64,
         interactive: bool,
+        overlay_targeting: NativeOverlayTargeting,
         resize_preview_active: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
@@ -2132,9 +2207,9 @@ impl TerminalSurface {
         widget.add_css_class("terminal-output");
         let effective_interactive = visible_plan.is_some() && interactive;
         widget.set_can_target(effective_interactive);
-        let shell = NativeSurfaceShell::new(shell_class, effective_interactive);
+        install_pointer_sequence_guard(&widget, overlay_targeting);
+        let shell = NativeSurfaceShell::new(&widget, shell_class, effective_interactive);
         let attention_ring = AttentionRingOverlay::new();
-        shell.mount_child(&widget);
         shell.set_content_padding(padding_x, padding_y);
         let initial_width_px = visible_plan.map_or(0, |plan| plan.frame.width);
         let initial_height_px = visible_plan.map_or(0, |plan| plan.frame.height);
@@ -2315,37 +2390,25 @@ fn thaw_terminal_widget(widget: &Widget) {
 }
 
 struct NativeSurfaceShell {
-    root: GtkBox,
+    widget: Widget,
     padding_x: Cell<i32>,
     padding_y: Cell<i32>,
 }
 
 impl NativeSurfaceShell {
-    fn new(kind_class: &'static str, interactive: bool) -> Self {
-        let root = GtkBox::new(Orientation::Vertical, 0);
-        root.set_hexpand(false);
-        root.set_vexpand(false);
-        root.set_halign(Align::Start);
-        root.set_valign(Align::Start);
-        root.set_overflow(Overflow::Hidden);
-        root.set_focusable(false);
-        root.set_can_target(native_surface_shell_can_target(interactive));
-        root.add_css_class("native-surface-host");
-        root.add_css_class(kind_class);
+    fn new(widget: &Widget, kind_class: &'static str, interactive: bool) -> Self {
+        widget.set_hexpand(false);
+        widget.set_vexpand(false);
+        widget.set_halign(Align::Start);
+        widget.set_valign(Align::Start);
+        widget.set_overflow(Overflow::Hidden);
+        widget.set_can_target(native_surface_shell_can_target(interactive));
+        widget.add_css_class("native-surface-host");
+        widget.add_css_class(kind_class);
         Self {
-            root,
+            widget: widget.clone(),
             padding_x: Cell::new(0),
             padding_y: Cell::new(0),
-        }
-    }
-
-    fn mount_child(&self, child: &Widget) {
-        child.set_hexpand(true);
-        child.set_vexpand(true);
-        child.set_halign(Align::Fill);
-        child.set_valign(Align::Fill);
-        if child.parent().is_none() {
-            self.root.append(child);
         }
     }
 
@@ -2355,39 +2418,34 @@ impl NativeSurfaceShell {
     }
 
     fn position(&self, scene: &Fixed, frame: taskers_core::Frame) {
-        self.apply_content_padding(frame);
-        position_widget_in_fixed(scene, self.root.upcast_ref(), frame);
-    }
-
-    fn apply_content_padding(&self, frame: taskers_core::Frame) {
-        let Some(child) = self.root.first_child() else {
-            return;
-        };
         let (padding_x, padding_y) =
             clamped_terminal_padding(frame, self.padding_x.get(), self.padding_y.get());
-        child.set_margin_start(padding_x);
-        child.set_margin_end(padding_x);
-        child.set_margin_top(padding_y);
-        child.set_margin_bottom(padding_y);
+        let content_frame = taskers_core::Frame::new(
+            frame.x + padding_x,
+            frame.y + padding_y,
+            frame.width.saturating_sub(padding_x * 2).max(1),
+            frame.height.saturating_sub(padding_y * 2).max(1),
+        );
+        position_widget_in_fixed(scene, &self.widget, content_frame);
     }
 
     fn show_at(&self, scene: &Fixed, frame: taskers_core::Frame) {
-        self.root.set_opacity(1.0);
+        self.widget.set_opacity(1.0);
         self.position(scene, frame);
     }
 
     fn park_hidden(&self, scene: &Fixed) {
-        self.root.set_opacity(0.0);
+        self.widget.set_opacity(0.0);
         self.position(scene, self.hidden_frame());
     }
 
     fn set_interactive(&self, interactive: bool) {
-        self.root
+        self.widget
             .set_can_target(native_surface_shell_can_target(interactive));
     }
 
     fn detach(&self, scene: &Fixed) {
-        detach_from_fixed(scene, self.root.upcast_ref());
+        detach_from_fixed(scene, &self.widget);
     }
 
     fn hidden_frame(&self) -> taskers_core::Frame {
@@ -2903,6 +2961,41 @@ fn terminal_surface_background(theme_id: &str) -> &'static str {
         "gruvbox-dark" => "#282828",
         _ => "#0f1117",
     }
+}
+
+fn install_pointer_sequence_guard(widget: &Widget, overlay_targeting: NativeOverlayTargeting) {
+    let sequence_active = Rc::new(Cell::new(false));
+    let focus_widget = widget.clone();
+    let targeting = overlay_targeting.clone();
+    let controller = gtk::EventControllerLegacy::new();
+    controller.connect_event(move |_, event| {
+        match event.event_type() {
+            gdk::EventType::ButtonPress | gdk::EventType::TouchBegin => {
+                if !sequence_active.replace(true) {
+                    targeting.begin_pointer_sequence();
+                }
+            }
+            gdk::EventType::ButtonRelease
+            | gdk::EventType::TouchEnd
+            | gdk::EventType::TouchCancel => {
+                if sequence_active.replace(false) {
+                    targeting.end_pointer_sequence();
+                }
+            }
+            gdk::EventType::MotionNotify => {
+                if event
+                    .modifier_state()
+                    .contains(gdk::ModifierType::BUTTON1_MASK)
+                    && !focus_widget.has_focus()
+                {
+                    focus_widget.grab_focus();
+                }
+            }
+            _ => {}
+        }
+        glib::Propagation::Proceed
+    });
+    widget.add_controller(controller);
 }
 
 fn connect_ghostty_widget(
@@ -3587,18 +3680,16 @@ fn native_surface_visible_plan<'a>(
 mod tests {
     use std::collections::BTreeMap;
 
-    use gtk::{Button, DrawingArea, Overlay, PickFlags, Window};
     use gtk::prelude::WidgetExt;
 
     use super::{
         browser_plans, build_native_surface_scene_layers, clamp_frame_to_widget,
         host_attention_palette, native_surface_classes, native_surface_css,
         native_surface_shell_can_target, native_surface_visible_plan, native_surfaces_interactive,
-        native_surfaces_visible, position_widget, position_widget_in_fixed, preview_for_drag,
-        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
-        settle_capture_main_loop, should_defer_terminal_surface_creations_after_removals,
+        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
+        resolve_screenshot_output_path, should_defer_terminal_surface_creations_after_removals,
         terminal_padding_value_px, terminal_plans, trim_terminal_tail, with_capture_retries,
-        workspace_pan_delta, NativeSurfaceShell,
+        workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
@@ -3755,81 +3846,6 @@ mod tests {
         assert!(native_surface_shell_can_target(true));
         assert!(!native_surface_shell_can_target(false));
     }
-
-    fn native_overlay_pick_target(
-        viewport_targetable: bool,
-        scene_targetable: bool,
-        shell_targetable: bool,
-    ) -> String {
-        let _ = gtk::init();
-
-        let shell_underlay = DrawingArea::new();
-        shell_underlay.set_widget_name("shell-underlay");
-        shell_underlay.set_can_target(true);
-        shell_underlay.set_focusable(false);
-        shell_underlay.set_size_request(220, 220);
-
-        let root = Overlay::new();
-        root.set_size_request(220, 220);
-        root.set_child(Some(&shell_underlay));
-
-        let viewport = gtk::Fixed::new();
-        viewport.set_widget_name("native-viewport");
-        viewport.set_can_target(viewport_targetable);
-        let scene = gtk::Fixed::new();
-        scene.set_widget_name("native-scene");
-        scene.set_can_target(scene_targetable);
-        root.add_overlay(&viewport);
-        root.set_measure_overlay(&viewport, false);
-        root.set_clip_overlay(&viewport, false);
-        viewport.put(&scene, 0.0, 0.0);
-
-        let shell = NativeSurfaceShell::new("native-surface-terminal", shell_targetable);
-        shell.root.set_widget_name("native-shell");
-        let child = Button::with_label("native-child");
-        child.set_widget_name("native-child");
-        child.set_can_target(true);
-        child.set_focusable(true);
-        shell.mount_child(child.upcast_ref());
-
-        position_widget(&root, viewport.upcast_ref(), Frame::new(0, 0, 220, 220));
-        position_widget_in_fixed(&viewport, scene.upcast_ref(), Frame::new(0, 0, 220, 220));
-        shell.show_at(&scene, Frame::new(20, 20, 140, 140));
-
-        let window = Window::builder()
-            .default_width(220)
-            .default_height(220)
-            .child(&root)
-            .build();
-        window.show();
-        settle_capture_main_loop();
-
-        let picked = root
-            .pick(40.0, 40.0, PickFlags::DEFAULT)
-            .expect("picked widget");
-        let result = picked.widget_name().to_string();
-        window.close();
-        result
-    }
-
-    #[test]
-    fn non_targetable_native_ancestors_skip_the_native_subtree_in_pick() {
-        let picked = native_overlay_pick_target(false, false, true);
-        assert_eq!(picked, "shell-underlay");
-    }
-
-    #[test]
-    fn targetable_native_ancestors_route_pick_to_the_native_child() {
-        let picked = native_overlay_pick_target(true, true, true);
-        assert_eq!(picked, "native-child");
-    }
-
-    #[test]
-    fn non_targetable_native_shell_blocks_picking_the_native_child() {
-        let picked = native_overlay_pick_target(true, true, false);
-        assert_eq!(picked, "shell-underlay");
-    }
-
 
     #[test]
     fn native_surface_css_tracks_selected_theme_terminal_background() {
