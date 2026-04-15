@@ -480,8 +480,11 @@ pub struct TaskersHost {
     ghostty_bridge_info: Option<GhosttyBridgeInfo>,
     ghostty_watchdog: Option<BridgeWatchdog>,
     skip_next_ghostty_tick: bool,
+    pending_terminal_create_retry: bool,
     native_surface_provider: CssProvider,
     selected_theme_id: String,
+    terminal_padding_x: i32,
+    terminal_padding_y: i32,
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
     persistent_browser_session: Option<NetworkSession>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
@@ -649,8 +652,11 @@ impl TaskersHost {
             ghostty_bridge_info,
             ghostty_watchdog,
             skip_next_ghostty_tick: false,
+            pending_terminal_create_retry: false,
             native_surface_provider,
             selected_theme_id: "dark".into(),
+            terminal_padding_x: 0,
+            terminal_padding_y: 0,
             browser_surfaces: HashMap::new(),
             persistent_browser_session: None,
             terminal_surfaces: HashMap::new(),
@@ -664,15 +670,26 @@ impl TaskersHost {
         self.root.clone()
     }
 
+    pub fn needs_sync_retry(&self) -> bool {
+        self.pending_terminal_create_retry
+    }
+
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
+        self.pending_terminal_create_retry = false;
         let interactive = native_surfaces_interactive(snapshot.drag_mode, snapshot.overview_mode);
         let visible = native_surfaces_visible(snapshot.drag_mode);
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
+        let next_padding_x =
+            terminal_padding_value_px(&snapshot.settings.embedded_terminal.window_padding_x);
+        let next_padding_y =
+            terminal_padding_value_px(&snapshot.settings.embedded_terminal.window_padding_y);
         if self.selected_theme_id != snapshot.settings.selected_theme_id {
             self.selected_theme_id = snapshot.settings.selected_theme_id.clone();
             update_native_surface_css(&self.native_surface_provider, &self.selected_theme_id);
         }
+        self.terminal_padding_x = next_padding_x;
+        self.terminal_padding_y = next_padding_y;
         emit_diagnostic(
             self.diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -1400,6 +1417,7 @@ impl TaskersHost {
             .copied()
             .filter(|surface_id| !desired_ids.contains(surface_id))
             .collect::<Vec<_>>();
+        let removed_any = !stale.is_empty();
 
         let host = self.ghostty_host.as_ref();
         let bridge_running = self.bridge_running();
@@ -1437,6 +1455,8 @@ impl TaskersHost {
             }
         }
 
+        let defer_creations = should_defer_terminal_surface_creations_after_removals(removed_any);
+
         for entry in catalog {
             let visible_plan = native_surface_visible_plan(
                 if visible {
@@ -1452,6 +1472,8 @@ impl TaskersHost {
                     entry,
                     visible_plan,
                     theme_id,
+                    self.terminal_padding_x,
+                    self.terminal_padding_y,
                     revision,
                     interactive,
                     resize_preview_active,
@@ -1459,6 +1481,20 @@ impl TaskersHost {
                     self.diagnostics.as_ref(),
                 ),
                 None => {
+                    if defer_creations {
+                        self.pending_terminal_create_retry = true;
+                        emit_diagnostic(
+                            self.diagnostics.as_ref(),
+                            DiagnosticRecord::new(
+                                DiagnosticCategory::Bridge,
+                                Some(revision),
+                                "deferring terminal surface create until next sync after removals",
+                            )
+                            .with_pane(entry.pane_id)
+                            .with_surface(entry.surface_id),
+                        );
+                        continue;
+                    }
                     if !bridge_running {
                         emit_diagnostic(
                             self.diagnostics.as_ref(),
@@ -1480,6 +1516,8 @@ impl TaskersHost {
                         entry,
                         visible_plan,
                         theme_id,
+                        self.terminal_padding_x,
+                        self.terminal_padding_y,
                         revision,
                         interactive,
                         resize_preview_active,
@@ -1495,6 +1533,10 @@ impl TaskersHost {
 
         Ok(terminal_mutated)
     }
+}
+
+fn should_defer_terminal_surface_creations_after_removals(removed_any: bool) -> bool {
+    removed_any
 }
 
 impl ResizeHandleOverlay {
@@ -2017,6 +2059,8 @@ struct TerminalSurface {
     visible: bool,
     width_px: i32,
     height_px: i32,
+    padding_x: i32,
+    padding_y: i32,
     resize_frozen: bool,
 }
 
@@ -2027,6 +2071,8 @@ impl TerminalSurface {
         entry: &TerminalSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
+        padding_x: i32,
+        padding_y: i32,
         revision: u64,
         interactive: bool,
         resize_preview_active: bool,
@@ -2053,6 +2099,7 @@ impl TerminalSurface {
         let shell = NativeSurfaceShell::new(shell_class, effective_interactive);
         let attention_ring = AttentionRingOverlay::new();
         shell.mount_child(&widget);
+        shell.set_content_padding(padding_x, padding_y);
         let initial_width_px = visible_plan.map_or(0, |plan| plan.frame.width);
         let initial_height_px = visible_plan.map_or(0, |plan| plan.frame.height);
         let mut resize_frozen = false;
@@ -2113,6 +2160,8 @@ impl TerminalSurface {
             visible: visible_plan.is_some(),
             width_px: initial_width_px,
             height_px: initial_height_px,
+            padding_x,
+            padding_y,
             resize_frozen,
         })
     }
@@ -2124,6 +2173,8 @@ impl TerminalSurface {
         entry: &TerminalSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
+        padding_x: i32,
+        padding_y: i32,
         revision: u64,
         interactive: bool,
         resize_preview_active: bool,
@@ -2137,6 +2188,11 @@ impl TerminalSurface {
         let effective_interactive = visible && interactive;
         self.widget.set_can_target(effective_interactive);
         self.shell.set_interactive(effective_interactive);
+        if self.padding_x != padding_x || self.padding_y != padding_y {
+            self.shell.set_content_padding(padding_x, padding_y);
+            self.padding_x = padding_x;
+            self.padding_y = padding_y;
+        }
         if resize_preview_active && visible {
             if !self.resize_frozen {
                 freeze_terminal_widget(&self.widget, self.width_px, self.height_px);
@@ -2216,6 +2272,8 @@ fn thaw_terminal_widget(widget: &Widget) {
 
 struct NativeSurfaceShell {
     root: GtkBox,
+    padding_x: Cell<i32>,
+    padding_y: Cell<i32>,
 }
 
 impl NativeSurfaceShell {
@@ -2230,7 +2288,11 @@ impl NativeSurfaceShell {
         root.set_can_target(interactive);
         root.add_css_class("native-surface-host");
         root.add_css_class(kind_class);
-        Self { root }
+        Self {
+            root,
+            padding_x: Cell::new(0),
+            padding_y: Cell::new(0),
+        }
     }
 
     fn mount_child(&self, child: &Widget) {
@@ -2243,8 +2305,17 @@ impl NativeSurfaceShell {
         }
     }
 
+    fn set_content_padding(&self, padding_x: i32, padding_y: i32) {
+        self.padding_x.set(padding_x.max(0));
+        self.padding_y.set(padding_y.max(0));
+    }
+
     fn position(&self, overlay: &Overlay, frame: taskers_core::Frame) {
-        position_widget(overlay, self.root.upcast_ref(), frame);
+        position_widget(
+            overlay,
+            self.root.upcast_ref(),
+            inset_frame(frame, self.padding_x.get(), self.padding_y.get()),
+        );
     }
 
     fn show_at(&self, overlay: &Overlay, frame: taskers_core::Frame) {
@@ -2694,7 +2765,6 @@ fn split_ratio_preview(
 }
 
 fn native_surface_css(theme_id: &str) -> String {
-    const DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX: i32 = 0;
     format!(
         r#"
 .native-surface-host,
@@ -2709,8 +2779,10 @@ fn native_surface_css(theme_id: &str) -> String {
 .native-surface-terminal-widget,
 .terminal-output {{
   background: {};
-  padding-left: {}px;
-  padding-right: {}px;
+  padding-left: 0px;
+  padding-right: 0px;
+  padding-top: 0px;
+  padding-bottom: 0px;
 }}
 
 .native-surface-browser,
@@ -2732,11 +2804,19 @@ fn native_surface_css(theme_id: &str) -> String {
 .resize-handle-active {{
   background: rgba(255, 255, 255, 0.16);
 }}
- "#,
-        terminal_surface_background(theme_id),
-        DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX,
-        DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX
+"#,
+        terminal_surface_background(theme_id)
     )
+}
+
+fn terminal_padding_value_px(value: &str) -> i32 {
+    value
+        .split(',')
+        .next()
+        .map(str::trim)
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or_default()
+        .max(0)
 }
 
 fn terminal_surface_background(theme_id: &str) -> &'static str {
@@ -3308,6 +3388,27 @@ fn hidden_frame() -> taskers_core::Frame {
     taskers_core::Frame::new(100_000, 100_000, 1, 1)
 }
 
+fn inset_frame(frame: taskers_core::Frame, padding_x: i32, padding_y: i32) -> taskers_core::Frame {
+    let max_padding_x = frame.width.saturating_sub(1) / 2;
+    let max_padding_y = frame.height.saturating_sub(1) / 2;
+    let padding_x = padding_x.max(0).min(max_padding_x);
+    let padding_y = padding_y.max(0).min(max_padding_y);
+    let width = frame
+        .width
+        .saturating_sub(padding_x.saturating_mul(2))
+        .max(1);
+    let height = frame
+        .height
+        .saturating_sub(padding_y.saturating_mul(2))
+        .max(1);
+    taskers_core::Frame::new(
+        frame.x.saturating_add(padding_x),
+        frame.y.saturating_add(padding_y),
+        width,
+        height,
+    )
+}
+
 fn native_surface_visible_plan<'a>(
     visible_plan: Option<&'a PortalSurfacePlan>,
     resize_preview_active: bool,
@@ -3324,11 +3425,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        browser_plans, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
-        native_surface_css, native_surface_visible_plan, native_surfaces_interactive,
-        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
-        resolve_screenshot_output_path, terminal_plans, trim_terminal_tail, with_capture_retries,
-        workspace_pan_delta,
+        browser_plans, clamp_frame_to_widget, host_attention_palette, inset_frame,
+        native_surface_classes, native_surface_css, native_surface_visible_plan,
+        native_surfaces_interactive, native_surfaces_visible, preview_for_drag,
+        redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
+        should_defer_terminal_surface_creations_after_removals, terminal_padding_value_px,
+        terminal_plans, trim_terminal_tail, with_capture_retries, workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
@@ -3431,7 +3533,33 @@ mod tests {
         assert!(dark.contains("background: #0f1117;"));
         assert!(dark.contains("padding-left: 0px;"));
         assert!(dark.contains("padding-right: 0px;"));
+        assert!(dark.contains("padding-top: 0px;"));
+        assert!(dark.contains("padding-bottom: 0px;"));
         assert!(gruvbox.contains("background: #282828;"));
+    }
+
+    #[test]
+    fn terminal_surface_creation_is_deferred_after_removals() {
+        assert!(should_defer_terminal_surface_creations_after_removals(true));
+        assert!(!should_defer_terminal_surface_creations_after_removals(
+            false
+        ));
+    }
+
+    #[test]
+    fn terminal_padding_value_uses_first_numeric_segment() {
+        assert_eq!(terminal_padding_value_px("22"), 22);
+        assert_eq!(terminal_padding_value_px("22,18"), 22);
+        assert_eq!(terminal_padding_value_px(" 20 "), 20);
+        assert_eq!(terminal_padding_value_px("bad"), 0);
+    }
+
+    #[test]
+    fn inset_frame_applies_terminal_padding_inside_host_frame() {
+        assert_eq!(
+            inset_frame(Frame::new(10, 20, 300, 200), 22, 20),
+            Frame::new(32, 40, 256, 160)
+        );
     }
 
     #[test]

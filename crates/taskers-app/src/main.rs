@@ -2211,18 +2211,27 @@ fn sync_window(
     }
 
     let revision = core.revision();
-    if last_revision.get() != revision {
+    let needs_sync_retry = host.borrow().needs_sync_retry();
+    if should_sync_host_snapshot(last_revision.get(), revision, needs_sync_retry) {
         let snapshot = core.snapshot();
         log_diagnostic(
             diagnostics,
             DiagnosticRecord::new(
                 DiagnosticCategory::Sync,
                 Some(revision),
-                format!(
-                    "syncing snapshot panes={} active={}",
-                    snapshot.portal.panes.len(),
-                    snapshot.current_workspace.active_pane
-                ),
+                if needs_sync_retry {
+                    format!(
+                        "retrying snapshot sync panes={} active={}",
+                        snapshot.portal.panes.len(),
+                        snapshot.current_workspace.active_pane
+                    )
+                } else {
+                    format!(
+                        "syncing snapshot panes={} active={}",
+                        snapshot.portal.panes.len(),
+                        snapshot.current_workspace.active_pane
+                    )
+                },
             ),
         );
         if let Err(error) = host.borrow_mut().sync_snapshot(&snapshot) {
@@ -2242,6 +2251,10 @@ fn sync_window(
     }
 
     host.borrow_mut().tick(Some(core.revision()));
+}
+
+fn should_sync_host_snapshot(last_revision: u64, revision: u64, needs_sync_retry: bool) -> bool {
+    last_revision != revision || needs_sync_retry
 }
 
 fn should_defer_initial_sync(last_size: (i32, i32), width: i32, height: i32) -> bool {
@@ -2965,7 +2978,8 @@ mod startup_tests {
     use super::{
         RuntimePathOverrides, looks_like_dev_install, maybe_export_bundled_terminfo,
         publish_shell_environment, should_defer_initial_sync, should_force_software_gl,
-        should_skip_terminal_sidecar_in_smoke, smoke_runtime_path_overrides,
+        should_skip_terminal_sidecar_in_smoke, should_sync_host_snapshot,
+        smoke_runtime_path_overrides,
     };
     use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
     use taskers_runtime::ShellLaunchSpec;
@@ -2982,6 +2996,13 @@ mod startup_tests {
     #[test]
     fn later_resizes_do_not_get_blocked() {
         assert!(!should_defer_initial_sync((1440, 900), 1, 1));
+    }
+
+    #[test]
+    fn host_sync_retries_when_pending_retry_is_set() {
+        assert!(should_sync_host_snapshot(5, 5, true));
+        assert!(should_sync_host_snapshot(5, 6, false));
+        assert!(!should_sync_host_snapshot(5, 5, false));
     }
 
     #[test]
