@@ -32,7 +32,9 @@ use taskers_control::{
     TerminalDebugCommand, bind_socket, default_socket_path, serve_with_handler,
 };
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
-use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
+use taskers_domain::{
+    AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, NotificationDeliveryState, NotificationId, SignalKind,
+};
 use taskers_ghostty::{
     BackendChoice, EmbeddedTerminalAppearance, EmbeddedTerminalConfig, EmbeddedTerminalConfigPaths,
     GhosttyHost, GhosttyHostOptions, OptionalBoolValue, ensure_runtime_installed,
@@ -47,7 +49,7 @@ use taskers_shell_core::{
     BootstrapModel, EmbeddedTerminalSettingsSnapshot, LayoutNodeSnapshot,
     NotificationPreferencesSnapshot, OptionalSettingChoice, PaneTabLayoutSnapshot, PixelSize,
     RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
-    ShortcutPreset, SurfaceKind,
+    ShortcutPreset, SurfaceKind, clamp_workspace_window_gap,
 };
 use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
 
@@ -162,6 +164,8 @@ struct TaskersConfig {
     notification_preferences: NotificationPreferencesConfig,
     #[serde(default = "default_true")]
     render_live_surfaces_in_overview: bool,
+    #[serde(default = "default_workspace_window_gap")]
+    workspace_window_gap: i32,
     #[serde(default)]
     embedded_terminal_appearance: EmbeddedTerminalAppearance,
     #[serde(default)]
@@ -188,6 +192,7 @@ impl Default for TaskersConfig {
             configured_shell: None,
             notification_preferences: NotificationPreferencesConfig::default(),
             render_live_surfaces_in_overview: true,
+            workspace_window_gap: default_workspace_window_gap(),
             embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
             embedded_terminal_config_initialized: false,
         }
@@ -237,11 +242,19 @@ fn default_true() -> bool {
     true
 }
 
+fn default_workspace_window_gap() -> i32 {
+    DEFAULT_WORKSPACE_WINDOW_GAP
+}
+
 fn normalize_configured_shell_value(shell: Option<&str>) -> Option<String> {
     shell.and_then(|shell| {
         let trimmed = shell.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
+}
+
+fn normalize_workspace_window_gap_value(gap: i32) -> i32 {
+    clamp_workspace_window_gap(gap)
 }
 
 fn safe_eprintln(message: impl std::fmt::Display) {
@@ -279,6 +292,7 @@ impl TaskersConfig {
             .with_context(|| format!("failed to parse config {}", path.display()))?;
         config.configured_shell =
             normalize_configured_shell_value(config.configured_shell.as_deref());
+        config.workspace_window_gap = normalize_workspace_window_gap_value(config.workspace_window_gap);
         Ok(config)
     }
 
@@ -313,6 +327,7 @@ impl TaskersConfig {
                 settings.notification_preferences,
             ),
             render_live_surfaces_in_overview: settings.render_live_surfaces_in_overview,
+            workspace_window_gap: normalize_workspace_window_gap_value(settings.workspace_window_gap),
             embedded_terminal_appearance: current.embedded_terminal_appearance,
             embedded_terminal_config_initialized: current.embedded_terminal_config_initialized,
         }
@@ -1191,8 +1206,8 @@ mod notification_tests {
 #[cfg(test)]
 mod config_tests {
     use super::{
-        NotificationPreferencesConfig, TaskersConfig,
-        legacy_embedded_terminal_appearance_for_migration,
+        DEFAULT_WORKSPACE_WINDOW_GAP, NotificationPreferencesConfig, TaskersConfig,
+        legacy_embedded_terminal_appearance_for_migration, normalize_workspace_window_gap_value,
         persist_embedded_terminal_migration_marker,
     };
     use taskers_ghostty::EmbeddedTerminalAppearance;
@@ -1207,6 +1222,10 @@ mod config_tests {
             EmbeddedTerminalAppearance::Taskers
         );
         assert_eq!(TaskersConfig::default().configured_shell, None);
+        assert_eq!(
+            TaskersConfig::default().workspace_window_gap,
+            DEFAULT_WORKSPACE_WINDOW_GAP
+        );
     }
 
     #[test]
@@ -1231,6 +1250,7 @@ mod config_tests {
                 suppress_when_visible: false,
             },
             render_live_surfaces_in_overview: false,
+            workspace_window_gap: 24,
         };
 
         let next = TaskersConfig::from_settings(&settings, &current);
@@ -1246,6 +1266,17 @@ mod config_tests {
             NotificationPreferencesConfig::from_snapshot(settings.notification_preferences)
         );
         assert!(!next.render_live_surfaces_in_overview);
+        assert_eq!(next.workspace_window_gap, 24);
+    }
+
+    #[test]
+    fn workspace_window_gap_normalization_clamps_values() {
+        assert_eq!(
+            normalize_workspace_window_gap_value(DEFAULT_WORKSPACE_WINDOW_GAP),
+            DEFAULT_WORKSPACE_WINDOW_GAP
+        );
+        assert_eq!(normalize_workspace_window_gap_value(-5), 0);
+        assert_eq!(normalize_workspace_window_gap_value(999), 64);
     }
 
     #[test]
@@ -1310,7 +1341,7 @@ mod config_tests {
 
 #[cfg(test)]
 mod runtime_bootstrap_tests {
-    use super::{TaskersConfig, resolve_runtime_bootstrap};
+    use super::{DEFAULT_WORKSPACE_WINDOW_GAP, TaskersConfig, resolve_runtime_bootstrap};
     use std::{env, fs, os::unix::fs::PermissionsExt, sync::Mutex};
     use taskers_shell_core::{
         EmbeddedTerminalSettingsSnapshot, NotificationPreferencesSnapshot, SettingsSnapshot,
@@ -1418,6 +1449,7 @@ mod runtime_bootstrap_tests {
             embedded_terminal: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
+            workspace_window_gap: DEFAULT_WORKSPACE_WINDOW_GAP,
         };
         let next = TaskersConfig::from_settings(&settings, &TaskersConfig::default());
         let persisted = serde_json::to_string(&next).expect("serialize config");
@@ -1694,6 +1726,7 @@ fn bootstrap_runtime(
         ),
         notification_preferences: config.notification_preferences.to_snapshot(),
         render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
+        workspace_window_gap: config.workspace_window_gap,
     });
 
     log_runtime_status(diagnostics, &core.snapshot().runtime_status);
@@ -2014,6 +2047,7 @@ fn run_internal_surface_probe(
         embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
         notification_preferences,
         render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
+        workspace_window_gap: config.workspace_window_gap,
     });
     core.set_window_size(PixelSize::new(
         GHOSTTY_PROBE_WINDOW_SIZE_PX,

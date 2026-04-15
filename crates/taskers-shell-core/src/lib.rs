@@ -29,6 +29,12 @@ pub use taskers_domain::{
 
 pub const MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX: i32 = 160;
 pub const MIN_RENDERED_NATIVE_SURFACE_HEIGHT_PX: i32 = 96;
+pub const MIN_WORKSPACE_WINDOW_GAP: i32 = 0;
+pub const MAX_WORKSPACE_WINDOW_GAP: i32 = 64;
+
+pub fn clamp_workspace_window_gap(gap: i32) -> i32 {
+    gap.clamp(MIN_WORKSPACE_WINDOW_GAP, MAX_WORKSPACE_WINDOW_GAP)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActivityId {
@@ -540,6 +546,7 @@ pub struct BootstrapModel {
     pub embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot,
     pub notification_preferences: NotificationPreferencesSnapshot,
     pub render_live_surfaces_in_overview: bool,
+    pub workspace_window_gap: i32,
 }
 
 impl Default for BootstrapModel {
@@ -553,6 +560,7 @@ impl Default for BootstrapModel {
             embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
+            workspace_window_gap: DEFAULT_WORKSPACE_WINDOW_GAP,
         }
     }
 }
@@ -1210,6 +1218,7 @@ pub struct SettingsSnapshot {
     pub embedded_terminal: EmbeddedTerminalSettingsSnapshot,
     pub notification_preferences: NotificationPreferencesSnapshot,
     pub render_live_surfaces_in_overview: bool,
+    pub workspace_window_gap: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1595,6 +1604,9 @@ pub enum ShellAction {
     SetOverviewLiveSurfaces {
         enabled: bool,
     },
+    SetWorkspaceWindowGap {
+        gap: i32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1610,6 +1622,7 @@ struct UiState {
     embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot,
     notification_preferences: NotificationPreferencesSnapshot,
     render_live_surfaces_in_overview: bool,
+    workspace_window_gap: i32,
     window_size: PixelSize,
     vcs_panel_visible: bool,
     last_terminal_surface_by_workspace: BTreeMap<WorkspaceId, SurfaceId>,
@@ -1683,6 +1696,7 @@ impl TaskersCore {
                 embedded_terminal_settings: bootstrap.embedded_terminal_settings,
                 notification_preferences: bootstrap.notification_preferences,
                 render_live_surfaces_in_overview: bootstrap.render_live_surfaces_in_overview,
+                workspace_window_gap: clamp_workspace_window_gap(bootstrap.workspace_window_gap),
                 window_size: PixelSize::new(1440, 900),
                 vcs_panel_visible: false,
                 last_terminal_surface_by_workspace: BTreeMap::new(),
@@ -1741,6 +1755,7 @@ impl TaskersCore {
             workspace,
             viewport.width,
             viewport.height,
+            self.ui.workspace_window_gap,
             workspace.viewport.clone(),
         );
         let render_context = workspace_render_context(
@@ -1749,8 +1764,13 @@ impl TaskersCore {
             viewport.width,
             viewport.height,
             self.metrics,
+            self.ui.workspace_window_gap,
         );
-        let placements = workspace_display_window_placements(workspace, render_context);
+        let placements = workspace_display_window_placements(
+            workspace,
+            render_context,
+            self.ui.workspace_window_gap,
+        );
         let canvas_metrics = workspace_canvas_metrics(&placements, render_context.outer_padding);
         let window_frames = placements
             .iter()
@@ -1889,6 +1909,7 @@ impl TaskersCore {
             embedded_terminal: self.ui.embedded_terminal_settings.clone(),
             notification_preferences: self.ui.notification_preferences,
             render_live_surfaces_in_overview: self.ui.render_live_surfaces_in_overview,
+            workspace_window_gap: self.ui.workspace_window_gap,
         }
     }
 
@@ -2685,6 +2706,7 @@ impl TaskersCore {
         window_frames: &BTreeMap<WorkspaceWindowId, (WorkspaceColumnId, Frame)>,
     ) -> Vec<ResizeHandleSnapshot> {
         let mut handles = Vec::new();
+        let workspace_window_gap = self.ui.workspace_window_gap;
         let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
         let column_widths = ordered_columns
             .iter()
@@ -2726,7 +2748,11 @@ impl TaskersCore {
                 if has_right_neighbor {
                     handles.push(ResizeHandleSnapshot {
                         id: format!("workspace-column-edge-{}-{}", column.id, window.id),
-                        frame: workspace_window_edge_handle_frame(*frame, true),
+                        frame: workspace_window_edge_handle_frame(
+                            *frame,
+                            true,
+                            workspace_window_gap,
+                        ),
                         cursor: ResizeHandleCursor::EastWest,
                         target: ResizeHandleTarget::WorkspaceColumnEdge {
                             workspace_id,
@@ -2739,7 +2765,11 @@ impl TaskersCore {
                 if has_bottom_neighbor {
                     handles.push(ResizeHandleSnapshot {
                         id: format!("workspace-window-bottom-{}", window.id),
-                        frame: workspace_window_edge_handle_frame(*frame, false),
+                        frame: workspace_window_edge_handle_frame(
+                            *frame,
+                            false,
+                            workspace_window_gap,
+                        ),
                         cursor: ResizeHandleCursor::NorthSouth,
                         target: ResizeHandleTarget::WorkspaceWindowBottomEdge {
                             workspace_id,
@@ -2752,7 +2782,7 @@ impl TaskersCore {
                 if has_right_neighbor && has_bottom_neighbor {
                     handles.push(ResizeHandleSnapshot {
                         id: format!("workspace-window-corner-{}", window.id),
-                        frame: workspace_window_corner_handle_frame(*frame),
+                        frame: workspace_window_corner_handle_frame(*frame, workspace_window_gap),
                         cursor: ResizeHandleCursor::SouthEast,
                         target: ResizeHandleTarget::WorkspaceWindowCorner {
                             workspace_id,
@@ -3415,6 +3445,15 @@ impl TaskersCore {
                 self.bump_local_revision();
                 true
             }
+            ShellAction::SetWorkspaceWindowGap { gap } => {
+                let gap = clamp_workspace_window_gap(gap);
+                if self.ui.workspace_window_gap == gap {
+                    return false;
+                }
+                self.ui.workspace_window_gap = gap;
+                self.bump_local_revision();
+                true
+            }
         }
     }
 
@@ -3981,12 +4020,14 @@ impl TaskersCore {
             workspace,
             viewport_frame.width,
             viewport_frame.height,
+            self.ui.workspace_window_gap,
             workspace.viewport.clone(),
         );
         let next_viewport = clamped_workspace_viewport(
             workspace,
             viewport_frame.width,
             viewport_frame.height,
+            self.ui.workspace_window_gap,
             taskers_domain::WorkspaceViewport {
                 x: current_viewport.x.saturating_add(dx),
                 y: current_viewport.y.saturating_add(dy),
@@ -4891,10 +4932,16 @@ impl TaskersCore {
             workspace,
             viewport_frame.width,
             viewport_frame.height,
+            self.ui.workspace_window_gap,
             workspace.viewport.clone(),
         );
         let Some(active_frame) =
-            workspace_window_placements(workspace, viewport_frame.width, viewport_frame.height)
+            workspace_window_placements(
+                workspace,
+                viewport_frame.width,
+                viewport_frame.height,
+                self.ui.workspace_window_gap,
+            )
                 .into_iter()
                 .find(|placement| placement.window_id == workspace.active_window)
                 .map(|placement| placement.frame)
@@ -4923,6 +4970,7 @@ impl TaskersCore {
             workspace,
             viewport_frame.width,
             viewport_frame.height,
+            self.ui.workspace_window_gap,
             next_viewport,
         );
         if next_viewport == workspace.viewport {
@@ -5137,9 +5185,9 @@ fn apply_resize_preview_to_model(model: &mut AppModel, preview: &ResizePreview) 
     }
 }
 
-fn workspace_window_edge_handle_frame(frame: Frame, right_edge: bool) -> Frame {
+fn workspace_window_edge_handle_frame(frame: Frame, right_edge: bool, gap: i32) -> Frame {
     if right_edge {
-        let center_x = frame.right() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+        let center_x = frame.right() + gap / 2;
         Frame::new(
             center_x - RESIZE_HANDLE_THICKNESS_PX / 2,
             frame.y,
@@ -5147,7 +5195,7 @@ fn workspace_window_edge_handle_frame(frame: Frame, right_edge: bool) -> Frame {
             frame.height.max(1),
         )
     } else {
-        let center_y = frame.bottom() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+        let center_y = frame.bottom() + gap / 2;
         Frame::new(
             frame.x,
             center_y - RESIZE_HANDLE_THICKNESS_PX / 2,
@@ -5157,9 +5205,9 @@ fn workspace_window_edge_handle_frame(frame: Frame, right_edge: bool) -> Frame {
     }
 }
 
-fn workspace_window_corner_handle_frame(frame: Frame) -> Frame {
-    let center_x = frame.right() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
-    let center_y = frame.bottom() + DEFAULT_WORKSPACE_WINDOW_GAP / 2;
+fn workspace_window_corner_handle_frame(frame: Frame, gap: i32) -> Frame {
+    let center_x = frame.right() + gap / 2;
+    let center_y = frame.bottom() + gap / 2;
     Frame::new(
         center_x - RESIZE_CORNER_SIZE_PX / 2,
         center_y - RESIZE_CORNER_SIZE_PX / 2,
@@ -5365,6 +5413,7 @@ fn workspace_render_context(
     viewport_width: i32,
     viewport_height: i32,
     metrics: LayoutMetrics,
+    workspace_window_gap: i32,
 ) -> WorkspaceRenderContext {
     if !overview_mode {
         return WorkspaceRenderContext {
@@ -5376,7 +5425,8 @@ fn workspace_render_context(
         };
     }
 
-    let base_frames = workspace_window_placements(workspace, viewport_width, viewport_height)
+    let base_frames =
+        workspace_window_placements(workspace, viewport_width, viewport_height, workspace_window_gap)
         .into_iter()
         .map(|placement| placement.frame)
         .collect::<Vec<_>>();
@@ -5400,11 +5450,13 @@ fn workspace_render_context(
 fn workspace_display_window_placements(
     workspace: &Workspace,
     render_context: WorkspaceRenderContext,
+    workspace_window_gap: i32,
 ) -> Vec<WorkspaceWindowPlacement> {
     workspace_window_placements(
         workspace,
         render_context.viewport_width,
         render_context.viewport_height,
+        workspace_window_gap,
     )
     .into_iter()
     .map(|mut placement| {
@@ -5420,14 +5472,14 @@ fn workspace_window_placements(
     workspace: &Workspace,
     viewport_width: i32,
     viewport_height: i32,
+    workspace_window_gap: i32,
 ) -> Vec<WorkspaceWindowPlacement> {
     let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
     if ordered_columns.is_empty() {
         return Vec::new();
     }
 
-    let horizontal_gap_total =
-        DEFAULT_WORKSPACE_WINDOW_GAP * ordered_columns.len().saturating_sub(1) as i32;
+    let horizontal_gap_total = workspace_window_gap * ordered_columns.len().saturating_sub(1) as i32;
     let available_width = (viewport_width - horizontal_gap_total).max(0);
     let preferred_column_widths = ordered_columns
         .iter()
@@ -5452,7 +5504,7 @@ fn workspace_window_placements(
             .copied()
             .unwrap_or(MIN_WORKSPACE_WINDOW_WIDTH);
         let vertical_gap_total =
-            DEFAULT_WORKSPACE_WINDOW_GAP * column.window_order.len().saturating_sub(1) as i32;
+            workspace_window_gap * column.window_order.len().saturating_sub(1) as i32;
         let available_height = (viewport_height - vertical_gap_total).max(0);
         let preferred_window_heights = column
             .window_order
@@ -5484,10 +5536,10 @@ fn workspace_window_placements(
                     height: window_height,
                 },
             });
-            y += window_height + DEFAULT_WORKSPACE_WINDOW_GAP;
+            y += window_height + workspace_window_gap;
         }
 
-        x += column_width + DEFAULT_WORKSPACE_WINDOW_GAP;
+        x += column_width + workspace_window_gap;
     }
 
     placements
@@ -5592,9 +5644,15 @@ fn clamped_workspace_viewport(
     workspace: &Workspace,
     viewport_width: i32,
     viewport_height: i32,
+    workspace_window_gap: i32,
     viewport: taskers_domain::WorkspaceViewport,
 ) -> taskers_domain::WorkspaceViewport {
-    let placements = workspace_window_placements(workspace, viewport_width, viewport_height);
+    let placements = workspace_window_placements(
+        workspace,
+        viewport_width,
+        viewport_height,
+        workspace_window_gap,
+    );
     let canvas = workspace_canvas_metrics(&placements, 0);
     let max_x = (canvas.width - viewport_width).max(0);
     let max_y = (canvas.height - viewport_height).max(0);
@@ -6862,14 +6920,14 @@ mod tests {
     use super::{
         BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME,
         DEFAULT_WORKSPACE_WINDOW_GAP, Direction, EmbeddedTerminalSettingsSnapshot, HostCommand,
-        HostEvent, LayoutMetrics, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
-        NotificationPreferencesSnapshot, ResizeHandleTarget, ResizePreview, RuntimeCapability,
-        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection, ShortcutAction,
-        SurfaceDragSessionSnapshot, SurfaceMountSpec, WorkspaceDirection,
-        WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot, default_preview_app_state,
-        default_session_path_for_preview, display_surface_title, pane_body_frame,
-        pane_shows_tab_strip_for_surface_count, resolved_browser_uri, split_frame,
-        workspace_window_content_frame,
+        HostEvent, LayoutMetrics, MAX_WORKSPACE_WINDOW_GAP, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
+        MIN_WORKSPACE_WINDOW_GAP, NotificationPreferencesSnapshot, ResizeHandleTarget,
+        ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
+        ShellSection, ShortcutAction, SurfaceDragSessionSnapshot, SurfaceMountSpec,
+        WorkspaceDirection, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
+        default_preview_app_state, default_session_path_for_preview, display_surface_title,
+        pane_body_frame, pane_shows_tab_strip_for_surface_count, resolved_browser_uri,
+        split_frame, workspace_window_content_frame,
     };
 
     fn bootstrap() -> BootstrapModel {
@@ -6889,6 +6947,7 @@ mod tests {
             embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
+            workspace_window_gap: DEFAULT_WORKSPACE_WINDOW_GAP,
         }
     }
 
@@ -8814,6 +8873,7 @@ mod tests {
             embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
+            workspace_window_gap: DEFAULT_WORKSPACE_WINDOW_GAP,
         });
 
         core.dispatch_shell_action(ShellAction::ResumeInterruptedAgent {
@@ -9191,6 +9251,51 @@ mod tests {
         assert!(snapshot.overview_mode);
         assert!(snapshot.portal.panes.is_empty());
         assert!(!snapshot.settings.render_live_surfaces_in_overview);
+    }
+
+    #[test]
+    fn workspace_window_gap_setting_updates_window_spacing() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let first_window_id = core.snapshot().current_workspace.active_window_id;
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let before = core.snapshot();
+        let second_window_id = before.current_workspace.active_window_id;
+        let first_window = window_snapshot(&before, first_window_id);
+        let second_window = window_snapshot(&before, second_window_id);
+        assert_eq!(
+            second_window.frame.x - first_window.frame.right(),
+            DEFAULT_WORKSPACE_WINDOW_GAP
+        );
+
+        core.dispatch_shell_action(ShellAction::SetWorkspaceWindowGap { gap: 24 });
+
+        let after = core.snapshot();
+        let first_window = window_snapshot(&after, first_window_id);
+        let second_window = window_snapshot(&after, second_window_id);
+        assert_eq!(after.settings.workspace_window_gap, 24);
+        assert_eq!(second_window.frame.x - first_window.frame.right(), 24);
+    }
+
+    #[test]
+    fn workspace_window_gap_setting_clamps_out_of_range_values() {
+        let core = SharedCore::bootstrap(bootstrap());
+
+        core.dispatch_shell_action(ShellAction::SetWorkspaceWindowGap { gap: -5 });
+        assert_eq!(
+            core.snapshot().settings.workspace_window_gap,
+            MIN_WORKSPACE_WINDOW_GAP
+        );
+
+        core.dispatch_shell_action(ShellAction::SetWorkspaceWindowGap { gap: 999 });
+        assert_eq!(
+            core.snapshot().settings.workspace_window_gap,
+            MAX_WORKSPACE_WINDOW_GAP
+        );
     }
 
     #[test]

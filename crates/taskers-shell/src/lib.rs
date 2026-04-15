@@ -5006,8 +5006,9 @@ fn render_workspace_tab(settings: &SettingsSnapshot, core: SharedCore) -> Elemen
         section { class: "settings-section",
             div { class: "settings-section-heading", "Workspace" }
             div { class: "settings-section-helper",
-                "Overview mode uses dedicated overview cards. When possible it can prefer richer previews, but it should stay stable and readable first."
+                "Tune top-level workspace window spacing and overview preview behavior from one place."
             }
+            {render_workspace_window_gap_setting(settings.workspace_window_gap, core.clone())}
             {render_overview_surface_preference(
                 "Prefer richer previews",
                 "Ask overview to prefer richer previews when they are stable enough. Turn this off to keep overview on summary cards and jump into the full window for interaction.",
@@ -5122,6 +5123,37 @@ fn render_overview_surface_preference(
         core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: !enabled })
     };
     render_settings_toggle_row(label, detail, enabled, toggle)
+}
+
+fn render_workspace_window_gap_setting(value: i32, core: SharedCore) -> Element {
+    let onchange = move |event: Event<FormData>| {
+        let Ok(gap) = event.value().parse::<i32>() else {
+            return;
+        };
+        core.dispatch_shell_action(ShellAction::SetWorkspaceWindowGap { gap });
+    };
+
+    rsx! {
+        div { class: "settings-row",
+            div { class: "settings-row-copy",
+                div { class: "settings-row-label", "Window gap" }
+                div { class: "settings-row-helper",
+                    "Pixels between top-level workspace windows. Use 0 for flush edges."
+                }
+            }
+            div { class: "settings-row-control",
+                input {
+                    class: "vcs-input",
+                    r#type: "number",
+                    min: "{taskers_core::MIN_WORKSPACE_WINDOW_GAP}",
+                    max: "{taskers_core::MAX_WORKSPACE_WINDOW_GAP}",
+                    step: "1",
+                    value: "{value}",
+                    onchange,
+                }
+            }
+        }
+    }
 }
 
 fn render_settings_toggle_row(
