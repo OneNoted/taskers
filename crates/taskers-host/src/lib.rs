@@ -475,7 +475,6 @@ pub struct TaskersHost {
     root: Overlay,
     native_surface_viewport: Fixed,
     native_surface_scene: Fixed,
-    native_overlay_targeting: NativeOverlayTargeting,
     event_sink: HostEventSink,
     shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
@@ -486,61 +485,12 @@ pub struct TaskersHost {
     pending_terminal_create_retry: bool,
     native_surface_provider: CssProvider,
     selected_theme_id: String,
-    terminal_padding_x: i32,
-    terminal_padding_y: i32,
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
     persistent_browser_session: Option<NetworkSession>,
     terminal_surfaces: HashMap<SurfaceId, TerminalSurface>,
     resize_handles: HashMap<String, ResizeHandleOverlay>,
     current_portal: Option<SurfacePortalPlan>,
     current_workspace: Option<WorkspaceViewSnapshot>,
-}
-
-#[derive(Clone)]
-struct NativeOverlayTargeting {
-    viewport: Fixed,
-    scene: Fixed,
-    shell_widget: Widget,
-    interactive: Rc<Cell<bool>>,
-    active_sequences: Rc<Cell<u32>>,
-}
-
-impl NativeOverlayTargeting {
-    fn new(viewport: &Fixed, scene: &Fixed, shell_widget: &Widget) -> Self {
-        Self {
-            viewport: viewport.clone(),
-            scene: scene.clone(),
-            shell_widget: shell_widget.clone(),
-            interactive: Rc::new(Cell::new(false)),
-            active_sequences: Rc::new(Cell::new(0)),
-        }
-    }
-
-    fn set_interactive(&self, interactive: bool) {
-        self.interactive.set(interactive);
-        self.refresh();
-    }
-
-    fn begin_pointer_sequence(&self) {
-        self.active_sequences
-            .set(self.active_sequences.get().saturating_add(1));
-        self.refresh();
-    }
-
-    fn end_pointer_sequence(&self) {
-        self.active_sequences
-            .set(self.active_sequences.get().saturating_sub(1));
-        self.refresh();
-    }
-
-    fn refresh(&self) {
-        let can_target = self.interactive.get() && self.active_sequences.get() == 0;
-        self.viewport.set_can_target(can_target);
-        self.scene.set_can_target(can_target);
-        let shell_interactive = self.active_sequences.get() == 0;
-        self.shell_widget.set_can_target(shell_interactive);
-        self.shell_widget.set_focusable(shell_interactive);
-    }
 }
 
 struct ResizeHandleOverlay {
@@ -653,11 +603,6 @@ impl TaskersHost {
         root.set_vexpand(true);
         root.set_child(Some(shell_widget));
         let (native_surface_viewport, native_surface_scene) = build_native_surface_scene_layers();
-        let native_overlay_targeting = NativeOverlayTargeting::new(
-            &native_surface_viewport,
-            &native_surface_scene,
-            shell_widget.as_ref(),
-        );
         root.add_overlay(&native_surface_viewport);
         root.set_measure_overlay(&native_surface_viewport, false);
         root.set_clip_overlay(&native_surface_viewport, false);
@@ -707,7 +652,6 @@ impl TaskersHost {
             root,
             native_surface_viewport,
             native_surface_scene,
-            native_overlay_targeting,
             event_sink,
             shell_action_sink,
             diagnostics,
@@ -718,8 +662,6 @@ impl TaskersHost {
             pending_terminal_create_retry: false,
             native_surface_provider,
             selected_theme_id: "dark".into(),
-            terminal_padding_x: 0,
-            terminal_padding_y: 0,
             browser_surfaces: HashMap::new(),
             persistent_browser_session: None,
             terminal_surfaces: HashMap::new(),
@@ -745,7 +687,6 @@ impl TaskersHost {
             snapshot.overview_mode,
         );
         let visible = native_surfaces_visible(snapshot.section, snapshot.drag_mode);
-        self.native_overlay_targeting.set_interactive(interactive);
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
         sync_native_surface_scene(
@@ -757,16 +698,10 @@ impl TaskersHost {
             visible,
             interactive,
         );
-        let next_padding_x =
-            terminal_padding_value_px(&snapshot.settings.embedded_terminal.window_padding_x);
-        let next_padding_y =
-            terminal_padding_value_px(&snapshot.settings.embedded_terminal.window_padding_y);
         if self.selected_theme_id != snapshot.settings.selected_theme_id {
             self.selected_theme_id = snapshot.settings.selected_theme_id.clone();
             update_native_surface_css(&self.native_surface_provider, &self.selected_theme_id);
         }
-        self.terminal_padding_x = next_padding_x;
-        self.terminal_padding_y = next_padding_y;
         emit_diagnostic(
             self.diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -1461,7 +1396,6 @@ impl TaskersHost {
                         &snapshot.settings.selected_theme_id,
                         snapshot.revision,
                         interactive,
-                        self.native_overlay_targeting.clone(),
                         network_session,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
@@ -1558,8 +1492,6 @@ impl TaskersHost {
                     entry,
                     visible_plan,
                     theme_id,
-                    self.terminal_padding_x,
-                    self.terminal_padding_y,
                     revision,
                     interactive,
                     resize_preview_active,
@@ -1602,11 +1534,8 @@ impl TaskersHost {
                         entry,
                         visible_plan,
                         theme_id,
-                        self.terminal_padding_x,
-                        self.terminal_padding_y,
                         revision,
                         interactive,
-                        self.native_overlay_targeting.clone(),
                         resize_preview_active,
                         self.event_sink.clone(),
                         self.diagnostics.clone(),
@@ -1808,7 +1737,6 @@ impl BrowserSurface {
         theme_id: &str,
         revision: u64,
         interactive: bool,
-        overlay_targeting: NativeOverlayTargeting,
         network_session: NetworkSession,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
@@ -1856,7 +1784,6 @@ impl BrowserSurface {
         let pane_id = Rc::new(Cell::new(entry.pane_id));
         let focus_state = Rc::new(Cell::new(false));
         let last_load_state = Rc::new(Cell::new(None));
-        install_pointer_sequence_guard(webview.upcast_ref(), overlay_targeting);
 
         let focus_pane_id = pane_id.clone();
         let surface_id = entry.surface_id;
@@ -2169,8 +2096,6 @@ struct TerminalSurface {
     height_px: i32,
     resize_count: u64,
     last_resize_revision: Option<u64>,
-    padding_x: i32,
-    padding_y: i32,
     resize_frozen: bool,
 }
 
@@ -2181,11 +2106,8 @@ impl TerminalSurface {
         entry: &TerminalSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
-        padding_x: i32,
-        padding_y: i32,
         revision: u64,
         interactive: bool,
-        overlay_targeting: NativeOverlayTargeting,
         resize_preview_active: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
@@ -2207,10 +2129,8 @@ impl TerminalSurface {
         widget.add_css_class("terminal-output");
         let effective_interactive = visible_plan.is_some() && interactive;
         widget.set_can_target(effective_interactive);
-        install_pointer_sequence_guard(&widget, overlay_targeting);
         let shell = NativeSurfaceShell::new(&widget, shell_class, effective_interactive);
         let attention_ring = AttentionRingOverlay::new();
-        shell.set_content_padding(padding_x, padding_y);
         let initial_width_px = visible_plan.map_or(0, |plan| plan.frame.width);
         let initial_height_px = visible_plan.map_or(0, |plan| plan.frame.height);
         let mut resize_frozen = false;
@@ -2273,8 +2193,6 @@ impl TerminalSurface {
             height_px: initial_height_px,
             resize_count: 0,
             last_resize_revision: None,
-            padding_x,
-            padding_y,
             resize_frozen,
         })
     }
@@ -2286,8 +2204,6 @@ impl TerminalSurface {
         entry: &TerminalSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
-        padding_x: i32,
-        padding_y: i32,
         revision: u64,
         interactive: bool,
         resize_preview_active: bool,
@@ -2301,11 +2217,6 @@ impl TerminalSurface {
         let effective_interactive = visible && interactive;
         self.widget.set_can_target(effective_interactive);
         self.shell.set_interactive(effective_interactive);
-        if self.padding_x != padding_x || self.padding_y != padding_y {
-            self.shell.set_content_padding(padding_x, padding_y);
-            self.padding_x = padding_x;
-            self.padding_y = padding_y;
-        }
         if resize_preview_active && visible {
             if !self.resize_frozen {
                 freeze_terminal_widget(&self.widget, self.width_px, self.height_px);
@@ -2391,8 +2302,6 @@ fn thaw_terminal_widget(widget: &Widget) {
 
 struct NativeSurfaceShell {
     widget: Widget,
-    padding_x: Cell<i32>,
-    padding_y: Cell<i32>,
 }
 
 impl NativeSurfaceShell {
@@ -2405,28 +2314,11 @@ impl NativeSurfaceShell {
         widget.set_can_target(native_surface_shell_can_target(interactive));
         widget.add_css_class("native-surface-host");
         widget.add_css_class(kind_class);
-        Self {
-            widget: widget.clone(),
-            padding_x: Cell::new(0),
-            padding_y: Cell::new(0),
-        }
-    }
-
-    fn set_content_padding(&self, padding_x: i32, padding_y: i32) {
-        self.padding_x.set(padding_x.max(0));
-        self.padding_y.set(padding_y.max(0));
+        Self { widget: widget.clone() }
     }
 
     fn position(&self, scene: &Fixed, frame: taskers_core::Frame) {
-        let (padding_x, padding_y) =
-            clamped_terminal_padding(frame, self.padding_x.get(), self.padding_y.get());
-        let content_frame = taskers_core::Frame::new(
-            frame.x + padding_x,
-            frame.y + padding_y,
-            frame.width.saturating_sub(padding_x * 2).max(1),
-            frame.height.saturating_sub(padding_y * 2).max(1),
-        );
-        position_widget_in_fixed(scene, &self.widget, content_frame);
+        position_widget_in_fixed(scene, &self.widget, frame);
     }
 
     fn show_at(&self, scene: &Fixed, frame: taskers_core::Frame) {
@@ -2944,16 +2836,6 @@ fn native_surface_css(theme_id: &str) -> String {
     )
 }
 
-fn terminal_padding_value_px(value: &str) -> i32 {
-    value
-        .split(',')
-        .next()
-        .map(str::trim)
-        .and_then(|value| value.parse::<i32>().ok())
-        .unwrap_or_default()
-        .max(0)
-}
-
 fn terminal_surface_background(theme_id: &str) -> &'static str {
     match theme_id {
         "catppuccin-mocha" => "#1e1e2e",
@@ -2961,41 +2843,6 @@ fn terminal_surface_background(theme_id: &str) -> &'static str {
         "gruvbox-dark" => "#282828",
         _ => "#0f1117",
     }
-}
-
-fn install_pointer_sequence_guard(widget: &Widget, overlay_targeting: NativeOverlayTargeting) {
-    let sequence_active = Rc::new(Cell::new(false));
-    let focus_widget = widget.clone();
-    let targeting = overlay_targeting.clone();
-    let controller = gtk::EventControllerLegacy::new();
-    controller.connect_event(move |_, event| {
-        match event.event_type() {
-            gdk::EventType::ButtonPress | gdk::EventType::TouchBegin => {
-                if !sequence_active.replace(true) {
-                    targeting.begin_pointer_sequence();
-                }
-            }
-            gdk::EventType::ButtonRelease
-            | gdk::EventType::TouchEnd
-            | gdk::EventType::TouchCancel => {
-                if sequence_active.replace(false) {
-                    targeting.end_pointer_sequence();
-                }
-            }
-            gdk::EventType::MotionNotify => {
-                if event
-                    .modifier_state()
-                    .contains(gdk::ModifierType::BUTTON1_MASK)
-                    && !focus_widget.has_focus()
-                {
-                    focus_widget.grab_focus();
-                }
-            }
-            _ => {}
-        }
-        glib::Propagation::Proceed
-    });
-    widget.add_controller(controller);
 }
 
 fn connect_ghostty_widget(
@@ -3656,19 +3503,6 @@ fn hidden_frame() -> taskers_core::Frame {
     taskers_core::Frame::new(100_000, 100_000, 1, 1)
 }
 
-fn clamped_terminal_padding(
-    frame: taskers_core::Frame,
-    padding_x: i32,
-    padding_y: i32,
-) -> (i32, i32) {
-    let max_padding_x = frame.width.saturating_sub(1) / 2;
-    let max_padding_y = frame.height.saturating_sub(1) / 2;
-    (
-        padding_x.max(0).min(max_padding_x),
-        padding_y.max(0).min(max_padding_y),
-    )
-}
-
 fn native_surface_visible_plan<'a>(
     visible_plan: Option<&'a PortalSurfacePlan>,
     _resize_preview_active: bool,
@@ -3688,8 +3522,7 @@ mod tests {
         native_surface_shell_can_target, native_surface_visible_plan, native_surfaces_interactive,
         native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
         resolve_screenshot_output_path, should_defer_terminal_surface_creations_after_removals,
-        terminal_padding_value_px, terminal_plans, trim_terminal_tail, with_capture_retries,
-        workspace_pan_delta,
+        terminal_plans, trim_terminal_tail, with_capture_retries, workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
@@ -3868,14 +3701,6 @@ mod tests {
         assert!(!should_defer_terminal_surface_creations_after_removals(
             false
         ));
-    }
-
-    #[test]
-    fn terminal_padding_value_uses_first_numeric_segment() {
-        assert_eq!(terminal_padding_value_px("22"), 22);
-        assert_eq!(terminal_padding_value_px("22,18"), 22);
-        assert_eq!(terminal_padding_value_px(" 20 "), 20);
-        assert_eq!(terminal_padding_value_px("bad"), 0);
     }
 
     #[test]
