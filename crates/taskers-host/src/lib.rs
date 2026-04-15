@@ -604,21 +604,10 @@ impl TaskersHost {
         root.set_hexpand(true);
         root.set_vexpand(true);
         root.set_child(Some(shell_widget));
-        let native_surface_viewport = Fixed::new();
-        native_surface_viewport.set_overflow(Overflow::Hidden);
-        native_surface_viewport.set_hexpand(false);
-        native_surface_viewport.set_vexpand(false);
-        native_surface_viewport.set_halign(Align::Start);
-        native_surface_viewport.set_valign(Align::Start);
+        let (native_surface_viewport, native_surface_scene) = build_native_surface_scene_layers();
         root.add_overlay(&native_surface_viewport);
         root.set_measure_overlay(&native_surface_viewport, false);
         root.set_clip_overlay(&native_surface_viewport, false);
-
-        let native_surface_scene = Fixed::new();
-        native_surface_scene.set_hexpand(false);
-        native_surface_scene.set_vexpand(false);
-        native_surface_scene.set_halign(Align::Start);
-        native_surface_scene.set_valign(Align::Start);
         native_surface_viewport.put(&native_surface_scene, 0.0, 0.0);
         let native_surface_provider = install_native_surface_css("dark");
 
@@ -1568,6 +1557,27 @@ impl TaskersHost {
 
         Ok(terminal_mutated)
     }
+}
+
+fn build_native_surface_scene_layers() -> (Fixed, Fixed) {
+    let native_surface_viewport = Fixed::new();
+    native_surface_viewport.set_overflow(Overflow::Hidden);
+    native_surface_viewport.set_hexpand(false);
+    native_surface_viewport.set_vexpand(false);
+    native_surface_viewport.set_halign(Align::Start);
+    native_surface_viewport.set_valign(Align::Start);
+    native_surface_viewport.set_focusable(false);
+    native_surface_viewport.set_can_target(false);
+
+    let native_surface_scene = Fixed::new();
+    native_surface_scene.set_hexpand(false);
+    native_surface_scene.set_vexpand(false);
+    native_surface_scene.set_halign(Align::Start);
+    native_surface_scene.set_valign(Align::Start);
+    native_surface_scene.set_focusable(false);
+    native_surface_scene.set_can_target(false);
+
+    (native_surface_viewport, native_surface_scene)
 }
 
 fn should_defer_terminal_surface_creations_after_removals(removed_any: bool) -> bool {
@@ -3581,8 +3591,10 @@ fn native_surface_visible_plan<'a>(
 mod tests {
     use std::collections::BTreeMap;
 
+    use gtk::prelude::WidgetExt;
+
     use super::{
-        browser_plans, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
+        browser_plans, build_native_surface_scene_layers, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
         native_surface_css, native_surface_visible_plan, native_surfaces_interactive,
         native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
         resolve_screenshot_output_path, should_defer_terminal_surface_creations_after_removals,
@@ -3682,6 +3694,16 @@ mod tests {
             native_surface_classes(PaneKind::Browser),
             ("native-surface-browser", "native-surface-browser-widget")
         );
+    }
+
+    #[test]
+    fn native_surface_scene_layers_do_not_steal_shell_click_targets() {
+        let _ = gtk::init();
+        let (viewport, scene) = build_native_surface_scene_layers();
+        assert!(!viewport.can_target());
+        assert!(!scene.can_target());
+        assert!(!viewport.is_focusable());
+        assert!(!scene.is_focusable());
     }
 
     #[test]
