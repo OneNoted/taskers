@@ -1692,7 +1692,7 @@ impl TaskersCore {
     fn with_bootstrap(bootstrap: BootstrapModel) -> Self {
         let observed_app_revision = bootstrap.app_state.revision();
         let revision = observed_app_revision.max(1);
-        Self {
+        let mut core = Self {
             app_state: bootstrap.app_state,
             revision,
             observed_app_revision,
@@ -1720,7 +1720,9 @@ impl TaskersCore {
             },
             host_commands: VecDeque::new(),
             browser_navigation: BTreeMap::new(),
-        }
+        };
+        let _ = core.bootstrap_active_workspace_top_level_extents_if_needed();
+        core
     }
 
     fn revision(&self) -> u64 {
@@ -3111,6 +3113,7 @@ impl TaskersCore {
         }
         self.ui.window_size = size;
         self.bump_local_revision();
+        let _ = self.bootstrap_active_workspace_top_level_extents_if_needed();
         true
     }
 
@@ -3756,48 +3759,37 @@ impl TaskersCore {
         if self.ui.vcs_panel_visible {
             changed |= self.refresh_vcs_panel();
         }
+        changed |= self.bootstrap_active_workspace_top_level_extents_if_needed();
         changed
     }
 
     fn create_workspace(&mut self) -> bool {
         let label = next_workspace_label(&self.app_state.snapshot_model());
-        self.dispatch_control(ControlCommand::CreateWorkspace { label })
+        let changed = self.dispatch_control(ControlCommand::CreateWorkspace { label });
+        self.bootstrap_active_workspace_top_level_extents_if_needed() || changed
     }
 
-    fn resize_active_workspace_window_for_viewport(
-        &mut self,
-        workspace_id: WorkspaceId,
-        direction: Direction,
-    ) -> bool {
+    fn bootstrap_active_workspace_top_level_extents_if_needed(&mut self) -> bool {
         let model = self.app_state.snapshot_model();
-        let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
-        let target_column_width = (viewport.width / 2).max(MIN_WORKSPACE_WINDOW_WIDTH);
-        let target_window_height = (viewport.height / 2).max(MIN_WORKSPACE_WINDOW_HEIGHT);
+        let Some(workspace_id) = model.active_workspace_id() else {
+            return false;
+        };
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        if workspace.top_level_extents_initialized {
+            return false;
+        }
 
-        model
-            .workspaces
-            .get(&workspace_id)
-            .map(|workspace| match direction {
-                Direction::Left | Direction::Right => {
-                    workspace
-                        .active_column_id()
-                        .is_some_and(|workspace_column_id| {
-                            self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
-                                workspace_id,
-                                workspace_column_id,
-                                width: target_column_width,
-                            })
-                        })
-                }
-                Direction::Up | Direction::Down => {
-                    self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
-                        workspace_id,
-                        workspace_window_id: workspace.active_window,
-                        height: target_window_height,
-                    })
-                }
-            })
-            .unwrap_or(false)
+        let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
+        let column_width = (viewport.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2)
+            .max(MIN_WORKSPACE_WINDOW_WIDTH);
+        let window_height = viewport.height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
+        self.dispatch_control(ControlCommand::BootstrapWorkspaceTopLevelExtents {
+            workspace_id,
+            column_width,
+            window_height,
+        })
     }
 
     fn create_workspace_window(&mut self, direction: WorkspaceDirection) -> bool {
@@ -3805,12 +3797,11 @@ impl TaskersCore {
         let Some(workspace_id) = model.active_workspace_id() else {
             return false;
         };
-        let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
         let changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
             workspace_id,
             direction: direction.to_domain(),
-            preferred_column_width: Some((viewport.width / 2).max(MIN_WORKSPACE_WINDOW_WIDTH)),
-            preferred_window_height: Some((viewport.height / 2).max(MIN_WORKSPACE_WINDOW_HEIGHT)),
+            preferred_column_width: None,
+            preferred_window_height: None,
         });
         if changed {
             return self.ensure_active_window_visible() || changed;
@@ -3931,16 +3922,7 @@ impl TaskersCore {
             target,
         });
         if changed {
-            let resized = self.resize_active_workspace_window_for_viewport(
-                workspace_id,
-                match target {
-                    WorkspaceWindowMoveTarget::ColumnBefore { .. }
-                    | WorkspaceWindowMoveTarget::ColumnAfter { .. } => Direction::Right,
-                    WorkspaceWindowMoveTarget::StackAbove { .. }
-                    | WorkspaceWindowMoveTarget::StackBelow { .. } => Direction::Down,
-                },
-            );
-            return self.ensure_active_window_visible() || resized || changed;
+            return self.ensure_active_window_visible() || changed;
         }
         false
     }
@@ -4340,9 +4322,7 @@ impl TaskersCore {
         };
         let changed = matches!(response, ControlResponse::SurfaceMovedToWorkspace { .. });
         if changed {
-            let resized = self
-                .resize_active_workspace_window_for_viewport(target_workspace_id, Direction::Right);
-            return self.ensure_active_window_visible() || resized || changed;
+            return self.ensure_active_window_visible() || changed;
         }
         false
     }
@@ -5553,8 +5533,8 @@ fn workspace_display_window_placements(
 
 fn workspace_window_placements(
     workspace: &Workspace,
-    viewport_width: i32,
-    viewport_height: i32,
+    _viewport_width: i32,
+    _viewport_height: i32,
     workspace_window_gap: i32,
 ) -> Vec<WorkspaceWindowPlacement> {
     let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
@@ -5562,53 +5542,17 @@ fn workspace_window_placements(
         return Vec::new();
     }
 
-    let horizontal_gap_total = workspace_window_gap * ordered_columns.len().saturating_sub(1) as i32;
-    let available_width = (viewport_width - horizontal_gap_total).max(0);
-    let preferred_column_widths = ordered_columns
-        .iter()
-        .map(|column| column.width.max(MIN_WORKSPACE_WINDOW_WIDTH))
-        .collect::<Vec<_>>();
-    let preferred_total = preferred_column_widths.iter().sum::<i32>();
-    let column_widths = if ordered_columns.len() > 1 && preferred_total > available_width {
-        preferred_column_widths.clone()
-    } else {
-        fit_track_extents(
-            &preferred_column_widths,
-            available_width,
-            MIN_WORKSPACE_WINDOW_WIDTH,
-        )
-    };
-
     let mut placements = Vec::new();
     let mut x = 0;
-    for (column_index, column) in ordered_columns.into_iter().enumerate() {
-        let column_width = column_widths
-            .get(column_index)
-            .copied()
-            .unwrap_or(MIN_WORKSPACE_WINDOW_WIDTH);
-        let vertical_gap_total =
-            workspace_window_gap * column.window_order.len().saturating_sub(1) as i32;
-        let available_height = (viewport_height - vertical_gap_total).max(0);
-        let preferred_window_heights = column
-            .window_order
-            .iter()
-            .filter_map(|window_id| workspace.windows.get(window_id).map(|window| window.height))
-            .collect::<Vec<_>>();
-        let window_heights = fit_track_extents(
-            &preferred_window_heights,
-            available_height,
-            MIN_WORKSPACE_WINDOW_HEIGHT,
-        );
+    for column in ordered_columns {
+        let column_width = column.width.max(MIN_WORKSPACE_WINDOW_WIDTH);
 
         let mut y = 0;
-        for (window_index, window_id) in column.window_order.iter().enumerate() {
-            if !workspace.windows.contains_key(window_id) {
+        for window_id in &column.window_order {
+            let Some(window) = workspace.windows.get(window_id) else {
                 continue;
-            }
-            let window_height = window_heights
-                .get(window_index)
-                .copied()
-                .unwrap_or(MIN_WORKSPACE_WINDOW_HEIGHT);
+            };
+            let window_height = window.height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
             placements.push(WorkspaceWindowPlacement {
                 window_id: *window_id,
                 column_id: column.id,
@@ -5786,103 +5730,6 @@ fn scale_window_frame(frame: WindowFrame, scale: f64) -> WindowFrame {
         width: (f64::from(frame.width) * scale).round() as i32,
         height: (f64::from(frame.height) * scale).round() as i32,
     }
-}
-
-fn fit_track_extents(preferred_extents: &[i32], available_total: i32, min_extent: i32) -> Vec<i32> {
-    if preferred_extents.is_empty() {
-        return Vec::new();
-    }
-
-    let count = preferred_extents.len() as i32;
-    let min_total = min_extent.saturating_mul(count);
-    if available_total <= min_total {
-        return vec![min_extent; preferred_extents.len()];
-    }
-
-    let preferred_extents = preferred_extents
-        .iter()
-        .map(|extent| (*extent).max(1))
-        .collect::<Vec<_>>();
-    let mut result = vec![0; preferred_extents.len()];
-    let mut active = (0..preferred_extents.len()).collect::<Vec<_>>();
-    let mut remaining_total = available_total;
-
-    loop {
-        if active.is_empty() {
-            break;
-        }
-
-        let remaining_weight = active
-            .iter()
-            .map(|index| i64::from(preferred_extents[*index]))
-            .sum::<i64>()
-            .max(1);
-        let below_minimum = active
-            .iter()
-            .copied()
-            .filter(|index| {
-                (f64::from(remaining_total) * f64::from(preferred_extents[*index]))
-                    / (remaining_weight as f64)
-                    < f64::from(min_extent)
-            })
-            .collect::<Vec<_>>();
-
-        if below_minimum.is_empty() {
-            let distributed = distribute_weighted_total(
-                &active
-                    .iter()
-                    .map(|index| preferred_extents[*index])
-                    .collect::<Vec<_>>(),
-                remaining_total,
-            );
-            for (slot, index) in active.iter().enumerate() {
-                result[*index] = distributed[slot];
-            }
-            break;
-        }
-
-        for index in below_minimum {
-            result[index] = min_extent;
-            remaining_total -= min_extent;
-            active.retain(|candidate| *candidate != index);
-        }
-    }
-
-    result
-}
-
-fn distribute_weighted_total(weights: &[i32], total: i32) -> Vec<i32> {
-    if weights.is_empty() {
-        return Vec::new();
-    }
-    let weight_sum = weights
-        .iter()
-        .map(|weight| i64::from(*weight))
-        .sum::<i64>()
-        .max(1);
-    let mut distributed = Vec::with_capacity(weights.len());
-    let mut allocated = 0;
-    let mut remainders = Vec::with_capacity(weights.len());
-
-    for (index, weight) in weights.iter().copied().enumerate() {
-        let scaled = i64::from(total) * i64::from(weight);
-        let base = (scaled / weight_sum) as i32;
-        distributed.push(base);
-        allocated += base;
-        remainders.push((index, scaled % weight_sum));
-    }
-
-    let mut remaining = total - allocated;
-    remainders.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    for (index, _) in remainders.into_iter().take(remaining.max(0) as usize) {
-        distributed[index] += 1;
-        remaining -= 1;
-        if remaining <= 0 {
-            break;
-        }
-    }
-
-    distributed
 }
 
 fn default_preview_app_state() -> AppState {
@@ -8508,13 +8355,13 @@ mod tests {
     }
 
     #[test]
-    fn creating_horizontal_workspace_window_uses_half_viewport_width() {
+    fn creating_horizontal_workspace_window_preserves_existing_width_and_applies_new_window_default_width() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
         let before = core.snapshot();
         let first_window_id = before.current_workspace.active_window_id;
-        let expected_width =
-            (before.portal.content.width / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
+        let first_window_before = window_snapshot(&before, first_window_id);
+        let expected_width = taskers_domain::DEFAULT_WORKSPACE_WINDOW_WIDTH;
 
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
             direction: WorkspaceDirection::Right,
@@ -8525,6 +8372,7 @@ mod tests {
         let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
 
         assert_eq!(active_window.frame.width, expected_width);
+        assert_eq!(first_window.frame.width, first_window_before.frame.width);
         assert!(
             snapshot.current_workspace.canvas_width
                 >= first_window.frame.width
@@ -8534,18 +8382,20 @@ mod tests {
     }
 
     #[test]
-    fn creating_vertical_workspace_window_uses_half_viewport_height() {
+    fn creating_vertical_workspace_window_preserves_existing_height_and_applies_new_window_default_height() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
         let before = core.snapshot();
-        let expected_height =
-            (before.portal.content.height / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_HEIGHT);
+        let first_window_before =
+            window_snapshot(&before, before.current_workspace.active_window_id);
+        let expected_height = taskers_domain::DEFAULT_WORKSPACE_WINDOW_HEIGHT;
 
         core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
             direction: WorkspaceDirection::Down,
         });
 
         let snapshot = core.snapshot();
+        let first_window = window_snapshot(&snapshot, first_window_before.id);
         let active_window = window_snapshot(&snapshot, snapshot.current_workspace.active_window_id);
 
         assert!(
@@ -8553,10 +8403,11 @@ mod tests {
             "expected active window height to stay near half the visible viewport (expected {expected_height}, got {})",
             active_window.frame.height
         );
+        assert_eq!(first_window.frame.height, first_window_before.frame.height);
     }
 
     #[test]
-    fn extracting_window_tab_uses_half_viewport_width() {
+    fn extracting_window_tab_uses_persistent_default_width() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(700, 900));
         let source_window_id = core.snapshot().current_workspace.active_window_id;
@@ -8567,8 +8418,7 @@ mod tests {
         let before = core.snapshot();
         let active_window = window_snapshot(&before, source_window_id);
         let tab_id = active_window.tabs[1].id;
-        let expected_width =
-            (before.portal.content.width / 2).max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
+        let expected_width = taskers_domain::DEFAULT_WORKSPACE_WINDOW_WIDTH;
 
         core.dispatch_shell_action(ShellAction::ExtractWorkspaceWindowTab {
             source_window_id,
@@ -8584,7 +8434,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_surface_to_workspace_uses_half_viewport_width() {
+    fn moving_surface_to_workspace_uses_persistent_default_width() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(700, 900));
         let source_pane_id = core.snapshot().current_workspace.active_pane;
@@ -8605,8 +8455,7 @@ mod tests {
             .find(|workspace| workspace.active)
             .map(|workspace| workspace.id)
             .expect("target workspace");
-        let expected_width = (core.snapshot().portal.content.width / 2)
-            .max(taskers_domain::MIN_WORKSPACE_WINDOW_WIDTH);
+        let expected_width = taskers_domain::DEFAULT_WORKSPACE_WINDOW_WIDTH;
 
         core.dispatch_shell_action(ShellAction::MoveSurfaceToWorkspace {
             source_pane_id,
@@ -8663,6 +8512,192 @@ mod tests {
             snapshot.current_workspace.canvas_width >= total_column_width + total_gap_width,
             "expected canvas width to grow beyond the viewport for wide workspaces"
         );
+    }
+
+    #[test]
+    fn resizing_outer_window_preserves_persisted_top_level_extents() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let snapshot = core.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let column_widths = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.id, if index == 0 { 820 } else { 640 }))
+            .collect::<Vec<_>>();
+        let right_column = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .find(|column| column.windows.len() > 1)
+            .expect("stacked column");
+        let mut window_heights = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .filter(|column| column.windows.len() == 1)
+            .flat_map(|column| column.windows.iter().map(|window| (window.id, window.frame.height)))
+            .collect::<Vec<_>>();
+        window_heights.extend(right_column
+            .windows
+            .iter()
+            .enumerate()
+            .map(|(index, window)| (window.id, if index == 0 { 520 } else { 680 }))
+            .collect::<Vec<_>>());
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: column_widths.clone(),
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceWindowHeights {
+                workspace_id,
+                heights: window_heights.clone(),
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        core.set_window_size(PixelSize::new(1600, 980));
+
+        let after = core.snapshot();
+        let actual_widths = after
+            .current_workspace
+            .columns
+            .iter()
+            .map(|column| (column.id, column.width))
+            .collect::<Vec<_>>();
+        let actual_heights = after
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .map(|window| (window.id, window.frame.height))
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual_widths, column_widths);
+        assert_eq!(actual_heights, window_heights);
+    }
+
+    #[test]
+    fn focusing_tall_stacked_window_scrolls_vertically_without_resizing_windows() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+
+        let before = core.snapshot();
+        let workspace_id = before.current_workspace.id;
+        let heights = before
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .enumerate()
+            .map(|(index, window)| (window.id, if index == 0 { 520 } else { 560 }))
+            .collect::<Vec<_>>();
+        let target_window_id = before
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .last()
+            .map(|window| window.id)
+            .expect("bottom window");
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceWindowHeights {
+                workspace_id,
+                heights: heights.clone(),
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        core.dispatch_shell_action(ShellAction::FocusWorkspaceWindow {
+            window_id: target_window_id,
+        });
+
+        let after = core.snapshot();
+        let actual_heights = after
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .map(|window| (window.id, window.frame.height))
+            .collect::<Vec<_>>();
+
+        assert!(after.current_workspace.viewport_y > 0);
+        assert_eq!(actual_heights, heights);
+    }
+
+    #[test]
+    fn toggling_overview_does_not_mutate_persisted_top_level_extents() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        let before = core.snapshot();
+        let workspace_id = before.current_workspace.id;
+        let widths = before
+            .current_workspace
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.id, if index == 0 { 780 } else { 620 }))
+            .collect::<Vec<_>>();
+
+        core.dispatch_shell_action(ShellAction::PreviewResize {
+            preview: ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: widths.clone(),
+            },
+        });
+        core.dispatch_shell_action(ShellAction::CommitResizePreview);
+
+        let persisted_before = {
+            let guard = core.inner.lock();
+            let model = guard.app_state.snapshot_model();
+            let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+            workspace
+                .columns
+                .values()
+                .map(|column| (column.id, column.width))
+                .collect::<Vec<_>>()
+        };
+
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: false });
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+
+        let persisted_after = {
+            let guard = core.inner.lock();
+            let model = guard.app_state.snapshot_model();
+            let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+            workspace
+                .columns
+                .values()
+                .map(|column| (column.id, column.width))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(persisted_before, widths);
+        assert_eq!(persisted_after, widths);
     }
 
     #[test]
@@ -9845,7 +9880,8 @@ mod tests {
             );
         } else {
             assert_eq!(
-                visible_left, active_window.frame.x,
+                visible_left + WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX,
+                active_window.frame.x,
                 "expected oversized active window to align its left edge with the viewport"
             );
         }

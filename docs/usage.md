@@ -17,6 +17,7 @@ That distinction matters:
 - Window tabs stay local to the current workspace window until you merge or extract them.
 - Pane splits stay local to the current window tab.
 - Surface tabs stay local to the current pane until you move them.
+- Top-level workspace window widths and heights are persistent by default; Taskers pans the workspace viewport to reveal offscreen windows instead of implicitly refitting every window to the visible area.
 
 If something feels like “Niri behavior,” it should usually happen at the workspace-window layer, not at the pane or tab layer.
 

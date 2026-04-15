@@ -3,7 +3,7 @@ mod browser_automation;
 use anyhow::{Result, anyhow};
 use gtk::{
     Align, Box as GtkBox, CssProvider, DrawingArea, EventControllerFocus, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, GestureDrag, Orientation, Overflow, Overlay,
+    EventControllerScrollFlags, Fixed, GestureClick, GestureDrag, Orientation, Overflow, Overlay,
     STYLE_PROVIDER_PRIORITY_APPLICATION, Snapshot, Widget, WidgetPaintable, gdk, glib, graphene,
     gsk, prelude::*,
 };
@@ -473,6 +473,8 @@ fn redacted_browser_url_for_diagnostics(url: &str) -> String {
 
 pub struct TaskersHost {
     root: Overlay,
+    native_surface_viewport: Fixed,
+    native_surface_scene: Fixed,
     event_sink: HostEventSink,
     shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
@@ -602,6 +604,22 @@ impl TaskersHost {
         root.set_hexpand(true);
         root.set_vexpand(true);
         root.set_child(Some(shell_widget));
+        let native_surface_viewport = Fixed::new();
+        native_surface_viewport.set_overflow(Overflow::Hidden);
+        native_surface_viewport.set_hexpand(false);
+        native_surface_viewport.set_vexpand(false);
+        native_surface_viewport.set_halign(Align::Start);
+        native_surface_viewport.set_valign(Align::Start);
+        root.add_overlay(&native_surface_viewport);
+        root.set_measure_overlay(&native_surface_viewport, false);
+        root.set_clip_overlay(&native_surface_viewport, false);
+
+        let native_surface_scene = Fixed::new();
+        native_surface_scene.set_hexpand(false);
+        native_surface_scene.set_vexpand(false);
+        native_surface_scene.set_halign(Align::Start);
+        native_surface_scene.set_valign(Align::Start);
+        native_surface_viewport.put(&native_surface_scene, 0.0, 0.0);
         let native_surface_provider = install_native_surface_css("dark");
 
         let pan_sink = event_sink.clone();
@@ -645,6 +663,8 @@ impl TaskersHost {
 
         Self {
             root,
+            native_surface_viewport,
+            native_surface_scene,
             event_sink,
             shell_action_sink,
             diagnostics,
@@ -680,6 +700,13 @@ impl TaskersHost {
         let visible = native_surfaces_visible(snapshot.drag_mode);
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
+        sync_native_surface_scene(
+            &self.root,
+            &self.native_surface_viewport,
+            &self.native_surface_scene,
+            &snapshot.portal,
+            &snapshot.current_workspace,
+        );
         let next_padding_x =
             terminal_padding_value_px(&snapshot.settings.embedded_terminal.window_padding_x);
         let next_padding_y =
@@ -712,6 +739,7 @@ impl TaskersHost {
         );
         let terminal_mutated = match self.sync_terminal_surfaces(
             &snapshot.portal,
+            &snapshot.current_workspace,
             &snapshot.terminal_catalog,
             &snapshot.settings.selected_theme_id,
             snapshot.revision,
@@ -816,8 +844,8 @@ impl TaskersHost {
 
         let terminal_surfaces = self.terminal_surfaces.drain().collect::<Vec<_>>();
         for (surface_id, surface) in terminal_surfaces {
-            surface.shell.detach(&self.root);
-            surface.attention_ring.detach(&self.root);
+            surface.shell.detach(&self.native_surface_scene);
+            surface.attention_ring.detach(&self.native_surface_scene);
             if bridge_was_running {
                 if let Some(host) = &self.ghostty_host {
                     host.destroy_surface(&surface.widget);
@@ -846,8 +874,8 @@ impl TaskersHost {
 
         let browser_surfaces = self.browser_surfaces.drain().collect::<Vec<_>>();
         for (surface_id, surface) in browser_surfaces {
-            surface.shell.detach(&self.root);
-            surface.attention_ring.detach(&self.root);
+            surface.shell.detach(&self.native_surface_scene);
+            surface.attention_ring.detach(&self.native_surface_scene);
             emit_diagnostic(
                 self.diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -1152,6 +1180,8 @@ impl TaskersHost {
                         rows,
                         width_px,
                         height_px,
+                        resize_count: surface.resize_count,
+                        last_resize_revision: surface.last_resize_revision,
                         has_selection,
                     },
                 })
@@ -1293,8 +1323,8 @@ impl TaskersHost {
 
     fn remove_browser_surface(&mut self, surface_id: SurfaceId, revision: u64, reason: &str) {
         if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
-            surface.shell.detach(&self.root);
-            surface.attention_ring.detach(&self.root);
+            surface.shell.detach(&self.native_surface_scene);
+            surface.attention_ring.detach(&self.native_surface_scene);
             emit_diagnostic(
                 self.diagnostics.as_ref(),
                 DiagnosticRecord::new(DiagnosticCategory::SurfaceLifecycle, Some(revision), reason)
@@ -1310,7 +1340,11 @@ impl TaskersHost {
         visible: bool,
         resize_preview_active: bool,
     ) -> Result<()> {
-        let desired = browser_plans(&snapshot.portal);
+        let desired = scene_plans_for_kind(
+            &snapshot.portal,
+            &snapshot.current_workspace,
+            PaneKind::Browser,
+        );
         let desired_by_id = desired
             .into_iter()
             .map(|plan| (plan.surface_id, plan))
@@ -1360,7 +1394,7 @@ impl TaskersHost {
             );
             match self.browser_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
-                    &self.root,
+                    &self.native_surface_scene,
                     entry,
                     visible_plan,
                     &snapshot.settings.selected_theme_id,
@@ -1371,7 +1405,7 @@ impl TaskersHost {
                 None => {
                     let network_session = self.browser_network_session_for(entry.profile_mode);
                     let surface = BrowserSurface::new(
-                        &self.root,
+                        &self.native_surface_scene,
                         entry,
                         visible_plan,
                         &snapshot.settings.selected_theme_id,
@@ -1393,6 +1427,7 @@ impl TaskersHost {
     fn sync_terminal_surfaces(
         &mut self,
         portal: &SurfacePortalPlan,
+        workspace: &WorkspaceViewSnapshot,
         catalog: &[TerminalSurfaceCatalogEntry],
         theme_id: &str,
         revision: u64,
@@ -1400,7 +1435,7 @@ impl TaskersHost {
         visible: bool,
         resize_preview_active: bool,
     ) -> Result<bool> {
-        let desired = terminal_plans(portal);
+        let desired = scene_plans_for_kind(portal, workspace, PaneKind::Terminal);
         let desired_by_id = desired
             .into_iter()
             .map(|plan| (plan.surface_id, plan))
@@ -1425,8 +1460,8 @@ impl TaskersHost {
 
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
-                surface.shell.detach(&self.root);
-                surface.attention_ring.detach(&self.root);
+                surface.shell.detach(&self.native_surface_scene);
+                surface.attention_ring.detach(&self.native_surface_scene);
                 if bridge_running {
                     if let Some(host) = host {
                         host.destroy_surface(&surface.widget);
@@ -1468,7 +1503,7 @@ impl TaskersHost {
             );
             match self.terminal_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
-                    &self.root,
+                    &self.native_surface_scene,
                     entry,
                     visible_plan,
                     theme_id,
@@ -1512,7 +1547,7 @@ impl TaskersHost {
                         continue;
                     };
                     let surface = TerminalSurface::new(
-                        &self.root,
+                        &self.native_surface_scene,
                         entry,
                         visible_plan,
                         theme_id,
@@ -1693,7 +1728,7 @@ struct BrowserSurface {
 impl BrowserSurface {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        overlay: &Overlay,
+        scene: &Fixed,
         entry: &BrowserSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
@@ -1730,12 +1765,12 @@ impl BrowserSurface {
         shell.mount_child(webview.upcast_ref());
         match visible_plan {
             Some(plan) => {
-                shell.show_at(overlay, plan.frame);
-                attention_ring.show_at(overlay, plan.pane_frame, plan.notification_ring, theme_id);
+                shell.show_at(scene, plan.frame);
+                attention_ring.show_at(scene, plan.pane_frame, plan.notification_ring, theme_id);
             }
             None => {
-                shell.park_hidden(overlay);
-                attention_ring.park_hidden(overlay);
+                shell.park_hidden(scene);
+                attention_ring.park_hidden(scene);
             }
         }
         let devtools_open = Rc::new(Cell::new(false));
@@ -1920,7 +1955,7 @@ impl BrowserSurface {
     #[allow(clippy::too_many_arguments)]
     fn sync(
         &mut self,
-        overlay: &Overlay,
+        scene: &Fixed,
         entry: &BrowserSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
@@ -1937,17 +1972,17 @@ impl BrowserSurface {
         self.webview.set_can_target(effective_interactive);
         match visible_plan {
             Some(plan) => {
-                self.shell.show_at(overlay, plan.frame);
+                self.shell.show_at(scene, plan.frame);
                 self.attention_ring.show_at(
-                    overlay,
+                    scene,
                     plan.pane_frame,
                     plan.notification_ring,
                     theme_id,
                 );
             }
             None => {
-                self.shell.park_hidden(overlay);
-                self.attention_ring.park_hidden(overlay);
+                self.shell.park_hidden(scene);
+                self.attention_ring.park_hidden(scene);
             }
         }
 
@@ -2059,6 +2094,8 @@ struct TerminalSurface {
     visible: bool,
     width_px: i32,
     height_px: i32,
+    resize_count: u64,
+    last_resize_revision: Option<u64>,
     padding_x: i32,
     padding_y: i32,
     resize_frozen: bool,
@@ -2067,7 +2104,7 @@ struct TerminalSurface {
 impl TerminalSurface {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        overlay: &Overlay,
+        scene: &Fixed,
         entry: &TerminalSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
@@ -2109,12 +2146,12 @@ impl TerminalSurface {
         }
         match visible_plan {
             Some(plan) => {
-                shell.show_at(overlay, plan.frame);
-                attention_ring.show_at(overlay, plan.pane_frame, plan.notification_ring, theme_id);
+                shell.show_at(scene, plan.frame);
+                attention_ring.show_at(scene, plan.pane_frame, plan.notification_ring, theme_id);
             }
             None => {
-                shell.park_hidden(overlay);
-                attention_ring.park_hidden(overlay);
+                shell.park_hidden(scene);
+                attention_ring.park_hidden(scene);
             }
         }
 
@@ -2160,6 +2197,8 @@ impl TerminalSurface {
             visible: visible_plan.is_some(),
             width_px: initial_width_px,
             height_px: initial_height_px,
+            resize_count: 0,
+            last_resize_revision: None,
             padding_x,
             padding_y,
             resize_frozen,
@@ -2169,7 +2208,7 @@ impl TerminalSurface {
     #[allow(clippy::too_many_arguments)]
     fn sync(
         &mut self,
-        overlay: &Overlay,
+        scene: &Fixed,
         entry: &TerminalSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
@@ -2204,17 +2243,17 @@ impl TerminalSurface {
         }
         match visible_plan {
             Some(plan) => {
-                self.shell.show_at(overlay, plan.frame);
+                self.shell.show_at(scene, plan.frame);
                 self.attention_ring.show_at(
-                    overlay,
+                    scene,
                     plan.pane_frame,
                     plan.notification_ring,
                     theme_id,
                 );
             }
             None => {
-                self.shell.park_hidden(overlay);
-                self.attention_ring.park_hidden(overlay);
+                self.shell.park_hidden(scene);
+                self.attention_ring.park_hidden(scene);
             }
         }
         if visible_plan.is_some_and(|plan| plan.active)
@@ -2230,9 +2269,15 @@ impl TerminalSurface {
         self.active = visible_plan.is_some_and(|plan| plan.active);
         self.interactive = effective_interactive;
         self.visible = visible;
+        let next_width_px = visible_plan.map_or(0, |plan| plan.frame.width);
+        let next_height_px = visible_plan.map_or(0, |plan| plan.frame.height);
         if !resize_preview_active {
-            self.width_px = visible_plan.map_or(0, |plan| plan.frame.width);
-            self.height_px = visible_plan.map_or(0, |plan| plan.frame.height);
+            if next_width_px != self.width_px || next_height_px != self.height_px {
+                self.resize_count = self.resize_count.saturating_add(1);
+                self.last_resize_revision = Some(revision);
+            }
+            self.width_px = next_width_px;
+            self.height_px = next_height_px;
         }
 
         emit_diagnostic(
@@ -2310,9 +2355,9 @@ impl NativeSurfaceShell {
         self.padding_y.set(padding_y.max(0));
     }
 
-    fn position(&self, overlay: &Overlay, frame: taskers_core::Frame) {
+    fn position(&self, scene: &Fixed, frame: taskers_core::Frame) {
         self.apply_content_padding(frame);
-        position_widget(overlay, self.root.upcast_ref(), frame);
+        position_widget_in_fixed(scene, self.root.upcast_ref(), frame);
     }
 
     fn apply_content_padding(&self, frame: taskers_core::Frame) {
@@ -2327,22 +2372,22 @@ impl NativeSurfaceShell {
         child.set_margin_bottom(padding_y);
     }
 
-    fn show_at(&self, overlay: &Overlay, frame: taskers_core::Frame) {
+    fn show_at(&self, scene: &Fixed, frame: taskers_core::Frame) {
         self.root.set_opacity(1.0);
-        self.position(overlay, frame);
+        self.position(scene, frame);
     }
 
-    fn park_hidden(&self, overlay: &Overlay) {
+    fn park_hidden(&self, scene: &Fixed) {
         self.root.set_opacity(0.0);
-        self.position(overlay, self.hidden_frame());
+        self.position(scene, self.hidden_frame());
     }
 
     fn set_interactive(&self, interactive: bool) {
         self.root.set_can_target(interactive);
     }
 
-    fn detach(&self, overlay: &Overlay) {
-        detach_from_overlay(overlay, self.root.upcast_ref());
+    fn detach(&self, scene: &Fixed) {
+        detach_from_fixed(scene, self.root.upcast_ref());
     }
 
     fn hidden_frame(&self) -> taskers_core::Frame {
@@ -2418,7 +2463,7 @@ impl AttentionRingOverlay {
 
     fn show_at(
         &self,
-        overlay: &Overlay,
+        scene: &Fixed,
         frame: taskers_core::Frame,
         state: Option<taskers_core::AttentionRingState>,
         theme_id: &str,
@@ -2428,21 +2473,21 @@ impl AttentionRingOverlay {
         self.widget.set_visible(state.is_some());
         if state.is_some() {
             self.widget.set_opacity(1.0);
-            position_widget(overlay, self.widget.upcast_ref(), frame);
+            position_widget_in_fixed(scene, self.widget.upcast_ref(), frame);
         } else {
-            self.park_hidden(overlay);
+            self.park_hidden(scene);
         }
         self.widget.queue_draw();
     }
 
-    fn park_hidden(&self, overlay: &Overlay) {
+    fn park_hidden(&self, scene: &Fixed) {
         self.widget.set_visible(false);
         self.widget.set_opacity(0.0);
-        position_widget(overlay, self.widget.upcast_ref(), hidden_frame());
+        position_widget_in_fixed(scene, self.widget.upcast_ref(), hidden_frame());
     }
 
-    fn detach(&self, overlay: &Overlay) {
-        detach_from_overlay(overlay, self.widget.upcast_ref());
+    fn detach(&self, scene: &Fixed) {
+        detach_from_fixed(scene, self.widget.upcast_ref());
     }
 }
 
@@ -3112,18 +3157,89 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
     }
 }
 
+fn sync_native_surface_scene(
+    root: &Overlay,
+    viewport: &Fixed,
+    scene: &Fixed,
+    portal: &SurfacePortalPlan,
+    workspace: &WorkspaceViewSnapshot,
+) {
+    position_widget(root, viewport.upcast_ref(), portal.content);
+    position_widget_in_fixed(
+        viewport,
+        scene.upcast_ref(),
+        taskers_core::Frame::new(
+            workspace.canvas_offset_x - workspace.viewport_x,
+            workspace.canvas_offset_y - workspace.viewport_y,
+            workspace.canvas_width,
+            workspace.canvas_height,
+        ),
+    );
+}
+
+fn scene_plans_for_kind(
+    portal: &SurfacePortalPlan,
+    workspace: &WorkspaceViewSnapshot,
+    kind: PaneKind,
+) -> Vec<PortalSurfacePlan> {
+    portal
+        .panes
+        .iter()
+        .filter(|plan| match (&plan.mount, &kind) {
+            (SurfaceMountSpec::Browser(_), PaneKind::Browser)
+            | (SurfaceMountSpec::Terminal(_), PaneKind::Terminal) => true,
+            _ => false,
+        })
+        .map(|plan| plan_in_scene_coordinates(plan, workspace))
+        .collect()
+}
+
+fn plan_in_scene_coordinates(
+    plan: &PortalSurfacePlan,
+    workspace: &WorkspaceViewSnapshot,
+) -> PortalSurfacePlan {
+    PortalSurfacePlan {
+        frame: display_frame_to_scene(plan.frame, workspace),
+        pane_frame: display_frame_to_scene(plan.pane_frame, workspace),
+        ..plan.clone()
+    }
+}
+
+fn display_frame_to_scene(
+    frame: taskers_core::Frame,
+    workspace: &WorkspaceViewSnapshot,
+) -> taskers_core::Frame {
+    taskers_core::Frame::new(
+        frame.x - workspace.viewport_origin_x - workspace.canvas_offset_x + workspace.viewport_x,
+        frame.y - workspace.viewport_origin_y - workspace.canvas_offset_y + workspace.viewport_y,
+        frame.width,
+        frame.height,
+    )
+}
+
 fn position_widget(overlay: &Overlay, widget: &Widget, frame: taskers_core::Frame) {
     let clamped_margin_start = frame.x.clamp(0, i32::from(i16::MAX));
     let clamped_margin_top = frame.y.clamp(0, i32::from(i16::MAX));
-    widget.set_size_request(frame.width.max(1), frame.height.max(1));
+    let width = frame.width.max(1);
+    let height = frame.height.max(1);
+    let needs_resize = widget.width_request() != width || widget.height_request() != height;
+    let needs_reposition =
+        widget.margin_start() != clamped_margin_start || widget.margin_top() != clamped_margin_top;
+    if needs_resize {
+        widget.set_size_request(width, height);
+    }
     widget.set_hexpand(false);
     widget.set_vexpand(false);
     widget.set_halign(Align::Start);
     widget.set_valign(Align::Start);
-    widget.set_margin_start(clamped_margin_start);
-    widget.set_margin_top(clamped_margin_top);
+    if needs_reposition {
+        widget.set_margin_start(clamped_margin_start);
+        widget.set_margin_top(clamped_margin_top);
+    }
     if widget.parent().is_some() {
-        widget.queue_allocate();
+        if needs_resize || needs_reposition {
+            widget.queue_allocate();
+        }
     } else {
         overlay.add_overlay(widget);
         overlay.set_measure_overlay(widget, false);
@@ -3131,9 +3247,36 @@ fn position_widget(overlay: &Overlay, widget: &Widget, frame: taskers_core::Fram
     }
 }
 
+fn position_widget_in_fixed(fixed: &Fixed, widget: &Widget, frame: taskers_core::Frame) {
+    let width = frame.width.max(1);
+    let height = frame.height.max(1);
+    let needs_resize = widget.width_request() != width || widget.height_request() != height;
+    if needs_resize {
+        widget.set_size_request(width, height);
+    }
+    widget.set_hexpand(false);
+    widget.set_vexpand(false);
+    widget.set_halign(Align::Start);
+    widget.set_valign(Align::Start);
+    if widget.parent().is_some() {
+        fixed.move_(widget, frame.x as f64, frame.y as f64);
+        if needs_resize {
+            widget.queue_allocate();
+        }
+    } else {
+        fixed.put(widget, frame.x as f64, frame.y as f64);
+    }
+}
+
 fn detach_from_overlay(overlay: &Overlay, widget: &Widget) {
     if widget.parent().is_some() {
         overlay.remove_overlay(widget);
+    }
+}
+
+fn detach_from_fixed(fixed: &Fixed, widget: &Widget) {
+    if widget.parent().is_some() {
+        fixed.remove(widget);
     }
 }
 
@@ -3429,13 +3572,9 @@ fn clamped_terminal_padding(
 
 fn native_surface_visible_plan<'a>(
     visible_plan: Option<&'a PortalSurfacePlan>,
-    resize_preview_active: bool,
+    _resize_preview_active: bool,
 ) -> Option<&'a PortalSurfacePlan> {
-    if resize_preview_active {
-        None
-    } else {
-        visible_plan
-    }
+    visible_plan
 }
 
 #[cfg(test)]
@@ -3504,7 +3643,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_preview_hides_native_surface_plans() {
+    fn resize_preview_keeps_native_surface_plans_available() {
         let plan = PortalSurfacePlan {
             pane_id: PaneId::new(),
             surface_id: SurfaceId::new(),
@@ -3526,7 +3665,10 @@ mod tests {
             native_surface_visible_plan(Some(&plan), false).map(|plan| plan.frame),
             Some(plan.frame)
         );
-        assert!(native_surface_visible_plan(Some(&plan), true).is_none());
+        assert_eq!(
+            native_surface_visible_plan(Some(&plan), true).map(|plan| plan.frame),
+            Some(plan.frame)
+        );
         assert!(native_surface_visible_plan(None, true).is_none());
     }
 

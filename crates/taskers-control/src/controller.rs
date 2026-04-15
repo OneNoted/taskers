@@ -437,6 +437,23 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::BootstrapWorkspaceTopLevelExtents {
+                workspace_id,
+                column_width,
+                window_height,
+            } => {
+                let bootstrapped = model.bootstrap_workspace_top_level_extents(
+                    workspace_id,
+                    column_width,
+                    window_height,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace top-level extents bootstrapped".into(),
+                    },
+                    bootstrapped,
+                )
+            }
             ControlCommand::SetWindowSplitRatio {
                 workspace_id,
                 workspace_window_id,
