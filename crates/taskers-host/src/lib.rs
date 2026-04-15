@@ -1809,24 +1809,13 @@ impl BrowserSurface {
         });
         webview.add_controller(focus);
 
-        let click_pane_id = pane_id.clone();
-        let click_sink = event_sink.clone();
-        let click_diagnostics = diagnostics.clone();
-        let click = GestureClick::new();
-        click.connect_pressed(move |_, _, _, _| {
-            let pane_id = click_pane_id.get();
-            emit_diagnostic(
-                click_diagnostics.as_ref(),
-                DiagnosticRecord::new(
-                    DiagnosticCategory::HostEvent,
-                    None,
-                    "browser click focus event received",
-                )
-                .with_pane(pane_id)
-                .with_surface(surface_id),
-            );
-            (click_sink)(HostEvent::PaneFocused { pane_id });
-        });
+        let click = pane_focus_click_controller(
+            pane_id.clone(),
+            surface_id,
+            event_sink.clone(),
+            diagnostics.clone(),
+            "browser click focus event received",
+        );
         webview.add_controller(click);
 
         let surface_id = entry.surface_id;
@@ -2920,24 +2909,13 @@ fn connect_ghostty_widget(
 ) {
     let _ = host;
 
-    let click_pane_id = pane_id.clone();
-    let focus_sink = event_sink.clone();
-    let focus_diagnostics = diagnostics.clone();
-    let click = GestureClick::new();
-    click.connect_pressed(move |_, _, _, _| {
-        let pane_id = click_pane_id.get();
-        emit_diagnostic(
-            focus_diagnostics.as_ref(),
-            DiagnosticRecord::new(
-                DiagnosticCategory::HostEvent,
-                None,
-                "terminal click focus event received",
-            )
-            .with_pane(pane_id)
-            .with_surface(surface_id),
-        );
-        (focus_sink)(HostEvent::PaneFocused { pane_id });
-    });
+    let click = pane_focus_click_controller(
+        pane_id.clone(),
+        surface_id,
+        event_sink.clone(),
+        diagnostics.clone(),
+        "terminal click focus event received",
+    );
     widget.add_controller(click);
 
     let focus_pane_id = pane_id.clone();
@@ -3024,6 +3002,31 @@ fn connect_ghostty_widget(
             });
         }
     });
+}
+
+fn pane_focus_click_controller(
+    pane_id: Rc<Cell<PaneId>>,
+    surface_id: SurfaceId,
+    event_sink: HostEventSink,
+    diagnostics: Option<DiagnosticsSink>,
+    message: &'static str,
+) -> GestureClick {
+    let click = GestureClick::new();
+    // Keep this gesture non-exclusive so native terminal/browser content still
+    // receives the click sequence. Otherwise apps like tmux can lose mouse
+    // interaction while Taskers steals the press just to focus the pane.
+    click.set_exclusive(false);
+    click.connect_pressed(move |_, _, _, _| {
+        let pane_id = pane_id.get();
+        emit_diagnostic(
+            diagnostics.as_ref(),
+            DiagnosticRecord::new(DiagnosticCategory::HostEvent, None, message)
+                .with_pane(pane_id)
+                .with_surface(surface_id),
+        );
+        (event_sink)(HostEvent::PaneFocused { pane_id });
+    });
+    click
 }
 
 fn emit_browser_navigation_state(
