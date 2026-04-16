@@ -449,7 +449,12 @@ impl ShortcutAction {
                 Self::ResizeWindowUp => &[],
                 Self::ResizeWindowDown => &[],
                 Self::ResizeSplitLeft => &["<Control><Alt>minus", "<Control><Alt>KP_Subtract"],
-                Self::ResizeSplitRight => &["<Control><Alt>plus", "<Control><Alt>KP_Add"],
+                Self::ResizeSplitRight => &[
+                    "<Control><Alt>plus",
+                    "<Control><Alt><Shift>plus",
+                    "<Control><Alt><Shift>equal",
+                    "<Control><Alt>KP_Add",
+                ],
                 Self::ResizeSplitUp => &[],
                 Self::ResizeSplitDown => &[],
                 Self::SplitRight => &["<Control><Alt><Shift>t"],
@@ -486,6 +491,8 @@ impl ShortcutAction {
                 ],
                 Self::ResizeSplitRight => &[
                     "<Control><Alt>plus",
+                    "<Control><Alt><Shift>plus",
+                    "<Control><Alt><Shift>equal",
                     "<Control><Alt>KP_Add",
                     "<Control><Alt><Shift>End",
                 ],
@@ -9768,7 +9775,12 @@ mod tests {
         );
         assert_eq!(
             ShortcutAction::ResizeSplitRight.accelerators(ShortcutPreset::Balanced),
-            &["<Control><Alt>plus", "<Control><Alt>KP_Add"]
+            &[
+                "<Control><Alt>plus",
+                "<Control><Alt><Shift>plus",
+                "<Control><Alt><Shift>equal",
+                "<Control><Alt>KP_Add",
+            ]
         );
         assert_eq!(
             ShortcutAction::ResizeSplitLeft.accelerators(ShortcutPreset::PowerUser),
@@ -9782,6 +9794,8 @@ mod tests {
             ShortcutAction::ResizeSplitRight.accelerators(ShortcutPreset::PowerUser),
             &[
                 "<Control><Alt>plus",
+                "<Control><Alt><Shift>plus",
+                "<Control><Alt><Shift>equal",
                 "<Control><Alt>KP_Add",
                 "<Control><Alt><Shift>End",
             ]
