@@ -231,6 +231,8 @@ pub enum ShortcutAction {
     NewWindowRight,
     NewWindowUp,
     NewWindowDown,
+    SplitWindowRight,
+    SplitWindowDown,
     MoveWindowLeft,
     MoveWindowRight,
     MoveWindowUp,
@@ -249,7 +251,7 @@ pub enum ShortcutAction {
 }
 
 impl ShortcutAction {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 32] = [
         Self::ToggleOverview,
         Self::FocusLatestUnread,
         Self::CloseTerminal,
@@ -265,6 +267,8 @@ impl ShortcutAction {
         Self::NewWindowRight,
         Self::NewWindowUp,
         Self::NewWindowDown,
+        Self::SplitWindowRight,
+        Self::SplitWindowDown,
         Self::MoveWindowLeft,
         Self::MoveWindowRight,
         Self::MoveWindowUp,
@@ -299,6 +303,8 @@ impl ShortcutAction {
             Self::NewWindowRight => "new_window_right",
             Self::NewWindowUp => "new_window_up",
             Self::NewWindowDown => "new_window_down",
+            Self::SplitWindowRight => "split_window_right",
+            Self::SplitWindowDown => "split_window_down",
             Self::MoveWindowLeft => "move_window_left",
             Self::MoveWindowRight => "move_window_right",
             Self::MoveWindowUp => "move_window_up",
@@ -334,6 +340,8 @@ impl ShortcutAction {
             Self::NewWindowRight => "New window right",
             Self::NewWindowUp => "New window up",
             Self::NewWindowDown => "New window down",
+            Self::SplitWindowRight => "Split to new window right",
+            Self::SplitWindowDown => "Split to new window down",
             Self::MoveWindowLeft => "Move window left",
             Self::MoveWindowRight => "Move window right",
             Self::MoveWindowUp => "Move window up",
@@ -377,17 +385,15 @@ impl ShortcutAction {
             Self::FocusDown => {
                 "Move focus to the nearest pane below before falling back to another window."
             }
-            Self::NewWindowLeft => {
-                "Create a top-level window on the left using half the active window width."
+            Self::NewWindowLeft => "Create a top-level window in a new column on the left.",
+            Self::NewWindowRight => "Create a top-level window in a new column on the right.",
+            Self::NewWindowUp => "Create a stacked top-level window above the active window.",
+            Self::NewWindowDown => "Create a stacked top-level window below the active window.",
+            Self::SplitWindowRight => {
+                "Create a top-level terminal window on the right using half the active window width."
             }
-            Self::NewWindowRight => {
-                "Create a top-level window on the right using half the active window width."
-            }
-            Self::NewWindowUp => {
-                "Create a stacked top-level window above using half the active window height."
-            }
-            Self::NewWindowDown => {
-                "Create a stacked top-level window below using half the active window height."
+            Self::SplitWindowDown => {
+                "Create a stacked top-level terminal window below using half the active window height."
             }
             Self::MoveWindowLeft => "Move the active top-level window into the column on the left.",
             Self::MoveWindowRight => {
@@ -427,6 +433,8 @@ impl ShortcutAction {
             | Self::NewWindowRight
             | Self::NewWindowUp
             | Self::NewWindowDown
+            | Self::SplitWindowRight
+            | Self::SplitWindowDown
             | Self::MoveWindowLeft
             | Self::MoveWindowRight
             | Self::MoveWindowUp
@@ -462,6 +470,8 @@ impl ShortcutAction {
                 Self::NewWindowRight => &["<Control><Alt>t"],
                 Self::NewWindowUp => &[],
                 Self::NewWindowDown => &["<Control><Alt>g"],
+                Self::SplitWindowRight => &["<Control><Alt><Shift>r"],
+                Self::SplitWindowDown => &["<Control><Alt><Shift>d"],
                 Self::MoveWindowLeft => &[],
                 Self::MoveWindowRight => &[],
                 Self::MoveWindowUp => &[],
@@ -494,6 +504,8 @@ impl ShortcutAction {
                 Self::NewWindowRight => &["<Control><Alt>t"],
                 Self::NewWindowUp => &[],
                 Self::NewWindowDown => &["<Control><Alt>g"],
+                Self::SplitWindowRight => &["<Control><Alt><Shift>r"],
+                Self::SplitWindowDown => &["<Control><Alt><Shift>d"],
                 Self::MoveWindowLeft => &["<Control><Alt><Shift>h", "<Control><Alt><Shift>Left"],
                 Self::MoveWindowRight => &["<Control><Alt><Shift>l", "<Control><Alt><Shift>Right"],
                 Self::MoveWindowUp => &["<Control><Alt><Shift>k", "<Control><Alt><Shift>Up"],
@@ -3645,15 +3657,21 @@ impl TaskersCore {
                 }
             }
             ShortcutAction::NewWindowLeft => self.run_workspace_shortcut(true, |core, _| {
-                Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Left))
+                Some(core.create_workspace_window(WorkspaceDirection::Left))
             }),
             ShortcutAction::NewWindowRight => self.run_workspace_shortcut(true, |core, _| {
-                Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Right))
+                Some(core.create_workspace_window(WorkspaceDirection::Right))
             }),
             ShortcutAction::NewWindowUp => self.run_workspace_shortcut(true, |core, _| {
-                Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Up))
+                Some(core.create_workspace_window(WorkspaceDirection::Up))
             }),
             ShortcutAction::NewWindowDown => self.run_workspace_shortcut(true, |core, _| {
+                Some(core.create_workspace_window(WorkspaceDirection::Down))
+            }),
+            ShortcutAction::SplitWindowRight => self.run_workspace_shortcut(true, |core, _| {
+                Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Right))
+            }),
+            ShortcutAction::SplitWindowDown => self.run_workspace_shortcut(true, |core, _| {
                 Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Down))
             }),
             ShortcutAction::MoveWindowLeft
@@ -10033,6 +10051,14 @@ mod tests {
             ShortcutAction::FitTerminalToViewport.accelerators(ShortcutPreset::PowerUser),
             &["<Control><Alt>0", "<Control><Alt>KP_0"]
         );
+        assert_eq!(
+            ShortcutAction::SplitWindowRight.accelerators(ShortcutPreset::Balanced),
+            &["<Control><Alt><Shift>r"]
+        );
+        assert_eq!(
+            ShortcutAction::SplitWindowDown.accelerators(ShortcutPreset::Balanced),
+            &["<Control><Alt><Shift>d"]
+        );
     }
 
     #[test]
@@ -10075,7 +10101,20 @@ mod tests {
     }
 
     #[test]
-    fn new_window_right_shortcut_splits_active_window_width_in_half() {
+    fn new_window_right_shortcut_keeps_default_window_width_behavior() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let expected_width = taskers_domain::DEFAULT_WORKSPACE_WINDOW_WIDTH;
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowRight));
+
+        let after = core.snapshot();
+        let new_window = window_snapshot(&after, after.current_workspace.active_window_id);
+        assert_eq!(new_window.frame.width, expected_width);
+    }
+
+    #[test]
+    fn split_window_right_shortcut_splits_active_window_width_in_half() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
         let before = core.snapshot();
@@ -10085,7 +10124,7 @@ mod tests {
             / 2)
         .max(MIN_WORKSPACE_WINDOW_WIDTH);
 
-        assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowRight));
+        assert!(core.dispatch_shortcut_action(ShortcutAction::SplitWindowRight));
 
         let after = core.snapshot();
         let moved_source_window = window_snapshot(&after, source_window_id);
@@ -10095,7 +10134,7 @@ mod tests {
     }
 
     #[test]
-    fn new_window_down_shortcut_splits_active_window_height_in_half() {
+    fn split_window_down_shortcut_splits_active_window_height_in_half() {
         let core = SharedCore::bootstrap(bootstrap());
         core.set_window_size(PixelSize::new(1280, 900));
         let before = core.snapshot();
@@ -10105,7 +10144,7 @@ mod tests {
             / 2)
         .max(MIN_WORKSPACE_WINDOW_HEIGHT);
 
-        assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowDown));
+        assert!(core.dispatch_shortcut_action(ShortcutAction::SplitWindowDown));
 
         let after = core.snapshot();
         let moved_source_window = window_snapshot(&after, source_window_id);
