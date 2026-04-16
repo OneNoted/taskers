@@ -51,7 +51,9 @@ use taskers_shell_core::{
     RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
     ShortcutPreset, SurfaceKind, clamp_workspace_window_gap,
 };
-use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
+use webkit6::{
+    HardwareAccelerationPolicy, NetworkSession, Settings as WebKitSettings, WebView, prelude::*,
+};
 
 use glib::variant::ToVariant;
 use taskers_paths::{TaskersPaths, default_terminal_socket_path};
@@ -59,6 +61,8 @@ use taskers_paths::{TaskersPaths, default_terminal_socket_path};
 const APP_ID: &str = taskers_paths::APP_ID;
 const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
 const DEV_DIAGNOSTIC_LOG_NAME: &str = "taskers-gtk.latest.log";
+const TASKERS_WEBKIT_GRAPHICS_MODE_ENV: &str = "TASKERS_WEBKIT_GRAPHICS_MODE";
+const WEBKIT_DISABLE_DMABUF_RENDERER_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "taskers")]
@@ -292,7 +296,8 @@ impl TaskersConfig {
             .with_context(|| format!("failed to parse config {}", path.display()))?;
         config.configured_shell =
             normalize_configured_shell_value(config.configured_shell.as_deref());
-        config.workspace_window_gap = normalize_workspace_window_gap_value(config.workspace_window_gap);
+        config.workspace_window_gap =
+            normalize_workspace_window_gap_value(config.workspace_window_gap);
         Ok(config)
     }
 
@@ -327,7 +332,9 @@ impl TaskersConfig {
                 settings.notification_preferences,
             ),
             render_live_surfaces_in_overview: settings.render_live_surfaces_in_overview,
-            workspace_window_gap: normalize_workspace_window_gap_value(settings.workspace_window_gap),
+            workspace_window_gap: normalize_workspace_window_gap_value(
+                settings.workspace_window_gap,
+            ),
             embedded_terminal_appearance: current.embedded_terminal_appearance,
             embedded_terminal_config_initialized: current.embedded_terminal_config_initialized,
         }
@@ -416,6 +423,9 @@ fn optional_bool_value(value: OptionalSettingChoice) -> OptionalBoolValue {
 fn main() -> glib::ExitCode {
     let cli = Cli::parse();
     scrub_inherited_terminal_env();
+    if let Some(note) = maybe_apply_webkit_graphics_workaround() {
+        safe_eprintln(note);
+    }
     if let Some(mode) = cli.internal_ghostty_probe {
         return run_internal_ghostty_probe(mode);
     }
@@ -606,13 +616,18 @@ fn build_ui_result(
 
     let initial_shell_stylesheet = taskers_shell::shell_stylesheet(&bootstrap.core.snapshot());
     let shell_url = launch_liveview_server(bootstrap.core.clone(), initial_shell_stylesheet)?;
+    let shell_network_session = build_shell_network_session();
     let settings = WebKitSettings::builder()
         .enable_developer_extras(true)
         .build();
+    if std::env::var_os(WEBKIT_DISABLE_DMABUF_RENDERER_ENV).is_some() {
+        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+    }
     let shell_view = WebView::builder()
         .hexpand(true)
         .vexpand(true)
         .focusable(true)
+        .network_session(&shell_network_session)
         .settings(&settings)
         .build();
     shell_view.set_can_target(true);
@@ -1269,7 +1284,10 @@ mod config_tests {
 
     #[test]
     fn workspace_window_gap_normalization_clamps_values() {
-        assert_eq!(normalize_workspace_window_gap_value(DEFAULT_WORKSPACE_WINDOW_GAP), 0);
+        assert_eq!(
+            normalize_workspace_window_gap_value(DEFAULT_WORKSPACE_WINDOW_GAP),
+            0
+        );
         assert_eq!(normalize_workspace_window_gap_value(-5), 0);
         assert_eq!(normalize_workspace_window_gap_value(999), 64);
     }
@@ -1909,6 +1927,57 @@ fn maybe_enable_software_gl(startup_notes: &mut Vec<String>, should_force: bool)
                 .into(),
         );
     }
+}
+
+fn maybe_apply_webkit_graphics_workaround() -> Option<&'static str> {
+    if matches!(
+        std::env::var_os(WEBKIT_DISABLE_DMABUF_RENDERER_ENV).as_deref(),
+        Some(value) if value != "0"
+    ) {
+        return None;
+    }
+
+    if !should_apply_webkit_dmabuf_workaround(
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        has_nvidia_graphics_runtime(),
+        std::env::var(TASKERS_WEBKIT_GRAPHICS_MODE_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        return None;
+    }
+
+    unsafe {
+        std::env::set_var(WEBKIT_DISABLE_DMABUF_RENDERER_ENV, "1");
+    }
+
+    Some(
+        "Detected a Wayland + NVIDIA graphics runtime; forcing WEBKIT_DISABLE_DMABUF_RENDERER=1 for Taskers' WebKit views.",
+    )
+}
+
+fn should_apply_webkit_dmabuf_workaround(
+    wayland_present: bool,
+    nvidia_runtime_present: bool,
+    override_mode: Option<&str>,
+) -> bool {
+    match override_mode {
+        Some("gpu") | Some("default") | Some("off") => false,
+        Some("safe") | Some("software") | Some("on") => true,
+        _ => wayland_present && nvidia_runtime_present,
+    }
+}
+
+fn has_nvidia_graphics_runtime() -> bool {
+    Path::new("/proc/driver/nvidia/version").exists()
+        || Path::new("/sys/module/nvidia_drm").exists()
+        || Path::new("/sys/module/nvidia").exists()
+}
+
+fn build_shell_network_session() -> NetworkSession {
+    let session = NetworkSession::new_ephemeral();
+    session.set_persistent_credential_storage_enabled(false);
+    session
 }
 
 fn should_force_software_gl(
@@ -3023,8 +3092,9 @@ fn looks_like_dev_install(path: &Path) -> bool {
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        RuntimePathOverrides, looks_like_dev_install, maybe_export_bundled_terminfo,
-        publish_shell_environment, should_defer_initial_sync, should_force_software_gl,
+        RuntimePathOverrides, build_shell_network_session, looks_like_dev_install,
+        maybe_export_bundled_terminfo, publish_shell_environment,
+        should_apply_webkit_dmabuf_workaround, should_defer_initial_sync, should_force_software_gl,
         should_skip_terminal_sidecar_in_smoke, should_sync_host_snapshot,
         smoke_runtime_path_overrides,
     };
@@ -3114,6 +3184,42 @@ mod startup_tests {
         assert!(!should_force_software_gl(false, false, true, false));
         assert!(!should_force_software_gl(true, false, false, false));
         assert!(!should_force_software_gl(true, false, true, true));
+    }
+
+    #[test]
+    fn webkit_dmabuf_workaround_defaults_only_for_wayland_nvidia() {
+        assert!(should_apply_webkit_dmabuf_workaround(true, true, None));
+        assert!(!should_apply_webkit_dmabuf_workaround(false, true, None));
+        assert!(!should_apply_webkit_dmabuf_workaround(true, false, None));
+    }
+
+    #[test]
+    fn webkit_dmabuf_workaround_respects_env_override() {
+        assert!(should_apply_webkit_dmabuf_workaround(
+            false,
+            false,
+            Some("safe")
+        ));
+        assert!(should_apply_webkit_dmabuf_workaround(
+            false,
+            false,
+            Some("software")
+        ));
+        assert!(!should_apply_webkit_dmabuf_workaround(
+            true,
+            true,
+            Some("gpu")
+        ));
+        assert!(!should_apply_webkit_dmabuf_workaround(
+            true,
+            true,
+            Some("off")
+        ));
+    }
+
+    #[test]
+    fn shell_network_session_is_ephemeral() {
+        assert!(build_shell_network_session().is_ephemeral());
     }
 
     #[test]
