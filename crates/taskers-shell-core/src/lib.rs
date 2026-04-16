@@ -337,8 +337,8 @@ impl ShortcutAction {
             Self::ResizeWindowRight => "Make window wider",
             Self::ResizeWindowUp => "Make window shorter",
             Self::ResizeWindowDown => "Make window taller",
-            Self::ResizeSplitLeft => "Make split narrower",
-            Self::ResizeSplitRight => "Make split wider",
+            Self::ResizeSplitLeft => "Make terminal narrower",
+            Self::ResizeSplitRight => "Make terminal wider",
             Self::ResizeSplitUp => "Make split shorter",
             Self::ResizeSplitDown => "Make split taller",
             Self::SplitRight => "Split right",
@@ -385,8 +385,12 @@ impl ShortcutAction {
             Self::ResizeWindowRight => "Increase the active column width.",
             Self::ResizeWindowUp => "Reduce the active top-level window height.",
             Self::ResizeWindowDown => "Increase the active top-level window height.",
-            Self::ResizeSplitLeft => "Reduce the active split width.",
-            Self::ResizeSplitRight => "Increase the active split width.",
+            Self::ResizeSplitLeft => {
+                "Reduce the active split width, or the active window width when no split can resize."
+            }
+            Self::ResizeSplitRight => {
+                "Increase the active split width, or the active window width when no split can resize."
+            }
             Self::ResizeSplitUp => "Reduce the active split height.",
             Self::ResizeSplitDown => "Increase the active split height.",
             Self::SplitRight => "Split the active pane to the right inside the current window.",
@@ -3696,24 +3700,12 @@ impl TaskersCore {
             ),
             ShortcutAction::ResizeSplitLeft => {
                 self.run_standard_workspace_shortcut(|core, workspace_id| {
-                    Some(
-                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
-                            workspace_id,
-                            direction: Direction::Left,
-                            amount: KEYBOARD_RESIZE_STEP,
-                        }),
-                    )
+                    Some(core.resize_active_terminal_horizontally(workspace_id, Direction::Left))
                 })
             }
             ShortcutAction::ResizeSplitRight => {
                 self.run_standard_workspace_shortcut(|core, workspace_id| {
-                    Some(
-                        core.dispatch_control(ControlCommand::ResizeActivePaneSplit {
-                            workspace_id,
-                            direction: Direction::Right,
-                            amount: KEYBOARD_RESIZE_STEP,
-                        }),
-                    )
+                    Some(core.resize_active_terminal_horizontally(workspace_id, Direction::Right))
                 })
             }
             ShortcutAction::ResizeSplitUp => {
@@ -4797,6 +4789,51 @@ impl TaskersCore {
         handler: impl FnOnce(&mut Self, WorkspaceId) -> Option<bool>,
     ) -> bool {
         self.run_workspace_shortcut(false, handler)
+    }
+
+    fn active_pane_can_resize_split(
+        &self,
+        workspace_id: WorkspaceId,
+        direction: Direction,
+    ) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let active_pane = workspace.active_pane;
+        let Some(mut layout) = workspace
+            .pane_containers
+            .values()
+            .flat_map(|container| container.tabs.values())
+            .find(|pane_tab| pane_tab.layout.contains(active_pane))
+            .map(|pane_tab| pane_tab.layout.clone())
+        else {
+            return false;
+        };
+
+        let before = layout.clone();
+        layout.resize_leaf(active_pane, direction, KEYBOARD_RESIZE_STEP);
+        layout != before
+    }
+
+    fn resize_active_terminal_horizontally(
+        &mut self,
+        workspace_id: WorkspaceId,
+        direction: Direction,
+    ) -> bool {
+        if self.active_pane_can_resize_split(workspace_id, direction) {
+            return self.dispatch_control(ControlCommand::ResizeActivePaneSplit {
+                workspace_id,
+                direction,
+                amount: KEYBOARD_RESIZE_STEP,
+            });
+        }
+
+        self.dispatch_control(ControlCommand::ResizeActiveWindow {
+            workspace_id,
+            direction,
+            amount: KEYBOARD_RESIZE_STEP,
+        })
     }
 
     fn begin_window_drag(&mut self) -> bool {
@@ -9889,6 +9926,90 @@ mod tests {
         assert!(snapshot.overview_mode);
         let after_width = window_snapshot(&snapshot, active_window_id).frame.width;
         assert_ne!(after_width, before_width);
+    }
+
+    #[test]
+    fn horizontal_resize_shortcut_falls_back_to_window_width_without_split() {
+        let core = SharedCore::bootstrap(terminal_only_bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let before = core.snapshot();
+        let active_window_id = before.current_workspace.active_window_id;
+        let before_width = window_snapshot(&before, active_window_id).frame.width;
+        let before_model_width = {
+            let guard = core.inner.lock();
+            let model = guard.app_state.snapshot_model();
+            let workspace = model.active_workspace().expect("workspace");
+            let column_id = workspace.active_column_id().expect("active column");
+            workspace
+                .columns
+                .get(&column_id)
+                .expect("active column record")
+                .width
+        };
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::ResizeSplitRight));
+
+        let after = core.snapshot();
+        let after_width = window_snapshot(&after, active_window_id).frame.width;
+        let after_model_width = {
+            let guard = core.inner.lock();
+            let model = guard.app_state.snapshot_model();
+            let workspace = model.active_workspace().expect("workspace");
+            let column_id = workspace.active_column_id().expect("active column");
+            workspace
+                .columns
+                .get(&column_id)
+                .expect("active column record")
+                .width
+        };
+        assert!(
+            after_model_width > before_model_width,
+            "expected stored column width to grow; before={before_model_width}, after={after_model_width}"
+        );
+        assert!(
+            after_width > before_width,
+            "expected active window width to grow when no split can resize; before={before_width}, after={after_width}, stored_before={before_model_width}, stored_after={after_model_width}"
+        );
+    }
+
+    #[test]
+    fn horizontal_resize_shortcut_prefers_split_width_when_available() {
+        let core = SharedCore::bootstrap(bootstrap());
+        assert!(core.dispatch_shortcut_action(ShortcutAction::SplitRight));
+
+        let before = core.snapshot();
+        let active_window_id = before.current_workspace.active_window_id;
+        let active_pane_id = before.current_workspace.active_pane;
+        let metrics = LayoutMetrics::default();
+        let before_window = window_snapshot(&before, active_window_id);
+        let before_window_width = before_window.frame.width;
+        let before_pane_width = find_pane_frame(
+            &before_window.layout,
+            active_pane_id,
+            workspace_window_content_frame(before_window.frame, metrics),
+            metrics,
+        )
+        .expect("active pane frame before resize")
+        .width;
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::ResizeSplitRight));
+
+        let after = core.snapshot();
+        let after_window = window_snapshot(&after, active_window_id);
+        let after_pane_width = find_pane_frame(
+            &after_window.layout,
+            active_pane_id,
+            workspace_window_content_frame(after_window.frame, metrics),
+            metrics,
+        )
+        .expect("active pane frame after resize")
+        .width;
+
+        assert_eq!(after_window.frame.width, before_window_width);
+        assert!(
+            after_pane_width > before_pane_width,
+            "expected active pane width to grow by resizing the split"
+        );
     }
 
     #[test]
