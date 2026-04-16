@@ -3835,11 +3835,17 @@ impl TaskersCore {
     }
 
     fn create_workspace_window(&mut self, direction: WorkspaceDirection) -> bool {
+        let mut changed = false;
+        if self.ui.overview_mode {
+            self.ui.overview_mode = false;
+            self.bump_local_revision();
+            changed = true;
+        }
         let model = self.app_state.snapshot_model();
         let Some(workspace_id) = model.active_workspace_id() else {
             return false;
         };
-        let changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
+        changed |= self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
             workspace_id,
             direction: direction.to_domain(),
             preferred_column_width: None,
@@ -3855,6 +3861,12 @@ impl TaskersCore {
         &mut self,
         direction: WorkspaceDirection,
     ) -> bool {
+        let mut changed = false;
+        if self.ui.overview_mode {
+            self.ui.overview_mode = false;
+            self.bump_local_revision();
+            changed = true;
+        }
         let snapshot = self.snapshot();
         let workspace_id = snapshot.current_workspace.id;
         let Some(active_window) = snapshot
@@ -3883,7 +3895,7 @@ impl TaskersCore {
             ),
         };
 
-        let mut changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
+        changed |= self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
             workspace_id,
             direction: direction.to_domain(),
             preferred_column_width,
@@ -10088,7 +10100,7 @@ mod tests {
     }
 
     #[test]
-    fn new_window_shortcut_keeps_overview_mode_active() {
+    fn new_window_shortcut_leaves_overview_and_creates_terminal_surface() {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::ToggleOverview);
         assert!(core.snapshot().overview_mode);
@@ -10096,8 +10108,46 @@ mod tests {
         assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowRight));
 
         let snapshot = core.snapshot();
-        assert!(snapshot.overview_mode);
+        let active_pane_id = snapshot.current_workspace.active_pane;
+        let active_pane =
+            find_pane(&snapshot.current_workspace.layout, active_pane_id).expect("active pane");
+        let active_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == active_pane_id)
+            .expect("active portal plan");
+        assert!(!snapshot.overview_mode);
         assert_eq!(snapshot.current_workspace.columns.len(), 2);
+        assert_eq!(active_pane.surfaces.len(), 1);
+        assert!(matches!(active_plan.mount, SurfaceMountSpec::Terminal(_)));
+    }
+
+    #[test]
+    fn create_workspace_window_shell_action_in_overview_leaves_overview_and_creates_terminal_surface()
+     {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+
+        let snapshot = core.snapshot();
+        let active_pane_id = snapshot.current_workspace.active_pane;
+        let active_pane =
+            find_pane(&snapshot.current_workspace.layout, active_pane_id).expect("active pane");
+        let active_plan = snapshot
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == active_pane_id)
+            .expect("active portal plan");
+
+        assert!(!snapshot.overview_mode);
+        assert_eq!(active_pane.surfaces.len(), 1);
+        assert!(matches!(active_plan.mount, SurfaceMountSpec::Terminal(_)));
     }
 
     #[test]
