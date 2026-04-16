@@ -377,10 +377,18 @@ impl ShortcutAction {
             Self::FocusDown => {
                 "Move focus to the nearest pane below before falling back to another window."
             }
-            Self::NewWindowLeft => "Create a top-level window in a new column on the left.",
-            Self::NewWindowRight => "Create a top-level window in a new column on the right.",
-            Self::NewWindowUp => "Create a stacked top-level window above the active window.",
-            Self::NewWindowDown => "Create a stacked top-level window below the active window.",
+            Self::NewWindowLeft => {
+                "Create a top-level window on the left using half the active window width."
+            }
+            Self::NewWindowRight => {
+                "Create a top-level window on the right using half the active window width."
+            }
+            Self::NewWindowUp => {
+                "Create a stacked top-level window above using half the active window height."
+            }
+            Self::NewWindowDown => {
+                "Create a stacked top-level window below using half the active window height."
+            }
             Self::MoveWindowLeft => "Move the active top-level window into the column on the left.",
             Self::MoveWindowRight => {
                 "Move the active top-level window into the column on the right."
@@ -3637,16 +3645,16 @@ impl TaskersCore {
                 }
             }
             ShortcutAction::NewWindowLeft => self.run_workspace_shortcut(true, |core, _| {
-                Some(core.create_workspace_window(WorkspaceDirection::Left))
+                Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Left))
             }),
             ShortcutAction::NewWindowRight => self.run_workspace_shortcut(true, |core, _| {
-                Some(core.create_workspace_window(WorkspaceDirection::Right))
+                Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Right))
             }),
             ShortcutAction::NewWindowUp => self.run_workspace_shortcut(true, |core, _| {
-                Some(core.create_workspace_window(WorkspaceDirection::Up))
+                Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Up))
             }),
             ShortcutAction::NewWindowDown => self.run_workspace_shortcut(true, |core, _| {
-                Some(core.create_workspace_window(WorkspaceDirection::Down))
+                Some(core.create_workspace_window_from_active_terminal(WorkspaceDirection::Down))
             }),
             ShortcutAction::MoveWindowLeft
             | ShortcutAction::MoveWindowRight
@@ -3823,6 +3831,68 @@ impl TaskersCore {
             return self.ensure_active_window_visible() || changed;
         }
         false
+    }
+
+    fn create_workspace_window_from_active_terminal(
+        &mut self,
+        direction: WorkspaceDirection,
+    ) -> bool {
+        let snapshot = self.snapshot();
+        let workspace_id = snapshot.current_workspace.id;
+        let Some(active_window) = snapshot
+            .current_workspace
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter())
+            .find(|window| window.id == snapshot.current_workspace.active_window_id)
+        else {
+            return false;
+        };
+        let gap = self.ui.workspace_window_gap.max(0);
+        let (preferred_column_width, preferred_window_height) = match direction {
+            WorkspaceDirection::Left | WorkspaceDirection::Right => (
+                Some(
+                    ((active_window.frame.width - gap).max(2) / 2).max(MIN_WORKSPACE_WINDOW_WIDTH),
+                ),
+                None,
+            ),
+            WorkspaceDirection::Up | WorkspaceDirection::Down => (
+                None,
+                Some(
+                    ((active_window.frame.height - gap).max(2) / 2)
+                        .max(MIN_WORKSPACE_WINDOW_HEIGHT),
+                ),
+            ),
+        };
+
+        let mut changed = self.dispatch_control(ControlCommand::CreateWorkspaceWindow {
+            workspace_id,
+            direction: direction.to_domain(),
+            preferred_column_width,
+            preferred_window_height,
+        });
+        match direction {
+            WorkspaceDirection::Left | WorkspaceDirection::Right => {
+                if let Some(width) = preferred_column_width {
+                    changed |= self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+                        workspace_id,
+                        workspace_column_id: active_window.column_id,
+                        width,
+                    });
+                }
+            }
+            WorkspaceDirection::Up | WorkspaceDirection::Down => {
+                if let Some(height) = preferred_window_height {
+                    changed |= self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+                        workspace_id,
+                        workspace_window_id: active_window.id,
+                        height,
+                    });
+                }
+            }
+        }
+        changed |= self.ensure_active_window_visible();
+        changed
     }
 
     fn focus_workspace_window(&mut self, window_id: WorkspaceWindowId) -> bool {
@@ -7034,9 +7104,10 @@ mod tests {
         BootstrapModel, BrowserMountSpec, BrowserProfileMode, DEFAULT_BROWSER_HOME,
         DEFAULT_WORKSPACE_WINDOW_GAP, Direction, EmbeddedTerminalSettingsSnapshot, HostCommand,
         HostEvent, LayoutMetrics, MAX_WORKSPACE_WINDOW_GAP, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
-        MIN_WORKSPACE_WINDOW_GAP, NotificationPreferencesSnapshot, ResizeHandleTarget,
-        ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
-        ShellSection, ShortcutAction, ShortcutPreset, SurfaceDragSessionSnapshot, SurfaceMountSpec,
+        MIN_WORKSPACE_WINDOW_GAP, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH,
+        NotificationPreferencesSnapshot, ResizeHandleTarget, ResizePreview, RuntimeCapability,
+        RuntimeStatus, SharedCore, ShellAction, ShellDragMode, ShellSection, ShortcutAction,
+        ShortcutPreset, SurfaceDragSessionSnapshot, SurfaceMountSpec,
         WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX, WorkspaceDirection, WorkspaceOuterEdge,
         WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot, default_preview_app_state,
         default_session_path_for_preview, display_surface_title, pane_body_frame,
@@ -10001,6 +10072,46 @@ mod tests {
         let snapshot = core.snapshot();
         assert!(snapshot.overview_mode);
         assert_eq!(snapshot.current_workspace.columns.len(), 2);
+    }
+
+    #[test]
+    fn new_window_right_shortcut_splits_active_window_width_in_half() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let before = core.snapshot();
+        let source_window_id = before.current_workspace.active_window_id;
+        let source_window = window_snapshot(&before, source_window_id);
+        let expected_width = ((source_window.frame.width - DEFAULT_WORKSPACE_WINDOW_GAP).max(2)
+            / 2)
+        .max(MIN_WORKSPACE_WINDOW_WIDTH);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowRight));
+
+        let after = core.snapshot();
+        let moved_source_window = window_snapshot(&after, source_window_id);
+        let new_window = window_snapshot(&after, after.current_workspace.active_window_id);
+        assert_eq!(moved_source_window.frame.width, expected_width);
+        assert_eq!(new_window.frame.width, expected_width);
+    }
+
+    #[test]
+    fn new_window_down_shortcut_splits_active_window_height_in_half() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        let before = core.snapshot();
+        let source_window_id = before.current_workspace.active_window_id;
+        let source_window = window_snapshot(&before, source_window_id);
+        let expected_height = ((source_window.frame.height - DEFAULT_WORKSPACE_WINDOW_GAP).max(2)
+            / 2)
+        .max(MIN_WORKSPACE_WINDOW_HEIGHT);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowDown));
+
+        let after = core.snapshot();
+        let moved_source_window = window_snapshot(&after, source_window_id);
+        let new_window = window_snapshot(&after, after.current_workspace.active_window_id);
+        assert_eq!(moved_source_window.frame.height, expected_height);
+        assert_eq!(new_window.frame.height, expected_height);
     }
 
     #[test]
