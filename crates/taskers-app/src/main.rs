@@ -32,21 +32,28 @@ use taskers_control::{
     TerminalDebugCommand, bind_socket, default_socket_path, serve_with_handler,
 };
 use taskers_core::{AppState, default_session_path, load_or_bootstrap};
-use taskers_domain::{AppModel, NotificationDeliveryState, NotificationId, SignalKind};
+use taskers_domain::{
+    AppModel, DEFAULT_WORKSPACE_WINDOW_GAP, NotificationDeliveryState, NotificationId, SignalKind,
+};
 use taskers_ghostty::{
-    BackendChoice, EmbeddedTerminalAppearance, GhosttyHost, GhosttyHostOptions,
-    ensure_runtime_installed, runtime_terminfo_dir,
+    BackendChoice, EmbeddedTerminalAppearance, EmbeddedTerminalConfig, EmbeddedTerminalConfigPaths,
+    GhosttyHost, GhosttyHostOptions, OptionalBoolValue, ensure_runtime_installed,
+    load_or_initialize_embedded_terminal_config, runtime_terminfo_dir,
+    save_embedded_terminal_config,
 };
 use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
 use taskers_runtime::{
     ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
 };
 use taskers_shell_core::{
-    BootstrapModel, LayoutNodeSnapshot, NotificationPreferencesSnapshot, PaneTabLayoutSnapshot,
-    PixelSize, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection,
-    ShortcutAction, ShortcutPreset, SurfaceKind,
+    BootstrapModel, EmbeddedTerminalSettingsSnapshot, LayoutNodeSnapshot,
+    NotificationPreferencesSnapshot, OptionalSettingChoice, PaneTabLayoutSnapshot, PixelSize,
+    RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellSection, ShortcutAction,
+    ShortcutPreset, SurfaceKind, clamp_workspace_window_gap,
 };
-use webkit6::{Settings as WebKitSettings, WebView, prelude::*};
+use webkit6::{
+    HardwareAccelerationPolicy, NetworkSession, Settings as WebKitSettings, WebView, prelude::*,
+};
 
 use glib::variant::ToVariant;
 use taskers_paths::{TaskersPaths, default_terminal_socket_path};
@@ -54,6 +61,8 @@ use taskers_paths::{TaskersPaths, default_terminal_socket_path};
 const APP_ID: &str = taskers_paths::APP_ID;
 const GHOSTTY_PROBE_WINDOW_SIZE_PX: i32 = 64;
 const DEV_DIAGNOSTIC_LOG_NAME: &str = "taskers-gtk.latest.log";
+const TASKERS_WEBKIT_GRAPHICS_MODE_ENV: &str = "TASKERS_WEBKIT_GRAPHICS_MODE";
+const WEBKIT_DISABLE_DMABUF_RENDERER_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "taskers")]
@@ -95,6 +104,7 @@ struct BootstrapContext {
     socket_path: PathBuf,
     ghostty_host: Option<GhosttyHost>,
     config: TaskersConfig,
+    embedded_terminal_config: EmbeddedTerminalConfig,
     startup_notes: Vec<String>,
 }
 
@@ -158,8 +168,12 @@ struct TaskersConfig {
     notification_preferences: NotificationPreferencesConfig,
     #[serde(default = "default_true")]
     render_live_surfaces_in_overview: bool,
+    #[serde(default = "default_workspace_window_gap")]
+    workspace_window_gap: i32,
     #[serde(default)]
     embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    #[serde(default)]
+    embedded_terminal_config_initialized: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,7 +196,9 @@ impl Default for TaskersConfig {
             configured_shell: None,
             notification_preferences: NotificationPreferencesConfig::default(),
             render_live_surfaces_in_overview: true,
+            workspace_window_gap: default_workspace_window_gap(),
             embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
+            embedded_terminal_config_initialized: false,
         }
     }
 }
@@ -230,11 +246,19 @@ fn default_true() -> bool {
     true
 }
 
+fn default_workspace_window_gap() -> i32 {
+    DEFAULT_WORKSPACE_WINDOW_GAP
+}
+
 fn normalize_configured_shell_value(shell: Option<&str>) -> Option<String> {
     shell.and_then(|shell| {
         let trimmed = shell.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     })
+}
+
+fn normalize_workspace_window_gap_value(gap: i32) -> i32 {
+    clamp_workspace_window_gap(gap)
 }
 
 fn safe_eprintln(message: impl std::fmt::Display) {
@@ -272,6 +296,8 @@ impl TaskersConfig {
             .with_context(|| format!("failed to parse config {}", path.display()))?;
         config.configured_shell =
             normalize_configured_shell_value(config.configured_shell.as_deref());
+        config.workspace_window_gap =
+            normalize_workspace_window_gap_value(config.workspace_window_gap);
         Ok(config)
     }
 
@@ -306,14 +332,100 @@ impl TaskersConfig {
                 settings.notification_preferences,
             ),
             render_live_surfaces_in_overview: settings.render_live_surfaces_in_overview,
+            workspace_window_gap: normalize_workspace_window_gap_value(
+                settings.workspace_window_gap,
+            ),
             embedded_terminal_appearance: current.embedded_terminal_appearance,
+            embedded_terminal_config_initialized: current.embedded_terminal_config_initialized,
         }
+    }
+}
+
+fn legacy_embedded_terminal_appearance_for_migration(
+    config: &TaskersConfig,
+) -> Option<EmbeddedTerminalAppearance> {
+    (!config.embedded_terminal_config_initialized).then_some(config.embedded_terminal_appearance)
+}
+
+fn persist_embedded_terminal_migration_marker(
+    config: &mut TaskersConfig,
+    init_succeeded: bool,
+) -> Option<String> {
+    if !init_succeeded || config.embedded_terminal_config_initialized {
+        return None;
+    }
+
+    config.embedded_terminal_config_initialized = true;
+    config
+        .save()
+        .err()
+        .map(|error| format!("failed to persist embedded terminal migration marker: {error}"))
+}
+
+fn embedded_terminal_settings_snapshot(
+    config: &EmbeddedTerminalConfig,
+    paths: &EmbeddedTerminalConfigPaths,
+) -> EmbeddedTerminalSettingsSnapshot {
+    EmbeddedTerminalSettingsSnapshot {
+        theme: config.theme.clone().unwrap_or_default(),
+        font_family: config.font_family.clone().unwrap_or_default(),
+        font_size: config.font_size.clone().unwrap_or_default(),
+        window_padding_x: config.window_padding_x.clone().unwrap_or_default(),
+        window_padding_y: config.window_padding_y.clone().unwrap_or_default(),
+        cursor_style: config.cursor_style.clone().unwrap_or_default(),
+        cursor_style_blink: optional_setting_choice(config.cursor_style_blink),
+        scrollback_limit: config.scrollback_limit.clone().unwrap_or_default(),
+        background_opacity: config.background_opacity.clone().unwrap_or_default(),
+        background_opacity_cells: optional_setting_choice(config.background_opacity_cells),
+        base_config_path: paths.base.display().to_string(),
+        override_config_path: paths.override_file.display().to_string(),
+    }
+}
+
+fn embedded_terminal_config_from_settings(
+    settings: &EmbeddedTerminalSettingsSnapshot,
+) -> EmbeddedTerminalConfig {
+    EmbeddedTerminalConfig {
+        theme: non_empty_setting(&settings.theme),
+        font_family: non_empty_setting(&settings.font_family),
+        font_size: non_empty_setting(&settings.font_size),
+        window_padding_x: non_empty_setting(&settings.window_padding_x),
+        window_padding_y: non_empty_setting(&settings.window_padding_y),
+        cursor_style: non_empty_setting(&settings.cursor_style),
+        cursor_style_blink: optional_bool_value(settings.cursor_style_blink),
+        scrollback_limit: non_empty_setting(&settings.scrollback_limit),
+        background_opacity: non_empty_setting(&settings.background_opacity),
+        background_opacity_cells: optional_bool_value(settings.background_opacity_cells),
+    }
+}
+
+fn non_empty_setting(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn optional_setting_choice(value: OptionalBoolValue) -> OptionalSettingChoice {
+    match value {
+        OptionalBoolValue::Default => OptionalSettingChoice::Default,
+        OptionalBoolValue::Enabled => OptionalSettingChoice::Enabled,
+        OptionalBoolValue::Disabled => OptionalSettingChoice::Disabled,
+    }
+}
+
+fn optional_bool_value(value: OptionalSettingChoice) -> OptionalBoolValue {
+    match value {
+        OptionalSettingChoice::Default => OptionalBoolValue::Default,
+        OptionalSettingChoice::Enabled => OptionalBoolValue::Enabled,
+        OptionalSettingChoice::Disabled => OptionalBoolValue::Disabled,
     }
 }
 
 fn main() -> glib::ExitCode {
     let cli = Cli::parse();
     scrub_inherited_terminal_env();
+    if let Some(note) = maybe_apply_webkit_graphics_workaround() {
+        safe_eprintln(note);
+    }
     if let Some(mode) = cli.internal_ghostty_probe {
         return run_internal_ghostty_probe(mode);
     }
@@ -502,14 +614,20 @@ fn build_ui_result(
         &bootstrap.core.snapshot().runtime_status,
     );
 
-    let shell_url = launch_liveview_server(bootstrap.core.clone())?;
+    let initial_shell_stylesheet = taskers_shell::shell_stylesheet(&bootstrap.core.snapshot());
+    let shell_url = launch_liveview_server(bootstrap.core.clone(), initial_shell_stylesheet)?;
+    let shell_network_session = build_shell_network_session();
     let settings = WebKitSettings::builder()
         .enable_developer_extras(true)
         .build();
+    if std::env::var_os(WEBKIT_DISABLE_DMABUF_RENDERER_ENV).is_some() {
+        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+    }
     let shell_view = WebView::builder()
         .hexpand(true)
         .vexpand(true)
         .focusable(true)
+        .network_session(&shell_network_session)
         .settings(&settings)
         .build();
     shell_view.set_can_target(true);
@@ -564,6 +682,8 @@ fn build_ui_result(
         safe_eprintln(note);
     }
     let persisted_config = Rc::new(RefCell::new(bootstrap.config.clone()));
+    let persisted_embedded_terminal_config =
+        Rc::new(RefCell::new(bootstrap.embedded_terminal_config.clone()));
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -652,6 +772,7 @@ fn build_ui_result(
     let tick_app = app.clone();
     let tick_app_state = bootstrap.app_state.clone();
     let tick_config = persisted_config.clone();
+    let tick_embedded_terminal_config = persisted_embedded_terminal_config.clone();
     glib::timeout_add_local(Duration::from_millis(16), move || {
         sync_window(
             &tick_window,
@@ -668,7 +789,12 @@ fn build_ui_result(
             &tick_app_state,
             tick_diagnostics.as_ref(),
         );
-        persist_settings_if_needed(&tick_core, &tick_config, tick_diagnostics.as_ref());
+        persist_settings_if_needed(
+            &tick_core,
+            &tick_config,
+            &tick_embedded_terminal_config,
+            tick_diagnostics.as_ref(),
+        );
         glib::ControlFlow::Continue
     });
 
@@ -907,29 +1033,54 @@ fn notification_target_visible(
 fn persist_settings_if_needed(
     core: &SharedCore,
     persisted_config: &Rc<RefCell<TaskersConfig>>,
+    persisted_embedded_terminal_config: &Rc<RefCell<EmbeddedTerminalConfig>>,
     diagnostics: Option<&DiagnosticsWriter>,
 ) {
     let snapshot = core.snapshot();
     let current = persisted_config.borrow().clone();
+    let current_embedded = persisted_embedded_terminal_config.borrow().clone();
     let next = TaskersConfig::from_settings(&snapshot.settings, &current);
-    if current == next {
+    let next_embedded =
+        embedded_terminal_config_from_settings(&snapshot.settings.embedded_terminal);
+    let config_changed = current != next;
+    let embedded_changed = current_embedded != next_embedded;
+    if !config_changed && !embedded_changed {
         return;
     }
 
-    if let Err(error) = next.save() {
-        log_diagnostic(
-            diagnostics,
-            DiagnosticRecord::new(
-                DiagnosticCategory::Startup,
-                Some(core.revision()),
-                format!("failed to persist config: {error:?}"),
-            ),
-        );
-        safe_eprintln(format!("taskers config save failed: {error:?}"));
-        return;
+    if config_changed {
+        if let Err(error) = next.save() {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Startup,
+                    Some(core.revision()),
+                    format!("failed to persist config: {error:?}"),
+                ),
+            );
+            safe_eprintln(format!("taskers config save failed: {error:?}"));
+            return;
+        }
+
+        *persisted_config.borrow_mut() = next;
     }
 
-    *persisted_config.borrow_mut() = next;
+    if embedded_changed {
+        if let Err(error) = save_embedded_terminal_config(&next_embedded) {
+            log_diagnostic(
+                diagnostics,
+                DiagnosticRecord::new(
+                    DiagnosticCategory::Startup,
+                    Some(core.revision()),
+                    format!("failed to persist embedded terminal config: {error:?}"),
+                ),
+            );
+            safe_eprintln(format!("embedded terminal config save failed: {error:?}"));
+            return;
+        }
+
+        *persisted_embedded_terminal_config.borrow_mut() = next_embedded;
+    }
 }
 
 #[cfg(test)]
@@ -1070,9 +1221,15 @@ mod notification_tests {
 
 #[cfg(test)]
 mod config_tests {
-    use super::{NotificationPreferencesConfig, TaskersConfig};
+    use super::{
+        DEFAULT_WORKSPACE_WINDOW_GAP, NotificationPreferencesConfig, TaskersConfig,
+        legacy_embedded_terminal_appearance_for_migration, liveview_index_html,
+        normalize_workspace_window_gap_value, persist_embedded_terminal_migration_marker,
+    };
     use taskers_ghostty::EmbeddedTerminalAppearance;
-    use taskers_shell_core::{NotificationPreferencesSnapshot, SettingsSnapshot};
+    use taskers_shell_core::{
+        EmbeddedTerminalSettingsSnapshot, NotificationPreferencesSnapshot, SettingsSnapshot,
+    };
 
     #[test]
     fn taskers_config_defaults_to_taskers_embedded_terminal_appearance() {
@@ -1081,6 +1238,7 @@ mod config_tests {
             EmbeddedTerminalAppearance::Taskers
         );
         assert_eq!(TaskersConfig::default().configured_shell, None);
+        assert_eq!(TaskersConfig::default().workspace_window_gap, 0);
     }
 
     #[test]
@@ -1097,6 +1255,7 @@ mod config_tests {
             shortcuts: Vec::new(),
             configured_shell: Some(" /bin/fish ".into()),
             default_shell_label: "/bin/zsh".into(),
+            embedded_terminal: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot {
                 alerts_on_waiting: false,
                 alerts_on_error: true,
@@ -1104,6 +1263,7 @@ mod config_tests {
                 suppress_when_visible: false,
             },
             render_live_surfaces_in_overview: false,
+            workspace_window_gap: 24,
         };
 
         let next = TaskersConfig::from_settings(&settings, &current);
@@ -1119,15 +1279,97 @@ mod config_tests {
             NotificationPreferencesConfig::from_snapshot(settings.notification_preferences)
         );
         assert!(!next.render_live_surfaces_in_overview);
+        assert_eq!(next.workspace_window_gap, 24);
+    }
+
+    #[test]
+    fn workspace_window_gap_normalization_clamps_values() {
+        assert_eq!(
+            normalize_workspace_window_gap_value(DEFAULT_WORKSPACE_WINDOW_GAP),
+            0
+        );
+        assert_eq!(normalize_workspace_window_gap_value(-5), 0);
+        assert_eq!(normalize_workspace_window_gap_value(999), 64);
+    }
+
+    #[test]
+    fn liveview_index_html_inlines_shell_stylesheet() {
+        let css = ".app-shell { display: grid; }";
+        let html = liveview_index_html(css);
+
+        assert!(html.contains(r#"<style id="taskers-shell-style">"#));
+        assert!(html.contains(css));
+        assert!(html.contains(r#"<div id="main"></div>"#));
+        assert!(html.contains(r#"__dioxusGetWsUrl("/ws")"#));
+    }
+
+    #[test]
+    fn embedded_terminal_legacy_migration_runs_only_once_after_save_reload() {
+        let mut config = TaskersConfig {
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Ghostty,
+            ..TaskersConfig::default()
+        };
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&config),
+            Some(EmbeddedTerminalAppearance::Ghostty)
+        );
+
+        config.embedded_terminal_config_initialized = true;
+        let persisted = serde_json::to_string(&config).expect("serialize config");
+        let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
+
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&reloaded),
+            None
+        );
+    }
+
+    #[test]
+    fn embedded_terminal_legacy_migration_waits_for_successful_initialization() {
+        let mut config = TaskersConfig {
+            embedded_terminal_appearance: EmbeddedTerminalAppearance::Ghostty,
+            ..TaskersConfig::default()
+        };
+
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&config),
+            Some(EmbeddedTerminalAppearance::Ghostty)
+        );
+
+        assert_eq!(
+            persist_embedded_terminal_migration_marker(&mut config, false),
+            None
+        );
+        let persisted = serde_json::to_string(&config).expect("serialize config");
+        let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
+
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&reloaded),
+            Some(EmbeddedTerminalAppearance::Ghostty)
+        );
+
+        let mut reloaded = reloaded;
+        assert_eq!(
+            persist_embedded_terminal_migration_marker(&mut reloaded, true),
+            None
+        );
+        let persisted = serde_json::to_string(&reloaded).expect("serialize config");
+        let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
+
+        assert_eq!(
+            legacy_embedded_terminal_appearance_for_migration(&reloaded),
+            None
+        );
     }
 }
 
 #[cfg(test)]
 mod runtime_bootstrap_tests {
-    use super::{TaskersConfig, resolve_runtime_bootstrap};
+    use super::{DEFAULT_WORKSPACE_WINDOW_GAP, TaskersConfig, resolve_runtime_bootstrap};
     use std::{env, fs, os::unix::fs::PermissionsExt, sync::Mutex};
-    use taskers_ghostty::EmbeddedTerminalAppearance;
-    use taskers_shell_core::{NotificationPreferencesSnapshot, SettingsSnapshot};
+    use taskers_shell_core::{
+        EmbeddedTerminalSettingsSnapshot, NotificationPreferencesSnapshot, SettingsSnapshot,
+    };
     use tempfile::TempDir;
 
     static PATH_MUTEX: Mutex<()> = Mutex::new(());
@@ -1157,7 +1399,7 @@ mod runtime_bootstrap_tests {
         fs::set_permissions(&shell_path, permissions).expect("chmod");
 
         let runtime = resolve_runtime_bootstrap(
-            EmbeddedTerminalAppearance::Taskers,
+            &taskers_ghostty::embedded_terminal_config_paths(),
             Some(shell_path.to_str().expect("shell path utf8")),
             None,
         );
@@ -1192,7 +1434,7 @@ mod runtime_bootstrap_tests {
     fn runtime_bootstrap_invalid_configured_shell_falls_back_with_note() {
         let _guard = PATH_MUTEX.lock().expect("path mutex");
         let runtime = resolve_runtime_bootstrap(
-            EmbeddedTerminalAppearance::Taskers,
+            &taskers_ghostty::embedded_terminal_config_paths(),
             Some("/definitely/missing/taskers-shell"),
             None,
         );
@@ -1228,15 +1470,17 @@ mod runtime_bootstrap_tests {
             shortcuts: Vec::new(),
             configured_shell: Some(" fish ".into()),
             default_shell_label: "/bin/zsh".into(),
+            embedded_terminal: EmbeddedTerminalSettingsSnapshot::default(),
             notification_preferences: NotificationPreferencesSnapshot::default(),
             render_live_surfaces_in_overview: true,
+            workspace_window_gap: DEFAULT_WORKSPACE_WINDOW_GAP,
         };
         let next = TaskersConfig::from_settings(&settings, &TaskersConfig::default());
         let persisted = serde_json::to_string(&next).expect("serialize config");
         let reloaded: TaskersConfig = serde_json::from_str(&persisted).expect("reload config");
 
         let runtime = resolve_runtime_bootstrap(
-            reloaded.embedded_terminal_appearance,
+            &taskers_ghostty::embedded_terminal_config_paths(),
             reloaded.configured_shell.as_deref(),
             None,
         );
@@ -1289,6 +1533,38 @@ fn shortcut_matches(
         })
 }
 
+fn physical_horizontal_resize_action(
+    key: gdk::Key,
+    state: gdk::ModifierType,
+) -> Option<ShortcutAction> {
+    let normalized = normalize_shortcut_modifiers(state);
+    let required = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+    if !normalized.contains(gdk::ModifierType::CONTROL_MASK)
+        || !normalized.contains(gdk::ModifierType::ALT_MASK)
+    {
+        return None;
+    }
+
+    let unexpected = normalized & !(required | gdk::ModifierType::SHIFT_MASK);
+    if !unexpected.is_empty() {
+        return None;
+    }
+
+    if matches!(key, gdk::Key::KP_Subtract) {
+        return Some(ShortcutAction::ResizeSplitLeft);
+    }
+    if matches!(key, gdk::Key::KP_Add) {
+        return Some(ShortcutAction::ResizeSplitRight);
+    }
+
+    match key.to_unicode() {
+        Some('-') => Some(ShortcutAction::ResizeSplitLeft),
+        Some('=') => Some(ShortcutAction::ResizeSplitRight),
+        Some('+') => Some(ShortcutAction::ResizeSplitRight),
+        _ => None,
+    }
+}
+
 fn focus_active_browser_address(shell_view: &WebView) {
     shell_view.evaluate_javascript(
         "(() => {
@@ -1321,6 +1597,12 @@ fn connect_navigation_shortcuts(
 
         let preset = shortcuts_core.selected_shortcut_preset();
 
+        if let Some(action) = physical_horizontal_resize_action(key, state)
+            && shortcuts_core.dispatch_shortcut_action(action)
+        {
+            return glib::Propagation::Stop;
+        }
+
         if shortcut_matches(preset, ShortcutAction::FocusBrowserAddress, key, state) {
             let snapshot = shortcuts_core.snapshot();
             if snapshot.section == ShellSection::Workspace && snapshot.browser_chrome.is_some() {
@@ -1346,27 +1628,107 @@ fn connect_navigation_shortcuts(
     window.add_controller(controller);
 }
 
+#[cfg(test)]
+mod shortcut_tests {
+    use super::{ShortcutAction, physical_horizontal_resize_action};
+    use gtk::gdk;
+
+    #[test]
+    fn physical_minus_shortcut_maps_to_horizontal_shrink() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::minus, modifiers),
+            Some(ShortcutAction::ResizeSplitLeft)
+        );
+    }
+
+    #[test]
+    fn physical_equal_shortcut_maps_to_horizontal_grow() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::equal, modifiers),
+            Some(ShortcutAction::ResizeSplitRight)
+        );
+    }
+
+    #[test]
+    fn physical_plus_shortcut_still_maps_to_horizontal_grow() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SHIFT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::plus, modifiers),
+            Some(ShortcutAction::ResizeSplitRight)
+        );
+    }
+
+    #[test]
+    fn shifted_equal_shortcut_maps_to_horizontal_grow() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SHIFT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::equal, modifiers),
+            Some(ShortcutAction::ResizeSplitRight)
+        );
+    }
+}
+
 fn bootstrap_runtime(
     diagnostics: Option<&DiagnosticsWriter>,
     smoke_script: Option<SmokeScript>,
 ) -> Result<BootstrapContext> {
-    let (config, config_note) = match TaskersConfig::load() {
+    let (mut config, config_note) = match TaskersConfig::load() {
         Ok(config) => (config, None),
         Err(error) => (
             TaskersConfig::default(),
             Some(format!("Taskers config unavailable: {error}")),
         ),
     };
+    let (embedded_terminal_state, embedded_terminal_init_succeeded) =
+        match load_or_initialize_embedded_terminal_config(
+            legacy_embedded_terminal_appearance_for_migration(&config),
+        ) {
+            Ok(state) => (state, true),
+            Err(error) => {
+                let paths = taskers_ghostty::embedded_terminal_config_paths();
+                let mut startup_notes = vec![format!(
+                    "Embedded terminal config unavailable; using in-memory defaults until it can be written ({error})"
+                )];
+                startup_notes.push(format!(
+                    "Embedded terminal managed config path {}",
+                    paths.base.display()
+                ));
+                startup_notes.push(format!(
+                    "Embedded terminal advanced override path {}",
+                    paths.override_file.display()
+                ));
+                (
+                    taskers_ghostty::EmbeddedTerminalConfigState {
+                        paths,
+                        managed: EmbeddedTerminalConfig::default(),
+                        startup_notes,
+                    },
+                    false,
+                )
+            }
+        };
+    let migration_marker_note =
+        persist_embedded_terminal_migration_marker(&mut config, embedded_terminal_init_succeeded);
     let path_overrides = smoke_script
         .map(|_| smoke_runtime_path_overrides())
         .transpose()?;
     let runtime = resolve_runtime_bootstrap(
-        config.embedded_terminal_appearance,
+        &embedded_terminal_state.paths,
         config.configured_shell.as_deref(),
         path_overrides.as_ref(),
     );
     let mut startup_notes = runtime.startup_notes;
+    startup_notes.extend(embedded_terminal_state.startup_notes.clone());
     if let Some(note) = config_note {
+        push_startup_note(&mut startup_notes, diagnostics, note);
+    }
+    if let Some(note) = migration_marker_note {
         push_startup_note(&mut startup_notes, diagnostics, note);
     }
     if let Some(path_overrides) = path_overrides.as_ref() {
@@ -1466,8 +1828,13 @@ fn bootstrap_runtime(
         selected_theme_id: config.selected_theme_id.clone(),
         selected_shortcut_preset: config.shortcut_preset(),
         configured_shell: config.configured_shell.clone(),
+        embedded_terminal_settings: embedded_terminal_settings_snapshot(
+            &embedded_terminal_state.managed,
+            &embedded_terminal_state.paths,
+        ),
         notification_preferences: config.notification_preferences.to_snapshot(),
         render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
+        workspace_window_gap: config.workspace_window_gap,
     });
 
     log_runtime_status(diagnostics, &core.snapshot().runtime_status);
@@ -1478,12 +1845,13 @@ fn bootstrap_runtime(
         socket_path: runtime.socket_path,
         ghostty_host,
         config,
+        embedded_terminal_config: embedded_terminal_state.managed,
         startup_notes,
     })
 }
 
 fn resolve_runtime_bootstrap(
-    embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    embedded_terminal_paths: &EmbeddedTerminalConfigPaths,
     configured_shell: Option<&str>,
     path_overrides: Option<&RuntimePathOverrides>,
 ) -> RuntimeBootstrap {
@@ -1592,7 +1960,10 @@ fn resolve_runtime_bootstrap(
     };
 
     let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch)
-        .with_embedded_terminal_appearance(embedded_terminal_appearance);
+        .with_embedded_config_paths(
+            embedded_terminal_paths.base.display().to_string(),
+            embedded_terminal_paths.override_file.display().to_string(),
+        );
 
     RuntimeBootstrap {
         ghostty_runtime,
@@ -1640,6 +2011,57 @@ fn maybe_enable_software_gl(startup_notes: &mut Vec<String>, should_force: bool)
                 .into(),
         );
     }
+}
+
+fn maybe_apply_webkit_graphics_workaround() -> Option<&'static str> {
+    if matches!(
+        std::env::var_os(WEBKIT_DISABLE_DMABUF_RENDERER_ENV).as_deref(),
+        Some(value) if value != "0"
+    ) {
+        return None;
+    }
+
+    if !should_apply_webkit_dmabuf_workaround(
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        has_nvidia_graphics_runtime(),
+        std::env::var(TASKERS_WEBKIT_GRAPHICS_MODE_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        return None;
+    }
+
+    unsafe {
+        std::env::set_var(WEBKIT_DISABLE_DMABUF_RENDERER_ENV, "1");
+    }
+
+    Some(
+        "Detected a Wayland + NVIDIA graphics runtime; forcing WEBKIT_DISABLE_DMABUF_RENDERER=1 for Taskers' WebKit views.",
+    )
+}
+
+fn should_apply_webkit_dmabuf_workaround(
+    wayland_present: bool,
+    nvidia_runtime_present: bool,
+    override_mode: Option<&str>,
+) -> bool {
+    match override_mode {
+        Some("gpu") | Some("default") | Some("off") => false,
+        Some("safe") | Some("software") | Some("on") => true,
+        _ => wayland_present && nvidia_runtime_present,
+    }
+}
+
+fn has_nvidia_graphics_runtime() -> bool {
+    Path::new("/proc/driver/nvidia/version").exists()
+        || Path::new("/sys/module/nvidia_drm").exists()
+        || Path::new("/sys/module/nvidia").exists()
+}
+
+fn build_shell_network_session() -> NetworkSession {
+    let session = NetworkSession::new_ephemeral();
+    session.set_persistent_credential_storage_enabled(false);
+    session
 }
 
 fn should_force_software_gl(
@@ -1693,7 +2115,7 @@ fn taskers_probe_session_path(mode: GhosttyProbeMode) -> PathBuf {
 fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
     let config = TaskersConfig::load().unwrap_or_default();
     let runtime = resolve_runtime_bootstrap(
-        config.embedded_terminal_appearance,
+        &taskers_ghostty::embedded_terminal_config_paths(),
         config.configured_shell.as_deref(),
         None,
     );
@@ -1781,8 +2203,10 @@ fn run_internal_surface_probe(
         selected_theme_id,
         selected_shortcut_preset,
         configured_shell: config.configured_shell.clone(),
+        embedded_terminal_settings: EmbeddedTerminalSettingsSnapshot::default(),
         notification_preferences,
         render_live_surfaces_in_overview: config.render_live_surfaces_in_overview,
+        workspace_window_gap: config.workspace_window_gap,
     });
     core.set_window_size(PixelSize::new(
         GHOSTTY_PROBE_WINDOW_SIZE_PX,
@@ -1980,18 +2404,27 @@ fn sync_window(
     }
 
     let revision = core.revision();
-    if last_revision.get() != revision {
+    let needs_sync_retry = host.borrow().needs_sync_retry();
+    if should_sync_host_snapshot(last_revision.get(), revision, needs_sync_retry) {
         let snapshot = core.snapshot();
         log_diagnostic(
             diagnostics,
             DiagnosticRecord::new(
                 DiagnosticCategory::Sync,
                 Some(revision),
-                format!(
-                    "syncing snapshot panes={} active={}",
-                    snapshot.portal.panes.len(),
-                    snapshot.current_workspace.active_pane
-                ),
+                if needs_sync_retry {
+                    format!(
+                        "retrying snapshot sync panes={} active={}",
+                        snapshot.portal.panes.len(),
+                        snapshot.current_workspace.active_pane
+                    )
+                } else {
+                    format!(
+                        "syncing snapshot panes={} active={}",
+                        snapshot.portal.panes.len(),
+                        snapshot.current_workspace.active_pane
+                    )
+                },
             ),
         );
         if let Err(error) = host.borrow_mut().sync_snapshot(&snapshot) {
@@ -2011,6 +2444,10 @@ fn sync_window(
     }
 
     host.borrow_mut().tick(Some(core.revision()));
+}
+
+fn should_sync_host_snapshot(last_revision: u64, revision: u64, needs_sync_retry: bool) -> bool {
+    last_revision != revision || needs_sync_retry
 }
 
 fn should_defer_initial_sync(last_size: (i32, i32), width: i32, height: i32) -> bool {
@@ -2321,7 +2758,7 @@ fn spawn_control_server(
     note
 }
 
-fn launch_liveview_server(core: SharedCore) -> Result<String> {
+fn launch_liveview_server(core: SharedCore, initial_shell_stylesheet: String) -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0").context("failed to bind loopback port")?;
     listener
         .set_nonblocking(true)
@@ -2342,22 +2779,9 @@ fn launch_liveview_server(core: SharedCore) -> Result<String> {
             let router = Router::new()
                 .route(
                     "/",
-                    get(|| async move {
-                        Html(format!(
-                            r#"<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Taskers</title>
-  </head>
-  <body>
-    <div id="main"></div>
-  </body>
-  {}
-</html>"#,
-                            dioxus_liveview::interpreter_glue("/ws")
-                        ))
+                    get(move || {
+                        let initial_shell_stylesheet = initial_shell_stylesheet.clone();
+                        async move { Html(liveview_index_html(&initial_shell_stylesheet)) }
                     }),
                 )
                 .route(
@@ -2386,6 +2810,26 @@ fn launch_liveview_server(core: SharedCore) -> Result<String> {
     });
 
     Ok(url)
+}
+
+fn liveview_index_html(initial_shell_stylesheet: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Taskers</title>
+    <style id="taskers-shell-style">{}</style>
+  </head>
+  <body>
+    <div id="main"></div>
+  </body>
+  {}
+</html>"#,
+        initial_shell_stylesheet,
+        dioxus_liveview::interpreter_glue("/ws")
+    )
 }
 
 fn spawn_smoke_script(
@@ -2732,13 +3176,16 @@ fn looks_like_dev_install(path: &Path) -> bool {
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        RuntimePathOverrides, looks_like_dev_install, maybe_export_bundled_terminfo,
-        publish_shell_environment, should_defer_initial_sync,
-        should_force_software_gl, should_skip_terminal_sidecar_in_smoke,
+        RuntimePathOverrides, build_shell_network_session, looks_like_dev_install,
+        maybe_export_bundled_terminfo, publish_shell_environment,
+        should_apply_webkit_dmabuf_workaround, should_defer_initial_sync, should_force_software_gl,
+        should_skip_terminal_sidecar_in_smoke, should_sync_host_snapshot,
         smoke_runtime_path_overrides,
     };
-    use std::{collections::BTreeMap, path::Path, path::PathBuf};
+    use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
     use taskers_runtime::ShellLaunchSpec;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn initial_sync_waits_for_real_allocation() {
@@ -2750,6 +3197,13 @@ mod startup_tests {
     #[test]
     fn later_resizes_do_not_get_blocked() {
         assert!(!should_defer_initial_sync((1440, 900), 1, 1));
+    }
+
+    #[test]
+    fn host_sync_retries_when_pending_retry_is_set() {
+        assert!(should_sync_host_snapshot(5, 5, true));
+        assert!(should_sync_host_snapshot(5, 6, false));
+        assert!(!should_sync_host_snapshot(5, 5, false));
     }
 
     #[test]
@@ -2788,6 +3242,7 @@ mod startup_tests {
 
     #[test]
     fn smoke_with_mock_backend_skips_terminal_sidecar() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
         let overrides = RuntimePathOverrides {
             root_dir: Path::new("/tmp/taskers-smoke").to_path_buf(),
             session_path: Path::new("/tmp/taskers-smoke/session.json").to_path_buf(),
@@ -2816,6 +3271,42 @@ mod startup_tests {
     }
 
     #[test]
+    fn webkit_dmabuf_workaround_defaults_only_for_wayland_nvidia() {
+        assert!(should_apply_webkit_dmabuf_workaround(true, true, None));
+        assert!(!should_apply_webkit_dmabuf_workaround(false, true, None));
+        assert!(!should_apply_webkit_dmabuf_workaround(true, false, None));
+    }
+
+    #[test]
+    fn webkit_dmabuf_workaround_respects_env_override() {
+        assert!(should_apply_webkit_dmabuf_workaround(
+            false,
+            false,
+            Some("safe")
+        ));
+        assert!(should_apply_webkit_dmabuf_workaround(
+            false,
+            false,
+            Some("software")
+        ));
+        assert!(!should_apply_webkit_dmabuf_workaround(
+            true,
+            true,
+            Some("gpu")
+        ));
+        assert!(!should_apply_webkit_dmabuf_workaround(
+            true,
+            true,
+            Some("off")
+        ));
+    }
+
+    #[test]
+    fn shell_network_session_is_ephemeral() {
+        assert!(build_shell_network_session().is_ephemeral());
+    }
+
+    #[test]
     fn root_x11_guest_sidecar_bypass_ignores_existing_software_gl_override() {
         assert!(super::should_bypass_terminal_sidecar_in_root_x11_guest(
             true, false, true
@@ -2833,13 +3324,17 @@ mod startup_tests {
 
     #[test]
     fn packaged_runtime_terminfo_is_reinjected_after_scrub() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime_dir = temp.path().join("taskers").join("ghostty");
         let terminfo_dir = temp.path().join("taskers").join("terminfo");
         std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
         std::fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
-        std::fs::write(terminfo_dir.join("x").join("xterm-ghostty"), b"fake terminfo")
-            .expect("write terminfo");
+        std::fs::write(
+            terminfo_dir.join("x").join("xterm-ghostty"),
+            b"fake terminfo",
+        )
+        .expect("write terminfo");
 
         let _guard = EnvGuard::set([
             ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.clone())),
@@ -2862,6 +3357,7 @@ mod startup_tests {
 
     #[test]
     fn publish_shell_environment_prefers_explicit_real_shell() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
         let _guard = EnvGuard::set([
             ("TASKERS_REAL_SHELL", None),
             ("SHELL", None),
@@ -2890,12 +3386,16 @@ mod startup_tests {
 
     #[test]
     fn publish_shell_environment_overwrites_stale_wrapper_shell_values() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
         let _guard = EnvGuard::set([
             (
                 "TASKERS_REAL_SHELL",
                 Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh")),
             ),
-            ("SHELL", Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh"))),
+            (
+                "SHELL",
+                Some(PathBuf::from("/tmp/taskers-shell-wrapper.sh")),
+            ),
             ("XDG_DATA_HOME", None),
         ]);
 

@@ -3,7 +3,7 @@ mod browser_automation;
 use anyhow::{Result, anyhow};
 use gtk::{
     Align, Box as GtkBox, CssProvider, DrawingArea, EventControllerFocus, EventControllerScroll,
-    EventControllerScrollFlags, GestureClick, GestureDrag, Orientation, Overflow, Overlay,
+    EventControllerScrollFlags, Fixed, GestureDrag, Orientation, Overflow, Overlay,
     STYLE_PROVIDER_PRIORITY_APPLICATION, Snapshot, Widget, WidgetPaintable, gdk, glib, graphene,
     gsk, prelude::*,
 };
@@ -25,7 +25,7 @@ use taskers_control::{
 };
 use taskers_core::{
     BrowserSurfaceCatalogEntry, HostCommand, HostEvent, PaneId, PortalSurfacePlan, ShellDragMode,
-    ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
+    ShellSection, ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
     TerminalSurfaceCatalogEntry, WorkspaceId, WorkspaceViewSnapshot,
 };
 use taskers_domain::{
@@ -33,7 +33,10 @@ use taskers_domain::{
 };
 use taskers_ghostty::{GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor};
 use taskers_shell_core as taskers_core;
-use webkit6::{LoadEvent, NetworkSession, Settings as WebKitSettings, WebView, prelude::*};
+use webkit6::{
+    HardwareAccelerationPolicy, LoadEvent, NetworkSession, Settings as WebKitSettings, WebView,
+    prelude::*,
+};
 
 pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type ShellActionSink = Rc<dyn Fn(taskers_core::ShellAction) + 'static>;
@@ -49,6 +52,8 @@ const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
 const GHOSTTY_BRIDGE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const GHOSTTY_BRIDGE_FATAL_THRESHOLD: Duration = Duration::from_secs(5);
 const GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const MAX_CONCURRENT_GHOSTTY_SURFACES: usize = 3;
+const WEBKIT_DISABLE_DMABUF_RENDERER_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCategory {
@@ -473,6 +478,8 @@ fn redacted_browser_url_for_diagnostics(url: &str) -> String {
 
 pub struct TaskersHost {
     root: Overlay,
+    native_surface_viewport: Fixed,
+    native_surface_scene: Fixed,
     event_sink: HostEventSink,
     shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
@@ -480,6 +487,7 @@ pub struct TaskersHost {
     ghostty_bridge_info: Option<GhosttyBridgeInfo>,
     ghostty_watchdog: Option<BridgeWatchdog>,
     skip_next_ghostty_tick: bool,
+    pending_terminal_create_retry: bool,
     native_surface_provider: CssProvider,
     selected_theme_id: String,
     browser_surfaces: HashMap<SurfaceId, BrowserSurface>,
@@ -599,6 +607,11 @@ impl TaskersHost {
         root.set_hexpand(true);
         root.set_vexpand(true);
         root.set_child(Some(shell_widget));
+        let (native_surface_viewport, native_surface_scene) = build_native_surface_scene_layers();
+        root.add_overlay(&native_surface_viewport);
+        root.set_measure_overlay(&native_surface_viewport, false);
+        root.set_clip_overlay(&native_surface_viewport, false);
+        native_surface_viewport.put(&native_surface_scene, 0.0, 0.0);
         let native_surface_provider = install_native_surface_css("dark");
 
         let pan_sink = event_sink.clone();
@@ -642,6 +655,8 @@ impl TaskersHost {
 
         Self {
             root,
+            native_surface_viewport,
+            native_surface_scene,
             event_sink,
             shell_action_sink,
             diagnostics,
@@ -649,6 +664,7 @@ impl TaskersHost {
             ghostty_bridge_info,
             ghostty_watchdog,
             skip_next_ghostty_tick: false,
+            pending_terminal_create_retry: false,
             native_surface_provider,
             selected_theme_id: "dark".into(),
             browser_surfaces: HashMap::new(),
@@ -664,11 +680,29 @@ impl TaskersHost {
         self.root.clone()
     }
 
+    pub fn needs_sync_retry(&self) -> bool {
+        self.pending_terminal_create_retry
+    }
+
     pub fn sync_snapshot(&mut self, snapshot: &ShellSnapshot) -> Result<()> {
-        let interactive = native_surfaces_interactive(snapshot.drag_mode, snapshot.overview_mode);
-        let visible = native_surfaces_visible(snapshot.drag_mode);
+        self.pending_terminal_create_retry = false;
+        let interactive = native_surfaces_interactive(
+            snapshot.section,
+            snapshot.drag_mode,
+            snapshot.overview_mode,
+        );
+        let visible = native_surfaces_visible(snapshot.section, snapshot.drag_mode);
         self.current_portal = Some(snapshot.portal.clone());
         self.current_workspace = Some(snapshot.current_workspace.clone());
+        sync_native_surface_scene(
+            &self.root,
+            &self.native_surface_viewport,
+            &self.native_surface_scene,
+            &snapshot.portal,
+            &snapshot.current_workspace,
+            visible,
+            interactive,
+        );
         if self.selected_theme_id != snapshot.settings.selected_theme_id {
             self.selected_theme_id = snapshot.settings.selected_theme_id.clone();
             update_native_surface_css(&self.native_surface_provider, &self.selected_theme_id);
@@ -695,6 +729,7 @@ impl TaskersHost {
         );
         let terminal_mutated = match self.sync_terminal_surfaces(
             &snapshot.portal,
+            &snapshot.current_workspace,
             &snapshot.terminal_catalog,
             &snapshot.settings.selected_theme_id,
             snapshot.revision,
@@ -799,8 +834,8 @@ impl TaskersHost {
 
         let terminal_surfaces = self.terminal_surfaces.drain().collect::<Vec<_>>();
         for (surface_id, surface) in terminal_surfaces {
-            surface.shell.detach(&self.root);
-            surface.attention_ring.detach(&self.root);
+            surface.shell.detach(&self.native_surface_scene);
+            surface.attention_ring.detach(&self.native_surface_scene);
             if bridge_was_running {
                 if let Some(host) = &self.ghostty_host {
                     host.destroy_surface(&surface.widget);
@@ -829,8 +864,8 @@ impl TaskersHost {
 
         let browser_surfaces = self.browser_surfaces.drain().collect::<Vec<_>>();
         for (surface_id, surface) in browser_surfaces {
-            surface.shell.detach(&self.root);
-            surface.attention_ring.detach(&self.root);
+            surface.shell.detach(&self.native_surface_scene);
+            surface.attention_ring.detach(&self.native_surface_scene);
             emit_diagnostic(
                 self.diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -1135,6 +1170,8 @@ impl TaskersHost {
                         rows,
                         width_px,
                         height_px,
+                        resize_count: surface.resize_count,
+                        last_resize_revision: surface.last_resize_revision,
                         has_selection,
                     },
                 })
@@ -1276,8 +1313,8 @@ impl TaskersHost {
 
     fn remove_browser_surface(&mut self, surface_id: SurfaceId, revision: u64, reason: &str) {
         if let Some(surface) = self.browser_surfaces.remove(&surface_id) {
-            surface.shell.detach(&self.root);
-            surface.attention_ring.detach(&self.root);
+            surface.shell.detach(&self.native_surface_scene);
+            surface.attention_ring.detach(&self.native_surface_scene);
             emit_diagnostic(
                 self.diagnostics.as_ref(),
                 DiagnosticRecord::new(DiagnosticCategory::SurfaceLifecycle, Some(revision), reason)
@@ -1293,7 +1330,11 @@ impl TaskersHost {
         visible: bool,
         resize_preview_active: bool,
     ) -> Result<()> {
-        let desired = browser_plans(&snapshot.portal);
+        let desired = scene_plans_for_kind(
+            &snapshot.portal,
+            &snapshot.current_workspace,
+            PaneKind::Browser,
+        );
         let desired_by_id = desired
             .into_iter()
             .map(|plan| (plan.surface_id, plan))
@@ -1343,7 +1384,7 @@ impl TaskersHost {
             );
             match self.browser_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
-                    &self.root,
+                    &self.native_surface_scene,
                     entry,
                     visible_plan,
                     &snapshot.settings.selected_theme_id,
@@ -1354,7 +1395,7 @@ impl TaskersHost {
                 None => {
                     let network_session = self.browser_network_session_for(entry.profile_mode);
                     let surface = BrowserSurface::new(
-                        &self.root,
+                        &self.native_surface_scene,
                         entry,
                         visible_plan,
                         &snapshot.settings.selected_theme_id,
@@ -1376,6 +1417,7 @@ impl TaskersHost {
     fn sync_terminal_surfaces(
         &mut self,
         portal: &SurfacePortalPlan,
+        workspace: &WorkspaceViewSnapshot,
         catalog: &[TerminalSurfaceCatalogEntry],
         theme_id: &str,
         revision: u64,
@@ -1383,7 +1425,7 @@ impl TaskersHost {
         visible: bool,
         resize_preview_active: bool,
     ) -> Result<bool> {
-        let desired = terminal_plans(portal);
+        let desired = scene_plans_for_kind(portal, workspace, PaneKind::Terminal);
         let desired_by_id = desired
             .into_iter()
             .map(|plan| (plan.surface_id, plan))
@@ -1400,6 +1442,7 @@ impl TaskersHost {
             .copied()
             .filter(|surface_id| !desired_ids.contains(surface_id))
             .collect::<Vec<_>>();
+        let removed_any = !stale.is_empty();
 
         let host = self.ghostty_host.as_ref();
         let bridge_running = self.bridge_running();
@@ -1407,8 +1450,8 @@ impl TaskersHost {
 
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
-                surface.shell.detach(&self.root);
-                surface.attention_ring.detach(&self.root);
+                surface.shell.detach(&self.native_surface_scene);
+                surface.attention_ring.detach(&self.native_surface_scene);
                 if bridge_running {
                     if let Some(host) = host {
                         host.destroy_surface(&surface.widget);
@@ -1448,7 +1491,7 @@ impl TaskersHost {
             );
             match self.terminal_surfaces.get_mut(&entry.surface_id) {
                 Some(surface) => surface.sync(
-                    &self.root,
+                    &self.native_surface_scene,
                     entry,
                     visible_plan,
                     theme_id,
@@ -1475,8 +1518,52 @@ impl TaskersHost {
                     let Some(host) = host else {
                         continue;
                     };
+                    let bridge_surface_count = host.surface_count();
+                    let live_surface_count = self.terminal_surfaces.len();
+                    match terminal_surface_create_decision(
+                        removed_any,
+                        live_surface_count,
+                        bridge_surface_count,
+                    ) {
+                        TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces => {
+                            self.pending_terminal_create_retry = true;
+                            emit_diagnostic(
+                                self.diagnostics.as_ref(),
+                                DiagnosticRecord::new(
+                                    DiagnosticCategory::Bridge,
+                                    Some(revision),
+                                    format!(
+                                        "deferring terminal surface create until ghostty bridge quiesces bridge_surface_count={} live_surface_count={}",
+                                        bridge_surface_count, live_surface_count
+                                    ),
+                                )
+                                .with_pane(entry.pane_id)
+                                .with_surface(entry.surface_id),
+                            );
+                            continue;
+                        }
+                        TerminalSurfaceCreateDecision::SkipAtSurfaceBudget => {
+                            emit_diagnostic(
+                                self.diagnostics.as_ref(),
+                                DiagnosticRecord::new(
+                                    DiagnosticCategory::Bridge,
+                                    Some(revision),
+                                    format!(
+                                        "skipping terminal surface create because embedded ghostty surface budget reached surface_limit={} bridge_surface_count={} live_surface_count={}",
+                                        MAX_CONCURRENT_GHOSTTY_SURFACES,
+                                        bridge_surface_count,
+                                        live_surface_count
+                                    ),
+                                )
+                                .with_pane(entry.pane_id)
+                                .with_surface(entry.surface_id),
+                            );
+                            continue;
+                        }
+                        TerminalSurfaceCreateDecision::CreateNow => {}
+                    }
                     let surface = TerminalSurface::new(
-                        &self.root,
+                        &self.native_surface_scene,
                         entry,
                         visible_plan,
                         theme_id,
@@ -1495,6 +1582,48 @@ impl TaskersHost {
 
         Ok(terminal_mutated)
     }
+}
+
+fn build_native_surface_scene_layers() -> (Fixed, Fixed) {
+    let native_surface_viewport = Fixed::new();
+    native_surface_viewport.set_overflow(Overflow::Hidden);
+    native_surface_viewport.set_hexpand(false);
+    native_surface_viewport.set_vexpand(false);
+    native_surface_viewport.set_halign(Align::Start);
+    native_surface_viewport.set_valign(Align::Start);
+    native_surface_viewport.set_focusable(false);
+    native_surface_viewport.set_can_target(false);
+
+    let native_surface_scene = Fixed::new();
+    native_surface_scene.set_hexpand(false);
+    native_surface_scene.set_vexpand(false);
+    native_surface_scene.set_halign(Align::Start);
+    native_surface_scene.set_valign(Align::Start);
+    native_surface_scene.set_focusable(false);
+    native_surface_scene.set_can_target(false);
+
+    (native_surface_viewport, native_surface_scene)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalSurfaceCreateDecision {
+    CreateNow,
+    DeferUntilBridgeQuiesces,
+    SkipAtSurfaceBudget,
+}
+
+fn terminal_surface_create_decision(
+    removed_any: bool,
+    live_surface_count: usize,
+    bridge_surface_count: usize,
+) -> TerminalSurfaceCreateDecision {
+    if removed_any || bridge_surface_count > live_surface_count {
+        return TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces;
+    }
+    if live_surface_count >= MAX_CONCURRENT_GHOSTTY_SURFACES {
+        return TerminalSurfaceCreateDecision::SkipAtSurfaceBudget;
+    }
+    TerminalSurfaceCreateDecision::CreateNow
 }
 
 impl ResizeHandleOverlay {
@@ -1636,6 +1765,7 @@ struct BrowserSurface {
     workspace_id: Rc<Cell<WorkspaceId>>,
     pane_id: Rc<Cell<PaneId>>,
     webview: WebView,
+    focus_state: Rc<Cell<bool>>,
     network_session: NetworkSession,
     profile_mode: BrowserProfileMode,
     url: String,
@@ -1651,7 +1781,7 @@ struct BrowserSurface {
 impl BrowserSurface {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        overlay: &Overlay,
+        scene: &Fixed,
         entry: &BrowserSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
@@ -1667,6 +1797,7 @@ impl BrowserSurface {
             .enable_back_forward_navigation_gestures(true)
             .enable_developer_extras(true)
             .build();
+        apply_taskers_webkit_graphics_fallback(&settings);
         let webview = WebView::builder()
             .hexpand(true)
             .vexpand(true)
@@ -1683,31 +1814,40 @@ impl BrowserSurface {
             surface_id: entry.surface_id,
             url: url.clone(),
         });
-        let shell = NativeSurfaceShell::new(shell_class, visible_plan.is_some() && interactive);
+        let shell = NativeSurfaceShell::new(
+            webview.upcast_ref(),
+            shell_class,
+            visible_plan.is_some() && interactive,
+        );
         let attention_ring = AttentionRingOverlay::new();
-        shell.mount_child(webview.upcast_ref());
         match visible_plan {
             Some(plan) => {
-                shell.show_at(overlay, plan.frame);
-                attention_ring.show_at(overlay, plan.pane_frame, plan.notification_ring, theme_id);
+                shell.show_at(scene, plan.frame);
+                attention_ring.show_at(scene, plan.pane_frame, plan.notification_ring, theme_id);
             }
             None => {
-                shell.park_hidden(overlay);
-                attention_ring.park_hidden(overlay);
+                shell.park_hidden(scene);
+                attention_ring.park_hidden(scene);
             }
         }
         let devtools_open = Rc::new(Cell::new(false));
         let workspace_id = Rc::new(Cell::new(entry.workspace_id));
         let pane_id = Rc::new(Cell::new(entry.pane_id));
+        let focus_state = Rc::new(Cell::new(false));
         let last_load_state = Rc::new(Cell::new(None));
 
         let focus_pane_id = pane_id.clone();
         let surface_id = entry.surface_id;
         let focus_sink = event_sink.clone();
         let focus_diagnostics = diagnostics.clone();
+        let focus_state_for_enter = focus_state.clone();
         let focus = EventControllerFocus::new();
         focus.connect_enter(move |_| {
             let pane_id = focus_pane_id.get();
+            focus_state_for_enter.set(true);
+            // Rely on the native widget's own focus transition instead of a
+            // synthetic click handler so terminal/browser content keeps the
+            // full mouse sequence for itself.
             emit_diagnostic(
                 focus_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -1720,27 +1860,11 @@ impl BrowserSurface {
             );
             (focus_sink)(HostEvent::PaneFocused { pane_id });
         });
-        webview.add_controller(focus);
-
-        let click_pane_id = pane_id.clone();
-        let click_sink = event_sink.clone();
-        let click_diagnostics = diagnostics.clone();
-        let click = GestureClick::new();
-        click.connect_pressed(move |_, _, _, _| {
-            let pane_id = click_pane_id.get();
-            emit_diagnostic(
-                click_diagnostics.as_ref(),
-                DiagnosticRecord::new(
-                    DiagnosticCategory::HostEvent,
-                    None,
-                    "browser click focus event received",
-                )
-                .with_pane(pane_id)
-                .with_surface(surface_id),
-            );
-            (click_sink)(HostEvent::PaneFocused { pane_id });
+        let focus_state_for_leave = focus_state.clone();
+        focus.connect_leave(move |_| {
+            focus_state_for_leave.set(false);
         });
-        webview.add_controller(click);
+        webview.add_controller(focus);
 
         let surface_id = entry.surface_id;
         let title_sink = event_sink.clone();
@@ -1862,6 +1986,7 @@ impl BrowserSurface {
             workspace_id,
             pane_id,
             webview,
+            focus_state,
             network_session,
             profile_mode: entry.profile_mode,
             url,
@@ -1878,7 +2003,7 @@ impl BrowserSurface {
     #[allow(clippy::too_many_arguments)]
     fn sync(
         &mut self,
-        overlay: &Overlay,
+        scene: &Fixed,
         entry: &BrowserSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
@@ -1895,17 +2020,17 @@ impl BrowserSurface {
         self.webview.set_can_target(effective_interactive);
         match visible_plan {
             Some(plan) => {
-                self.shell.show_at(overlay, plan.frame);
+                self.shell.show_at(scene, plan.frame);
                 self.attention_ring.show_at(
-                    overlay,
+                    scene,
                     plan.pane_frame,
                     plan.notification_ring,
                     theme_id,
                 );
             }
             None => {
-                self.shell.park_hidden(overlay);
-                self.attention_ring.park_hidden(overlay);
+                self.shell.park_hidden(scene);
+                self.attention_ring.park_hidden(scene);
             }
         }
 
@@ -1918,6 +2043,9 @@ impl BrowserSurface {
             && (!self.active || !self.interactive || !self.visible)
         {
             self.webview.grab_focus();
+        }
+        if !visible || !effective_interactive {
+            self.focus_state.set(false);
         }
         self.active = visible_plan.is_some_and(|plan| plan.active);
         self.interactive = effective_interactive;
@@ -2003,6 +2131,12 @@ impl BrowserSurface {
     }
 }
 
+fn apply_taskers_webkit_graphics_fallback(settings: &WebKitSettings) {
+    if std::env::var_os(WEBKIT_DISABLE_DMABUF_RENDERER_ENV).is_some_and(|value| value != "0") {
+        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+    }
+}
+
 struct TerminalSurface {
     surface_id: SurfaceId,
     workspace_id: Rc<Cell<WorkspaceId>>,
@@ -2017,13 +2151,15 @@ struct TerminalSurface {
     visible: bool,
     width_px: i32,
     height_px: i32,
+    resize_count: u64,
+    last_resize_revision: Option<u64>,
     resize_frozen: bool,
 }
 
 impl TerminalSurface {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        overlay: &Overlay,
+        scene: &Fixed,
         entry: &TerminalSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
@@ -2050,9 +2186,8 @@ impl TerminalSurface {
         widget.add_css_class("terminal-output");
         let effective_interactive = visible_plan.is_some() && interactive;
         widget.set_can_target(effective_interactive);
-        let shell = NativeSurfaceShell::new(shell_class, effective_interactive);
+        let shell = NativeSurfaceShell::new(&widget, shell_class, effective_interactive);
         let attention_ring = AttentionRingOverlay::new();
-        shell.mount_child(&widget);
         let initial_width_px = visible_plan.map_or(0, |plan| plan.frame.width);
         let initial_height_px = visible_plan.map_or(0, |plan| plan.frame.height);
         let mut resize_frozen = false;
@@ -2062,12 +2197,12 @@ impl TerminalSurface {
         }
         match visible_plan {
             Some(plan) => {
-                shell.show_at(overlay, plan.frame);
-                attention_ring.show_at(overlay, plan.pane_frame, plan.notification_ring, theme_id);
+                shell.show_at(scene, plan.frame);
+                attention_ring.show_at(scene, plan.pane_frame, plan.notification_ring, theme_id);
             }
             None => {
-                shell.park_hidden(overlay);
-                attention_ring.park_hidden(overlay);
+                shell.park_hidden(scene);
+                attention_ring.park_hidden(scene);
             }
         }
 
@@ -2113,6 +2248,8 @@ impl TerminalSurface {
             visible: visible_plan.is_some(),
             width_px: initial_width_px,
             height_px: initial_height_px,
+            resize_count: 0,
+            last_resize_revision: None,
             resize_frozen,
         })
     }
@@ -2120,7 +2257,7 @@ impl TerminalSurface {
     #[allow(clippy::too_many_arguments)]
     fn sync(
         &mut self,
-        overlay: &Overlay,
+        scene: &Fixed,
         entry: &TerminalSurfaceCatalogEntry,
         visible_plan: Option<&PortalSurfacePlan>,
         theme_id: &str,
@@ -2148,17 +2285,17 @@ impl TerminalSurface {
         }
         match visible_plan {
             Some(plan) => {
-                self.shell.show_at(overlay, plan.frame);
+                self.shell.show_at(scene, plan.frame);
                 self.attention_ring.show_at(
-                    overlay,
+                    scene,
                     plan.pane_frame,
                     plan.notification_ring,
                     theme_id,
                 );
             }
             None => {
-                self.shell.park_hidden(overlay);
-                self.attention_ring.park_hidden(overlay);
+                self.shell.park_hidden(scene);
+                self.attention_ring.park_hidden(scene);
             }
         }
         if visible_plan.is_some_and(|plan| plan.active)
@@ -2174,9 +2311,15 @@ impl TerminalSurface {
         self.active = visible_plan.is_some_and(|plan| plan.active);
         self.interactive = effective_interactive;
         self.visible = visible;
+        let next_width_px = visible_plan.map_or(0, |plan| plan.frame.width);
+        let next_height_px = visible_plan.map_or(0, |plan| plan.frame.height);
         if !resize_preview_active {
-            self.width_px = visible_plan.map_or(0, |plan| plan.frame.width);
-            self.height_px = visible_plan.map_or(0, |plan| plan.frame.height);
+            if next_width_px != self.width_px || next_height_px != self.height_px {
+                self.resize_count = self.resize_count.saturating_add(1);
+                self.last_resize_revision = Some(revision);
+            }
+            self.width_px = next_width_px;
+            self.height_px = next_height_px;
         }
 
         emit_diagnostic(
@@ -2215,54 +2358,45 @@ fn thaw_terminal_widget(widget: &Widget) {
 }
 
 struct NativeSurfaceShell {
-    root: GtkBox,
+    widget: Widget,
 }
 
 impl NativeSurfaceShell {
-    fn new(kind_class: &'static str, interactive: bool) -> Self {
-        let root = GtkBox::new(Orientation::Vertical, 0);
-        root.set_hexpand(false);
-        root.set_vexpand(false);
-        root.set_halign(Align::Start);
-        root.set_valign(Align::Start);
-        root.set_overflow(Overflow::Hidden);
-        root.set_focusable(false);
-        root.set_can_target(interactive);
-        root.add_css_class("native-surface-host");
-        root.add_css_class(kind_class);
-        Self { root }
-    }
-
-    fn mount_child(&self, child: &Widget) {
-        child.set_hexpand(true);
-        child.set_vexpand(true);
-        child.set_halign(Align::Fill);
-        child.set_valign(Align::Fill);
-        if child.parent().is_none() {
-            self.root.append(child);
+    fn new(widget: &Widget, kind_class: &'static str, interactive: bool) -> Self {
+        widget.set_hexpand(false);
+        widget.set_vexpand(false);
+        widget.set_halign(Align::Start);
+        widget.set_valign(Align::Start);
+        widget.set_overflow(Overflow::Hidden);
+        widget.set_can_target(native_surface_shell_can_target(interactive));
+        widget.add_css_class("native-surface-host");
+        widget.add_css_class(kind_class);
+        Self {
+            widget: widget.clone(),
         }
     }
 
-    fn position(&self, overlay: &Overlay, frame: taskers_core::Frame) {
-        position_widget(overlay, self.root.upcast_ref(), frame);
+    fn position(&self, scene: &Fixed, frame: taskers_core::Frame) {
+        position_widget_in_fixed(scene, &self.widget, frame);
     }
 
-    fn show_at(&self, overlay: &Overlay, frame: taskers_core::Frame) {
-        self.root.set_opacity(1.0);
-        self.position(overlay, frame);
+    fn show_at(&self, scene: &Fixed, frame: taskers_core::Frame) {
+        self.widget.set_opacity(1.0);
+        self.position(scene, frame);
     }
 
-    fn park_hidden(&self, overlay: &Overlay) {
-        self.root.set_opacity(0.0);
-        self.position(overlay, self.hidden_frame());
+    fn park_hidden(&self, scene: &Fixed) {
+        self.widget.set_opacity(0.0);
+        self.position(scene, self.hidden_frame());
     }
 
     fn set_interactive(&self, interactive: bool) {
-        self.root.set_can_target(interactive);
+        self.widget
+            .set_can_target(native_surface_shell_can_target(interactive));
     }
 
-    fn detach(&self, overlay: &Overlay) {
-        detach_from_overlay(overlay, self.root.upcast_ref());
+    fn detach(&self, scene: &Fixed) {
+        detach_from_fixed(scene, &self.widget);
     }
 
     fn hidden_frame(&self) -> taskers_core::Frame {
@@ -2338,7 +2472,7 @@ impl AttentionRingOverlay {
 
     fn show_at(
         &self,
-        overlay: &Overlay,
+        scene: &Fixed,
         frame: taskers_core::Frame,
         state: Option<taskers_core::AttentionRingState>,
         theme_id: &str,
@@ -2348,21 +2482,21 @@ impl AttentionRingOverlay {
         self.widget.set_visible(state.is_some());
         if state.is_some() {
             self.widget.set_opacity(1.0);
-            position_widget(overlay, self.widget.upcast_ref(), frame);
+            position_widget_in_fixed(scene, self.widget.upcast_ref(), frame);
         } else {
-            self.park_hidden(overlay);
+            self.park_hidden(scene);
         }
         self.widget.queue_draw();
     }
 
-    fn park_hidden(&self, overlay: &Overlay) {
+    fn park_hidden(&self, scene: &Fixed) {
         self.widget.set_visible(false);
         self.widget.set_opacity(0.0);
-        position_widget(overlay, self.widget.upcast_ref(), hidden_frame());
+        position_widget_in_fixed(scene, self.widget.upcast_ref(), hidden_frame());
     }
 
-    fn detach(&self, overlay: &Overlay) {
-        detach_from_overlay(overlay, self.widget.upcast_ref());
+    fn detach(&self, scene: &Fixed) {
+        detach_from_fixed(scene, self.widget.upcast_ref());
     }
 }
 
@@ -2531,6 +2665,29 @@ fn preview_for_drag(
                 widths,
             },
         ),
+        taskers_core::ResizeHandleTarget::WorkspaceColumnOuterEdge {
+            workspace_id,
+            column_widths,
+            column_index,
+            edge,
+        } => {
+            let delta = match edge {
+                taskers_core::WorkspaceOuterEdge::Left => -(dx.round() as i32),
+                taskers_core::WorkspaceOuterEdge::Right => dx.round() as i32,
+            };
+            resize_track_push(
+                column_widths,
+                *column_index,
+                delta,
+                MIN_WORKSPACE_WINDOW_WIDTH,
+            )
+            .map(
+                |widths| taskers_core::ResizePreview::WorkspaceColumnWidths {
+                    workspace_id: *workspace_id,
+                    widths,
+                },
+            )
+        }
         taskers_core::ResizeHandleTarget::WorkspaceWindowBottomEdge {
             workspace_id,
             window_heights,
@@ -2694,7 +2851,6 @@ fn split_ratio_preview(
 }
 
 fn native_surface_css(theme_id: &str) -> String {
-    const DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX: i32 = 0;
     format!(
         r#"
 .native-surface-host,
@@ -2709,8 +2865,10 @@ fn native_surface_css(theme_id: &str) -> String {
 .native-surface-terminal-widget,
 .terminal-output {{
   background: {};
-  padding-left: {}px;
-  padding-right: {}px;
+  padding-left: 0px;
+  padding-right: 0px;
+  padding-top: 0px;
+  padding-bottom: 0px;
 }}
 
 .native-surface-browser,
@@ -2732,10 +2890,8 @@ fn native_surface_css(theme_id: &str) -> String {
 .resize-handle-active {{
   background: rgba(255, 255, 255, 0.16);
 }}
- "#,
-        terminal_surface_background(theme_id),
-        DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX,
-        DEFAULT_TERMINAL_HORIZONTAL_PADDING_PX
+"#,
+        terminal_surface_background(theme_id)
     )
 }
 
@@ -2759,26 +2915,6 @@ fn connect_ghostty_widget(
 ) {
     let _ = host;
 
-    let click_pane_id = pane_id.clone();
-    let focus_sink = event_sink.clone();
-    let focus_diagnostics = diagnostics.clone();
-    let click = GestureClick::new();
-    click.connect_pressed(move |_, _, _, _| {
-        let pane_id = click_pane_id.get();
-        emit_diagnostic(
-            focus_diagnostics.as_ref(),
-            DiagnosticRecord::new(
-                DiagnosticCategory::HostEvent,
-                None,
-                "terminal click focus event received",
-            )
-            .with_pane(pane_id)
-            .with_surface(surface_id),
-        );
-        (focus_sink)(HostEvent::PaneFocused { pane_id });
-    });
-    widget.add_controller(click);
-
     let focus_pane_id = pane_id.clone();
     let focus_sink = event_sink.clone();
     let focus_diagnostics = diagnostics.clone();
@@ -2787,6 +2923,8 @@ fn connect_ghostty_widget(
     focus.connect_enter(move |_| {
         let pane_id = focus_pane_id.get();
         focus_enter_state.set(true);
+        // Native terminal clicks should focus the widget directly; we only
+        // mirror that focus change into Taskers state here.
         emit_diagnostic(
             focus_diagnostics.as_ref(),
             DiagnosticRecord::new(
@@ -3006,22 +3144,124 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
     }
 }
 
+fn sync_native_surface_scene(
+    root: &Overlay,
+    viewport: &Fixed,
+    scene: &Fixed,
+    portal: &SurfacePortalPlan,
+    workspace: &WorkspaceViewSnapshot,
+    visible: bool,
+    interactive: bool,
+) {
+    viewport.set_visible(visible);
+    viewport.set_can_target(interactive);
+    scene.set_can_target(interactive);
+    if !visible {
+        return;
+    }
+    position_widget(root, viewport.upcast_ref(), portal.content);
+    position_widget_in_fixed(
+        viewport,
+        scene.upcast_ref(),
+        taskers_core::Frame::new(
+            workspace.canvas_offset_x - workspace.viewport_x,
+            workspace.canvas_offset_y - workspace.viewport_y,
+            workspace.canvas_width,
+            workspace.canvas_height,
+        ),
+    );
+}
+
+fn scene_plans_for_kind(
+    portal: &SurfacePortalPlan,
+    workspace: &WorkspaceViewSnapshot,
+    kind: PaneKind,
+) -> Vec<PortalSurfacePlan> {
+    portal
+        .panes
+        .iter()
+        .filter(|plan| {
+            matches!(
+                (&plan.mount, &kind),
+                (SurfaceMountSpec::Browser(_), PaneKind::Browser)
+                    | (SurfaceMountSpec::Terminal(_), PaneKind::Terminal)
+            )
+        })
+        .map(|plan| plan_in_scene_coordinates(plan, workspace))
+        .collect()
+}
+
+fn plan_in_scene_coordinates(
+    plan: &PortalSurfacePlan,
+    workspace: &WorkspaceViewSnapshot,
+) -> PortalSurfacePlan {
+    PortalSurfacePlan {
+        frame: display_frame_to_scene(plan.frame, workspace),
+        pane_frame: display_frame_to_scene(plan.pane_frame, workspace),
+        ..plan.clone()
+    }
+}
+
+fn display_frame_to_scene(
+    frame: taskers_core::Frame,
+    workspace: &WorkspaceViewSnapshot,
+) -> taskers_core::Frame {
+    taskers_core::Frame::new(
+        frame.x - workspace.viewport_origin_x - workspace.canvas_offset_x + workspace.viewport_x,
+        frame.y - workspace.viewport_origin_y - workspace.canvas_offset_y + workspace.viewport_y,
+        frame.width,
+        frame.height,
+    )
+}
+
 fn position_widget(overlay: &Overlay, widget: &Widget, frame: taskers_core::Frame) {
     let clamped_margin_start = frame.x.clamp(0, i32::from(i16::MAX));
     let clamped_margin_top = frame.y.clamp(0, i32::from(i16::MAX));
-    widget.set_size_request(frame.width.max(1), frame.height.max(1));
+    let width = frame.width.max(1);
+    let height = frame.height.max(1);
+    let needs_resize = widget.width_request() != width || widget.height_request() != height;
+    let needs_reposition =
+        widget.margin_start() != clamped_margin_start || widget.margin_top() != clamped_margin_top;
+    if needs_resize {
+        widget.set_size_request(width, height);
+    }
     widget.set_hexpand(false);
     widget.set_vexpand(false);
     widget.set_halign(Align::Start);
     widget.set_valign(Align::Start);
-    widget.set_margin_start(clamped_margin_start);
-    widget.set_margin_top(clamped_margin_top);
+    if needs_reposition {
+        widget.set_margin_start(clamped_margin_start);
+        widget.set_margin_top(clamped_margin_top);
+    }
     if widget.parent().is_some() {
-        widget.queue_allocate();
+        if needs_resize || needs_reposition {
+            widget.queue_allocate();
+        }
     } else {
         overlay.add_overlay(widget);
         overlay.set_measure_overlay(widget, false);
         overlay.set_clip_overlay(widget, true);
+    }
+}
+
+fn position_widget_in_fixed(fixed: &Fixed, widget: &Widget, frame: taskers_core::Frame) {
+    let width = frame.width.max(1);
+    let height = frame.height.max(1);
+    let needs_resize = widget.width_request() != width || widget.height_request() != height;
+    if needs_resize {
+        widget.set_size_request(width, height);
+    }
+    widget.set_hexpand(false);
+    widget.set_vexpand(false);
+    widget.set_halign(Align::Start);
+    widget.set_valign(Align::Start);
+    if widget.parent().is_some() {
+        fixed.move_(widget, frame.x as f64, frame.y as f64);
+        if needs_resize {
+            widget.queue_allocate();
+        }
+    } else {
+        fixed.put(widget, frame.x as f64, frame.y as f64);
     }
 }
 
@@ -3031,12 +3271,26 @@ fn detach_from_overlay(overlay: &Overlay, widget: &Widget) {
     }
 }
 
-fn native_surfaces_interactive(drag_mode: ShellDragMode, overview_mode: bool) -> bool {
-    drag_mode == ShellDragMode::None && !overview_mode
+fn detach_from_fixed(fixed: &Fixed, widget: &Widget) {
+    if widget.parent().is_some() {
+        fixed.remove(widget);
+    }
 }
 
-fn native_surfaces_visible(drag_mode: ShellDragMode) -> bool {
-    drag_mode == ShellDragMode::None
+fn native_surfaces_interactive(
+    section: ShellSection,
+    drag_mode: ShellDragMode,
+    overview_mode: bool,
+) -> bool {
+    matches!(section, ShellSection::Workspace) && drag_mode == ShellDragMode::None && !overview_mode
+}
+
+fn native_surface_shell_can_target(interactive: bool) -> bool {
+    interactive
+}
+
+fn native_surfaces_visible(section: ShellSection, drag_mode: ShellDragMode) -> bool {
+    matches!(section, ShellSection::Workspace) && drag_mode == ShellDragMode::None
 }
 
 fn ensure_visible_workspace(
@@ -3308,35 +3562,38 @@ fn hidden_frame() -> taskers_core::Frame {
     taskers_core::Frame::new(100_000, 100_000, 1, 1)
 }
 
-fn native_surface_visible_plan<'a>(
-    visible_plan: Option<&'a PortalSurfacePlan>,
-    resize_preview_active: bool,
-) -> Option<&'a PortalSurfacePlan> {
-    if resize_preview_active {
-        None
-    } else {
-        visible_plan
-    }
+fn native_surface_visible_plan(
+    visible_plan: Option<&PortalSurfacePlan>,
+    _resize_preview_active: bool,
+) -> Option<&PortalSurfacePlan> {
+    visible_plan
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    use gtk::prelude::WidgetExt;
 
     use super::{
-        browser_plans, clamp_frame_to_widget, host_attention_palette, native_surface_classes,
-        native_surface_css, native_surface_visible_plan, native_surfaces_interactive,
-        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
-        resolve_screenshot_output_path, terminal_plans, trim_terminal_tail, with_capture_retries,
+        HardwareAccelerationPolicy, TerminalSurfaceCreateDecision, WebKitSettings, browser_plans,
+        build_native_surface_scene_layers, clamp_frame_to_widget, host_attention_palette,
+        native_surface_classes, native_surface_css, native_surface_shell_can_target,
+        native_surface_visible_plan, native_surfaces_interactive, native_surfaces_visible,
+        preview_for_drag, redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
+        terminal_plans, terminal_surface_create_decision, trim_terminal_tail, with_capture_retries,
         workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
         AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
-        PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode, SplitAxis,
-        SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId, WorkspaceWindowId,
+        PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode,
+        ShellSection, SplitAxis, SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId,
+        WorkspaceOuterEdge, WorkspaceWindowId,
     };
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn partitions_portal_plans_by_surface_kind() {
@@ -3362,28 +3619,73 @@ mod tests {
 
     #[test]
     fn native_surfaces_disable_pointer_targeting_during_shell_drags() {
-        assert!(native_surfaces_interactive(ShellDragMode::None, false));
-        assert!(!native_surfaces_interactive(ShellDragMode::None, true));
-        assert!(!native_surfaces_interactive(ShellDragMode::Window, false));
+        assert!(native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::None,
+            false
+        ));
         assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::None,
+            true
+        ));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::Window,
+            false
+        ));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
             ShellDragMode::WindowTab,
             false
         ));
-        assert!(!native_surfaces_interactive(ShellDragMode::PaneTab, false));
-        assert!(!native_surfaces_interactive(ShellDragMode::Surface, false));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::PaneTab,
+            false
+        ));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Workspace,
+            ShellDragMode::Surface,
+            false
+        ));
+        assert!(!native_surfaces_interactive(
+            ShellSection::Settings,
+            ShellDragMode::None,
+            false
+        ));
     }
 
     #[test]
     fn native_surfaces_hide_during_shell_drags() {
-        assert!(native_surfaces_visible(ShellDragMode::None));
-        assert!(!native_surfaces_visible(ShellDragMode::Window));
-        assert!(!native_surfaces_visible(ShellDragMode::WindowTab));
-        assert!(!native_surfaces_visible(ShellDragMode::PaneTab));
-        assert!(!native_surfaces_visible(ShellDragMode::Surface));
+        assert!(native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::None
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::Window
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::WindowTab
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::PaneTab
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Workspace,
+            ShellDragMode::Surface
+        ));
+        assert!(!native_surfaces_visible(
+            ShellSection::Settings,
+            ShellDragMode::None
+        ));
     }
 
     #[test]
-    fn resize_preview_hides_native_surface_plans() {
+    fn resize_preview_keeps_native_surface_plans_available() {
         let plan = PortalSurfacePlan {
             pane_id: PaneId::new(),
             surface_id: SurfaceId::new(),
@@ -3405,7 +3707,10 @@ mod tests {
             native_surface_visible_plan(Some(&plan), false).map(|plan| plan.frame),
             Some(plan.frame)
         );
-        assert!(native_surface_visible_plan(Some(&plan), true).is_none());
+        assert_eq!(
+            native_surface_visible_plan(Some(&plan), true).map(|plan| plan.frame),
+            Some(plan.frame)
+        );
         assert!(native_surface_visible_plan(None, true).is_none());
     }
 
@@ -3422,6 +3727,22 @@ mod tests {
     }
 
     #[test]
+    fn native_surface_scene_layers_do_not_steal_shell_click_targets() {
+        let _ = gtk::init();
+        let (viewport, scene) = build_native_surface_scene_layers();
+        assert!(!viewport.can_target());
+        assert!(!scene.can_target());
+        assert!(!viewport.is_focusable());
+        assert!(!scene.is_focusable());
+    }
+
+    #[test]
+    fn native_surface_shell_becomes_targetable_only_when_interactive() {
+        assert!(native_surface_shell_can_target(true));
+        assert!(!native_surface_shell_can_target(false));
+    }
+
+    #[test]
     fn native_surface_css_tracks_selected_theme_terminal_background() {
         let dark = native_surface_css("dark");
         let gruvbox = native_surface_css("gruvbox-dark");
@@ -3431,7 +3752,58 @@ mod tests {
         assert!(dark.contains("background: #0f1117;"));
         assert!(dark.contains("padding-left: 0px;"));
         assert!(dark.contains("padding-right: 0px;"));
+        assert!(dark.contains("padding-top: 0px;"));
+        assert!(dark.contains("padding-bottom: 0px;"));
         assert!(gruvbox.contains("background: #282828;"));
+    }
+
+    #[test]
+    fn webkit_graphics_fallback_follows_dmabuf_env_flag() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
+        let settings = WebKitSettings::builder().build();
+
+        unsafe { std::env::remove_var(super::WEBKIT_DISABLE_DMABUF_RENDERER_ENV) };
+        super::apply_taskers_webkit_graphics_fallback(&settings);
+        assert_eq!(
+            settings.hardware_acceleration_policy(),
+            HardwareAccelerationPolicy::Always
+        );
+
+        unsafe { std::env::set_var(super::WEBKIT_DISABLE_DMABUF_RENDERER_ENV, "1") };
+        super::apply_taskers_webkit_graphics_fallback(&settings);
+        assert_eq!(
+            settings.hardware_acceleration_policy(),
+            HardwareAccelerationPolicy::Never
+        );
+        unsafe { std::env::remove_var(super::WEBKIT_DISABLE_DMABUF_RENDERER_ENV) };
+    }
+
+    #[test]
+    fn terminal_surface_creation_defers_until_bridge_quiesces() {
+        assert_eq!(
+            terminal_surface_create_decision(false, 1, 2),
+            TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces
+        );
+        assert_eq!(
+            terminal_surface_create_decision(true, 1, 1),
+            TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces
+        );
+    }
+
+    #[test]
+    fn terminal_surface_creation_skips_when_surface_budget_is_exhausted() {
+        assert_eq!(
+            terminal_surface_create_decision(false, super::MAX_CONCURRENT_GHOSTTY_SURFACES, 3),
+            TerminalSurfaceCreateDecision::SkipAtSurfaceBudget
+        );
+    }
+
+    #[test]
+    fn terminal_surface_creation_allows_safe_capacity() {
+        assert_eq!(
+            terminal_surface_create_decision(false, 2, 2),
+            TerminalSurfaceCreateDecision::CreateNow
+        );
     }
 
     #[test]
@@ -3626,6 +3998,52 @@ mod tests {
                     (workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 240),
                     (neighbor_column_id, MIN_WORKSPACE_WINDOW_WIDTH),
                 ],
+            }
+        );
+    }
+
+    #[test]
+    fn preview_for_drag_resizes_workspace_outer_edges() {
+        let workspace_id = taskers_shell_core::WorkspaceId::new();
+        let workspace_column_id = WorkspaceColumnId::new();
+
+        let right_preview = preview_for_drag(
+            &ResizeHandleTarget::WorkspaceColumnOuterEdge {
+                workspace_id,
+                column_widths: vec![(workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH)],
+                column_index: 0,
+                edge: WorkspaceOuterEdge::Right,
+            },
+            2,
+            180.0,
+            0.0,
+        )
+        .expect("right outer edge preview");
+        assert_eq!(
+            right_preview,
+            ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: vec![(workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 180)],
+            }
+        );
+
+        let left_preview = preview_for_drag(
+            &ResizeHandleTarget::WorkspaceColumnOuterEdge {
+                workspace_id,
+                column_widths: vec![(workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH + 180)],
+                column_index: 0,
+                edge: WorkspaceOuterEdge::Left,
+            },
+            2,
+            180.0,
+            0.0,
+        )
+        .expect("left outer edge preview");
+        assert_eq!(
+            left_preview,
+            ResizePreview::WorkspaceColumnWidths {
+                workspace_id,
+                widths: vec![(workspace_column_id, MIN_WORKSPACE_WINDOW_WIDTH)],
             }
         );
     }

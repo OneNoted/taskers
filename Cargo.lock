@@ -2528,6 +2528,7 @@ name = "taskers-shell"
 version = "0.7.0"
 dependencies = [
  "dioxus",
+ "dioxus-document",
  "taskers-shell-core",
 ]
 

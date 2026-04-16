@@ -365,12 +365,36 @@ impl InMemoryController {
                 workspace_id,
                 pane_id,
             } => {
+                let before = model.workspaces.get(&workspace_id).map(|workspace| {
+                    (
+                        workspace.active_pane,
+                        workspace
+                            .notifications
+                            .iter()
+                            .filter(|notification| {
+                                notification.pane_id == pane_id && notification.unread()
+                            })
+                            .count(),
+                    )
+                });
                 model.focus_pane(workspace_id, pane_id)?;
+                let after = model.workspaces.get(&workspace_id).map(|workspace| {
+                    (
+                        workspace.active_pane,
+                        workspace
+                            .notifications
+                            .iter()
+                            .filter(|notification| {
+                                notification.pane_id == pane_id && notification.unread()
+                            })
+                            .count(),
+                    )
+                });
                 (
                     ControlResponse::Ack {
                         message: "pane focused".into(),
                     },
-                    true,
+                    before != after,
                 )
             }
             ControlCommand::FocusPaneDirection {
@@ -411,6 +435,46 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::SetWindowSplitRatioExact {
+                workspace_id,
+                workspace_window_id,
+                path,
+                ratio,
+            } => {
+                model.set_window_split_ratio_exact(
+                    workspace_id,
+                    workspace_window_id,
+                    &path,
+                    ratio,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window split ratio updated".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::SetPaneTabSplitRatioExact {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path,
+                ratio,
+            } => {
+                model.set_pane_tab_split_ratio_exact(
+                    workspace_id,
+                    pane_container_id,
+                    pane_tab_id,
+                    &path,
+                    ratio,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "pane tab split ratio updated".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::SetWorkspaceColumnWidth {
                 workspace_id,
                 workspace_column_id,
@@ -435,6 +499,23 @@ impl InMemoryController {
                         message: "workspace window height updated".into(),
                     },
                     true,
+                )
+            }
+            ControlCommand::BootstrapWorkspaceTopLevelExtents {
+                workspace_id,
+                column_width,
+                window_height,
+            } => {
+                let bootstrapped = model.bootstrap_workspace_top_level_extents(
+                    workspace_id,
+                    column_width,
+                    window_height,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace top-level extents bootstrapped".into(),
+                    },
+                    bootstrapped,
                 )
             }
             ControlCommand::SetWindowSplitRatio {

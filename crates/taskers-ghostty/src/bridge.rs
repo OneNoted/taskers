@@ -113,12 +113,21 @@ impl GhosttyHost {
                         .map_err(|_| GhosttyError::InvalidString("env"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let embedded_terminal_appearance =
-                CString::new(match options.embedded_terminal_appearance {
-                    crate::backend::EmbeddedTerminalAppearance::Taskers => "taskers",
-                    crate::backend::EmbeddedTerminalAppearance::Ghostty => "ghostty",
+            let base_config_path = options
+                .base_config_path
+                .as_deref()
+                .map(|value| {
+                    CString::new(value).map_err(|_| GhosttyError::InvalidString("base_config_path"))
                 })
-                .map_err(|_| GhosttyError::InvalidString("embedded_terminal_appearance"))?;
+                .transpose()?;
+            let override_config_path = options
+                .override_config_path
+                .as_deref()
+                .map(|value| {
+                    CString::new(value)
+                        .map_err(|_| GhosttyError::InvalidString("override_config_path"))
+                })
+                .transpose()?;
             let env_entry_ptrs = env_entries
                 .iter()
                 .map(|value| value.as_ptr())
@@ -136,7 +145,12 @@ impl GhosttyHost {
                     env_entry_ptrs.as_ptr()
                 },
                 env_count: env_entry_ptrs.len(),
-                embedded_terminal_appearance: embedded_terminal_appearance.as_ptr(),
+                base_config_path: base_config_path
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                override_config_path: override_config_path
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
             };
 
             let raw = (bridge.host_new)(&host_options);
@@ -514,7 +528,8 @@ struct taskers_ghostty_host_options_s {
     command_argc: usize,
     env_entries: *const *const c_char,
     env_count: usize,
-    embedded_terminal_appearance: *const c_char,
+    base_config_path: *const c_char,
+    override_config_path: *const c_char,
 }
 
 #[cfg(taskers_ghostty_bridge)]

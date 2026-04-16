@@ -11,25 +11,14 @@ use crate::{
     SurfaceId, WindowId, WorkspaceColumnId, WorkspaceId, WorkspaceWindowId, WorkspaceWindowTabId,
 };
 
-pub const SESSION_SCHEMA_VERSION: u32 = 7;
+pub const SESSION_SCHEMA_VERSION: u32 = 8;
 pub const DEFAULT_WORKSPACE_WINDOW_WIDTH: i32 = 1280;
 pub const DEFAULT_WORKSPACE_WINDOW_HEIGHT: i32 = 860;
-pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 10;
+pub const DEFAULT_WORKSPACE_WINDOW_GAP: i32 = 0;
 pub const MIN_WORKSPACE_WINDOW_WIDTH: i32 = 480;
 pub const MIN_WORKSPACE_WINDOW_HEIGHT: i32 = 420;
 pub const KEYBOARD_RESIZE_STEP: i32 = 80;
 const WORKSPACE_LOG_RETENTION: usize = 200;
-
-fn split_top_level_extent(extent: i32, min_extent: i32) -> (i32, i32) {
-    let extent = extent.max(min_extent);
-    if extent < min_extent * 2 {
-        return (min_extent, min_extent);
-    }
-
-    let retained_extent = (extent + 1) / 2;
-    let new_extent = extent - retained_extent;
-    (retained_extent.max(min_extent), new_extent.max(min_extent))
-}
 
 fn insert_window_relative_to_active(
     workspace: &mut Workspace,
@@ -42,21 +31,7 @@ fn insert_window_relative_to_active(
 
     match direction {
         Direction::Left | Direction::Right => {
-            let source_width = workspace
-                .columns
-                .get(&source_column_id)
-                .map(|column| column.width)
-                .expect("active column should exist");
-            let (retained_width, new_width) =
-                split_top_level_extent(source_width, MIN_WORKSPACE_WINDOW_WIDTH);
-            let column = workspace
-                .columns
-                .get_mut(&source_column_id)
-                .expect("active column should exist");
-            column.width = retained_width;
-
-            let mut new_column = WorkspaceColumnRecord::new(workspace_window_id);
-            new_column.width = new_width;
+            let new_column = WorkspaceColumnRecord::new(workspace_window_id);
             let insert_index = if matches!(direction, Direction::Left) {
                 source_column_index
             } else {
@@ -65,24 +40,6 @@ fn insert_window_relative_to_active(
             workspace.insert_column_at(insert_index, new_column);
         }
         Direction::Up | Direction::Down => {
-            let source_window_height = workspace
-                .windows
-                .get(&workspace.active_window)
-                .map(|window| window.height)
-                .ok_or(DomainError::MissingWorkspaceWindow(workspace.active_window))?;
-            let (retained_height, new_height) =
-                split_top_level_extent(source_window_height, MIN_WORKSPACE_WINDOW_HEIGHT);
-            let source_window = workspace
-                .windows
-                .get_mut(&workspace.active_window)
-                .ok_or(DomainError::MissingWorkspaceWindow(workspace.active_window))?;
-            source_window.height = retained_height;
-            let new_window = workspace
-                .windows
-                .get_mut(&workspace_window_id)
-                .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
-            new_window.height = new_height;
-
             let column = workspace
                 .columns
                 .get_mut(&source_column_id)
@@ -1070,6 +1027,8 @@ pub struct Workspace {
     pub next_flash_token: u64,
     #[serde(default)]
     pub custom_color: Option<String>,
+    #[serde(default)]
+    pub top_level_extents_initialized: bool,
 }
 
 impl<'de> Deserialize<'de> for Workspace {
@@ -1116,6 +1075,7 @@ impl Workspace {
             surface_flash_tokens: BTreeMap::new(),
             next_flash_token: 0,
             custom_color: None,
+            top_level_extents_initialized: false,
         }
     }
 
@@ -1138,6 +1098,25 @@ impl Workspace {
 
     pub fn active_column_id(&self) -> Option<WorkspaceColumnId> {
         self.column_for_window(self.active_window)
+    }
+
+    fn should_bootstrap_top_level_extents(&self) -> Option<(WorkspaceColumnId, WorkspaceWindowId)> {
+        if self.top_level_extents_initialized || self.columns.len() != 1 || self.windows.len() != 1
+        {
+            return None;
+        }
+
+        let (column_id, column) = self.columns.first()?;
+        let (window_id, window) = self.windows.first()?;
+        if column.window_order.as_slice() != [*window_id] || self.active_window != *window_id {
+            None
+        } else if column.width == DEFAULT_WORKSPACE_WINDOW_WIDTH
+            && window.height == DEFAULT_WORKSPACE_WINDOW_HEIGHT
+        {
+            Some((*column_id, *window_id))
+        } else {
+            None
+        }
     }
 
     fn position_for_window(
@@ -2093,6 +2072,7 @@ impl AppModel {
         insert_window_relative_to_active(workspace, new_window_id, direction)?;
 
         workspace.sync_active_from_window(new_window_id);
+        workspace.top_level_extents_initialized = true;
 
         Ok(new_pane_id)
     }
@@ -2928,22 +2908,15 @@ impl AppModel {
                     }
                     workspace.insert_column_at(insert_index, source_column);
                 } else {
-                    remove_window_from_column(workspace, source_column_id, source_window_index)?;
-                    let target_width = workspace
+                    let source_column_width = workspace
                         .columns
-                        .get(&column_id)
+                        .get(&source_column_id)
                         .map(|column| column.width)
-                        .ok_or(DomainError::MissingWorkspaceColumn(column_id))?;
-                    let (retained_width, new_width) =
-                        split_top_level_extent(target_width, MIN_WORKSPACE_WINDOW_WIDTH);
-                    let target_column = workspace
-                        .columns
-                        .get_mut(&column_id)
-                        .ok_or(DomainError::MissingWorkspaceColumn(column_id))?;
-                    target_column.width = retained_width;
+                        .ok_or(DomainError::MissingWorkspaceColumn(source_column_id))?;
+                    remove_window_from_column(workspace, source_column_id, source_window_index)?;
 
                     let mut new_column = WorkspaceColumnRecord::new(workspace_window_id);
-                    new_column.width = new_width;
+                    new_column.width = source_column_width.max(MIN_WORKSPACE_WINDOW_WIDTH);
                     let insert_index = workspace
                         .columns
                         .get_index_of(&column_id)
@@ -2991,6 +2964,7 @@ impl AppModel {
 
         workspace.normalize();
         workspace.sync_active_from_window(workspace_window_id);
+        workspace.top_level_extents_initialized = true;
         Ok(())
     }
 
@@ -3036,6 +3010,7 @@ impl AppModel {
                 window.height = (window.height + amount).max(MIN_WORKSPACE_WINDOW_HEIGHT);
             }
         }
+        workspace.top_level_extents_initialized = true;
         Ok(())
     }
 
@@ -3078,6 +3053,7 @@ impl AppModel {
             .get_mut(&workspace_column_id)
             .ok_or(DomainError::MissingWorkspaceColumn(workspace_column_id))?;
         column.width = width.max(MIN_WORKSPACE_WINDOW_WIDTH);
+        workspace.top_level_extents_initialized = true;
         Ok(())
     }
 
@@ -3096,7 +3072,36 @@ impl AppModel {
             .get_mut(&workspace_window_id)
             .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
         window.height = height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
+        workspace.top_level_extents_initialized = true;
         Ok(())
+    }
+
+    pub fn bootstrap_workspace_top_level_extents(
+        &mut self,
+        workspace_id: WorkspaceId,
+        column_width: i32,
+        window_height: i32,
+    ) -> Result<bool, DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let Some((column_id, window_id)) = workspace.should_bootstrap_top_level_extents() else {
+            workspace.top_level_extents_initialized = true;
+            return Ok(false);
+        };
+
+        let Some(column) = workspace.columns.get_mut(&column_id) else {
+            return Err(DomainError::MissingWorkspaceColumn(column_id));
+        };
+        column.width = column_width.max(MIN_WORKSPACE_WINDOW_WIDTH);
+
+        let Some(window) = workspace.windows.get_mut(&window_id) else {
+            return Err(DomainError::MissingWorkspaceWindow(window_id));
+        };
+        window.height = window_height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
+        workspace.top_level_extents_initialized = true;
+        Ok(true)
     }
 
     pub fn set_window_split_ratio(
@@ -3121,6 +3126,28 @@ impl AppModel {
         Ok(())
     }
 
+    pub fn set_window_split_ratio_exact(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: &[bool],
+        ratio: u16,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let window = workspace
+            .windows
+            .get_mut(&workspace_window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        let layout = window
+            .active_layout_mut()
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        layout.set_ratio_at_path_exact(path, ratio);
+        Ok(())
+    }
+
     pub fn set_pane_tab_split_ratio(
         &mut self,
         workspace_id: WorkspaceId,
@@ -3139,6 +3166,27 @@ impl AppModel {
             .and_then(|pane_container| pane_container.tabs.get_mut(&pane_tab_id))
             .ok_or(DomainError::MissingPaneContainer(pane_container_id))?;
         pane_tab.layout.set_ratio_at_path(path, ratio);
+        Ok(())
+    }
+
+    pub fn set_pane_tab_split_ratio_exact(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: &[bool],
+        ratio: u16,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let pane_tab = workspace
+            .pane_containers
+            .get_mut(&pane_container_id)
+            .and_then(|pane_container| pane_container.tabs.get_mut(&pane_tab_id))
+            .ok_or(DomainError::MissingPaneContainer(pane_container_id))?;
+        pane_tab.layout.set_ratio_at_path_exact(path, ratio);
         Ok(())
     }
 
@@ -4857,6 +4905,8 @@ struct CurrentWorkspaceSerde {
     next_flash_token: u64,
     #[serde(default)]
     custom_color: Option<String>,
+    #[serde(default)]
+    top_level_extents_initialized: bool,
 }
 
 impl CurrentWorkspaceSerde {
@@ -4878,7 +4928,18 @@ impl CurrentWorkspaceSerde {
             surface_flash_tokens: self.surface_flash_tokens,
             next_flash_token: self.next_flash_token,
             custom_color: self.custom_color,
+            top_level_extents_initialized: self.top_level_extents_initialized,
         };
+        workspace.top_level_extents_initialized |= workspace.columns.len() > 1
+            || workspace.windows.len() > 1
+            || workspace
+                .columns
+                .values()
+                .any(|column| column.width != DEFAULT_WORKSPACE_WINDOW_WIDTH)
+            || workspace
+                .windows
+                .values()
+                .any(|window| window.height != DEFAULT_WORKSPACE_WINDOW_HEIGHT);
         workspace.normalize();
         workspace
     }
@@ -5229,6 +5290,31 @@ mod tests {
     }
 
     #[test]
+    fn bootstrapping_workspace_top_level_extents_initializes_first_window_once() {
+        let mut model = AppModel::new("Main");
+        let workspace_id = model.active_workspace_id().expect("workspace");
+
+        assert!(
+            model
+                .bootstrap_workspace_top_level_extents(workspace_id, 900, 700)
+                .expect("bootstrap")
+        );
+        assert!(
+            !model
+                .bootstrap_workspace_top_level_extents(workspace_id, 1200, 900)
+                .expect("bootstrap is one-time")
+        );
+
+        let workspace = model.workspaces.get(&workspace_id).expect("workspace");
+        let column = workspace.columns.values().next().expect("column");
+        let window = workspace.windows.values().next().expect("window");
+
+        assert_eq!(column.width, 900);
+        assert_eq!(window.height, 700);
+        assert!(workspace.top_level_extents_initialized);
+    }
+
+    #[test]
     fn creating_workspace_windows_creates_columns_and_stacks() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
@@ -5253,12 +5339,12 @@ mod tests {
         assert_eq!(workspace.windows.len(), 3);
         assert_eq!(workspace.columns.len(), 2);
         assert_eq!(workspace.active_pane, stacked_pane);
-        assert_eq!(right_column.width, DEFAULT_WORKSPACE_WINDOW_WIDTH / 2);
+        assert_eq!(right_column.width, DEFAULT_WORKSPACE_WINDOW_WIDTH);
         assert_eq!(right_column.window_order.len(), 2);
         assert_ne!(workspace.active_window, first_window_id);
         assert!(workspace.columns.values().any(|column| {
             column.window_order == vec![first_window_id]
-                && column.width == DEFAULT_WORKSPACE_WINDOW_WIDTH / 2
+                && column.width == DEFAULT_WORKSPACE_WINDOW_WIDTH
         }));
         let upper_window_id = right_column.window_order[0];
         assert_eq!(
@@ -5276,7 +5362,7 @@ mod tests {
                 .get(&upper_window_id)
                 .expect("window")
                 .height,
-            (DEFAULT_WORKSPACE_WINDOW_HEIGHT + 1) / 2
+            DEFAULT_WORKSPACE_WINDOW_HEIGHT
         );
         assert_eq!(
             workspace
@@ -5284,19 +5370,20 @@ mod tests {
                 .get(&workspace.active_window)
                 .expect("window")
                 .height,
-            DEFAULT_WORKSPACE_WINDOW_HEIGHT / 2
+            DEFAULT_WORKSPACE_WINDOW_HEIGHT
         );
     }
 
     #[test]
-    fn creating_workspace_window_clamps_split_column_width_to_minimum() {
+    fn creating_workspace_window_preserves_existing_column_width() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
         let workspace = model.active_workspace().expect("workspace");
         let column_id = workspace.active_column_id().expect("active column");
+        let original_width = MIN_WORKSPACE_WINDOW_WIDTH + 80;
 
         model
-            .set_workspace_column_width(workspace_id, column_id, MIN_WORKSPACE_WINDOW_WIDTH + 80)
+            .set_workspace_column_width(workspace_id, column_id, original_width)
             .expect("set width");
         model
             .create_workspace_window(workspace_id, Direction::Right)
@@ -5308,23 +5395,21 @@ mod tests {
             .values()
             .map(|column| column.width)
             .collect::<Vec<_>>();
-        assert_eq!(
-            widths,
-            vec![MIN_WORKSPACE_WINDOW_WIDTH, MIN_WORKSPACE_WINDOW_WIDTH]
-        );
+        assert_eq!(widths, vec![original_width, DEFAULT_WORKSPACE_WINDOW_WIDTH]);
     }
 
     #[test]
-    fn creating_workspace_window_clamps_split_window_height_to_minimum() {
+    fn creating_workspace_window_preserves_existing_window_height() {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
         let window_id = model
             .active_workspace()
             .map(|workspace| workspace.active_window)
             .expect("active window");
+        let original_height = MIN_WORKSPACE_WINDOW_HEIGHT + 50;
 
         model
-            .set_workspace_window_height(workspace_id, window_id, MIN_WORKSPACE_WINDOW_HEIGHT + 50)
+            .set_workspace_window_height(workspace_id, window_id, original_height)
             .expect("set height");
         model
             .create_workspace_window(workspace_id, Direction::Down)
@@ -5338,7 +5423,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             heights,
-            vec![MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_HEIGHT]
+            vec![original_height, DEFAULT_WORKSPACE_WINDOW_HEIGHT]
         );
     }
 
@@ -5583,11 +5668,11 @@ mod tests {
         let workspace = model.workspaces.get(&workspace_id).expect("workspace");
         let ordered_columns = workspace.columns.values().collect::<Vec<_>>();
         assert_eq!(ordered_columns.len(), 2);
-        let expected_split_width = (DEFAULT_WORKSPACE_WINDOW_WIDTH + 400) / 2;
+        let expected_width = DEFAULT_WORKSPACE_WINDOW_WIDTH + 400;
         assert_eq!(ordered_columns[0].window_order, vec![first_window_id]);
-        assert_eq!(ordered_columns[0].width, expected_split_width);
+        assert_eq!(ordered_columns[0].width, expected_width);
         assert_eq!(ordered_columns[1].window_order, vec![lower_window_id]);
-        assert_eq!(ordered_columns[1].width, expected_split_width);
+        assert_eq!(ordered_columns[1].width, expected_width);
         assert_eq!(workspace.active_window, lower_window_id);
     }
 

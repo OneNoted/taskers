@@ -39,6 +39,12 @@ pub enum RuntimeBootstrapError {
     DownloadBundle { url: String, message: String },
     #[error("failed to unpack Ghostty runtime bundle into {path}: {message}")]
     UnpackBundle { path: PathBuf, message: String },
+    #[error("failed to copy Ghostty runtime path from {from} to {to}: {message}")]
+    CopyPath {
+        from: PathBuf,
+        to: PathBuf,
+        message: String,
+    },
     #[error("Ghostty runtime bundle missing required file {path}")]
     MissingBundlePath { path: &'static str },
     #[error("failed to write Ghostty runtime version marker at {path}: {message}")]
@@ -50,9 +56,14 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
         return Ok(None);
     }
 
+    let current_exe = current_exe_path();
     let bundle_override =
         env::var_os(BUNDLE_PATH_ENV).is_some() || env::var_os(BUNDLE_URL_ENV).is_some();
-    if !bundle_override && build_runtime_ready() {
+    let build_runtime = build_runtime_layout();
+    if !bundle_override
+        && build_runtime.is_some()
+        && use_build_runtime_directly_for(current_exe.as_deref())
+    {
         return Ok(None);
     }
 
@@ -87,6 +98,8 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
                 message: error.to_string(),
             })?;
         unpack_bundle(file, &staging_root)
+    } else if let Some(build_runtime) = build_runtime.as_ref() {
+        stage_build_runtime_layout(build_runtime, &staging_root)
     } else {
         let url = env::var(BUNDLE_URL_ENV).unwrap_or_else(|_| default_runtime_bundle_url());
         let response =
@@ -98,6 +111,7 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
                 })?;
         unpack_bundle(response.into_reader(), &staging_root).map_err(|error| match error {
             RuntimeBootstrapError::UnpackBundle { .. }
+            | RuntimeBootstrapError::CopyPath { .. }
             | RuntimeBootstrapError::MissingBundlePath { .. }
             | RuntimeBootstrapError::WriteVersion { .. }
             | RuntimeBootstrapError::CreateDir { .. }
@@ -137,22 +151,17 @@ pub fn configure_runtime_environment() {
         return;
     }
 
-    if let Some(path) = explicit_runtime_dir().filter(|path| path.exists()) {
-        set_runtime_environment_vars(&path);
-        return;
-    }
-
-    if let Some(path) = build_runtime_resources_dir() {
-        set_runtime_environment_vars(&path);
-        return;
-    }
-
-    if let Some(path) = default_installed_runtime_dir().filter(|path| path.exists()) {
+    let current_exe = current_exe_path();
+    if let Some(path) = runtime_resources_dir_for(current_exe.as_deref()) {
         set_runtime_environment_vars(&path);
     }
 }
 
 pub fn runtime_resources_dir() -> Option<PathBuf> {
+    runtime_resources_dir_for(current_exe_path().as_deref())
+}
+
+fn runtime_resources_dir_for(current_exe: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = env::var_os("GHOSTTY_RESOURCES_DIR")
         .map(PathBuf::from)
         .filter(|path| path.exists())
@@ -164,7 +173,9 @@ pub fn runtime_resources_dir() -> Option<PathBuf> {
         return Some(path);
     }
 
-    if let Some(path) = build_runtime_resources_dir() {
+    if use_build_runtime_directly_for(current_exe)
+        && let Some(path) = build_runtime_layout().map(|layout| layout.resources_dir)
+    {
         return Some(path);
     }
 
@@ -172,6 +183,10 @@ pub fn runtime_resources_dir() -> Option<PathBuf> {
 }
 
 pub fn runtime_bridge_path() -> Option<PathBuf> {
+    runtime_bridge_path_for(current_exe_path().as_deref())
+}
+
+fn runtime_bridge_path_for(current_exe: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = env::var_os("TASKERS_GHOSTTY_BRIDGE_PATH")
         .map(PathBuf::from)
         .filter(|path| path.exists())
@@ -186,7 +201,9 @@ pub fn runtime_bridge_path() -> Option<PathBuf> {
         return Some(path);
     }
 
-    if let Some(path) = build_runtime_bridge_path() {
+    if use_build_runtime_directly_for(current_exe)
+        && let Some(path) = build_runtime_layout().map(|layout| layout.bridge_path)
+    {
         return Some(path);
     }
 
@@ -196,6 +213,10 @@ pub fn runtime_bridge_path() -> Option<PathBuf> {
 }
 
 pub fn runtime_terminfo_dir() -> Option<PathBuf> {
+    runtime_terminfo_dir_for(current_exe_path().as_deref())
+}
+
+fn runtime_terminfo_dir_for(current_exe: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = env::var_os("TERMINFO")
         .map(PathBuf::from)
         .filter(|path| terminfo_dir_is_usable(path))
@@ -210,7 +231,9 @@ pub fn runtime_terminfo_dir() -> Option<PathBuf> {
         return Some(path);
     }
 
-    if let Some(path) = build_runtime_terminfo_dir() {
+    if use_build_runtime_directly_for(current_exe)
+        && let Some(path) = build_runtime_layout().map(|layout| layout.terminfo_dir)
+    {
         return Some(path);
     }
 
@@ -267,8 +290,38 @@ fn installed_runtime_is_current(runtime_dir: &Path) -> bool {
     }
 }
 
-fn build_runtime_ready() -> bool {
-    build_runtime_bridge_path().is_some() && build_runtime_resources_dir().is_some()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildRuntimeLayout {
+    bridge_path: PathBuf,
+    resources_dir: PathBuf,
+    terminfo_dir: PathBuf,
+}
+
+fn build_runtime_layout() -> Option<BuildRuntimeLayout> {
+    Some(BuildRuntimeLayout {
+        bridge_path: build_runtime_bridge_path()?,
+        resources_dir: build_runtime_resources_dir()?,
+        terminfo_dir: build_runtime_terminfo_dir()?,
+    })
+}
+
+fn use_build_runtime_directly_for(current_exe: Option<&Path>) -> bool {
+    let Some(current_exe) = current_exe else {
+        return false;
+    };
+    current_exe.starts_with(repo_target_dir())
+}
+
+fn current_exe_path() -> Option<PathBuf> {
+    env::current_exe().ok()
+}
+
+fn repo_target_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("taskers-ghostty should live under the workspace crates directory")
+        .join("target")
 }
 
 fn build_runtime_bridge_path() -> Option<PathBuf> {
@@ -287,6 +340,73 @@ fn build_runtime_terminfo_dir() -> Option<PathBuf> {
     option_env!("TASKERS_GHOSTTY_BUILD_TERMINFO_DIR")
         .map(PathBuf::from)
         .filter(|path| terminfo_dir_is_usable(path))
+}
+
+fn stage_build_runtime_layout(
+    layout: &BuildRuntimeLayout,
+    staging_root: &Path,
+) -> Result<(), RuntimeBootstrapError> {
+    let ghostty_stage = staging_root.join("ghostty");
+    copy_dir_all(&layout.resources_dir, &ghostty_stage)?;
+
+    let bridge_destination = ghostty_stage.join("lib").join(BRIDGE_LIBRARY_NAME);
+    if let Some(parent) = bridge_destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| RuntimeBootstrapError::CreateDir {
+            path: parent.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    }
+    fs::copy(&layout.bridge_path, &bridge_destination).map_err(|error| {
+        RuntimeBootstrapError::CopyPath {
+            from: layout.bridge_path.clone(),
+            to: bridge_destination.clone(),
+            message: error.to_string(),
+        }
+    })?;
+
+    copy_dir_all(&layout.terminfo_dir, &staging_root.join("terminfo"))
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), RuntimeBootstrapError> {
+    fs::create_dir_all(destination).map_err(|error| RuntimeBootstrapError::CreateDir {
+        path: destination.to_path_buf(),
+        message: error.to_string(),
+    })?;
+
+    for entry in fs::read_dir(source).map_err(|error| RuntimeBootstrapError::CopyPath {
+        from: source.to_path_buf(),
+        to: destination.to_path_buf(),
+        message: error.to_string(),
+    })? {
+        let entry = entry.map_err(|error| RuntimeBootstrapError::CopyPath {
+            from: source.to_path_buf(),
+            to: destination.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| RuntimeBootstrapError::CopyPath {
+                from: source_path.clone(),
+                to: destination_path.clone(),
+                message: error.to_string(),
+            })?;
+
+        if file_type.is_dir() {
+            copy_dir_all(&source_path, &destination_path)?;
+        } else {
+            fs::copy(&source_path, &destination_path).map_err(|error| {
+                RuntimeBootstrapError::CopyPath {
+                    from: source_path.clone(),
+                    to: destination_path.clone(),
+                    message: error.to_string(),
+                }
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 fn set_runtime_environment_vars(path: &Path) {
@@ -359,16 +479,21 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RuntimeBootstrapError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RUNTIME_VERSION_FILE, RuntimeBootstrap, ensure_runtime_installed, runtime_bridge_path,
-        runtime_resources_dir, runtime_terminfo_dir,
+        BuildRuntimeLayout, RUNTIME_VERSION_FILE, RuntimeBootstrap, ensure_runtime_installed,
+        runtime_bridge_path, runtime_bridge_path_for, runtime_resources_dir,
+        runtime_resources_dir_for, runtime_terminfo_dir, runtime_terminfo_dir_for,
+        stage_build_runtime_layout, use_build_runtime_directly_for,
     };
-    use std::{env, fs, path::Path};
+    use std::{env, fs, path::Path, sync::Mutex};
     use tar::Builder;
     use tempfile::tempdir;
     use xz2::write::XzEncoder;
 
+    static RUNTIME_ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn local_bundle_bootstrap_installs_runtime_layout() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
         let temp = tempdir().expect("tempdir");
         let bundle_path = temp.path().join("ghostty-runtime.tar.xz");
         let runtime_dir = temp.path().join("taskers").join("ghostty");
@@ -455,6 +580,7 @@ mod tests {
 
     #[test]
     fn configure_runtime_environment_uses_explicit_runtime_dir() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
         let temp = tempdir().expect("tempdir");
         let runtime_dir = temp.path().join("taskers").join("ghostty");
         fs::create_dir_all(&runtime_dir).expect("runtime dir");
@@ -478,13 +604,17 @@ mod tests {
 
     #[test]
     fn runtime_terminfo_dir_follows_explicit_runtime_dir() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
         let temp = tempdir().expect("tempdir");
         let runtime_dir = temp.path().join("taskers").join("ghostty");
         let terminfo_dir = temp.path().join("taskers").join("terminfo");
         fs::create_dir_all(&runtime_dir).expect("runtime dir");
         fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
-        fs::write(terminfo_dir.join("x").join("xterm-ghostty"), b"fake terminfo")
-            .expect("write fake terminfo");
+        fs::write(
+            terminfo_dir.join("x").join("xterm-ghostty"),
+            b"fake terminfo",
+        )
+        .expect("write fake terminfo");
 
         let _guard = EnvGuard::set([
             ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.as_os_str())),
@@ -493,6 +623,119 @@ mod tests {
         ]);
 
         assert_eq!(runtime_terminfo_dir(), Some(terminfo_dir));
+    }
+
+    #[test]
+    fn installed_executables_do_not_use_build_runtime_directly() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
+        assert!(!use_build_runtime_directly_for(Some(Path::new(
+            "/home/notes/.local/share/cargo/bin/taskers-gtk",
+        ))));
+        assert!(use_build_runtime_directly_for(Some(
+            &super::repo_target_dir().join("debug").join("taskers-gtk"),
+        )));
+    }
+
+    #[test]
+    fn installed_executables_prefer_managed_runtime_paths() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
+        let temp = tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        let terminfo_dir = temp.path().join("taskers").join("terminfo");
+        fs::create_dir_all(runtime_dir.join("lib")).expect("runtime lib dir");
+        fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
+        fs::write(
+            runtime_dir.join("lib").join("libtaskers_ghostty_bridge.so"),
+            b"bridge",
+        )
+        .expect("bridge");
+        fs::write(runtime_dir.join("theme.txt"), b"theme").expect("theme");
+        fs::write(terminfo_dir.join("x").join("xterm-ghostty"), b"terminfo").expect("terminfo");
+
+        let _guard = EnvGuard::set([
+            ("XDG_DATA_HOME", Some(temp.path().as_os_str())),
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", None),
+            ("TASKERS_GHOSTTY_BRIDGE_PATH", None),
+            ("GHOSTTY_RESOURCES_DIR", None),
+            ("TERMINFO", None),
+        ]);
+
+        let installed_exe = Path::new("/home/notes/.local/share/cargo/bin/taskers-gtk");
+        assert_eq!(
+            runtime_resources_dir_for(Some(installed_exe)),
+            Some(runtime_dir.clone())
+        );
+        assert_eq!(
+            runtime_bridge_path_for(Some(installed_exe)),
+            Some(runtime_dir.join("lib").join("libtaskers_ghostty_bridge.so"))
+        );
+        assert_eq!(
+            runtime_terminfo_dir_for(Some(installed_exe)),
+            Some(terminfo_dir)
+        );
+    }
+
+    #[test]
+    fn stage_build_runtime_layout_copies_bridge_resources_and_terminfo() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
+        let temp = tempdir().expect("tempdir");
+        let build_root = temp.path().join("build");
+        let resources_dir = build_root.join("share").join("ghostty");
+        let terminfo_dir = build_root.join("share").join("terminfo");
+        let bridge_path = build_root.join("lib").join("libtaskers_ghostty_bridge.so");
+        fs::create_dir_all(resources_dir.join("shell-integration")).expect("resources dir");
+        fs::create_dir_all(terminfo_dir.join("g")).expect("terminfo dir");
+        fs::create_dir_all(bridge_path.parent().expect("bridge dir")).expect("bridge dir");
+        fs::write(resources_dir.join("theme.txt"), b"theme").expect("theme");
+        fs::write(
+            resources_dir.join("shell-integration").join("ghostty.bash"),
+            b"shell",
+        )
+        .expect("shell integration");
+        fs::write(&bridge_path, b"bridge").expect("bridge");
+        fs::write(terminfo_dir.join("g").join("ghostty"), b"terminfo").expect("terminfo");
+
+        let staging_root = temp.path().join("staging");
+        fs::create_dir_all(&staging_root).expect("staging root");
+        stage_build_runtime_layout(
+            &BuildRuntimeLayout {
+                bridge_path: bridge_path.clone(),
+                resources_dir: resources_dir.clone(),
+                terminfo_dir: terminfo_dir.clone(),
+            },
+            &staging_root,
+        )
+        .expect("stage build runtime");
+
+        assert_eq!(
+            fs::read(staging_root.join("ghostty").join("theme.txt")).expect("staged theme"),
+            b"theme"
+        );
+        assert_eq!(
+            fs::read(
+                staging_root
+                    .join("ghostty")
+                    .join("shell-integration")
+                    .join("ghostty.bash"),
+            )
+            .expect("staged shell integration"),
+            b"shell"
+        );
+        assert_eq!(
+            fs::read(
+                staging_root
+                    .join("ghostty")
+                    .join("lib")
+                    .join("libtaskers_ghostty_bridge.so"),
+            )
+            .expect("staged bridge"),
+            b"bridge"
+        );
+        assert_eq!(
+            fs::read(staging_root.join("terminfo").join("g").join("ghostty"))
+                .expect("staged terminfo"),
+            b"terminfo"
+        );
     }
 
     fn write_bundle(source_dir: &Path, bundle_path: &Path) {

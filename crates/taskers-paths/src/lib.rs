@@ -1,4 +1,7 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 pub const APP_ID: &str = "dev.taskers.app";
 
@@ -79,52 +82,25 @@ impl TaskersPaths {
     }
 
     fn from_env(platform: HostPlatform, env_paths: &EnvPaths) -> Self {
-        if let Some(config_path) = env_paths.taskers_config_path.clone() {
-            let config_dir = config_path
-                .parent()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| temp_root().join("config"));
-            let state_dir = env_paths
-                .taskers_session_path
-                .clone()
-                .and_then(|path| path.parent().map(PathBuf::from))
-                .unwrap_or_else(|| platform_state_dir(platform, env_paths));
-            let cache_dir = platform_cache_dir(platform, env_paths);
-            let data_dir = platform_data_dir(platform, env_paths);
-            let shell_runtime_dir = shell_runtime_dir(platform, env_paths, &cache_dir);
-            let ghostty_runtime_dir = env_paths
-                .taskers_ghostty_runtime_dir
-                .clone()
-                .unwrap_or_else(|| data_dir.join("ghostty"));
-            let socket_path = env_paths
-                .taskers_socket_path
-                .clone()
-                .unwrap_or_else(|| socket_path(platform, &cache_dir));
-            let terminal_socket_path = env_paths
-                .taskers_terminal_socket_path
-                .clone()
-                .unwrap_or_else(|| terminal_socket_path(platform, env_paths, &cache_dir));
-            let session_path = env_paths
-                .taskers_session_path
-                .clone()
-                .unwrap_or_else(|| state_dir.join("session.json"));
-            return Self {
-                theme_dir: config_dir.join("themes"),
-                config_dir,
-                state_dir,
-                cache_dir,
-                data_dir,
-                shell_runtime_dir,
-                ghostty_runtime_dir,
-                socket_path,
-                terminal_socket_path,
-                session_path,
-                config_path,
+        let (config_dir, config_path, state_dir) =
+            if let Some(config_path) = env_paths.taskers_config_path.clone() {
+                let config_dir = config_path
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| temp_root().join("config"));
+                let state_dir = env_paths
+                    .taskers_session_path
+                    .clone()
+                    .and_then(|path| path.parent().map(PathBuf::from))
+                    .unwrap_or_else(|| platform_state_dir(platform, env_paths));
+                (config_dir, config_path, state_dir)
+            } else {
+                let config_dir = platform_config_dir(platform, env_paths);
+                let state_dir = platform_state_dir(platform, env_paths);
+                let config_path = config_dir.join("config.json");
+                (config_dir, config_path, state_dir)
             };
-        }
 
-        let config_dir = platform_config_dir(platform, env_paths);
-        let state_dir = platform_state_dir(platform, env_paths);
         let cache_dir = platform_cache_dir(platform, env_paths);
         let data_dir = platform_data_dir(platform, env_paths);
         let shell_runtime_dir = shell_runtime_dir(platform, env_paths, &cache_dir);
@@ -146,7 +122,6 @@ impl TaskersPaths {
             .unwrap_or_else(|| state_dir.join("session.json"));
 
         Self {
-            config_path: config_dir.join("config.json"),
             theme_dir: config_dir.join("themes"),
             config_dir,
             state_dir,
@@ -157,6 +132,7 @@ impl TaskersPaths {
             socket_path,
             terminal_socket_path,
             session_path,
+            config_path,
         }
     }
 
@@ -325,7 +301,7 @@ fn platform_data_dir(platform: HostPlatform, env_paths: &EnvPaths) -> PathBuf {
     }
 }
 
-fn shell_runtime_dir(platform: HostPlatform, env_paths: &EnvPaths, cache_dir: &PathBuf) -> PathBuf {
+fn shell_runtime_dir(platform: HostPlatform, env_paths: &EnvPaths, cache_dir: &Path) -> PathBuf {
     if let Some(path) = env_paths.taskers_runtime_dir.clone() {
         return path.join("shell");
     }
@@ -341,18 +317,14 @@ fn shell_runtime_dir(platform: HostPlatform, env_paths: &EnvPaths, cache_dir: &P
     }
 }
 
-fn socket_path(platform: HostPlatform, cache_dir: &PathBuf) -> PathBuf {
+fn socket_path(platform: HostPlatform, cache_dir: &Path) -> PathBuf {
     match platform {
         HostPlatform::Macos => cache_dir.join("control.sock"),
         HostPlatform::Linux | HostPlatform::Other => PathBuf::from("/tmp/taskers.sock"),
     }
 }
 
-fn terminal_socket_path(
-    platform: HostPlatform,
-    env_paths: &EnvPaths,
-    cache_dir: &PathBuf,
-) -> PathBuf {
+fn terminal_socket_path(platform: HostPlatform, env_paths: &EnvPaths, cache_dir: &Path) -> PathBuf {
     match platform {
         HostPlatform::Linux => env_paths
             .xdg_runtime_dir
@@ -488,6 +460,49 @@ mod tests {
             &PathBuf::from("/work/runtime/shell")
         );
         assert_eq!(paths.ghostty_runtime_dir(), &PathBuf::from("/work/ghostty"));
+    }
+
+    #[test]
+    fn config_path_override_only_changes_config_derived_paths() {
+        let env = EnvPaths {
+            home: Some(PathBuf::from("/home/notes")),
+            xdg_config_home: Some(PathBuf::from("/tmp/config")),
+            xdg_state_home: Some(PathBuf::from("/tmp/state")),
+            xdg_cache_home: Some(PathBuf::from("/tmp/cache")),
+            xdg_data_home: Some(PathBuf::from("/tmp/data")),
+            xdg_runtime_dir: Some(PathBuf::from("/tmp/runtime")),
+            taskers_config_path: Some(PathBuf::from("/work/taskers/config.json")),
+            ..EnvPaths::default()
+        };
+        let paths = TaskersPaths::from_env(HostPlatform::Linux, &env);
+
+        assert_eq!(paths.config_dir(), &PathBuf::from("/work/taskers"));
+        assert_eq!(
+            paths.config_path(),
+            &PathBuf::from("/work/taskers/config.json")
+        );
+        assert_eq!(paths.theme_dir(), &PathBuf::from("/work/taskers/themes"));
+
+        assert_eq!(paths.state_dir(), &PathBuf::from("/tmp/state/taskers"));
+        assert_eq!(
+            paths.session_path(),
+            &PathBuf::from("/tmp/state/taskers/session.json")
+        );
+        assert_eq!(paths.cache_dir(), &PathBuf::from("/tmp/cache/taskers"));
+        assert_eq!(paths.data_dir(), &PathBuf::from("/tmp/data/taskers"));
+        assert_eq!(
+            paths.shell_runtime_dir(),
+            &PathBuf::from("/tmp/runtime/taskers/shell")
+        );
+        assert_eq!(
+            paths.ghostty_runtime_dir(),
+            &PathBuf::from("/tmp/data/taskers/ghostty")
+        );
+        assert_eq!(paths.socket_path(), &PathBuf::from("/tmp/taskers.sock"));
+        assert_eq!(
+            paths.terminal_socket_path(),
+            &PathBuf::from("/tmp/runtime/taskers/terminal.sock")
+        );
     }
 
     #[test]

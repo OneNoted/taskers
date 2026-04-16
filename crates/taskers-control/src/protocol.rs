@@ -140,13 +140,31 @@ pub enum ControlCommand {
         workspace_window_id: WorkspaceWindowId,
         height: i32,
     },
+    BootstrapWorkspaceTopLevelExtents {
+        workspace_id: WorkspaceId,
+        column_width: i32,
+        window_height: i32,
+    },
     SetWindowSplitRatio {
         workspace_id: WorkspaceId,
         workspace_window_id: WorkspaceWindowId,
         path: Vec<bool>,
         ratio: u16,
     },
+    SetWindowSplitRatioExact {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
     SetPaneTabSplitRatio {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
+    SetPaneTabSplitRatioExact {
         workspace_id: WorkspaceId,
         pane_container_id: PaneContainerId,
         pane_tab_id: PaneTabId,
@@ -804,6 +822,10 @@ pub struct TerminalRenderStats {
     pub rows: u16,
     pub width_px: i32,
     pub height_px: i32,
+    #[serde(default)]
+    pub resize_count: u64,
+    #[serde(default)]
+    pub last_resize_revision: Option<u64>,
     pub has_selection: bool,
 }
 

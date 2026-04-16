@@ -9,14 +9,15 @@ use dioxus::html::{
 use dioxus::prelude::*;
 use taskers_core::{
     ActivityItemSnapshot, AgentSessionSnapshot, AttentionRingState, AttentionState,
-    BrowserChromeSnapshot, Direction, DragSessionSnapshot, LayoutNodeSnapshot, LivePaneSnapshot,
-    NotificationPreferenceKey, OverviewPreviewModeSnapshot, PaneContainerId, PaneId, PaneKind,
-    PaneSnapshot, PaneTabDragSessionSnapshot, PaneTabId, PaneTabLayoutSnapshot, PaneTabSnapshot,
-    ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot, RuntimeStateSnapshot,
-    RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection, ShellSnapshot,
-    ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot, SurfaceId,
-    SurfaceKind, SurfaceMountSpec, SurfacePortalPlan, SurfaceSnapshot, VcsCommand, VcsCommitEntry,
-    VcsFileEntry, VcsFileStatus, VcsMode, VcsPanelSnapshot, VcsSnapshot,
+    BrowserChromeSnapshot, Direction, DragSessionSnapshot, EmbeddedTerminalBoolSettingKey,
+    EmbeddedTerminalTextSettingKey, LayoutNodeSnapshot, LivePaneSnapshot,
+    NotificationPreferenceKey, OptionalSettingChoice, OverviewPreviewModeSnapshot, PaneContainerId,
+    PaneId, PaneKind, PaneSnapshot, PaneTabDragSessionSnapshot, PaneTabId, PaneTabLayoutSnapshot,
+    PaneTabSnapshot, ProgressSnapshot, PullRequestSnapshot, RuntimeIdentitySnapshot,
+    RuntimeStateSnapshot, RuntimeStatus, SettingsSnapshot, SharedCore, ShellAction, ShellSection,
+    ShellSnapshot, ShortcutAction, ShortcutBindingSnapshot, SplitAxis, SurfaceDragSessionSnapshot,
+    SurfaceId, SurfaceKind, SurfaceMountSpec, SurfacePortalPlan, SurfaceSnapshot, VcsCommand,
+    VcsCommitEntry, VcsFileEntry, VcsFileStatus, VcsMode, VcsPanelSnapshot, VcsSnapshot,
     WindowTabDragSessionSnapshot, WorkspaceDirection, WorkspaceId, WorkspaceLogEntrySnapshot,
     WorkspaceSummary, WorkspaceViewSnapshot, WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot,
     WorkspaceWindowTabId, WorkspaceWindowTabSnapshot,
@@ -613,12 +614,33 @@ fn apply_surface_drop(
     }
 }
 
-fn app_css(snapshot: &ShellSnapshot) -> String {
+pub fn shell_stylesheet(snapshot: &ShellSnapshot) -> String {
     theme::generate_css(
         &theme::resolve_palette(&snapshot.settings.selected_theme_id),
         snapshot.metrics,
         snapshot.attention_panel_visible || snapshot.vcs_panel.visible,
     )
+}
+
+// Keep the shell CSS in <head>; body-mounted <style> nodes were not reliably
+// applied in the embedded LiveView/WebKit shell.
+fn sync_shell_stylesheet(stylesheet: &str) {
+    let stylesheet_js = format!("{stylesheet:?}");
+    let script = format!(
+        r#"
+const stylesheetId = "taskers-shell-style";
+let stylesheetNode = document.getElementById(stylesheetId);
+if (!stylesheetNode) {{
+    stylesheetNode = document.createElement("style");
+    stylesheetNode.id = stylesheetId;
+    document.head.appendChild(stylesheetNode);
+}}
+if (stylesheetNode.textContent !== {stylesheet_js}) {{
+    stylesheetNode.textContent = {stylesheet_js};
+}}
+"#
+    );
+    let _ = dioxus_document::eval(&script);
 }
 
 #[component]
@@ -643,8 +665,11 @@ pub fn TaskersShell(core: SharedCore) -> Element {
 
     let _ = revision();
     let snapshot = core.snapshot();
+    let stylesheet = shell_stylesheet(&snapshot);
+    use_effect(use_reactive!(|stylesheet| {
+        sync_shell_stylesheet(&stylesheet);
+    }));
     let unread_activity = snapshot.activity.iter().filter(|item| item.unread).count();
-    let stylesheet = app_css(&snapshot);
     let toggle_settings = {
         let core = core.clone();
         let section = snapshot.section;
@@ -829,7 +854,6 @@ pub fn TaskersShell(core: SharedCore) -> Element {
     };
 
     rsx! {
-        style { "{stylesheet}" }
         div {
             class: "app-shell",
             onpointermove: track_pointer_drag,
@@ -4664,6 +4688,16 @@ fn render_appearance_tab(settings: &SettingsSnapshot, core: SharedCore) -> Eleme
 fn render_terminal_tab(settings: &SettingsSnapshot, core: SharedCore) -> Element {
     let select_core = core.clone();
     let input_core = core.clone();
+    let theme_core = core.clone();
+    let font_family_core = core.clone();
+    let font_size_core = core.clone();
+    let padding_x_core = core.clone();
+    let padding_y_core = core.clone();
+    let cursor_style_core = core.clone();
+    let cursor_blink_core = core.clone();
+    let scrollback_core = core.clone();
+    let background_opacity_core = core.clone();
+    let background_cells_core = core.clone();
     let system_default_shell_detail = format!(
         "Use your login shell by default (currently {}). Changes apply to new Taskers launches.",
         settings.default_shell_label
@@ -4755,6 +4789,198 @@ fn render_terminal_tab(settings: &SettingsSnapshot, core: SharedCore) -> Element
                     div { class: "settings-row-helper", "{system_default_shell_detail}" }
                 }
             }
+            div { class: "settings-row",
+                div { class: "settings-row-copy",
+                    div { class: "settings-row-label", "Managed Ghostty config" }
+                    div { class: "settings-row-helper",
+                        "GUI-edited embedded terminal settings are written to the Taskers-managed Ghostty config file."
+                    }
+                }
+                div { class: "settings-row-control settings-readonly-path",
+                    code { "{settings.embedded_terminal.base_config_path}" }
+                }
+            }
+            div { class: "settings-row",
+                div { class: "settings-row-copy",
+                    div { class: "settings-row-label", "Advanced override config" }
+                    div { class: "settings-row-helper",
+                        "Manual advanced Ghostty settings belong here. Taskers never rewrites this file."
+                    }
+                }
+                div { class: "settings-row-control settings-readonly-path",
+                    code { "{settings.embedded_terminal.override_config_path}" }
+                }
+            }
+            {render_terminal_text_setting(
+                "Embedded theme",
+                "Ghostty theme name. Leave blank to use embedded defaults.",
+                &settings.embedded_terminal.theme,
+                "Catppuccin Mocha",
+                move |value| theme_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalTextSetting {
+                    key: EmbeddedTerminalTextSettingKey::Theme,
+                    value,
+                }),
+            )}
+            {render_terminal_text_setting(
+                "Font family",
+                "Ghostty font-family value for embedded panes.",
+                &settings.embedded_terminal.font_family,
+                "JetBrainsMono NF",
+                move |value| font_family_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalTextSetting {
+                    key: EmbeddedTerminalTextSettingKey::FontFamily,
+                    value,
+                }),
+            )}
+            {render_terminal_text_setting(
+                "Font size",
+                "Ghostty font-size value. Leave blank to keep the embedded default.",
+                &settings.embedded_terminal.font_size,
+                "14",
+                move |value| font_size_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalTextSetting {
+                    key: EmbeddedTerminalTextSettingKey::FontSize,
+                    value,
+                }),
+            )}
+            {render_terminal_text_setting(
+                "Padding X",
+                "Ghostty window-padding-x value for embedded panes.",
+                &settings.embedded_terminal.window_padding_x,
+                "0",
+                move |value| padding_x_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalTextSetting {
+                    key: EmbeddedTerminalTextSettingKey::WindowPaddingX,
+                    value,
+                }),
+            )}
+            {render_terminal_text_setting(
+                "Padding Y",
+                "Ghostty window-padding-y value for embedded panes.",
+                &settings.embedded_terminal.window_padding_y,
+                "0",
+                move |value| padding_y_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalTextSetting {
+                    key: EmbeddedTerminalTextSettingKey::WindowPaddingY,
+                    value,
+                }),
+            )}
+            div { class: "settings-row",
+                div { class: "settings-row-copy",
+                    div { class: "settings-row-label", "Cursor style" }
+                    div { class: "settings-row-helper",
+                        "Select the embedded terminal cursor shape, or leave it at Default."
+                    }
+                }
+                div { class: "settings-row-control",
+                    select {
+                        class: "settings-select",
+                        onchange: move |evt| {
+                            cursor_style_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalTextSetting {
+                                key: EmbeddedTerminalTextSettingKey::CursorStyle,
+                                value: evt.value(),
+                            });
+                        },
+                        option { value: "", selected: settings.embedded_terminal.cursor_style.is_empty(), "Default" }
+                        option { value: "block", selected: settings.embedded_terminal.cursor_style == "block", "Block" }
+                        option { value: "bar", selected: settings.embedded_terminal.cursor_style == "bar", "Bar" }
+                        option { value: "underline", selected: settings.embedded_terminal.cursor_style == "underline", "Underline" }
+                        option { value: "block_hollow", selected: settings.embedded_terminal.cursor_style == "block_hollow", "Hollow block" }
+                    }
+                }
+            }
+            {render_terminal_toggle_setting(
+                "Cursor blink",
+                "Override Ghostty cursor-style-blink for embedded panes.",
+                settings.embedded_terminal.cursor_style_blink,
+                move |value| cursor_blink_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalBoolSetting {
+                    key: EmbeddedTerminalBoolSettingKey::CursorStyleBlink,
+                    value,
+                }),
+            )}
+            {render_terminal_text_setting(
+                "Scrollback limit",
+                "Ghostty scrollback-limit value for embedded panes.",
+                &settings.embedded_terminal.scrollback_limit,
+                "10000000",
+                move |value| scrollback_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalTextSetting {
+                    key: EmbeddedTerminalTextSettingKey::ScrollbackLimit,
+                    value,
+                }),
+            )}
+            {render_terminal_text_setting(
+                "Background opacity",
+                "Ghostty background-opacity value for embedded panes.",
+                &settings.embedded_terminal.background_opacity,
+                "0",
+                move |value| background_opacity_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalTextSetting {
+                    key: EmbeddedTerminalTextSettingKey::BackgroundOpacity,
+                    value,
+                }),
+            )}
+            {render_terminal_toggle_setting(
+                "Background opacity on cells",
+                "Override Ghostty background-opacity-cells for embedded panes.",
+                settings.embedded_terminal.background_opacity_cells,
+                move |value| background_cells_core.dispatch_shell_action(ShellAction::SetEmbeddedTerminalBoolSetting {
+                    key: EmbeddedTerminalBoolSettingKey::BackgroundOpacityCells,
+                    value,
+                }),
+            )}
+        }
+    }
+}
+
+fn render_terminal_text_setting(
+    label: &'static str,
+    helper: &'static str,
+    value: &str,
+    placeholder: &'static str,
+    onchange: impl Fn(String) + 'static + Clone,
+) -> Element {
+    rsx! {
+        div { class: "settings-row",
+            div { class: "settings-row-copy",
+                div { class: "settings-row-label", "{label}" }
+                div { class: "settings-row-helper", "{helper}" }
+            }
+            div { class: "settings-row-control",
+                input {
+                    class: "vcs-input",
+                    r#type: "text",
+                    value: "{value}",
+                    placeholder: "{placeholder}",
+                    oninput: move |event| onchange(event.value()),
+                }
+            }
+        }
+    }
+}
+
+fn render_terminal_toggle_setting(
+    label: &'static str,
+    helper: &'static str,
+    value: OptionalSettingChoice,
+    onchange: impl Fn(OptionalSettingChoice) + 'static + Clone,
+) -> Element {
+    rsx! {
+        div { class: "settings-row",
+            div { class: "settings-row-copy",
+                div { class: "settings-row-label", "{label}" }
+                div { class: "settings-row-helper", "{helper}" }
+            }
+            div { class: "settings-row-control",
+                select {
+                    class: "settings-select",
+                    onchange: move |evt| {
+                        let value = match evt.value().as_str() {
+                            "true" => OptionalSettingChoice::Enabled,
+                            "false" => OptionalSettingChoice::Disabled,
+                            _ => OptionalSettingChoice::Default,
+                        };
+                        onchange(value);
+                    },
+                    option { value: "", selected: value == OptionalSettingChoice::Default, "Default" }
+                    option { value: "true", selected: value == OptionalSettingChoice::Enabled, "Enabled" }
+                    option { value: "false", selected: value == OptionalSettingChoice::Disabled, "Disabled" }
+                }
+            }
         }
     }
 }
@@ -4803,8 +5029,9 @@ fn render_workspace_tab(settings: &SettingsSnapshot, core: SharedCore) -> Elemen
         section { class: "settings-section",
             div { class: "settings-section-heading", "Workspace" }
             div { class: "settings-section-helper",
-                "Overview mode uses dedicated overview cards. When possible it can prefer richer previews, but it should stay stable and readable first."
+                "Tune top-level workspace window spacing and overview preview behavior from one place."
             }
+            {render_workspace_window_gap_setting(settings.workspace_window_gap, core.clone())}
             {render_overview_surface_preference(
                 "Prefer richer previews",
                 "Ask overview to prefer richer previews when they are stable enough. Turn this off to keep overview on summary cards and jump into the full window for interaction.",
@@ -4919,6 +5146,37 @@ fn render_overview_surface_preference(
         core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: !enabled })
     };
     render_settings_toggle_row(label, detail, enabled, toggle)
+}
+
+fn render_workspace_window_gap_setting(value: i32, core: SharedCore) -> Element {
+    let onchange = move |event: Event<FormData>| {
+        let Ok(gap) = event.value().parse::<i32>() else {
+            return;
+        };
+        core.dispatch_shell_action(ShellAction::SetWorkspaceWindowGap { gap });
+    };
+
+    rsx! {
+        div { class: "settings-row",
+            div { class: "settings-row-copy",
+                div { class: "settings-row-label", "Window gap" }
+                div { class: "settings-row-helper",
+                    "Pixels between top-level workspace windows. Use 0 for flush edges."
+                }
+            }
+            div { class: "settings-row-control",
+                input {
+                    class: "vcs-input",
+                    r#type: "number",
+                    min: "{taskers_core::MIN_WORKSPACE_WINDOW_GAP}",
+                    max: "{taskers_core::MAX_WORKSPACE_WINDOW_GAP}",
+                    step: "1",
+                    value: "{value}",
+                    onchange,
+                }
+            }
+        }
+    }
 }
 
 fn render_settings_toggle_row(

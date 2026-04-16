@@ -61,7 +61,9 @@ pub struct GhosttyHostOptions {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
-    pub embedded_terminal_appearance: EmbeddedTerminalAppearance,
+    pub base_config_path: Option<String>,
+    #[serde(default)]
+    pub override_config_path: Option<String>,
 }
 
 impl GhosttyHostOptions {
@@ -81,15 +83,18 @@ impl GhosttyHostOptions {
         Self {
             command_argv,
             env,
-            embedded_terminal_appearance: EmbeddedTerminalAppearance::Taskers,
+            base_config_path: None,
+            override_config_path: None,
         }
     }
 
-    pub fn with_embedded_terminal_appearance(
+    pub fn with_embedded_config_paths(
         mut self,
-        embedded_terminal_appearance: EmbeddedTerminalAppearance,
+        base_config_path: impl Into<String>,
+        override_config_path: impl Into<String>,
     ) -> Self {
-        self.embedded_terminal_appearance = embedded_terminal_appearance;
+        self.base_config_path = Some(base_config_path.into());
+        self.override_config_path = Some(override_config_path.into());
         self
     }
 }
@@ -211,8 +216,7 @@ fn embedded_ghostty_notes() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendAvailability, BackendChoice, DefaultBackend, EmbeddedTerminalAppearance,
-        GhosttyHostOptions, TerminalBackend,
+        BackendAvailability, BackendChoice, DefaultBackend, GhosttyHostOptions, TerminalBackend,
     };
     use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
     use taskers_runtime::ShellLaunchSpec;
@@ -270,10 +274,6 @@ mod tests {
             options.env.get("TASKERS_SOCKET").map(String::as_str),
             Some("/tmp/taskers.sock")
         );
-        assert_eq!(
-            options.embedded_terminal_appearance,
-            EmbeddedTerminalAppearance::Taskers
-        );
     }
 
     #[test]
@@ -300,16 +300,6 @@ mod tests {
         assert_eq!(
             options.env.get("TASKERS_REAL_SHELL").map(String::as_str),
             Some("/usr/bin/fish")
-        );
-    }
-
-    #[test]
-    fn host_options_allow_overriding_embedded_terminal_appearance() {
-        let options = GhosttyHostOptions::default()
-            .with_embedded_terminal_appearance(EmbeddedTerminalAppearance::Ghostty);
-        assert_eq!(
-            options.embedded_terminal_appearance,
-            EmbeddedTerminalAppearance::Ghostty
         );
     }
 }
