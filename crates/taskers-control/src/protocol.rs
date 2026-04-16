@@ -151,7 +151,20 @@ pub enum ControlCommand {
         path: Vec<bool>,
         ratio: u16,
     },
+    SetWindowSplitRatioExact {
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
     SetPaneTabSplitRatio {
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: Vec<bool>,
+        ratio: u16,
+    },
+    SetPaneTabSplitRatioExact {
         workspace_id: WorkspaceId,
         pane_container_id: PaneContainerId,
         pane_tab_id: PaneTabId,

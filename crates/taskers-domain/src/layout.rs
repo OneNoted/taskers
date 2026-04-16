@@ -6,6 +6,8 @@ use crate::{PaneContainerId, PaneId};
 
 const MIN_SPLIT_RATIO: u16 = 150;
 const MAX_SPLIT_RATIO: u16 = 850;
+const MIN_EXACT_SPLIT_RATIO: u16 = 1;
+const MAX_EXACT_SPLIT_RATIO: u16 = 999;
 const ROOT_LAYOUT_SIZE: f32 = 1000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +171,15 @@ where
 
     pub fn set_ratio_at_path(&mut self, path: &[bool], ratio: u16) -> bool {
         let ratio = clamp_ratio(ratio);
+        self.set_ratio_at_path_inner(path, ratio)
+    }
+
+    pub fn set_ratio_at_path_exact(&mut self, path: &[bool], ratio: u16) -> bool {
+        let ratio = clamp_exact_ratio(ratio);
+        self.set_ratio_at_path_inner(path, ratio)
+    }
+
+    fn set_ratio_at_path_inner(&mut self, path: &[bool], ratio: u16) -> bool {
         if path.is_empty() {
             if let Self::Split {
                 ratio: current_ratio,
@@ -334,6 +345,10 @@ impl LayoutRect {
 
 fn clamp_ratio(ratio: u16) -> u16 {
     ratio.clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
+}
+
+fn clamp_exact_ratio(ratio: u16) -> u16 {
+    ratio.clamp(MIN_EXACT_SPLIT_RATIO, MAX_EXACT_SPLIT_RATIO)
 }
 
 fn split_resize_delta(

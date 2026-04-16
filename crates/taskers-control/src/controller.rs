@@ -435,6 +435,46 @@ impl InMemoryController {
                     true,
                 )
             }
+            ControlCommand::SetWindowSplitRatioExact {
+                workspace_id,
+                workspace_window_id,
+                path,
+                ratio,
+            } => {
+                model.set_window_split_ratio_exact(
+                    workspace_id,
+                    workspace_window_id,
+                    &path,
+                    ratio,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "workspace window split ratio updated".into(),
+                    },
+                    true,
+                )
+            }
+            ControlCommand::SetPaneTabSplitRatioExact {
+                workspace_id,
+                pane_container_id,
+                pane_tab_id,
+                path,
+                ratio,
+            } => {
+                model.set_pane_tab_split_ratio_exact(
+                    workspace_id,
+                    pane_container_id,
+                    pane_tab_id,
+                    &path,
+                    ratio,
+                )?;
+                (
+                    ControlResponse::Ack {
+                        message: "pane tab split ratio updated".into(),
+                    },
+                    true,
+                )
+            }
             ControlCommand::SetWorkspaceColumnWidth {
                 workspace_id,
                 workspace_column_id,

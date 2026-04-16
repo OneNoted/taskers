@@ -3126,6 +3126,28 @@ impl AppModel {
         Ok(())
     }
 
+    pub fn set_window_split_ratio_exact(
+        &mut self,
+        workspace_id: WorkspaceId,
+        workspace_window_id: WorkspaceWindowId,
+        path: &[bool],
+        ratio: u16,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let window = workspace
+            .windows
+            .get_mut(&workspace_window_id)
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        let layout = window
+            .active_layout_mut()
+            .ok_or(DomainError::MissingWorkspaceWindow(workspace_window_id))?;
+        layout.set_ratio_at_path_exact(path, ratio);
+        Ok(())
+    }
+
     pub fn set_pane_tab_split_ratio(
         &mut self,
         workspace_id: WorkspaceId,
@@ -3144,6 +3166,27 @@ impl AppModel {
             .and_then(|pane_container| pane_container.tabs.get_mut(&pane_tab_id))
             .ok_or(DomainError::MissingPaneContainer(pane_container_id))?;
         pane_tab.layout.set_ratio_at_path(path, ratio);
+        Ok(())
+    }
+
+    pub fn set_pane_tab_split_ratio_exact(
+        &mut self,
+        workspace_id: WorkspaceId,
+        pane_container_id: PaneContainerId,
+        pane_tab_id: PaneTabId,
+        path: &[bool],
+        ratio: u16,
+    ) -> Result<(), DomainError> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or(DomainError::MissingWorkspace(workspace_id))?;
+        let pane_tab = workspace
+            .pane_containers
+            .get_mut(&pane_container_id)
+            .and_then(|pane_container| pane_container.tabs.get_mut(&pane_tab_id))
+            .ok_or(DomainError::MissingPaneContainer(pane_container_id))?;
+        pane_tab.layout.set_ratio_at_path_exact(path, ratio);
         Ok(())
     }
 

@@ -31,6 +31,8 @@ pub const MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX: i32 = 160;
 pub const MIN_RENDERED_NATIVE_SURFACE_HEIGHT_PX: i32 = 96;
 pub const MIN_WORKSPACE_WINDOW_GAP: i32 = 0;
 pub const MAX_WORKSPACE_WINDOW_GAP: i32 = 64;
+const EXPANDED_ACTIVE_SPLIT_RATIO: u16 = 999;
+const COLLAPSED_INACTIVE_SPLIT_RATIO: u16 = 1;
 
 pub fn clamp_workspace_window_gap(gap: i32) -> i32 {
     gap.clamp(MIN_WORKSPACE_WINDOW_GAP, MAX_WORKSPACE_WINDOW_GAP)
@@ -241,12 +243,13 @@ pub enum ShortcutAction {
     ResizeSplitRight,
     ResizeSplitUp,
     ResizeSplitDown,
+    FitTerminalToViewport,
     SplitRight,
     SplitDown,
 }
 
 impl ShortcutAction {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::ToggleOverview,
         Self::FocusLatestUnread,
         Self::CloseTerminal,
@@ -274,6 +277,7 @@ impl ShortcutAction {
         Self::ResizeSplitRight,
         Self::ResizeSplitUp,
         Self::ResizeSplitDown,
+        Self::FitTerminalToViewport,
         Self::SplitRight,
         Self::SplitDown,
     ];
@@ -307,6 +311,7 @@ impl ShortcutAction {
             Self::ResizeSplitRight => "resize_split_right",
             Self::ResizeSplitUp => "resize_split_up",
             Self::ResizeSplitDown => "resize_split_down",
+            Self::FitTerminalToViewport => "fit_terminal_to_viewport",
             Self::SplitRight => "split_right",
             Self::SplitDown => "split_down",
         }
@@ -341,6 +346,7 @@ impl ShortcutAction {
             Self::ResizeSplitRight => "Make terminal wider",
             Self::ResizeSplitUp => "Make split shorter",
             Self::ResizeSplitDown => "Make split taller",
+            Self::FitTerminalToViewport => "Fit terminal to viewport",
             Self::SplitRight => "Split right",
             Self::SplitDown => "Split down",
         }
@@ -393,6 +399,9 @@ impl ShortcutAction {
             }
             Self::ResizeSplitUp => "Reduce the active split height.",
             Self::ResizeSplitDown => "Increase the active split height.",
+            Self::FitTerminalToViewport => {
+                "Resize the active terminal so it fills the visible workspace terminal area."
+            }
             Self::SplitRight => "Split the active pane to the right inside the current window.",
             Self::SplitDown => "Split the active pane downward inside the current window.",
         }
@@ -422,7 +431,8 @@ impl ShortcutAction {
             | Self::ResizeSplitLeft
             | Self::ResizeSplitRight
             | Self::ResizeSplitUp
-            | Self::ResizeSplitDown => "Advanced resize",
+            | Self::ResizeSplitDown
+            | Self::FitTerminalToViewport => "Advanced resize",
         }
     }
 
@@ -456,6 +466,7 @@ impl ShortcutAction {
                 Self::ResizeSplitRight => &["<Control><Alt>equal", "<Control><Alt>KP_Add"],
                 Self::ResizeSplitUp => &[],
                 Self::ResizeSplitDown => &[],
+                Self::FitTerminalToViewport => &["<Control><Alt>0", "<Control><Alt>KP_0"],
                 Self::SplitRight => &["<Control><Alt><Shift>t"],
                 Self::SplitDown => &["<Control><Alt><Shift>g"],
             },
@@ -495,6 +506,7 @@ impl ShortcutAction {
                 ],
                 Self::ResizeSplitUp => &["<Control><Alt><Shift>Page_Up"],
                 Self::ResizeSplitDown => &["<Control><Alt><Shift>Page_Down"],
+                Self::FitTerminalToViewport => &["<Control><Alt>0", "<Control><Alt>KP_0"],
                 Self::SplitRight => &["<Control><Alt><Shift>t"],
                 Self::SplitDown => &["<Control><Alt><Shift>g"],
             },
@@ -2639,7 +2651,7 @@ impl TaskersCore {
                 let axis = SplitAxis::from_domain(*axis);
                 let (first_frame, second_frame) =
                     split_frame(frame, axis, *ratio, self.metrics.split_gap);
-                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                if should_render_split_as_collapsed(frame, axis, *ratio, self.metrics.split_gap) {
                     let active_pane = workspace.active_pane;
                     let render_first = layout_node_contains_pane(workspace, first, active_pane)
                         || !layout_node_contains_pane(workspace, second, active_pane);
@@ -2705,7 +2717,7 @@ impl TaskersCore {
                 let axis = SplitAxis::from_domain(*axis);
                 let (first_frame, second_frame) =
                     split_frame(frame, axis, *ratio, self.metrics.split_gap);
-                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                if should_render_split_as_collapsed(frame, axis, *ratio, self.metrics.split_gap) {
                     let active_pane = workspace.active_pane;
                     let render_first = first.contains(active_pane) || !second.contains(active_pane);
                     return if render_first {
@@ -2924,7 +2936,7 @@ impl TaskersCore {
                 let axis = SplitAxis::from_domain(*axis);
                 let (first_frame, second_frame) =
                     split_frame(frame, axis, *ratio, self.metrics.split_gap);
-                if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+                if should_render_split_as_collapsed(frame, axis, *ratio, self.metrics.split_gap) {
                     let render_first = layout_node_contains_pane(workspace, first, active_pane)
                         || !layout_node_contains_pane(workspace, second, active_pane);
                     if render_first {
@@ -3027,7 +3039,7 @@ impl TaskersCore {
 
         let axis = SplitAxis::from_domain(*axis);
         let (first_frame, second_frame) = split_frame(frame, axis, *ratio, self.metrics.split_gap);
-        if should_collapse_render_split(frame, axis, self.metrics.split_gap) {
+        if should_render_split_as_collapsed(frame, axis, *ratio, self.metrics.split_gap) {
             let render_first = first.contains(active_pane) || !second.contains(active_pane);
             if render_first {
                 path.push(false);
@@ -3723,6 +3735,10 @@ impl TaskersCore {
                     )
                 })
             }
+            ShortcutAction::FitTerminalToViewport => self.run_workspace_shortcut(
+                shortcut_preserves_overview(action),
+                |core, workspace_id| Some(core.fit_active_terminal_to_viewport(workspace_id)),
+            ),
             ShortcutAction::SplitRight => self.run_standard_workspace_shortcut(|core, _| {
                 Some(core.split_with_kind_axis(
                     None,
@@ -4829,6 +4845,71 @@ impl TaskersCore {
         })
     }
 
+    fn fit_active_terminal_to_viewport(&mut self, workspace_id: WorkspaceId) -> bool {
+        let model = self.app_state.snapshot_model();
+        let Some(workspace) = model.workspaces.get(&workspace_id) else {
+            return false;
+        };
+        let Some(column_id) = workspace.active_column_id() else {
+            return false;
+        };
+        let Some(window) = workspace.active_window_record() else {
+            return false;
+        };
+        let Some(window_tab) = window.active_tab_record() else {
+            return false;
+        };
+        let active_window_id = window.id;
+        let active_container_id = window_tab.active_container;
+        let active_pane_id = workspace.active_pane;
+        let Some(pane_container) = workspace.pane_containers.get(&active_container_id) else {
+            return false;
+        };
+        let Some(pane_tab_id) = pane_container.tab_for_pane(active_pane_id) else {
+            return false;
+        };
+        let Some(pane_tab) = pane_container.tabs.get(&pane_tab_id) else {
+            return false;
+        };
+
+        let viewport = self.workspace_viewport_frame(attention_panel_visible(&model));
+        let target_column_width = (viewport.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2)
+            .max(MIN_WORKSPACE_WINDOW_WIDTH);
+        let target_window_height = viewport.height.max(MIN_WORKSPACE_WINDOW_HEIGHT);
+        let window_targets = focused_split_ratio_targets(&window_tab.layout, active_container_id);
+        let pane_targets = focused_split_ratio_targets(&pane_tab.layout, active_pane_id);
+
+        let mut changed = self.dispatch_control(ControlCommand::SetWorkspaceColumnWidth {
+            workspace_id,
+            workspace_column_id: column_id,
+            width: target_column_width,
+        });
+        changed |= self.dispatch_control(ControlCommand::SetWorkspaceWindowHeight {
+            workspace_id,
+            workspace_window_id: active_window_id,
+            height: target_window_height,
+        });
+        for (path, ratio) in window_targets {
+            changed |= self.dispatch_control(ControlCommand::SetWindowSplitRatioExact {
+                workspace_id,
+                workspace_window_id: active_window_id,
+                path,
+                ratio,
+            });
+        }
+        for (path, ratio) in pane_targets {
+            changed |= self.dispatch_control(ControlCommand::SetPaneTabSplitRatioExact {
+                workspace_id,
+                pane_container_id: active_container_id,
+                pane_tab_id,
+                path,
+                ratio,
+            });
+        }
+
+        changed
+    }
+
     fn begin_window_drag(&mut self) -> bool {
         let mut changed = false;
         if self.ui.drag_session.is_some() {
@@ -5201,6 +5282,7 @@ fn shortcut_preserves_overview(action: ShortcutAction) -> bool {
             | ShortcutAction::ResizeWindowRight
             | ShortcutAction::ResizeWindowUp
             | ShortcutAction::ResizeWindowDown
+            | ShortcutAction::FitTerminalToViewport
     )
 }
 
@@ -5260,6 +5342,46 @@ fn apply_resize_preview_to_model(model: &mut AppModel, preview: &ResizePreview) 
                 path,
                 *ratio,
             );
+        }
+    }
+}
+
+fn focused_split_ratio_targets<LeafId: Copy + Eq>(
+    node: &taskers_domain::SplitLayoutNode<LeafId>,
+    target: LeafId,
+) -> Vec<(Vec<bool>, u16)> {
+    let mut path = Vec::new();
+    let mut targets = Vec::new();
+    let _ = collect_focused_split_ratio_targets(node, target, &mut path, &mut targets);
+    targets
+}
+
+fn collect_focused_split_ratio_targets<LeafId: Copy + Eq>(
+    node: &taskers_domain::SplitLayoutNode<LeafId>,
+    target: LeafId,
+    path: &mut Vec<bool>,
+    targets: &mut Vec<(Vec<bool>, u16)>,
+) -> bool {
+    match node {
+        taskers_domain::SplitLayoutNode::Leaf { leaf_id } => *leaf_id == target,
+        taskers_domain::SplitLayoutNode::Split { first, second, .. } => {
+            path.push(false);
+            if collect_focused_split_ratio_targets(first, target, path, targets) {
+                path.pop();
+                targets.push((path.clone(), EXPANDED_ACTIVE_SPLIT_RATIO));
+                return true;
+            }
+            path.pop();
+
+            path.push(true);
+            if collect_focused_split_ratio_targets(second, target, path, targets) {
+                path.pop();
+                targets.push((path.clone(), COLLAPSED_INACTIVE_SPLIT_RATIO));
+                return true;
+            }
+            path.pop();
+
+            false
         }
     }
 }
@@ -5837,7 +5959,7 @@ fn default_session_path_for_preview(label: &str) -> PathBuf {
 }
 
 fn split_frame(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> (Frame, Frame) {
-    let ratio = i32::from(ratio.clamp(150, 850));
+    let ratio = i32::from(ratio.clamp(1, 999));
     match axis {
         SplitAxis::Horizontal => {
             let usable_width = (frame.width - gap).max(2);
@@ -5879,6 +6001,12 @@ fn should_collapse_render_split(frame: Frame, axis: SplitAxis, gap: i32) -> bool
             frame.height < (MIN_RENDERED_NATIVE_SURFACE_HEIGHT_PX * 2 + gap.max(0))
         }
     }
+}
+
+fn should_render_split_as_collapsed(frame: Frame, axis: SplitAxis, ratio: u16, gap: i32) -> bool {
+    should_collapse_render_split(frame, axis, gap)
+        || ratio <= COLLAPSED_INACTIVE_SPLIT_RATIO
+        || ratio >= EXPANDED_ACTIVE_SPLIT_RATIO
 }
 
 fn layout_node_contains_pane(
@@ -6888,12 +7016,15 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::PixelSize;
+    use crate::{
+        COLLAPSED_INACTIVE_SPLIT_RATIO, EXPANDED_ACTIVE_SPLIT_RATIO, PixelSize,
+        focused_split_ratio_targets, pane_container_content_frame,
+    };
     use taskers_control::ControlCommand;
     use taskers_core::AppState;
     use taskers_domain::{
         AppModel, AttentionState as DomainAttentionState, InterruptedAgentResume, NotificationId,
-        NotificationItem, SignalKind,
+        NotificationItem, PaneId, SignalKind,
     };
     use taskers_ghostty::BackendChoice;
     use taskers_runtime::ShellLaunchSpec;
@@ -7290,7 +7421,7 @@ mod tests {
                 first,
                 second,
             } => {
-                let ratio = (ratio.clamp(0.15, 0.85) * 1000.0).round() as u16;
+                let ratio = (ratio.clamp(0.001, 0.999) * 1000.0).round() as u16;
                 let (first_frame, second_frame) =
                     split_frame(frame, *axis, ratio, metrics.split_gap);
                 find_pane_frame(first, pane_id, first_frame, metrics)
@@ -7341,7 +7472,7 @@ mod tests {
                 first,
                 second,
             } => {
-                let ratio = (ratio.clamp(0.15, 0.85) * 1000.0).round() as u16;
+                let ratio = (ratio.clamp(0.001, 0.999) * 1000.0).round() as u16;
                 let (first_frame, second_frame) = split_frame(frame, *axis, ratio, gap);
                 find_live_pane_frame(first, pane_id, first_frame, gap)
                     .or_else(|| find_live_pane_frame(second, pane_id, second_frame, gap))
@@ -9823,6 +9954,40 @@ mod tests {
                 "<Control><Alt><Shift>End",
             ]
         );
+        assert_eq!(
+            ShortcutAction::FitTerminalToViewport.accelerators(ShortcutPreset::Balanced),
+            &["<Control><Alt>0", "<Control><Alt>KP_0"]
+        );
+        assert_eq!(
+            ShortcutAction::FitTerminalToViewport.accelerators(ShortcutPreset::PowerUser),
+            &["<Control><Alt>0", "<Control><Alt>KP_0"]
+        );
+    }
+
+    #[test]
+    fn focused_split_ratio_targets_follow_active_leaf_path() {
+        let first = PaneId::new();
+        let second = PaneId::new();
+        let target = PaneId::new();
+        let layout = taskers_domain::SplitLayoutNode::Split {
+            axis: taskers_domain::SplitAxis::Horizontal,
+            ratio: 500,
+            first: Box::new(taskers_domain::SplitLayoutNode::Leaf { leaf_id: first }),
+            second: Box::new(taskers_domain::SplitLayoutNode::Split {
+                axis: taskers_domain::SplitAxis::Vertical,
+                ratio: 500,
+                first: Box::new(taskers_domain::SplitLayoutNode::Leaf { leaf_id: target }),
+                second: Box::new(taskers_domain::SplitLayoutNode::Leaf { leaf_id: second }),
+            }),
+        };
+
+        assert_eq!(
+            focused_split_ratio_targets(&layout, target),
+            vec![
+                (vec![true], EXPANDED_ACTIVE_SPLIT_RATIO),
+                (Vec::new(), COLLAPSED_INACTIVE_SPLIT_RATIO),
+            ]
+        );
     }
 
     #[test]
@@ -9912,6 +10077,80 @@ mod tests {
         assert!(snapshot.overview_mode);
         let after_width = window_snapshot(&snapshot, active_window_id).frame.width;
         assert_ne!(after_width, before_width);
+    }
+
+    #[test]
+    fn fit_terminal_to_viewport_shortcut_expands_active_terminal_and_window() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.set_window_size(PixelSize::new(1280, 900));
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Down,
+        });
+        assert!(core.dispatch_shortcut_action(ShortcutAction::SplitRight));
+
+        let before = core.snapshot();
+        let active_window_id = before.current_workspace.active_window_id;
+        let active_pane_id = before.current_workspace.active_pane;
+        let metrics = before.metrics;
+        let before_window = window_snapshot(&before, active_window_id);
+        let before_pane_frame = find_pane_frame(
+            &before_window.layout,
+            active_pane_id,
+            workspace_window_content_frame(before_window.frame, metrics),
+            metrics,
+        )
+        .expect("active pane frame before fit");
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::FitTerminalToViewport));
+
+        let after = core.snapshot();
+        let after_window = window_snapshot(&after, active_window_id);
+        let active_pane = find_pane(&after.current_workspace.layout, active_pane_id).expect("pane");
+        let active_plan = after
+            .portal
+            .panes
+            .iter()
+            .find(|plan| plan.pane_id == active_pane_id)
+            .expect("active portal plan");
+        let expected_window_width =
+            after.portal.content.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2;
+        let expected_window_height = after.portal.content.height;
+        let expected_pane_frame = pane_container_content_frame(
+            workspace_window_content_frame(after_window.frame, metrics),
+            metrics,
+        );
+
+        assert!(before_window.frame.height < expected_window_height);
+        assert!(before_pane_frame.width < expected_pane_frame.width);
+        assert!(before_pane_frame.height <= expected_pane_frame.height);
+        assert_eq!(after_window.frame.width, expected_window_width);
+        assert_eq!(after_window.frame.height, expected_window_height);
+        assert_eq!(
+            active_plan.frame,
+            pane_body_frame(
+                expected_pane_frame,
+                metrics,
+                &taskers_domain::PaneKind::Terminal,
+                pane_shows_tab_strip_for_surface_count(active_pane.surfaces.len()),
+            )
+        );
+    }
+
+    #[test]
+    fn fit_terminal_to_viewport_shortcut_keeps_overview_mode_active() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::CreateWorkspaceWindow {
+            direction: WorkspaceDirection::Right,
+        });
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        assert!(core.snapshot().overview_mode);
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::FitTerminalToViewport));
+
+        assert!(core.snapshot().overview_mode);
     }
 
     #[test]
