@@ -52,6 +52,7 @@ const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
 const GHOSTTY_BRIDGE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const GHOSTTY_BRIDGE_FATAL_THRESHOLD: Duration = Duration::from_secs(5);
 const GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const MAX_CONCURRENT_GHOSTTY_SURFACES: usize = 3;
 const WEBKIT_DISABLE_DMABUF_RENDERER_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1479,8 +1480,6 @@ impl TaskersHost {
             }
         }
 
-        let defer_creations = should_defer_terminal_surface_creations_after_removals(removed_any);
-
         for entry in catalog {
             let visible_plan = native_surface_visible_plan(
                 if visible {
@@ -1503,20 +1502,6 @@ impl TaskersHost {
                     self.diagnostics.as_ref(),
                 ),
                 None => {
-                    if defer_creations {
-                        self.pending_terminal_create_retry = true;
-                        emit_diagnostic(
-                            self.diagnostics.as_ref(),
-                            DiagnosticRecord::new(
-                                DiagnosticCategory::Bridge,
-                                Some(revision),
-                                "deferring terminal surface create until next sync after removals",
-                            )
-                            .with_pane(entry.pane_id)
-                            .with_surface(entry.surface_id),
-                        );
-                        continue;
-                    }
                     if !bridge_running {
                         emit_diagnostic(
                             self.diagnostics.as_ref(),
@@ -1533,6 +1518,50 @@ impl TaskersHost {
                     let Some(host) = host else {
                         continue;
                     };
+                    let bridge_surface_count = host.surface_count();
+                    let live_surface_count = self.terminal_surfaces.len();
+                    match terminal_surface_create_decision(
+                        removed_any,
+                        live_surface_count,
+                        bridge_surface_count,
+                    ) {
+                        TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces => {
+                            self.pending_terminal_create_retry = true;
+                            emit_diagnostic(
+                                self.diagnostics.as_ref(),
+                                DiagnosticRecord::new(
+                                    DiagnosticCategory::Bridge,
+                                    Some(revision),
+                                    format!(
+                                        "deferring terminal surface create until ghostty bridge quiesces bridge_surface_count={} live_surface_count={}",
+                                        bridge_surface_count, live_surface_count
+                                    ),
+                                )
+                                .with_pane(entry.pane_id)
+                                .with_surface(entry.surface_id),
+                            );
+                            continue;
+                        }
+                        TerminalSurfaceCreateDecision::SkipAtSurfaceBudget => {
+                            emit_diagnostic(
+                                self.diagnostics.as_ref(),
+                                DiagnosticRecord::new(
+                                    DiagnosticCategory::Bridge,
+                                    Some(revision),
+                                    format!(
+                                        "skipping terminal surface create because embedded ghostty surface budget reached surface_limit={} bridge_surface_count={} live_surface_count={}",
+                                        MAX_CONCURRENT_GHOSTTY_SURFACES,
+                                        bridge_surface_count,
+                                        live_surface_count
+                                    ),
+                                )
+                                .with_pane(entry.pane_id)
+                                .with_surface(entry.surface_id),
+                            );
+                            continue;
+                        }
+                        TerminalSurfaceCreateDecision::CreateNow => {}
+                    }
                     let surface = TerminalSurface::new(
                         &self.native_surface_scene,
                         entry,
@@ -1576,8 +1605,25 @@ fn build_native_surface_scene_layers() -> (Fixed, Fixed) {
     (native_surface_viewport, native_surface_scene)
 }
 
-fn should_defer_terminal_surface_creations_after_removals(removed_any: bool) -> bool {
-    removed_any
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalSurfaceCreateDecision {
+    CreateNow,
+    DeferUntilBridgeQuiesces,
+    SkipAtSurfaceBudget,
+}
+
+fn terminal_surface_create_decision(
+    removed_any: bool,
+    live_surface_count: usize,
+    bridge_surface_count: usize,
+) -> TerminalSurfaceCreateDecision {
+    if removed_any || bridge_surface_count > live_surface_count {
+        return TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces;
+    }
+    if live_surface_count >= MAX_CONCURRENT_GHOSTTY_SURFACES {
+        return TerminalSurfaceCreateDecision::SkipAtSurfaceBudget;
+    }
+    TerminalSurfaceCreateDecision::CreateNow
 }
 
 impl ResizeHandleOverlay {
@@ -3134,10 +3180,12 @@ fn scene_plans_for_kind(
     portal
         .panes
         .iter()
-        .filter(|plan| match (&plan.mount, &kind) {
-            (SurfaceMountSpec::Browser(_), PaneKind::Browser)
-            | (SurfaceMountSpec::Terminal(_), PaneKind::Terminal) => true,
-            _ => false,
+        .filter(|plan| {
+            matches!(
+                (&plan.mount, &kind),
+                (SurfaceMountSpec::Browser(_), PaneKind::Browser)
+                    | (SurfaceMountSpec::Terminal(_), PaneKind::Terminal)
+            )
         })
         .map(|plan| plan_in_scene_coordinates(plan, workspace))
         .collect()
@@ -3514,10 +3562,10 @@ fn hidden_frame() -> taskers_core::Frame {
     taskers_core::Frame::new(100_000, 100_000, 1, 1)
 }
 
-fn native_surface_visible_plan<'a>(
-    visible_plan: Option<&'a PortalSurfacePlan>,
+fn native_surface_visible_plan(
+    visible_plan: Option<&PortalSurfacePlan>,
     _resize_preview_active: bool,
-) -> Option<&'a PortalSurfacePlan> {
+) -> Option<&PortalSurfacePlan> {
     visible_plan
 }
 
@@ -3528,13 +3576,13 @@ mod tests {
     use gtk::prelude::WidgetExt;
 
     use super::{
-        HardwareAccelerationPolicy, WebKitSettings, browser_plans,
+        HardwareAccelerationPolicy, TerminalSurfaceCreateDecision, WebKitSettings, browser_plans,
         build_native_surface_scene_layers, clamp_frame_to_widget, host_attention_palette,
         native_surface_classes, native_surface_css, native_surface_shell_can_target,
         native_surface_visible_plan, native_surfaces_interactive, native_surfaces_visible,
         preview_for_drag, redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
-        should_defer_terminal_surface_creations_after_removals, terminal_plans, trim_terminal_tail,
-        with_capture_retries, workspace_pan_delta,
+        terminal_plans, terminal_surface_create_decision, trim_terminal_tail, with_capture_retries,
+        workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
@@ -3731,11 +3779,31 @@ mod tests {
     }
 
     #[test]
-    fn terminal_surface_creation_is_deferred_after_removals() {
-        assert!(should_defer_terminal_surface_creations_after_removals(true));
-        assert!(!should_defer_terminal_surface_creations_after_removals(
-            false
-        ));
+    fn terminal_surface_creation_defers_until_bridge_quiesces() {
+        assert_eq!(
+            terminal_surface_create_decision(false, 1, 2),
+            TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces
+        );
+        assert_eq!(
+            terminal_surface_create_decision(true, 1, 1),
+            TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces
+        );
+    }
+
+    #[test]
+    fn terminal_surface_creation_skips_when_surface_budget_is_exhausted() {
+        assert_eq!(
+            terminal_surface_create_decision(false, super::MAX_CONCURRENT_GHOSTTY_SURFACES, 3),
+            TerminalSurfaceCreateDecision::SkipAtSurfaceBudget
+        );
+    }
+
+    #[test]
+    fn terminal_surface_creation_allows_safe_capacity() {
+        assert_eq!(
+            terminal_surface_create_decision(false, 2, 2),
+            TerminalSurfaceCreateDecision::CreateNow
+        );
     }
 
     #[test]
