@@ -3836,8 +3836,8 @@ impl TaskersCore {
 
     fn create_workspace_window(&mut self, direction: WorkspaceDirection) -> bool {
         let mut changed = false;
-        if self.ui.overview_mode {
-            self.ui.overview_mode = false;
+        if self.ui.overview_mode && !self.ui.render_live_surfaces_in_overview {
+            self.ui.render_live_surfaces_in_overview = true;
             self.bump_local_revision();
             changed = true;
         }
@@ -3862,8 +3862,8 @@ impl TaskersCore {
         direction: WorkspaceDirection,
     ) -> bool {
         let mut changed = false;
-        if self.ui.overview_mode {
-            self.ui.overview_mode = false;
+        if self.ui.overview_mode && !self.ui.render_live_surfaces_in_overview {
+            self.ui.render_live_surfaces_in_overview = true;
             self.bump_local_revision();
             changed = true;
         }
@@ -10100,7 +10100,7 @@ mod tests {
     }
 
     #[test]
-    fn new_window_shortcut_leaves_overview_and_creates_terminal_surface() {
+    fn new_window_shortcut_keeps_overview_and_creates_terminal_surface() {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::ToggleOverview);
         assert!(core.snapshot().overview_mode);
@@ -10117,14 +10117,14 @@ mod tests {
             .iter()
             .find(|plan| plan.pane_id == active_pane_id)
             .expect("active portal plan");
-        assert!(!snapshot.overview_mode);
+        assert!(snapshot.overview_mode);
         assert_eq!(snapshot.current_workspace.columns.len(), 2);
         assert_eq!(active_pane.surfaces.len(), 1);
         assert!(matches!(active_plan.mount, SurfaceMountSpec::Terminal(_)));
     }
 
     #[test]
-    fn create_workspace_window_shell_action_in_overview_leaves_overview_and_creates_terminal_surface()
+    fn create_workspace_window_shell_action_in_overview_keeps_overview_and_creates_terminal_surface()
      {
         let core = SharedCore::bootstrap(bootstrap());
         core.dispatch_shell_action(ShellAction::ToggleOverview);
@@ -10145,9 +10145,34 @@ mod tests {
             .find(|plan| plan.pane_id == active_pane_id)
             .expect("active portal plan");
 
-        assert!(!snapshot.overview_mode);
+        assert!(snapshot.overview_mode);
         assert_eq!(active_pane.surfaces.len(), 1);
         assert!(matches!(active_plan.mount, SurfaceMountSpec::Terminal(_)));
+    }
+
+    #[test]
+    fn new_window_in_overview_reenables_live_surfaces_when_disabled() {
+        let core = SharedCore::bootstrap(bootstrap());
+        core.dispatch_shell_action(ShellAction::SetOverviewLiveSurfaces { enabled: false });
+        core.dispatch_shell_action(ShellAction::ToggleOverview);
+        let before = core.snapshot();
+        assert!(before.overview_mode);
+        assert!(before.portal.panes.is_empty());
+
+        assert!(core.dispatch_shortcut_action(ShortcutAction::NewWindowRight));
+
+        let after = core.snapshot();
+        let active_pane_id = after.current_workspace.active_pane;
+        assert!(after.overview_mode);
+        assert!(after.settings.render_live_surfaces_in_overview);
+        assert!(
+            after
+                .portal
+                .panes
+                .iter()
+                .any(|plan| plan.pane_id == active_pane_id
+                    && matches!(plan.mount, SurfaceMountSpec::Terminal(_)))
+        );
     }
 
     #[test]
