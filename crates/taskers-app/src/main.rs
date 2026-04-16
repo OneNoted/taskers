@@ -1533,6 +1533,40 @@ fn shortcut_matches(
         })
 }
 
+fn physical_horizontal_resize_action(
+    key: gdk::Key,
+    state: gdk::ModifierType,
+) -> Option<ShortcutAction> {
+    let normalized = normalize_shortcut_modifiers(state);
+    let required = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+    if !normalized.contains(gdk::ModifierType::CONTROL_MASK)
+        || !normalized.contains(gdk::ModifierType::ALT_MASK)
+    {
+        return None;
+    }
+
+    let unexpected = normalized & !(required | gdk::ModifierType::SHIFT_MASK);
+    if !unexpected.is_empty() {
+        return None;
+    }
+
+    if matches!(key, gdk::Key::KP_Subtract) {
+        return Some(ShortcutAction::ResizeSplitLeft);
+    }
+    if matches!(key, gdk::Key::KP_Add) {
+        return Some(ShortcutAction::ResizeSplitRight);
+    }
+
+    match key.to_unicode() {
+        Some('-') => Some(ShortcutAction::ResizeSplitLeft),
+        Some('+') => Some(ShortcutAction::ResizeSplitRight),
+        _ if key == gdk::Key::equal && normalized.contains(gdk::ModifierType::SHIFT_MASK) => {
+            Some(ShortcutAction::ResizeSplitRight)
+        }
+        _ => None,
+    }
+}
+
 fn focus_active_browser_address(shell_view: &WebView) {
     shell_view.evaluate_javascript(
         "(() => {
@@ -1565,6 +1599,12 @@ fn connect_navigation_shortcuts(
 
         let preset = shortcuts_core.selected_shortcut_preset();
 
+        if let Some(action) = physical_horizontal_resize_action(key, state)
+            && shortcuts_core.dispatch_shortcut_action(action)
+        {
+            return glib::Propagation::Stop;
+        }
+
         if shortcut_matches(preset, ShortcutAction::FocusBrowserAddress, key, state) {
             let snapshot = shortcuts_core.snapshot();
             if snapshot.section == ShellSection::Workspace && snapshot.browser_chrome.is_some() {
@@ -1588,6 +1628,50 @@ fn connect_navigation_shortcuts(
         glib::Propagation::Proceed
     });
     window.add_controller(controller);
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::{ShortcutAction, physical_horizontal_resize_action};
+    use gtk::gdk;
+
+    #[test]
+    fn physical_minus_shortcut_maps_to_horizontal_shrink() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::minus, modifiers),
+            Some(ShortcutAction::ResizeSplitLeft)
+        );
+    }
+
+    #[test]
+    fn physical_plus_shortcut_maps_to_horizontal_grow() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::plus, modifiers),
+            Some(ShortcutAction::ResizeSplitRight)
+        );
+    }
+
+    #[test]
+    fn shifted_equal_shortcut_maps_to_horizontal_grow() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SHIFT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::equal, modifiers),
+            Some(ShortcutAction::ResizeSplitRight)
+        );
+    }
+
+    #[test]
+    fn unshifted_equal_does_not_trigger_horizontal_grow() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::equal, modifiers),
+            None
+        );
+    }
 }
 
 fn bootstrap_runtime(
