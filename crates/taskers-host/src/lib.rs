@@ -25,15 +25,18 @@ use taskers_control::{
 };
 use taskers_core::{
     BrowserSurfaceCatalogEntry, HostCommand, HostEvent, PaneId, PortalSurfacePlan, ShellDragMode,
-    ShellSection, ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan,
-    TerminalMountSpec, TerminalSurfaceCatalogEntry, WorkspaceId, WorkspaceViewSnapshot,
+    ShellSection, ShellSnapshot, SurfaceId, SurfaceMountSpec, SurfacePortalPlan, TerminalMountSpec,
+    TerminalSurfaceCatalogEntry, WorkspaceId, WorkspaceViewSnapshot,
 };
 use taskers_domain::{
     BrowserProfileMode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind,
 };
 use taskers_ghostty::{GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor};
 use taskers_shell_core as taskers_core;
-use webkit6::{LoadEvent, NetworkSession, Settings as WebKitSettings, WebView, prelude::*};
+use webkit6::{
+    HardwareAccelerationPolicy, LoadEvent, NetworkSession, Settings as WebKitSettings, WebView,
+    prelude::*,
+};
 
 pub type HostEventSink = Rc<dyn Fn(HostEvent) + 'static>;
 pub type ShellActionSink = Rc<dyn Fn(taskers_core::ShellAction) + 'static>;
@@ -49,6 +52,7 @@ const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
 const GHOSTTY_BRIDGE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const GHOSTTY_BRIDGE_FATAL_THRESHOLD: Duration = Duration::from_secs(5);
 const GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const WEBKIT_DISABLE_DMABUF_RENDERER_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCategory {
@@ -1747,6 +1751,7 @@ impl BrowserSurface {
             .enable_back_forward_navigation_gestures(true)
             .enable_developer_extras(true)
             .build();
+        apply_taskers_webkit_graphics_fallback(&settings);
         let webview = WebView::builder()
             .hexpand(true)
             .vexpand(true)
@@ -2080,6 +2085,12 @@ impl BrowserSurface {
     }
 }
 
+fn apply_taskers_webkit_graphics_fallback(settings: &WebKitSettings) {
+    if std::env::var_os(WEBKIT_DISABLE_DMABUF_RENDERER_ENV).is_some_and(|value| value != "0") {
+        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+    }
+}
+
 struct TerminalSurface {
     surface_id: SurfaceId,
     workspace_id: Rc<Cell<WorkspaceId>>,
@@ -2314,7 +2325,9 @@ impl NativeSurfaceShell {
         widget.set_can_target(native_surface_shell_can_target(interactive));
         widget.add_css_class("native-surface-host");
         widget.add_css_class(kind_class);
-        Self { widget: widget.clone() }
+        Self {
+            widget: widget.clone(),
+        }
     }
 
     fn position(&self, scene: &Fixed, frame: taskers_core::Frame) {
@@ -3221,9 +3234,7 @@ fn native_surfaces_interactive(
     drag_mode: ShellDragMode,
     overview_mode: bool,
 ) -> bool {
-    matches!(section, ShellSection::Workspace)
-        && drag_mode == ShellDragMode::None
-        && !overview_mode
+    matches!(section, ShellSection::Workspace) && drag_mode == ShellDragMode::None && !overview_mode
 }
 
 fn native_surface_shell_can_target(interactive: bool) -> bool {
@@ -3512,26 +3523,29 @@ fn native_surface_visible_plan<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Mutex};
 
     use gtk::prelude::WidgetExt;
 
     use super::{
-        browser_plans, build_native_surface_scene_layers, clamp_frame_to_widget,
-        host_attention_palette, native_surface_classes, native_surface_css,
-        native_surface_shell_can_target, native_surface_visible_plan, native_surfaces_interactive,
-        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
-        resolve_screenshot_output_path, should_defer_terminal_surface_creations_after_removals,
-        terminal_plans, trim_terminal_tail, with_capture_retries, workspace_pan_delta,
+        HardwareAccelerationPolicy, WebKitSettings, browser_plans,
+        build_native_surface_scene_layers, clamp_frame_to_widget, host_attention_palette,
+        native_surface_classes, native_surface_css, native_surface_shell_can_target,
+        native_surface_visible_plan, native_surfaces_interactive, native_surfaces_visible,
+        preview_for_drag, redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
+        should_defer_terminal_surface_creations_after_removals, terminal_plans, trim_terminal_tail,
+        with_capture_retries, workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
         AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
         PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode,
-        ShellSection, SplitAxis, SurfaceId, SurfaceMountSpec, TerminalMountSpec,
-        WorkspaceColumnId, WorkspaceOuterEdge, WorkspaceWindowId,
+        ShellSection, SplitAxis, SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId,
+        WorkspaceOuterEdge, WorkspaceWindowId,
     };
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn partitions_portal_plans_by_surface_kind() {
@@ -3693,6 +3707,27 @@ mod tests {
         assert!(dark.contains("padding-top: 0px;"));
         assert!(dark.contains("padding-bottom: 0px;"));
         assert!(gruvbox.contains("background: #282828;"));
+    }
+
+    #[test]
+    fn webkit_graphics_fallback_follows_dmabuf_env_flag() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
+        let settings = WebKitSettings::builder().build();
+
+        unsafe { std::env::remove_var(super::WEBKIT_DISABLE_DMABUF_RENDERER_ENV) };
+        super::apply_taskers_webkit_graphics_fallback(&settings);
+        assert_eq!(
+            settings.hardware_acceleration_policy(),
+            HardwareAccelerationPolicy::Always
+        );
+
+        unsafe { std::env::set_var(super::WEBKIT_DISABLE_DMABUF_RENDERER_ENV, "1") };
+        super::apply_taskers_webkit_graphics_fallback(&settings);
+        assert_eq!(
+            settings.hardware_acceleration_policy(),
+            HardwareAccelerationPolicy::Never
+        );
+        unsafe { std::env::remove_var(super::WEBKIT_DISABLE_DMABUF_RENDERER_ENV) };
     }
 
     #[test]
