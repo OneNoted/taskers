@@ -1559,10 +1559,8 @@ fn physical_horizontal_resize_action(
 
     match key.to_unicode() {
         Some('-') => Some(ShortcutAction::ResizeSplitLeft),
+        Some('=') => Some(ShortcutAction::ResizeSplitRight),
         Some('+') => Some(ShortcutAction::ResizeSplitRight),
-        _ if key == gdk::Key::equal && normalized.contains(gdk::ModifierType::SHIFT_MASK) => {
-            Some(ShortcutAction::ResizeSplitRight)
-        }
         _ => None,
     }
 }
@@ -1645,8 +1643,19 @@ mod shortcut_tests {
     }
 
     #[test]
-    fn physical_plus_shortcut_maps_to_horizontal_grow() {
+    fn physical_equal_shortcut_maps_to_horizontal_grow() {
         let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
+        assert_eq!(
+            physical_horizontal_resize_action(gdk::Key::equal, modifiers),
+            Some(ShortcutAction::ResizeSplitRight)
+        );
+    }
+
+    #[test]
+    fn physical_plus_shortcut_still_maps_to_horizontal_grow() {
+        let modifiers = gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SHIFT_MASK;
         assert_eq!(
             physical_horizontal_resize_action(gdk::Key::plus, modifiers),
             Some(ShortcutAction::ResizeSplitRight)
@@ -1661,15 +1670,6 @@ mod shortcut_tests {
         assert_eq!(
             physical_horizontal_resize_action(gdk::Key::equal, modifiers),
             Some(ShortcutAction::ResizeSplitRight)
-        );
-    }
-
-    #[test]
-    fn unshifted_equal_does_not_trigger_horizontal_grow() {
-        let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK;
-        assert_eq!(
-            physical_horizontal_resize_action(gdk::Key::equal, modifiers),
-            None
         );
     }
 }
