@@ -1101,7 +1101,8 @@ impl Workspace {
     }
 
     fn should_bootstrap_top_level_extents(&self) -> Option<(WorkspaceColumnId, WorkspaceWindowId)> {
-        if self.top_level_extents_initialized || self.columns.len() != 1 || self.windows.len() != 1 {
+        if self.top_level_extents_initialized || self.columns.len() != 1 || self.windows.len() != 1
+        {
             return None;
         }
 
@@ -5250,12 +5251,16 @@ mod tests {
         let mut model = AppModel::new("Main");
         let workspace_id = model.active_workspace_id().expect("workspace");
 
-        assert!(model
-            .bootstrap_workspace_top_level_extents(workspace_id, 900, 700)
-            .expect("bootstrap"));
-        assert!(!model
-            .bootstrap_workspace_top_level_extents(workspace_id, 1200, 900)
-            .expect("bootstrap is one-time"));
+        assert!(
+            model
+                .bootstrap_workspace_top_level_extents(workspace_id, 900, 700)
+                .expect("bootstrap")
+        );
+        assert!(
+            !model
+                .bootstrap_workspace_top_level_extents(workspace_id, 1200, 900)
+                .expect("bootstrap is one-time")
+        );
 
         let workspace = model.workspaces.get(&workspace_id).expect("workspace");
         let column = workspace.columns.values().next().expect("column");
@@ -5373,7 +5378,10 @@ mod tests {
             .values()
             .map(|window| window.height)
             .collect::<Vec<_>>();
-        assert_eq!(heights, vec![original_height, DEFAULT_WORKSPACE_WINDOW_HEIGHT]);
+        assert_eq!(
+            heights,
+            vec![original_height, DEFAULT_WORKSPACE_WINDOW_HEIGHT]
+        );
     }
 
     #[test]

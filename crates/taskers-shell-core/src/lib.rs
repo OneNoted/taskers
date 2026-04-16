@@ -195,7 +195,7 @@ impl ShortcutPreset {
     pub fn detail(self) -> &'static str {
         match self {
             Self::Balanced => {
-                "Keep common focus, top-level window, split, overview, and close actions bound."
+                "Keep common focus, split resize, top-level window, overview, and close actions bound."
             }
             Self::PowerUser => {
                 "Restore the dense direction and resize bindings for full keyboard-driven control."
@@ -448,8 +448,8 @@ impl ShortcutAction {
                 Self::ResizeWindowRight => &[],
                 Self::ResizeWindowUp => &[],
                 Self::ResizeWindowDown => &[],
-                Self::ResizeSplitLeft => &[],
-                Self::ResizeSplitRight => &[],
+                Self::ResizeSplitLeft => &["<Control><Alt>minus", "<Control><Alt>KP_Subtract"],
+                Self::ResizeSplitRight => &["<Control><Alt>plus", "<Control><Alt>KP_Add"],
                 Self::ResizeSplitUp => &[],
                 Self::ResizeSplitDown => &[],
                 Self::SplitRight => &["<Control><Alt><Shift>t"],
@@ -479,8 +479,16 @@ impl ShortcutAction {
                 Self::ResizeWindowRight => &["<Control><Alt>End"],
                 Self::ResizeWindowUp => &["<Control><Alt>Page_Up"],
                 Self::ResizeWindowDown => &["<Control><Alt>Page_Down"],
-                Self::ResizeSplitLeft => &["<Control><Alt><Shift>Home"],
-                Self::ResizeSplitRight => &["<Control><Alt><Shift>End"],
+                Self::ResizeSplitLeft => &[
+                    "<Control><Alt>minus",
+                    "<Control><Alt>KP_Subtract",
+                    "<Control><Alt><Shift>Home",
+                ],
+                Self::ResizeSplitRight => &[
+                    "<Control><Alt>plus",
+                    "<Control><Alt>KP_Add",
+                    "<Control><Alt><Shift>End",
+                ],
                 Self::ResizeSplitUp => &["<Control><Alt><Shift>Page_Up"],
                 Self::ResizeSplitDown => &["<Control><Alt><Shift>Page_Down"],
                 Self::SplitRight => &["<Control><Alt><Shift>t"],
@@ -6860,7 +6868,7 @@ mod tests {
         HostEvent, LayoutMetrics, MAX_WORKSPACE_WINDOW_GAP, MIN_RENDERED_NATIVE_SURFACE_WIDTH_PX,
         MIN_WORKSPACE_WINDOW_GAP, NotificationPreferencesSnapshot, ResizeHandleTarget,
         ResizePreview, RuntimeCapability, RuntimeStatus, SharedCore, ShellAction, ShellDragMode,
-        ShellSection, ShortcutAction, SurfaceDragSessionSnapshot, SurfaceMountSpec,
+        ShellSection, ShortcutAction, ShortcutPreset, SurfaceDragSessionSnapshot, SurfaceMountSpec,
         WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX, WorkspaceDirection, WorkspaceOuterEdge,
         WorkspaceWindowMoveTarget, WorkspaceWindowSnapshot, default_preview_app_state,
         default_session_path_for_preview, display_surface_title, pane_body_frame,
@@ -9749,6 +9757,34 @@ mod tests {
                 || movable.can_move_right
                 || movable.can_move_up
                 || movable.can_move_down
+        );
+    }
+
+    #[test]
+    fn presets_include_ctrl_alt_horizontal_split_resize_bindings() {
+        assert_eq!(
+            ShortcutAction::ResizeSplitLeft.accelerators(ShortcutPreset::Balanced),
+            &["<Control><Alt>minus", "<Control><Alt>KP_Subtract"]
+        );
+        assert_eq!(
+            ShortcutAction::ResizeSplitRight.accelerators(ShortcutPreset::Balanced),
+            &["<Control><Alt>plus", "<Control><Alt>KP_Add"]
+        );
+        assert_eq!(
+            ShortcutAction::ResizeSplitLeft.accelerators(ShortcutPreset::PowerUser),
+            &[
+                "<Control><Alt>minus",
+                "<Control><Alt>KP_Subtract",
+                "<Control><Alt><Shift>Home",
+            ]
+        );
+        assert_eq!(
+            ShortcutAction::ResizeSplitRight.accelerators(ShortcutPreset::PowerUser),
+            &[
+                "<Control><Alt>plus",
+                "<Control><Alt>KP_Add",
+                "<Control><Alt><Shift>End",
+            ]
         );
     }
 
