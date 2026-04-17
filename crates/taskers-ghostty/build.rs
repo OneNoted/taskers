@@ -84,7 +84,7 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
         .current_dir(vendor_dir)
         .args([
             "build",
-            "taskers-bridge",
+            "ghostty-gtk-bridge",
             "-Dapp-runtime=gtk",
             "-Demit-exe=false",
             "-Dgtk-wayland=false",

@@ -144,6 +144,17 @@ pub fn build(b: *std.Build) !void {
         taskers_bridge_step.dependOn(&install_ghostty_gtk_header.step);
         resources.addStepDependencies(taskers_bridge_step);
         if (i18n) |v| v.addStepDependencies(taskers_bridge_step);
+
+        const ghostty_gtk_bridge_step = b.step(
+            "ghostty-gtk-bridge",
+            "Build the generic Ghostty GTK bridge surface",
+        );
+        ghostty_gtk_bridge_step.dependOn(&install_bridge.step);
+        ghostty_gtk_bridge_step.dependOn(&install_ghostty_gtk_bridge.step);
+        ghostty_gtk_bridge_step.dependOn(&install_bridge_header.step);
+        ghostty_gtk_bridge_step.dependOn(&install_ghostty_gtk_header.step);
+        resources.addStepDependencies(ghostty_gtk_bridge_step);
+        if (i18n) |v| v.addStepDependencies(ghostty_gtk_bridge_step);
     }
 
     // libghostty-vt
