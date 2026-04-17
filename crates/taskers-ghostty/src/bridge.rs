@@ -56,34 +56,33 @@ pub enum GhosttyError {
 
 #[cfg(taskers_ghostty_bridge)]
 pub struct GhosttyHost {
-    bridge: GhosttyBridgeLibrary,
-    raw: NonNull<taskers_ghostty_host_t>,
+    bridge: GhosttyGtkLibrary,
+    raw: NonNull<ghostty_gtk_host_t>,
 }
 
 #[cfg(not(taskers_ghostty_bridge))]
 pub struct GhosttyHost;
 
 #[cfg(taskers_ghostty_bridge)]
-struct GhosttyBridgeLibrary {
+struct GhosttyGtkLibrary {
     _library: Library,
-    host_new:
-        unsafe extern "C" fn(*const taskers_ghostty_host_options_s) -> *mut taskers_ghostty_host_t,
-    host_free: unsafe extern "C" fn(*mut taskers_ghostty_host_t),
+    host_new: unsafe extern "C" fn(*const ghostty_gtk_host_options_s) -> *mut ghostty_gtk_host_t,
+    host_free: unsafe extern "C" fn(*mut ghostty_gtk_host_t),
     host_version: unsafe extern "C" fn() -> *const c_char,
     host_build_id: unsafe extern "C" fn() -> *const c_char,
-    host_begin_shutdown: unsafe extern "C" fn(*mut taskers_ghostty_host_t),
-    host_surface_count: unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> usize,
-    host_tick: unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> c_int,
+    host_begin_shutdown: unsafe extern "C" fn(*mut ghostty_gtk_host_t),
+    host_surface_count: unsafe extern "C" fn(*mut ghostty_gtk_host_t) -> usize,
+    host_tick: unsafe extern "C" fn(*mut ghostty_gtk_host_t) -> c_int,
     surface_new: unsafe extern "C" fn(
-        *mut taskers_ghostty_host_t,
-        *const taskers_ghostty_surface_options_s,
+        *mut ghostty_gtk_host_t,
+        *const ghostty_gtk_surface_options_s,
     ) -> *mut c_void,
     surface_destroy: unsafe extern "C" fn(*mut c_void),
     surface_grab_focus: unsafe extern "C" fn(*mut c_void) -> c_int,
     surface_has_selection: unsafe extern "C" fn(*mut c_void) -> c_int,
     surface_send_text: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> c_int,
-    surface_read_all_text: unsafe extern "C" fn(*mut c_void, *mut taskers_ghostty_text_s) -> c_int,
-    surface_free_text: unsafe extern "C" fn(*mut taskers_ghostty_text_s),
+    surface_read_all_text: unsafe extern "C" fn(*mut c_void, *mut ghostty_gtk_text_s) -> c_int,
+    surface_free_text: unsafe extern "C" fn(*mut ghostty_gtk_text_s),
 }
 
 impl GhosttyHost {
@@ -136,7 +135,7 @@ impl GhosttyHost {
                 .iter()
                 .map(|value| value.as_ptr())
                 .collect::<Vec<_>>();
-            let host_options = taskers_ghostty_host_options_s {
+            let host_options = ghostty_gtk_host_options_s {
                 command_argv: if command_argv_ptrs.is_empty() {
                     std::ptr::null()
                 } else {
@@ -252,7 +251,7 @@ impl GhosttyHost {
                 .map(|value| value.as_ptr())
                 .collect::<Vec<_>>();
 
-            let options = taskers_ghostty_surface_options_s {
+            let options = ghostty_gtk_surface_options_s {
                 working_directory: cwd
                     .as_ref()
                     .map_or(std::ptr::null(), |value| value.as_ptr()),
@@ -323,7 +322,7 @@ impl GhosttyHost {
     pub fn read_surface_text(&self, widget: &Widget) -> Result<String, GhosttyError> {
         #[cfg(taskers_ghostty_bridge)]
         unsafe {
-            let mut text = taskers_ghostty_text_s::default();
+            let mut text = ghostty_gtk_text_s::default();
             let ok = (self.bridge.surface_read_all_text)(widget.as_ptr().cast(), &mut text);
             if ok == 0 {
                 return Err(GhosttyError::SurfaceReadText);
@@ -381,7 +380,7 @@ impl Drop for GhosttyHost {
 }
 
 #[cfg(taskers_ghostty_bridge)]
-fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
+fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyError> {
     let path = runtime_bridge_path().ok_or(GhosttyError::LibraryPathUnavailable)?;
     let library = unsafe {
         Library::new(&path).map_err(|error| GhosttyError::LibraryLoad {
@@ -476,7 +475,7 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
             b"taskers_ghostty_surface_free_text\0",
         )?;
 
-        Ok(GhosttyBridgeLibrary {
+        Ok(GhosttyGtkLibrary {
             _library: library,
             host_new,
             host_free,
@@ -522,13 +521,13 @@ unsafe fn load_bridge_symbol<T: Copy>(
 
 #[cfg(taskers_ghostty_bridge)]
 #[repr(C)]
-struct taskers_ghostty_host_t {
+struct ghostty_gtk_host_t {
     _private: [u8; 0],
 }
 
 #[cfg(taskers_ghostty_bridge)]
 #[repr(C)]
-struct taskers_ghostty_host_options_s {
+struct ghostty_gtk_host_options_s {
     command_argv: *const *const c_char,
     command_argc: usize,
     env_entries: *const *const c_char,
@@ -539,7 +538,7 @@ struct taskers_ghostty_host_options_s {
 
 #[cfg(taskers_ghostty_bridge)]
 #[repr(C)]
-struct taskers_ghostty_surface_options_s {
+struct ghostty_gtk_surface_options_s {
     working_directory: *const c_char,
     title: *const c_char,
     env_entries: *const *const c_char,
@@ -549,7 +548,7 @@ struct taskers_ghostty_surface_options_s {
 #[cfg(taskers_ghostty_bridge)]
 #[repr(C)]
 #[derive(Default)]
-struct taskers_ghostty_text_s {
+struct ghostty_gtk_text_s {
     text: *const c_char,
     text_len: usize,
 }
