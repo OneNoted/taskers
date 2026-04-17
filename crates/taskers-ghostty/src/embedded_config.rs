@@ -26,6 +26,8 @@ const KEY_CURSOR_STYLE_BLINK: &str = "cursor-style-blink";
 const KEY_SCROLLBACK_LIMIT: &str = "scrollback-limit";
 const KEY_BACKGROUND_OPACITY: &str = "background-opacity";
 const KEY_BACKGROUND_OPACITY_CELLS: &str = "background-opacity-cells";
+const SOURCE_ORDER_NOTE: &str =
+    "Embedded terminal config source order: base.conf < override.conf < Taskers invariants";
 
 const MANAGED_KEYS: &[&str] = &[
     KEY_THEME,
@@ -126,8 +128,7 @@ pub fn load_or_initialize_embedded_terminal_config(
             "Embedded terminal advanced override path {}",
             paths.override_file.display()
         ),
-        "Embedded terminal config source order: base.conf < override.conf < Taskers invariants"
-            .into(),
+        embedded_terminal_config_source_order_note().into(),
     ];
 
     if !paths.base.exists() {
@@ -179,6 +180,10 @@ fn config_paths_from_taskers_config_path(
         override_file: dir.join("override.conf"),
         dir,
     }
+}
+
+fn embedded_terminal_config_source_order_note() -> &'static str {
+    SOURCE_ORDER_NOTE
 }
 
 fn seed_managed_config(
@@ -434,9 +439,9 @@ fn quote_value(value: &str) -> String {
 mod tests {
     use super::{
         EmbeddedTerminalAppearance, EmbeddedTerminalConfig, OptionalBoolValue,
-        config_paths_from_taskers_config_path, load_embedded_terminal_config_from_path,
-        render_base_file, save_embedded_terminal_config_to_path, seed_managed_config,
-        strip_managed_lines,
+        config_paths_from_taskers_config_path, embedded_terminal_config_source_order_note,
+        load_embedded_terminal_config_from_path, render_base_file,
+        save_embedded_terminal_config_to_path, seed_managed_config, strip_managed_lines,
     };
     use std::path::Path;
     use tempfile::tempdir;
@@ -539,5 +544,34 @@ mod tests {
             &["confirm-close-surface = false".into()],
         ));
         assert_eq!(preserved, vec!["confirm-close-surface = false".to_string()]);
+    }
+
+    #[test]
+    fn embedded_config_preserves_base_override_then_taskers_invariants() {
+        let temp = tempdir().expect("tempdir");
+        let base_path = temp.path().join("base.conf");
+        let override_path = temp.path().join("override.conf");
+        std::fs::write(&override_path, "shell-integration = detect\n").expect("write override");
+
+        save_embedded_terminal_config_to_path(
+            &base_path,
+            &EmbeddedTerminalConfig {
+                theme: Some("Tokyo Night".into()),
+                ..EmbeddedTerminalConfig::default()
+            },
+        )
+        .expect("save config");
+
+        assert_eq!(
+            embedded_terminal_config_source_order_note(),
+            "Embedded terminal config source order: base.conf < override.conf < Taskers invariants"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&override_path).expect("read override"),
+            "shell-integration = detect\n"
+        );
+
+        let saved = std::fs::read_to_string(&base_path).expect("read base");
+        assert!(saved.contains("theme = \"Tokyo Night\""));
     }
 }
