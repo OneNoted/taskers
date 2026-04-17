@@ -44,8 +44,12 @@ cp "$repo_root/target/release/taskers-gtk" "$bundle_dir/bin/taskers"
 cp "$repo_root/target/release/taskersctl" "$bundle_dir/bin/taskersctl"
 cp "$repo_root/target/release/taskers-terminald" "$bundle_dir/bin/taskers-terminald"
 chmod +x "$bundle_dir/bin/taskers" "$bundle_dir/bin/taskersctl" "$bundle_dir/bin/taskers-terminald"
-cp "$prefix_dir/lib/libtaskers_ghostty_bridge.so" "$bundle_dir/ghostty/lib/"
 cp "$prefix_dir/lib/libghostty_gtk.so" "$bundle_dir/ghostty/lib/"
+if [ -f "$prefix_dir/lib/libtaskers_ghostty_bridge.so" ]; then
+  cp "$prefix_dir/lib/libtaskers_ghostty_bridge.so" "$bundle_dir/ghostty/lib/"
+else
+  cp "$prefix_dir/lib/libghostty_gtk.so" "$bundle_dir/ghostty/lib/libtaskers_ghostty_bridge.so"
+fi
 cp -R "$prefix_dir/share/ghostty/shell-integration/." "$bundle_dir/ghostty/shell-integration/"
 cp -R "$prefix_dir/share/ghostty/themes/." "$bundle_dir/ghostty/themes/"
 cp -R "$prefix_dir/share/terminfo/." "$bundle_dir/terminfo/"
