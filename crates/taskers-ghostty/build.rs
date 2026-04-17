@@ -4,12 +4,14 @@ use std::{
     process::Command,
 };
 
-const SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED";
+const SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "GHOSTTY_GTK_SKIP_BUILD_RUNTIME_EMBED";
+const LEGACY_SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(ghostty_gtk_bridge)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={SKIP_BUILD_RUNTIME_EMBED_ENV}");
+    println!("cargo:rerun-if-env-changed={LEGACY_SKIP_BUILD_RUNTIME_EMBED_ENV}");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/ghostty_gtk_bridge.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge.zig");
@@ -31,9 +33,9 @@ fn main() {
         println!("cargo:rustc-env=TASKERS_BUILD_TARGET={target}");
     }
 
-    if env::var_os(SKIP_BUILD_RUNTIME_EMBED_ENV).is_some() {
+    if let Some(skip_env) = skip_build_runtime_embed_env() {
         println!(
-            "cargo:warning=skipping build-time Ghostty runtime embedding because {SKIP_BUILD_RUNTIME_EMBED_ENV} is set"
+            "cargo:warning=skipping build-time Ghostty runtime embedding because {skip_env} is set"
         );
         return;
     }
@@ -69,6 +71,16 @@ fn main() {
         install_dir.join("share").join("terminfo").display()
     );
     println!("cargo:rustc-cfg=ghostty_gtk_bridge");
+}
+
+fn skip_build_runtime_embed_env() -> Option<&'static str> {
+    if env::var_os(SKIP_BUILD_RUNTIME_EMBED_ENV).is_some() {
+        Some(SKIP_BUILD_RUNTIME_EMBED_ENV)
+    } else if env::var_os(LEGACY_SKIP_BUILD_RUNTIME_EMBED_ENV).is_some() {
+        Some(LEGACY_SKIP_BUILD_RUNTIME_EMBED_ENV)
+    } else {
+        None
+    }
 }
 
 fn build_bridge(vendor_dir: &Path, install_dir: &Path) {

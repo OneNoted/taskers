@@ -20,7 +20,7 @@ trap cleanup EXIT
 
 (
   cd "$repo_root"
-  TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED=1 \
+  GHOSTTY_GTK_SKIP_BUILD_RUNTIME_EMBED=1 \
     RUSTFLAGS="$bundle_rustflags" \
     cargo build --release -p taskers --bin taskers --bin taskers-gtk --bin taskersctl --bin taskers-terminald
 )
