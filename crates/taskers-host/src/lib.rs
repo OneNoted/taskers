@@ -2210,7 +2210,6 @@ impl TerminalSurface {
         let pane_id = Rc::new(Cell::new(entry.pane_id));
         let focus_state = Rc::new(Cell::new(false));
         connect_ghostty_widget(
-            host,
             &widget,
             pane_id.clone(),
             entry.surface_id,
@@ -2904,8 +2903,42 @@ fn terminal_surface_background(theme_id: &str) -> &'static str {
     }
 }
 
+fn ghostty_focus_enter_event(pane_id: PaneId) -> HostEvent {
+    HostEvent::PaneFocused { pane_id }
+}
+
+fn ghostty_title_changed_event(
+    surface_id: SurfaceId,
+    title: Option<glib::GString>,
+) -> Option<HostEvent> {
+    title.map(|title| HostEvent::SurfaceTitleChanged {
+        surface_id,
+        title: title.to_string(),
+    })
+}
+
+fn ghostty_cwd_changed_event(
+    surface_id: SurfaceId,
+    cwd: Option<glib::GString>,
+) -> Option<HostEvent> {
+    cwd.map(|cwd| HostEvent::SurfaceCwdChanged {
+        surface_id,
+        cwd: cwd.to_string(),
+    })
+}
+
+fn ghostty_child_exited_event(
+    pane_id: PaneId,
+    surface_id: SurfaceId,
+    child_exited: bool,
+) -> Option<HostEvent> {
+    child_exited.then_some(HostEvent::SurfaceClosed {
+        pane_id,
+        surface_id,
+    })
+}
+
 fn connect_ghostty_widget(
-    host: &GhosttyHost,
     widget: &Widget,
     pane_id: Rc<Cell<PaneId>>,
     surface_id: SurfaceId,
@@ -2913,8 +2946,6 @@ fn connect_ghostty_widget(
     diagnostics: Option<DiagnosticsSink>,
     focus_state: Rc<Cell<bool>>,
 ) {
-    let _ = host;
-
     let focus_pane_id = pane_id.clone();
     let focus_sink = event_sink.clone();
     let focus_diagnostics = diagnostics.clone();
@@ -2935,7 +2966,7 @@ fn connect_ghostty_widget(
             .with_pane(pane_id)
             .with_surface(surface_id),
         );
-        (focus_sink)(HostEvent::PaneFocused { pane_id });
+        (focus_sink)(ghostty_focus_enter_event(pane_id));
     });
     let focus_leave_state = focus_state;
     focus.connect_leave(move |_| {
@@ -2946,7 +2977,9 @@ fn connect_ghostty_widget(
     let title_sink = event_sink.clone();
     let title_diagnostics = diagnostics.clone();
     widget.connect_notify_local(Some("title"), move |widget, _| {
-        if let Some(title) = widget.property::<Option<glib::GString>>("title") {
+        if let Some(title) = widget.property::<Option<glib::GString>>("title")
+            && let Some(event) = ghostty_title_changed_event(surface_id, Some(title.clone()))
+        {
             emit_diagnostic(
                 title_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -2956,17 +2989,16 @@ fn connect_ghostty_widget(
                 )
                 .with_surface(surface_id),
             );
-            (title_sink)(HostEvent::SurfaceTitleChanged {
-                surface_id,
-                title: title.to_string(),
-            });
+            (title_sink)(event);
         }
     });
 
     let cwd_sink = event_sink.clone();
     let cwd_diagnostics = diagnostics.clone();
     widget.connect_notify_local(Some("pwd"), move |widget, _| {
-        if let Some(cwd) = widget.property::<Option<glib::GString>>("pwd") {
+        if let Some(cwd) = widget.property::<Option<glib::GString>>("pwd")
+            && let Some(event) = ghostty_cwd_changed_event(surface_id, Some(cwd.clone()))
+        {
             emit_diagnostic(
                 cwd_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -2976,10 +3008,7 @@ fn connect_ghostty_widget(
                 )
                 .with_surface(surface_id),
             );
-            (cwd_sink)(HostEvent::SurfaceCwdChanged {
-                surface_id,
-                cwd: cwd.to_string(),
-            });
+            (cwd_sink)(event);
         }
     });
 
@@ -2987,7 +3016,9 @@ fn connect_ghostty_widget(
     let exit_sink = event_sink;
     let exit_diagnostics = diagnostics;
     widget.connect_notify_local(Some("child-exited"), move |widget, _| {
-        if widget.property::<bool>("child-exited") {
+        if widget.property::<bool>("child-exited")
+            && let Some(event) = ghostty_child_exited_event(exit_pane_id.get(), surface_id, true)
+        {
             let pane_id = exit_pane_id.get();
             emit_diagnostic(
                 exit_diagnostics.as_ref(),
@@ -2995,10 +3026,7 @@ fn connect_ghostty_widget(
                     .with_pane(pane_id)
                     .with_surface(surface_id),
             );
-            (exit_sink)(HostEvent::SurfaceClosed {
-                pane_id,
-                surface_id,
-            });
+            (exit_sink)(event);
         }
     });
 }
@@ -3577,17 +3605,18 @@ mod tests {
 
     use super::{
         HardwareAccelerationPolicy, TerminalSurfaceCreateDecision, WebKitSettings, browser_plans,
-        build_native_surface_scene_layers, clamp_frame_to_widget, host_attention_palette,
-        native_surface_classes, native_surface_css, native_surface_shell_can_target,
-        native_surface_visible_plan, native_surfaces_interactive, native_surfaces_visible,
-        preview_for_drag, redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
-        terminal_plans, terminal_surface_create_decision, trim_terminal_tail, with_capture_retries,
-        workspace_pan_delta,
+        build_native_surface_scene_layers, clamp_frame_to_widget, ghostty_child_exited_event,
+        ghostty_cwd_changed_event, ghostty_focus_enter_event, ghostty_title_changed_event,
+        host_attention_palette, native_surface_classes, native_surface_css,
+        native_surface_shell_can_target, native_surface_visible_plan, native_surfaces_interactive,
+        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
+        resolve_screenshot_output_path, terminal_plans, terminal_surface_create_decision,
+        trim_terminal_tail, with_capture_retries, workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
-        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
+        AttentionRingState, BootstrapModel, Frame, HostEvent, PaneContainerId, PaneId, PaneTabId,
         PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode,
         ShellSection, SplitAxis, SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId,
         WorkspaceOuterEdge, WorkspaceWindowId,
@@ -3804,6 +3833,47 @@ mod tests {
             terminal_surface_create_decision(false, 2, 2),
             TerminalSurfaceCreateDecision::CreateNow
         );
+    }
+
+    #[test]
+    fn ghostty_widget_focus_enter_emits_pane_focused_once() {
+        let pane_id = PaneId::new();
+
+        assert_eq!(
+            ghostty_focus_enter_event(pane_id),
+            HostEvent::PaneFocused { pane_id }
+        );
+    }
+
+    #[test]
+    fn ghostty_widget_notify_propagates_title_pwd_child_exited() {
+        let pane_id = PaneId::new();
+        let surface_id = SurfaceId::new();
+
+        assert_eq!(
+            ghostty_title_changed_event(surface_id, Some("Taskers Terminal".into())),
+            Some(HostEvent::SurfaceTitleChanged {
+                surface_id,
+                title: "Taskers Terminal".into(),
+            })
+        );
+        assert_eq!(
+            ghostty_cwd_changed_event(surface_id, Some("/tmp/taskers".into())),
+            Some(HostEvent::SurfaceCwdChanged {
+                surface_id,
+                cwd: "/tmp/taskers".into(),
+            })
+        );
+        assert_eq!(
+            ghostty_child_exited_event(pane_id, surface_id, true),
+            Some(HostEvent::SurfaceClosed {
+                pane_id,
+                surface_id,
+            })
+        );
+        assert_eq!(ghostty_title_changed_event(surface_id, None), None);
+        assert_eq!(ghostty_cwd_changed_event(surface_id, None), None);
+        assert_eq!(ghostty_child_exited_event(pane_id, surface_id, false), None);
     }
 
     #[test]
