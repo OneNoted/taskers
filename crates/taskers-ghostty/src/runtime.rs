@@ -195,7 +195,7 @@ fn runtime_resources_dir_for(current_exe: Option<&Path>) -> Option<PathBuf> {
         return Some(path);
     }
 
-    default_installed_runtime_dir().filter(|path| path.exists())
+    normalized_default_installed_runtime_dir()
 }
 
 pub fn runtime_gtk_bridge_path() -> Option<PathBuf> {
@@ -229,7 +229,7 @@ fn runtime_gtk_bridge_path_for(current_exe: Option<&Path>) -> Option<PathBuf> {
         return Some(path);
     }
 
-    default_installed_runtime_dir().and_then(|root| {
+    normalized_default_installed_runtime_dir().and_then(|root| {
         gtk_bridge_library_paths_in_dir(&root.join("lib")).find(|path| path.exists())
     })
 }
@@ -497,6 +497,15 @@ fn explicit_runtime_dir() -> Option<PathBuf> {
 
 fn default_installed_runtime_dir() -> Option<PathBuf> {
     Some(taskers_paths::default_ghostty_runtime_dir())
+}
+
+fn normalized_default_installed_runtime_dir() -> Option<PathBuf> {
+    let runtime_dir = default_installed_runtime_dir()?;
+    if !runtime_dir.exists() {
+        return None;
+    }
+    let _ = normalize_gtk_bridge_layout(&runtime_dir);
+    Some(runtime_dir)
 }
 
 fn default_runtime_bundle_url() -> String {
@@ -931,9 +940,15 @@ mod tests {
             runtime_resources_dir_for(Some(installed_exe)),
             Some(runtime_dir.clone())
         );
+        assert!(
+            runtime_dir
+                .join("lib")
+                .join(GTK_BRIDGE_LIBRARY_NAME)
+                .exists()
+        );
         assert_eq!(
             runtime_gtk_bridge_path_for(Some(installed_exe)),
-            Some(runtime_dir.join("lib").join("libtaskers_ghostty_bridge.so"))
+            Some(runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME))
         );
         assert_eq!(
             runtime_terminfo_dir_for(Some(installed_exe)),
