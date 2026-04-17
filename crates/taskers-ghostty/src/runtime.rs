@@ -471,7 +471,6 @@ fn set_runtime_environment_vars(path: &Path) {
     unsafe {
         env::set_var("GHOSTTY_RESOURCES_DIR", path);
         env::set_var(GTK_RUNTIME_DIR_ENV, path);
-        env::set_var("TASKERS_GHOSTTY_RUNTIME_DIR", path);
     }
 }
 
@@ -737,13 +736,17 @@ mod tests {
             Some(runtime_dir.clone())
         );
         assert_eq!(
+            env::var_os(GTK_RUNTIME_DIR_ENV).map(std::path::PathBuf::from),
+            Some(runtime_dir.clone())
+        );
+        assert_eq!(
             env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR").map(std::path::PathBuf::from),
             Some(runtime_dir)
         );
     }
 
     #[test]
-    fn configure_runtime_environment_sets_generic_runtime_dir_alias() {
+    fn configure_runtime_environment_prefers_generic_runtime_dir_without_legacy_export() {
         let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
         let temp = tempdir().expect("tempdir");
         let runtime_dir = temp.path().join("taskers").join("ghostty");
@@ -765,6 +768,10 @@ mod tests {
         assert_eq!(
             env::var_os(GTK_RUNTIME_DIR_ENV).map(std::path::PathBuf::from),
             Some(runtime_dir)
+        );
+        assert_eq!(
+            env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR").map(std::path::PathBuf::from),
+            None
         );
     }
 
