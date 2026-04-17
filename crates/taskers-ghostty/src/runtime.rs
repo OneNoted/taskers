@@ -8,7 +8,7 @@ use tar::Archive;
 use thiserror::Error;
 use xz2::read::XzDecoder;
 
-const BRIDGE_LIBRARY_NAME: &str = "libtaskers_ghostty_bridge.so";
+const LEGACY_BRIDGE_LIBRARY_NAME: &str = "libtaskers_ghostty_bridge.so";
 const GTK_BRIDGE_LIBRARY_NAME: &str = "libghostty_gtk.so";
 const GTK_BRIDGE_PATH_ENV: &str = "GHOSTTY_GTK_BRIDGE_PATH";
 const GTK_RUNTIME_DIR_ENV: &str = "GHOSTTY_GTK_RUNTIME_DIR";
@@ -18,9 +18,9 @@ const GTK_DISABLE_BOOTSTRAP_ENV: &str = "GHOSTTY_GTK_DISABLE_RUNTIME_BOOTSTRAP";
 const RUNTIME_VERSION_FILE: &str = ".taskers-runtime-version";
 const TERMINFO_GHOSTTY_PATH: &str = "g/ghostty";
 const TERMINFO_XTERM_GHOSTTY_PATH: &str = "x/xterm-ghostty";
-const BUNDLE_PATH_ENV: &str = "TASKERS_GHOSTTY_RUNTIME_BUNDLE_PATH";
-const BUNDLE_URL_ENV: &str = "TASKERS_GHOSTTY_RUNTIME_URL";
-const DISABLE_BOOTSTRAP_ENV: &str = "TASKERS_DISABLE_GHOSTTY_RUNTIME_BOOTSTRAP";
+const LEGACY_BUNDLE_PATH_ENV: &str = "TASKERS_GHOSTTY_RUNTIME_BUNDLE_PATH";
+const LEGACY_BUNDLE_URL_ENV: &str = "TASKERS_GHOSTTY_RUNTIME_URL";
+const LEGACY_DISABLE_BOOTSTRAP_ENV: &str = "TASKERS_DISABLE_GHOSTTY_RUNTIME_BOOTSTRAP";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeBootstrap {
@@ -59,16 +59,16 @@ pub enum RuntimeBootstrapError {
 
 pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBootstrapError> {
     if env::var_os(GTK_DISABLE_BOOTSTRAP_ENV).is_some()
-        || env::var_os(DISABLE_BOOTSTRAP_ENV).is_some()
+        || env::var_os(LEGACY_DISABLE_BOOTSTRAP_ENV).is_some()
     {
         return Ok(None);
     }
 
     let current_exe = current_exe_path();
     let bundle_override = env::var_os(GTK_BUNDLE_PATH_ENV).is_some()
-        || env::var_os(BUNDLE_PATH_ENV).is_some()
+        || env::var_os(LEGACY_BUNDLE_PATH_ENV).is_some()
         || env::var_os(GTK_BUNDLE_URL_ENV).is_some()
-        || env::var_os(BUNDLE_URL_ENV).is_some();
+        || env::var_os(LEGACY_BUNDLE_URL_ENV).is_some();
     let build_runtime = build_runtime_layout();
     if !bundle_override
         && build_runtime.is_some()
@@ -101,7 +101,7 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
     })?;
 
     let install_result = if let Some(bundle_path) = env::var_os(GTK_BUNDLE_PATH_ENV)
-        .or_else(|| env::var_os(BUNDLE_PATH_ENV))
+        .or_else(|| env::var_os(LEGACY_BUNDLE_PATH_ENV))
         .map(PathBuf::from)
     {
         let file =
@@ -114,7 +114,7 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
         stage_build_runtime_layout(build_runtime, &staging_root)
     } else {
         let url = env::var(GTK_BUNDLE_URL_ENV)
-            .or_else(|_| env::var(BUNDLE_URL_ENV))
+            .or_else(|_| env::var(LEGACY_BUNDLE_URL_ENV))
             .unwrap_or_else(|_| default_runtime_bundle_url());
         let response =
             ureq::get(&url)
@@ -390,7 +390,7 @@ fn stage_build_runtime_layout(
     let ghostty_stage = staging_root.join("ghostty");
     copy_dir_all(&layout.resources_dir, &ghostty_stage)?;
 
-    let bridge_destination = ghostty_stage.join("lib").join(BRIDGE_LIBRARY_NAME);
+    let bridge_destination = ghostty_stage.join("lib").join(LEGACY_BRIDGE_LIBRARY_NAME);
     if let Some(parent) = bridge_destination.parent() {
         fs::create_dir_all(parent).map_err(|error| RuntimeBootstrapError::CreateDir {
             path: parent.to_path_buf(),
@@ -419,7 +419,7 @@ fn stage_build_runtime_layout(
 }
 
 fn bridge_library_paths_in_dir(lib_dir: &Path) -> impl Iterator<Item = PathBuf> + '_ {
-    [GTK_BRIDGE_LIBRARY_NAME, BRIDGE_LIBRARY_NAME]
+    [GTK_BRIDGE_LIBRARY_NAME, LEGACY_BRIDGE_LIBRARY_NAME]
         .into_iter()
         .map(|name| lib_dir.join(name))
 }
@@ -539,12 +539,12 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RuntimeBootstrapError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BRIDGE_LIBRARY_NAME, BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, GTK_BRIDGE_PATH_ENV,
-        GTK_BUNDLE_PATH_ENV, GTK_BUNDLE_URL_ENV, GTK_DISABLE_BOOTSTRAP_ENV, GTK_RUNTIME_DIR_ENV,
-        RUNTIME_VERSION_FILE, RuntimeBootstrap, ensure_runtime_installed, runtime_bridge_path,
-        runtime_bridge_path_for, runtime_resources_dir, runtime_resources_dir_for,
-        runtime_terminfo_dir, runtime_terminfo_dir_for, stage_build_runtime_layout,
-        use_build_runtime_directly_for,
+        BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, GTK_BRIDGE_PATH_ENV, GTK_BUNDLE_PATH_ENV,
+        GTK_BUNDLE_URL_ENV, GTK_DISABLE_BOOTSTRAP_ENV, GTK_RUNTIME_DIR_ENV,
+        LEGACY_BRIDGE_LIBRARY_NAME, RUNTIME_VERSION_FILE, RuntimeBootstrap,
+        ensure_runtime_installed, runtime_bridge_path, runtime_bridge_path_for,
+        runtime_resources_dir, runtime_resources_dir_for, runtime_terminfo_dir,
+        runtime_terminfo_dir_for, stage_build_runtime_layout, use_build_runtime_directly_for,
     };
     use std::{env, fs, path::Path, sync::Mutex};
     use tar::Builder;
@@ -729,7 +729,7 @@ mod tests {
             bundle_source
                 .join("ghostty")
                 .join("lib")
-                .join(BRIDGE_LIBRARY_NAME),
+                .join(LEGACY_BRIDGE_LIBRARY_NAME),
             b"fake bridge",
         )
         .expect("write fake bridge");
@@ -779,7 +779,7 @@ mod tests {
         );
         assert_eq!(
             runtime_bridge_path(),
-            Some(runtime_dir.join("lib").join(BRIDGE_LIBRARY_NAME))
+            Some(runtime_dir.join("lib").join(LEGACY_BRIDGE_LIBRARY_NAME))
         );
         assert_eq!(runtime_resources_dir(), Some(runtime_dir));
         assert_eq!(runtime_terminfo_dir(), Some(terminfo_dir));
