@@ -5,7 +5,9 @@ use std::{
 
 #[cfg(ghostty_gtk_bridge)]
 use std::{
-    ffi::{c_int, c_void},
+    ffi::{CStr, c_int, c_void},
+    mem,
+    os::unix::ffi::OsStrExt,
     ptr::NonNull,
     slice,
 };
@@ -15,8 +17,6 @@ use gtk::Widget;
 use gtk::glib::translate::from_glib_full;
 #[cfg(ghostty_gtk_bridge)]
 use gtk::prelude::ObjectType;
-#[cfg(ghostty_gtk_bridge)]
-use libloading::Library;
 use thiserror::Error;
 
 use crate::backend::{GhosttyGtkHostOptions, GhosttyGtkSurfaceDescriptor};
@@ -65,7 +65,7 @@ pub struct GhosttyGtkHost;
 
 #[cfg(ghostty_gtk_bridge)]
 struct GhosttyGtkLibrary {
-    _library: Library,
+    handle: *mut libc::c_void,
     host_new: unsafe extern "C" fn(*const ghostty_gtk_host_options_s) -> *mut ghostty_gtk_host_t,
     host_free: unsafe extern "C" fn(*mut ghostty_gtk_host_t),
     host_version: unsafe extern "C" fn() -> *const c_char,
@@ -83,6 +83,17 @@ struct GhosttyGtkLibrary {
     surface_send_text: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> c_int,
     surface_read_all_text: unsafe extern "C" fn(*mut c_void, *mut ghostty_gtk_text_s) -> c_int,
     surface_free_text: unsafe extern "C" fn(*mut ghostty_gtk_text_s),
+}
+
+#[cfg(ghostty_gtk_bridge)]
+impl Drop for GhosttyGtkLibrary {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.handle.is_null() {
+                libc::dlclose(self.handle);
+            }
+        }
+    }
 }
 
 impl GhosttyGtkHost {
@@ -388,101 +399,110 @@ impl Drop for GhosttyGtkHost {
 #[cfg(ghostty_gtk_bridge)]
 fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyGtkError> {
     let path = runtime_gtk_bridge_path().ok_or(GhosttyGtkError::LibraryPathUnavailable)?;
-    let library = unsafe {
-        Library::new(&path).map_err(|error| GhosttyGtkError::LibraryLoad {
-            path: path.clone(),
-            message: error.to_string(),
-        })?
+    let handle = unsafe {
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            GhosttyGtkError::LibraryLoad {
+                path: path.clone(),
+                message: "bridge library path contains NUL bytes".into(),
+            }
+        })?;
+        libc::dlopen(c_path.as_ptr(), libc::RTLD_LOCAL | libc::RTLD_NOW)
     };
+    if handle.is_null() {
+        return Err(GhosttyGtkError::LibraryLoad {
+            path: path.clone(),
+            message: unsafe { dl_error_message() },
+        });
+    }
 
     unsafe {
         let host_new = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_host_new\0",
             b"taskers_ghostty_host_new\0",
         )?;
         let host_free = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_host_free\0",
             b"taskers_ghostty_host_free\0",
         )?;
         let host_version = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_host_version\0",
             b"taskers_ghostty_host_version\0",
         )?;
         let host_build_id = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_host_build_id\0",
             b"taskers_ghostty_host_build_id\0",
         )?;
         let host_begin_shutdown = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_host_begin_shutdown\0",
             b"taskers_ghostty_host_begin_shutdown\0",
         )?;
         let host_surface_count = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_host_surface_count\0",
             b"taskers_ghostty_host_surface_count\0",
         )?;
         let host_tick = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_host_tick\0",
             b"taskers_ghostty_host_tick\0",
         )?;
         let surface_new = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_surface_new\0",
             b"taskers_ghostty_surface_new\0",
         )?;
         let surface_destroy = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_surface_destroy\0",
             b"taskers_ghostty_surface_destroy\0",
         )?;
         let surface_grab_focus = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_surface_grab_focus\0",
             b"taskers_ghostty_surface_grab_focus\0",
         )?;
         let surface_has_selection = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_surface_has_selection\0",
             b"taskers_ghostty_surface_has_selection\0",
         )?;
         let surface_send_text = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_surface_send_text\0",
             b"taskers_ghostty_surface_send_text\0",
         )?;
         let surface_read_all_text = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_surface_read_all_text\0",
             b"taskers_ghostty_surface_read_all_text\0",
         )?;
         let surface_free_text = load_bridge_symbol(
-            &library,
+            handle,
             &path,
             b"ghostty_gtk_surface_free_text\0",
             b"taskers_ghostty_surface_free_text\0",
         )?;
 
         Ok(GhosttyGtkLibrary {
-            _library: library,
+            handle,
             host_new,
             host_free,
             host_version,
@@ -503,15 +523,14 @@ fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyGtkError> {
 
 #[cfg(ghostty_gtk_bridge)]
 unsafe fn load_bridge_symbol<T: Copy>(
-    library: &Library,
+    handle: *mut libc::c_void,
     path: &std::path::Path,
     generic_symbol: &[u8],
     legacy_symbol: &[u8],
 ) -> Result<T, GhosttyGtkError> {
-    match unsafe { library.get::<T>(generic_symbol) } {
-        Ok(symbol) => Ok(*symbol),
-        Err(generic_error) => unsafe { library.get::<T>(legacy_symbol) }
-            .map(|symbol| *symbol)
+    match unsafe { load_symbol(handle, generic_symbol) } {
+        Ok(symbol) => Ok(symbol),
+        Err(generic_error) => unsafe { load_symbol(handle, legacy_symbol) }
             .map_err(|legacy_error| GhosttyGtkError::LibraryLoad {
                 path: path.to_path_buf(),
                 message: format!(
@@ -522,6 +541,32 @@ unsafe fn load_bridge_symbol<T: Copy>(
                     legacy_error
                 ),
             }),
+    }
+}
+
+#[cfg(ghostty_gtk_bridge)]
+unsafe fn load_symbol<T: Copy>(
+    handle: *mut libc::c_void,
+    symbol: &[u8],
+) -> Result<T, String> {
+    let _ = unsafe { libc::dlerror() };
+    let symbol_ptr = unsafe { libc::dlsym(handle, symbol.as_ptr().cast()) };
+    if symbol_ptr.is_null() {
+        return Err(unsafe { dl_error_message() });
+    }
+
+    Ok(unsafe { mem::transmute_copy::<*mut libc::c_void, T>(&symbol_ptr) })
+}
+
+#[cfg(ghostty_gtk_bridge)]
+unsafe fn dl_error_message() -> String {
+    let error = unsafe { libc::dlerror() };
+    if error.is_null() {
+        "unknown dynamic loader error".into()
+    } else {
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
