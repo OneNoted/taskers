@@ -97,9 +97,11 @@ impl ManagedInstallation {
         let mut command = Command::new(&executable);
         command.args(args);
         command.env("TASKERS_CTL_PATH", self.taskersctl_path());
+        command.env("GHOSTTY_GTK_RUNTIME_DIR", self.ghostty_resources_path());
         command.env("TASKERS_GHOSTTY_RUNTIME_DIR", self.ghostty_resources_path());
         command.env("GHOSTTY_RESOURCES_DIR", self.ghostty_resources_path());
         command.env("TERMINFO", self.terminfo_path());
+        command.env("GHOSTTY_GTK_DISABLE_RUNTIME_BOOTSTRAP", "1");
         command.env("TASKERS_DISABLE_GHOSTTY_RUNTIME_BOOTSTRAP", "1");
 
         command
@@ -311,11 +313,16 @@ fn validate_bundle_layout(bundle_root: &Path) -> bool {
         && bundle_root.join("bin").join("taskersctl").is_file()
         && bundle_root.join("bin").join("taskers-terminald").is_file()
         && bundle_root.join("ghostty").is_dir()
-        && bundle_root
+        && (bundle_root
             .join("ghostty")
             .join("lib")
-            .join("libtaskers_ghostty_bridge.so")
+            .join("libghostty_gtk.so")
             .is_file()
+            || bundle_root
+                .join("ghostty")
+                .join("lib")
+                .join("libtaskers_ghostty_bridge.so")
+                .is_file())
         && bundle_root.join("ghostty").join("themes").is_dir()
         && bundle_root.join("terminfo").is_dir()
 }
@@ -699,6 +706,14 @@ mod tests {
         fs::write(
             bundle_dir
                 .join("ghostty")
+                .join("lib")
+                .join("libghostty_gtk.so"),
+            "bridge",
+        )
+        .expect("generic bridge");
+        fs::write(
+            bundle_dir
+                .join("ghostty")
                 .join("themes")
                 .join("Catppuccin Mocha"),
             "palette = 0=#1e1e2e\n",
@@ -756,6 +771,14 @@ mod tests {
         assert!(installation.bundle_root.join("bin").join("taskers-terminald").is_file());
         assert!(installation.ghostty_resources_path().is_dir());
         assert!(installation.terminfo_path().is_dir());
+        assert!(
+            installation
+                .bundle_root
+                .join("ghostty")
+                .join("lib")
+                .join("libghostty_gtk.so")
+                .is_file()
+        );
     }
 
     #[test]
