@@ -31,9 +31,45 @@ pub fn create(b: *std.Build, opts: Options) *LibtoolStep {
     const self = b.allocator.create(LibtoolStep) catch @panic("OOM");
 
     const run_step = RunStep.create(b, b.fmt("libtool {s}", .{opts.name}));
-    run_step.addArgs(&.{ "libtool", "-static", "-o" });
-    const output = run_step.addOutputFileArg(opts.out_name);
-    for (opts.sources) |source| run_step.addFileArg(source);
+    const output = if (b.graph.host.result.os.tag.isDarwin()) blk: {
+        run_step.addArgs(&.{ "libtool", "-static", "-o" });
+        const output = run_step.addOutputFileArg(opts.out_name);
+        for (opts.sources) |source| run_step.addFileArg(source);
+        break :blk output;
+    } else blk: {
+        run_step.addArgs(&.{
+            "sh",
+            "-c",
+            \\set -e
+            \\out="$1"
+            \\shift
+            \\tmp="$(mktemp -d)"
+            \\trap 'rm -rf "$tmp"' EXIT
+            \\i=0
+            \\for archive in "$@"; do
+            \\  members="$tmp/members.txt"
+            \\  llvm-ar t "$archive" > "$members"
+            \\  while IFS= read -r member; do
+            \\    case "$member" in
+            \\      *.o|*.obj)
+            \\        llvm-ar p "$archive" "$member" > "$tmp/$i.o"
+            \\        i=$((i + 1))
+            \\        ;;
+            \\    esac
+            \\  done < "$members"
+            \\done
+            \\if [ "$i" -eq 0 ]; then
+            \\  echo "no object files extracted from static inputs" >&2
+            \\  exit 1
+            \\fi
+            \\llvm-ar crs "$out" "$tmp"/*.o
+            ,
+            "libtool-step",
+        });
+        const output = run_step.addOutputFileArg(opts.out_name);
+        for (opts.sources) |source| run_step.addFileArg(source);
+        break :blk output;
+    };
 
     self.* = .{
         .step = &run_step.step,

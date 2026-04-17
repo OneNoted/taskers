@@ -31,7 +31,10 @@ use taskers_core::{
 use taskers_domain::{
     BrowserProfileMode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind,
 };
-use taskers_ghostty::{GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor};
+use taskers_ghostty::{
+    GHOSTTY_GTK_PROPERTY_CHILD_EXITED, GHOSTTY_GTK_PROPERTY_PWD, GHOSTTY_GTK_PROPERTY_TITLE,
+    GhosttyGtkHost, GhosttyGtkInfo, GhosttyGtkSurfaceDescriptor,
+};
 use taskers_shell_core as taskers_core;
 use webkit6::{
     HardwareAccelerationPolicy, LoadEvent, NetworkSession, Settings as WebKitSettings, WebView,
@@ -154,8 +157,8 @@ impl GhosttyLifecycleState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BridgeHealthSnapshot {
-    pub bridge_info: GhosttyBridgeInfo,
+pub struct GhosttyGtkHealthSnapshot {
+    pub gtk_host_info: GhosttyGtkInfo,
     pub state: GhosttyLifecycleState,
     pub surface_count: usize,
     pub last_tick_duration_ms: Option<u128>,
@@ -272,7 +275,7 @@ impl BridgeWatchdog {
                                 DiagnosticCategory::Bridge,
                                 active.revision,
                                 format!(
-                                    "ghostty bridge hang suspected operation={} elapsed_ms={elapsed_ms}",
+                                    "ghostty gtk host hang suspected operation={} elapsed_ms={elapsed_ms}",
                                     active.kind.label()
                                 ),
                             )
@@ -288,7 +291,7 @@ impl BridgeWatchdog {
                                 DiagnosticCategory::Bridge,
                                 active.revision,
                                 format!(
-                                    "ghostty bridge operation stalled operation={} elapsed_ms={elapsed_ms}",
+                                    "ghostty gtk host operation stalled operation={} elapsed_ms={elapsed_ms}",
                                     active.kind.label()
                                 ),
                             )
@@ -403,12 +406,12 @@ impl BridgeWatchdog {
 
     fn snapshot(
         &self,
-        bridge_info: GhosttyBridgeInfo,
+        gtk_host_info: GhosttyGtkInfo,
         surface_count: usize,
-    ) -> BridgeHealthSnapshot {
+    ) -> GhosttyGtkHealthSnapshot {
         let shared = self.shared.lock().expect("bridge watchdog lock");
-        BridgeHealthSnapshot {
-            bridge_info,
+        GhosttyGtkHealthSnapshot {
+            gtk_host_info,
             state: shared.lifecycle_state,
             surface_count,
             last_tick_duration_ms: shared.last_tick_duration_ms,
@@ -483,8 +486,8 @@ pub struct TaskersHost {
     event_sink: HostEventSink,
     shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
-    ghostty_host: Option<GhosttyHost>,
-    ghostty_bridge_info: Option<GhosttyBridgeInfo>,
+    ghostty_host: Option<GhosttyGtkHost>,
+    ghostty_gtk_host_info: Option<GhosttyGtkInfo>,
     ghostty_watchdog: Option<BridgeWatchdog>,
     skip_next_ghostty_tick: bool,
     pending_terminal_create_retry: bool,
@@ -594,13 +597,13 @@ impl BrowserSurfaceHandle {
 impl TaskersHost {
     pub fn new(
         shell_widget: &impl IsA<Widget>,
-        ghostty_host: Option<GhosttyHost>,
+        ghostty_host: Option<GhosttyGtkHost>,
         event_sink: HostEventSink,
         shell_action_sink: ShellActionSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Self {
-        let ghostty_bridge_info = ghostty_host.as_ref().map(GhosttyHost::bridge_info);
-        let ghostty_watchdog = ghostty_bridge_info
+        let ghostty_gtk_host_info = ghostty_host.as_ref().map(GhosttyGtkHost::bridge_info);
+        let ghostty_watchdog = ghostty_gtk_host_info
             .as_ref()
             .map(|_| BridgeWatchdog::new(diagnostics.clone()));
         let root = Overlay::new();
@@ -661,7 +664,7 @@ impl TaskersHost {
             shell_action_sink,
             diagnostics,
             ghostty_host,
-            ghostty_bridge_info,
+            ghostty_gtk_host_info,
             ghostty_watchdog,
             skip_next_ghostty_tick: false,
             pending_terminal_create_retry: false,
@@ -762,7 +765,7 @@ impl TaskersHost {
     }
 
     pub fn tick(&mut self, revision: Option<u64>) {
-        if !self.bridge_running() {
+        if !self.gtk_host_running() {
             return;
         }
         if self.skip_next_ghostty_tick {
@@ -788,24 +791,24 @@ impl TaskersHost {
         }
     }
 
-    pub fn bridge_info(&self) -> Option<GhosttyBridgeInfo> {
-        self.ghostty_bridge_info.clone()
+    pub fn gtk_host_info(&self) -> Option<GhosttyGtkInfo> {
+        self.ghostty_gtk_host_info.clone()
     }
 
-    pub fn bridge_health_snapshot(&self) -> Option<BridgeHealthSnapshot> {
-        let bridge_info = self.ghostty_bridge_info.clone()?;
+    pub fn gtk_host_health_snapshot(&self) -> Option<GhosttyGtkHealthSnapshot> {
+        let gtk_host_info = self.ghostty_gtk_host_info.clone()?;
         let surface_count = self
             .ghostty_host
             .as_ref()
-            .map(GhosttyHost::surface_count)
+            .map(GhosttyGtkHost::surface_count)
             .unwrap_or_default();
         self.ghostty_watchdog
             .as_ref()
-            .map(|watchdog| watchdog.snapshot(bridge_info, surface_count))
+            .map(|watchdog| watchdog.snapshot(gtk_host_info, surface_count))
     }
 
     pub fn shutdown(&mut self) {
-        let bridge_was_running = self.bridge_running();
+        let bridge_was_running = self.gtk_host_running();
         if let Some(watchdog) = self.ghostty_watchdog.as_ref() {
             watchdog.transition_state(
                 self.diagnostics.as_ref(),
@@ -877,14 +880,14 @@ impl TaskersHost {
             );
         }
 
-        if let Some(health) = self.bridge_health_snapshot() {
+        if let Some(health) = self.gtk_host_health_snapshot() {
             emit_diagnostic(
                 self.diagnostics.as_ref(),
                 DiagnosticRecord::new(
                     DiagnosticCategory::Bridge,
                     None,
                     format!(
-                        "ghostty bridge shutdown complete state={} surface_count={} last_tick_ms={} last_mutation_ms={}",
+                        "ghostty gtk host shutdown complete state={} surface_count={} last_tick_ms={} last_mutation_ms={}",
                         health.state.label(),
                         health.surface_count,
                         health
@@ -932,13 +935,13 @@ impl TaskersHost {
                 Ok(())
             }
             HostCommand::TerminalSendText { surface_id, text } => {
-                if !self.bridge_running() {
+                if !self.gtk_host_running() {
                     emit_diagnostic(
                         self.diagnostics.as_ref(),
                         DiagnosticRecord::new(
                             DiagnosticCategory::Bridge,
                             None,
-                            "skipping terminal send text because ghostty bridge is not running",
+                            "skipping terminal send text because ghostty gtk host is not running",
                         )
                         .with_surface(surface_id),
                     );
@@ -1095,9 +1098,9 @@ impl TaskersHost {
                 "terminal debug requires the Ghostty host backend",
             ));
         };
-        if !self.bridge_running() {
+        if !self.gtk_host_running() {
             return Err(ControlError::not_supported(
-                "terminal debug is unavailable because the Ghostty bridge is not running",
+                "terminal debug is unavailable because the Ghostty GTK host is not running",
             ));
         }
 
@@ -1179,7 +1182,7 @@ impl TaskersHost {
         }
     }
 
-    fn bridge_running(&self) -> bool {
+    fn gtk_host_running(&self) -> bool {
         self.ghostty_watchdog
             .as_ref()
             .is_some_and(|watchdog| watchdog.lifecycle_state() == GhosttyLifecycleState::Running)
@@ -1445,14 +1448,14 @@ impl TaskersHost {
         let removed_any = !stale.is_empty();
 
         let host = self.ghostty_host.as_ref();
-        let bridge_running = self.bridge_running();
+        let gtk_host_running = self.gtk_host_running();
         let mut terminal_mutated = false;
 
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
                 surface.shell.detach(&self.native_surface_scene);
                 surface.attention_ring.detach(&self.native_surface_scene);
-                if bridge_running {
+                if gtk_host_running {
                     if let Some(host) = host {
                         host.destroy_surface(&surface.widget);
                     }
@@ -1462,7 +1465,7 @@ impl TaskersHost {
                         DiagnosticRecord::new(
                             DiagnosticCategory::Bridge,
                             Some(revision),
-                            "skipped terminal surface destroy because ghostty bridge is not running",
+                            "skipped terminal surface destroy because ghostty gtk host is not running",
                         )
                         .with_surface(surface_id),
                     );
@@ -1498,17 +1501,17 @@ impl TaskersHost {
                     revision,
                     interactive,
                     resize_preview_active,
-                    host.filter(|_| bridge_running),
+                    host.filter(|_| gtk_host_running),
                     self.diagnostics.as_ref(),
                 ),
                 None => {
-                    if !bridge_running {
+                    if !gtk_host_running {
                         emit_diagnostic(
                             self.diagnostics.as_ref(),
                             DiagnosticRecord::new(
                                 DiagnosticCategory::Bridge,
                                 Some(revision),
-                                "skipping terminal surface create because ghostty bridge is not running",
+                                "skipping terminal surface create because ghostty gtk host is not running",
                             )
                             .with_pane(entry.pane_id)
                             .with_surface(entry.surface_id),
@@ -1533,7 +1536,7 @@ impl TaskersHost {
                                     DiagnosticCategory::Bridge,
                                     Some(revision),
                                     format!(
-                                        "deferring terminal surface create until ghostty bridge quiesces bridge_surface_count={} live_surface_count={}",
+                                        "deferring terminal surface create until ghostty gtk host quiesces bridge_surface_count={} live_surface_count={}",
                                         bridge_surface_count, live_surface_count
                                     ),
                                 )
@@ -2168,7 +2171,7 @@ impl TerminalSurface {
         resize_preview_active: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
-        host: &GhosttyHost,
+        host: &GhosttyGtkHost,
     ) -> Result<Self> {
         let spec = entry.spec.clone();
         let descriptor = surface_descriptor_from(&spec);
@@ -2210,7 +2213,6 @@ impl TerminalSurface {
         let pane_id = Rc::new(Cell::new(entry.pane_id));
         let focus_state = Rc::new(Cell::new(false));
         connect_ghostty_widget(
-            host,
             &widget,
             pane_id.clone(),
             entry.surface_id,
@@ -2264,7 +2266,7 @@ impl TerminalSurface {
         revision: u64,
         interactive: bool,
         resize_preview_active: bool,
-        host: Option<&GhosttyHost>,
+        host: Option<&GhosttyGtkHost>,
         diagnostics: Option<&DiagnosticsSink>,
     ) {
         self.workspace_id.set(entry.workspace_id);
@@ -2904,8 +2906,42 @@ fn terminal_surface_background(theme_id: &str) -> &'static str {
     }
 }
 
+fn ghostty_focus_enter_event(pane_id: PaneId) -> HostEvent {
+    HostEvent::PaneFocused { pane_id }
+}
+
+fn ghostty_title_changed_event(
+    surface_id: SurfaceId,
+    title: Option<glib::GString>,
+) -> Option<HostEvent> {
+    title.map(|title| HostEvent::SurfaceTitleChanged {
+        surface_id,
+        title: title.to_string(),
+    })
+}
+
+fn ghostty_cwd_changed_event(
+    surface_id: SurfaceId,
+    cwd: Option<glib::GString>,
+) -> Option<HostEvent> {
+    cwd.map(|cwd| HostEvent::SurfaceCwdChanged {
+        surface_id,
+        cwd: cwd.to_string(),
+    })
+}
+
+fn ghostty_child_exited_event(
+    pane_id: PaneId,
+    surface_id: SurfaceId,
+    child_exited: bool,
+) -> Option<HostEvent> {
+    child_exited.then_some(HostEvent::SurfaceClosed {
+        pane_id,
+        surface_id,
+    })
+}
+
 fn connect_ghostty_widget(
-    host: &GhosttyHost,
     widget: &Widget,
     pane_id: Rc<Cell<PaneId>>,
     surface_id: SurfaceId,
@@ -2913,8 +2949,6 @@ fn connect_ghostty_widget(
     diagnostics: Option<DiagnosticsSink>,
     focus_state: Rc<Cell<bool>>,
 ) {
-    let _ = host;
-
     let focus_pane_id = pane_id.clone();
     let focus_sink = event_sink.clone();
     let focus_diagnostics = diagnostics.clone();
@@ -2935,7 +2969,7 @@ fn connect_ghostty_widget(
             .with_pane(pane_id)
             .with_surface(surface_id),
         );
-        (focus_sink)(HostEvent::PaneFocused { pane_id });
+        (focus_sink)(ghostty_focus_enter_event(pane_id));
     });
     let focus_leave_state = focus_state;
     focus.connect_leave(move |_| {
@@ -2945,8 +2979,10 @@ fn connect_ghostty_widget(
 
     let title_sink = event_sink.clone();
     let title_diagnostics = diagnostics.clone();
-    widget.connect_notify_local(Some("title"), move |widget, _| {
-        if let Some(title) = widget.property::<Option<glib::GString>>("title") {
+    widget.connect_notify_local(Some(GHOSTTY_GTK_PROPERTY_TITLE), move |widget, _| {
+        if let Some(title) = widget.property::<Option<glib::GString>>(GHOSTTY_GTK_PROPERTY_TITLE)
+            && let Some(event) = ghostty_title_changed_event(surface_id, Some(title.clone()))
+        {
             emit_diagnostic(
                 title_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -2956,17 +2992,16 @@ fn connect_ghostty_widget(
                 )
                 .with_surface(surface_id),
             );
-            (title_sink)(HostEvent::SurfaceTitleChanged {
-                surface_id,
-                title: title.to_string(),
-            });
+            (title_sink)(event);
         }
     });
 
     let cwd_sink = event_sink.clone();
     let cwd_diagnostics = diagnostics.clone();
-    widget.connect_notify_local(Some("pwd"), move |widget, _| {
-        if let Some(cwd) = widget.property::<Option<glib::GString>>("pwd") {
+    widget.connect_notify_local(Some(GHOSTTY_GTK_PROPERTY_PWD), move |widget, _| {
+        if let Some(cwd) = widget.property::<Option<glib::GString>>(GHOSTTY_GTK_PROPERTY_PWD)
+            && let Some(event) = ghostty_cwd_changed_event(surface_id, Some(cwd.clone()))
+        {
             emit_diagnostic(
                 cwd_diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -2976,18 +3011,17 @@ fn connect_ghostty_widget(
                 )
                 .with_surface(surface_id),
             );
-            (cwd_sink)(HostEvent::SurfaceCwdChanged {
-                surface_id,
-                cwd: cwd.to_string(),
-            });
+            (cwd_sink)(event);
         }
     });
 
     let exit_pane_id = pane_id;
     let exit_sink = event_sink;
     let exit_diagnostics = diagnostics;
-    widget.connect_notify_local(Some("child-exited"), move |widget, _| {
-        if widget.property::<bool>("child-exited") {
+    widget.connect_notify_local(Some(GHOSTTY_GTK_PROPERTY_CHILD_EXITED), move |widget, _| {
+        if widget.property::<bool>(GHOSTTY_GTK_PROPERTY_CHILD_EXITED)
+            && let Some(event) = ghostty_child_exited_event(exit_pane_id.get(), surface_id, true)
+        {
             let pane_id = exit_pane_id.get();
             emit_diagnostic(
                 exit_diagnostics.as_ref(),
@@ -2995,10 +3029,7 @@ fn connect_ghostty_widget(
                     .with_pane(pane_id)
                     .with_surface(surface_id),
             );
-            (exit_sink)(HostEvent::SurfaceClosed {
-                pane_id,
-                surface_id,
-            });
+            (exit_sink)(event);
         }
     });
 }
@@ -3127,8 +3158,8 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
-    SurfaceDescriptor {
+fn surface_descriptor_from(spec: &TerminalMountSpec) -> GhosttyGtkSurfaceDescriptor {
+    GhosttyGtkSurfaceDescriptor {
         cols: spec.cols,
         rows: spec.rows,
         kind: PaneKind::Terminal,
@@ -3136,7 +3167,7 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
         title: Some(spec.title.clone()),
         url: None,
         browser_profile_mode: BrowserProfileMode::PersistentDefault,
-        // The current Ghostty bridge is more stable when it controls shell
+        // The current Ghostty GTK host is more stable when it controls shell
         // selection itself, so keep command overrides empty until that path is
         // proven across hosts.
         command_argv: Vec::new(),
@@ -3577,17 +3608,18 @@ mod tests {
 
     use super::{
         HardwareAccelerationPolicy, TerminalSurfaceCreateDecision, WebKitSettings, browser_plans,
-        build_native_surface_scene_layers, clamp_frame_to_widget, host_attention_palette,
-        native_surface_classes, native_surface_css, native_surface_shell_can_target,
-        native_surface_visible_plan, native_surfaces_interactive, native_surfaces_visible,
-        preview_for_drag, redacted_browser_url_for_diagnostics, resolve_screenshot_output_path,
-        terminal_plans, terminal_surface_create_decision, trim_terminal_tail, with_capture_retries,
-        workspace_pan_delta,
+        build_native_surface_scene_layers, clamp_frame_to_widget, ghostty_child_exited_event,
+        ghostty_cwd_changed_event, ghostty_focus_enter_event, ghostty_title_changed_event,
+        host_attention_palette, native_surface_classes, native_surface_css,
+        native_surface_shell_can_target, native_surface_visible_plan, native_surfaces_interactive,
+        native_surfaces_visible, preview_for_drag, redacted_browser_url_for_diagnostics,
+        resolve_screenshot_output_path, terminal_plans, terminal_surface_create_decision,
+        trim_terminal_tail, with_capture_retries, workspace_pan_delta,
     };
     use taskers_control::{ControlError, ControlErrorCode};
     use taskers_domain::{MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind};
     use taskers_shell_core::{
-        AttentionRingState, BootstrapModel, Frame, PaneContainerId, PaneId, PaneTabId,
+        AttentionRingState, BootstrapModel, Frame, HostEvent, PaneContainerId, PaneId, PaneTabId,
         PortalSurfacePlan, ResizeHandleTarget, ResizePreview, SharedCore, ShellDragMode,
         ShellSection, SplitAxis, SurfaceId, SurfaceMountSpec, TerminalMountSpec, WorkspaceColumnId,
         WorkspaceOuterEdge, WorkspaceWindowId,
@@ -3804,6 +3836,47 @@ mod tests {
             terminal_surface_create_decision(false, 2, 2),
             TerminalSurfaceCreateDecision::CreateNow
         );
+    }
+
+    #[test]
+    fn ghostty_widget_focus_enter_emits_pane_focused_once() {
+        let pane_id = PaneId::new();
+
+        assert_eq!(
+            ghostty_focus_enter_event(pane_id),
+            HostEvent::PaneFocused { pane_id }
+        );
+    }
+
+    #[test]
+    fn ghostty_widget_notify_propagates_title_pwd_child_exited() {
+        let pane_id = PaneId::new();
+        let surface_id = SurfaceId::new();
+
+        assert_eq!(
+            ghostty_title_changed_event(surface_id, Some("Taskers Terminal".into())),
+            Some(HostEvent::SurfaceTitleChanged {
+                surface_id,
+                title: "Taskers Terminal".into(),
+            })
+        );
+        assert_eq!(
+            ghostty_cwd_changed_event(surface_id, Some("/tmp/taskers".into())),
+            Some(HostEvent::SurfaceCwdChanged {
+                surface_id,
+                cwd: "/tmp/taskers".into(),
+            })
+        );
+        assert_eq!(
+            ghostty_child_exited_event(pane_id, surface_id, true),
+            Some(HostEvent::SurfaceClosed {
+                pane_id,
+                surface_id,
+            })
+        );
+        assert_eq!(ghostty_title_changed_event(surface_id, None), None);
+        assert_eq!(ghostty_cwd_changed_event(surface_id, None), None);
+        assert_eq!(ghostty_child_exited_event(pane_id, surface_id, false), None);
     }
 
     #[test]

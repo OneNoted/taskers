@@ -1,52 +1,34 @@
 #ifndef TASKERS_GHOSTTY_BRIDGE_H
 #define TASKERS_GHOSTTY_BRIDGE_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+/*
+ * Legacy compatibility shim for Taskers' historical GTK bridge surface.
+ *
+ * New consumers should prefer ghostty_gtk.h and the ghostty_gtk_* symbol
+ * family. This header remains installed so existing runtime consumers can
+ * keep building while the Rust side migrates to the generic GTK surface.
+ */
 
-typedef struct taskers_ghostty_host taskers_ghostty_host_t;
+#include "ghostty_gtk.h"
 
-typedef struct {
-  const char *const *command_argv;
-  size_t command_argc;
-  const char *const *env_entries;
-  size_t env_count;
-  const char *embedded_terminal_appearance;
-} taskers_ghostty_host_options_s;
+typedef ghostty_gtk_host_t taskers_ghostty_host_t;
+typedef ghostty_gtk_host_options_s taskers_ghostty_host_options_s;
+typedef ghostty_gtk_surface_options_s taskers_ghostty_surface_options_s;
+typedef ghostty_gtk_text_s taskers_ghostty_text_s;
 
-typedef struct {
-  const char *working_directory;
-  const char *title;
-  const char *const *env_entries;
-  size_t env_count;
-} taskers_ghostty_surface_options_s;
-
-typedef struct {
-  const char *text;
-  size_t text_len;
-} taskers_ghostty_text_s;
-
-taskers_ghostty_host_t *taskers_ghostty_host_new(
-    const taskers_ghostty_host_options_s *);
-void taskers_ghostty_host_free(taskers_ghostty_host_t *);
-const char *taskers_ghostty_host_version(void);
-const char *taskers_ghostty_host_build_id(void);
-void taskers_ghostty_host_begin_shutdown(taskers_ghostty_host_t *);
-size_t taskers_ghostty_host_surface_count(taskers_ghostty_host_t *);
-int taskers_ghostty_host_tick(taskers_ghostty_host_t *);
-void *taskers_ghostty_surface_new(
-    taskers_ghostty_host_t *,
-    const taskers_ghostty_surface_options_s *);
-void taskers_ghostty_surface_destroy(void *);
-int taskers_ghostty_surface_grab_focus(void *);
-int taskers_ghostty_surface_has_selection(void *);
-int taskers_ghostty_surface_send_text(void *, const char *, size_t);
-int taskers_ghostty_surface_read_all_text(void *, taskers_ghostty_text_s *);
-void taskers_ghostty_surface_free_text(taskers_ghostty_text_s *);
-
-#ifdef __cplusplus
-}
-#endif
+#define taskers_ghostty_host_new ghostty_gtk_host_new
+#define taskers_ghostty_host_free ghostty_gtk_host_free
+#define taskers_ghostty_host_version ghostty_gtk_host_version
+#define taskers_ghostty_host_build_id ghostty_gtk_host_build_id
+#define taskers_ghostty_host_begin_shutdown ghostty_gtk_host_begin_shutdown
+#define taskers_ghostty_host_surface_count ghostty_gtk_host_surface_count
+#define taskers_ghostty_host_tick ghostty_gtk_host_tick
+#define taskers_ghostty_surface_new ghostty_gtk_surface_new
+#define taskers_ghostty_surface_destroy ghostty_gtk_surface_destroy
+#define taskers_ghostty_surface_grab_focus ghostty_gtk_surface_grab_focus
+#define taskers_ghostty_surface_has_selection ghostty_gtk_surface_has_selection
+#define taskers_ghostty_surface_send_text ghostty_gtk_surface_send_text
+#define taskers_ghostty_surface_read_all_text ghostty_gtk_surface_read_all_text
+#define taskers_ghostty_surface_free_text ghostty_gtk_surface_free_text
 
 #endif /* TASKERS_GHOSTTY_BRIDGE_H */

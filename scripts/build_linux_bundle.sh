@@ -20,14 +20,14 @@ trap cleanup EXIT
 
 (
   cd "$repo_root"
-  TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED=1 \
+  GHOSTTY_GTK_SKIP_BUILD_RUNTIME_EMBED=1 \
     RUSTFLAGS="$bundle_rustflags" \
     cargo build --release -p taskers --bin taskers --bin taskers-gtk --bin taskersctl --bin taskers-terminald
 )
 
 (
   cd "$repo_root/vendor/ghostty"
-  zig build taskers-bridge \
+  zig build ghostty-gtk-bridge \
     -Dapp-runtime=gtk \
     -Demit-exe=false \
     -Dgtk-wayland=false \
@@ -44,7 +44,9 @@ cp "$repo_root/target/release/taskers-gtk" "$bundle_dir/bin/taskers"
 cp "$repo_root/target/release/taskersctl" "$bundle_dir/bin/taskersctl"
 cp "$repo_root/target/release/taskers-terminald" "$bundle_dir/bin/taskers-terminald"
 chmod +x "$bundle_dir/bin/taskers" "$bundle_dir/bin/taskersctl" "$bundle_dir/bin/taskers-terminald"
-cp "$prefix_dir/lib/libtaskers_ghostty_bridge.so" "$bundle_dir/ghostty/lib/"
+cp "$prefix_dir/lib/libghostty_gtk.so" "$bundle_dir/ghostty/lib/"
+# Compatibility copy for older runtime consumers.
+cp "$prefix_dir/lib/libghostty_gtk.so" "$bundle_dir/ghostty/lib/libtaskers_ghostty_bridge.so"
 cp -R "$prefix_dir/share/ghostty/shell-integration/." "$bundle_dir/ghostty/shell-integration/"
 cp -R "$prefix_dir/share/ghostty/themes/." "$bundle_dir/ghostty/themes/"
 cp -R "$prefix_dir/share/terminfo/." "$bundle_dir/terminfo/"

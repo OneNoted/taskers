@@ -1,4 +1,4 @@
-use crate::runtime::{runtime_bridge_path, runtime_resources_dir};
+use crate::runtime::runtime_resources_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use taskers_domain::{BrowserProfileMode, PaneKind};
@@ -39,7 +39,7 @@ pub struct BackendProbe {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SurfaceDescriptor {
+pub struct GhosttyGtkSurfaceDescriptor {
     pub cols: u16,
     pub rows: u16,
     pub kind: PaneKind,
@@ -55,7 +55,7 @@ pub struct SurfaceDescriptor {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GhosttyHostOptions {
+pub struct GhosttyGtkHostOptions {
     #[serde(default)]
     pub command_argv: Vec<String>,
     #[serde(default)]
@@ -66,7 +66,7 @@ pub struct GhosttyHostOptions {
     pub override_config_path: Option<String>,
 }
 
-impl GhosttyHostOptions {
+impl GhosttyGtkHostOptions {
     pub fn from_shell_launch(shell_launch: &ShellLaunchSpec) -> Self {
         let mut env = BTreeMap::new();
         env.extend(shell_launch.env.clone());
@@ -161,22 +161,18 @@ fn auto_probe(requested: BackendChoice) -> BackendProbe {
             requested,
             selected: BackendChoice::Mock,
             availability: BackendAvailability::Fallback,
-            notes: "Ghostty bridge unavailable, using placeholder terminal surfaces.".into(),
+            notes: "Ghostty GTK host unavailable, using placeholder terminal surfaces.".into(),
         }
     }
 }
 
 fn ghostty_availability() -> BackendAvailability {
-    #[cfg(all(target_os = "linux", taskers_ghostty_bridge))]
+    #[cfg(all(target_os = "linux", ghostty_gtk_bridge))]
     {
-        if runtime_bridge_path().is_some() {
-            BackendAvailability::Ready
-        } else {
-            BackendAvailability::Unavailable
-        }
+        BackendAvailability::Ready
     }
 
-    #[cfg(not(all(target_os = "linux", taskers_ghostty_bridge)))]
+    #[cfg(not(all(target_os = "linux", ghostty_gtk_bridge)))]
     {
         BackendAvailability::Unavailable
     }
@@ -195,13 +191,7 @@ fn embedded_ghostty_availability() -> BackendAvailability {
 }
 
 fn ghostty_notes() -> String {
-    let mut notes = String::from("Ghostty GTK bridge compiled in.");
-    if let Some(path) = runtime_bridge_path() {
-        notes.push_str(" Bridge: ");
-        notes.push_str(&path.display().to_string());
-    } else {
-        notes.push_str(" Bridge library not found.");
-    }
+    let mut notes = String::from("Ghostty GTK host compiled in.");
     if let Some(path) = runtime_resources_dir() {
         notes.push_str(" Resources: ");
         notes.push_str(&path.display().to_string());
@@ -216,7 +206,7 @@ fn embedded_ghostty_notes() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendAvailability, BackendChoice, DefaultBackend, GhosttyHostOptions, TerminalBackend,
+        BackendAvailability, BackendChoice, DefaultBackend, GhosttyGtkHostOptions, TerminalBackend,
     };
     use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
     use taskers_runtime::ShellLaunchSpec;
@@ -267,7 +257,7 @@ mod tests {
             env,
         };
 
-        let options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+        let options = GhosttyGtkHostOptions::from_shell_launch(&shell_launch);
 
         assert_eq!(options.command_argv, vec!["/bin/zsh", "-i"]);
         assert_eq!(
@@ -291,7 +281,7 @@ mod tests {
             env,
         };
 
-        let options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+        let options = GhosttyGtkHostOptions::from_shell_launch(&shell_launch);
 
         assert_eq!(
             options.command_argv,

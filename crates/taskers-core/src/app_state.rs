@@ -5,7 +5,7 @@ use taskers_control::{
     ControlCommand, ControlResponse, InMemoryController, VcsCommand, VcsCommandResult,
 };
 use taskers_domain::{AppModel, BrowserProfileMode, PaneId, PaneKind, SurfaceId, WorkspaceId};
-use taskers_ghostty::{BackendChoice, GhosttyHostOptions, SurfaceDescriptor};
+use taskers_ghostty::{BackendChoice, GhosttyGtkHostOptions, GhosttyGtkSurfaceDescriptor};
 use taskers_runtime::{ShellLaunchSpec, TerminalSessionClient};
 
 use crate::{
@@ -74,8 +74,8 @@ impl AppState {
         &self.shell_launch
     }
 
-    pub fn ghostty_host_options(&self) -> GhosttyHostOptions {
-        GhosttyHostOptions::from_shell_launch(&self.shell_launch)
+    pub fn ghostty_host_options(&self) -> GhosttyGtkHostOptions {
+        GhosttyGtkHostOptions::from_shell_launch(&self.shell_launch)
     }
 
     pub fn snapshot_model(&self) -> AppModel {
@@ -131,7 +131,7 @@ impl AppState {
         &self,
         workspace_id: WorkspaceId,
         pane_id: PaneId,
-    ) -> Result<SurfaceDescriptor> {
+    ) -> Result<GhosttyGtkSurfaceDescriptor> {
         let model = self.snapshot_model();
         let workspace = model
             .workspaces
@@ -154,7 +154,7 @@ impl AppState {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
         surface_id: SurfaceId,
-    ) -> Result<SurfaceDescriptor> {
+    ) -> Result<GhosttyGtkSurfaceDescriptor> {
         let model = self.snapshot_model();
         self.surface_descriptor_for_surface_in_model(&model, workspace_id, pane_id, surface_id)
     }
@@ -165,7 +165,7 @@ impl AppState {
         workspace_id: WorkspaceId,
         pane_id: PaneId,
         surface_id: SurfaceId,
-    ) -> Result<SurfaceDescriptor> {
+    ) -> Result<GhosttyGtkSurfaceDescriptor> {
         let workspace = model
             .workspaces
             .get(&workspace_id)
@@ -198,7 +198,7 @@ impl AppState {
             PaneKind::Browser => BTreeMap::new(),
         };
 
-        Ok(SurfaceDescriptor {
+        Ok(GhosttyGtkSurfaceDescriptor {
             cols: 120,
             rows: 40,
             kind: surface.kind.clone(),
@@ -221,7 +221,7 @@ mod tests {
 
     use taskers_control::{ControlCommand, ControlQuery};
     use taskers_domain::{AppModel, BrowserProfileMode, PaneKind, PaneMetadataPatch};
-    use taskers_ghostty::{BackendChoice, GhosttyHostOptions};
+    use taskers_ghostty::{BackendChoice, GhosttyGtkHostOptions};
     use taskers_runtime::ShellLaunchSpec;
 
     use super::AppState;
@@ -341,7 +341,7 @@ mod tests {
         )
         .expect("app state");
 
-        let options: GhosttyHostOptions = app_state.ghostty_host_options();
+        let options: GhosttyGtkHostOptions = app_state.ghostty_host_options();
         assert_eq!(options.command_argv, vec!["/bin/zsh", "-i"]);
         assert_eq!(
             options.env.get("TASKERS_SOCKET").map(String::as_str),

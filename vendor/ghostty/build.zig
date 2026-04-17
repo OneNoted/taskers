@@ -102,7 +102,73 @@ pub fn build(b: *std.Build) !void {
     );
 
     if (config.app_runtime == .gtk) {
-        const taskers_bridge = b.addLibrary(.{
+        const ghostty_gtk_bridge_lib = b.addLibrary(.{
+            .name = "ghostty_gtk_bridge",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/ghostty_gtk_bridge.zig"),
+                .target = config.target,
+                .optimize = config.optimize,
+                .strip = config.strip,
+                .omit_frame_pointer = config.strip,
+                .unwind_tables = if (config.strip) .none else .sync,
+            }),
+            .use_llvm = true,
+        });
+        ghostty_gtk_bridge_lib.linkLibC();
+        _ = try deps.add(ghostty_gtk_bridge_lib);
+
+        const ghostty_gtk_bridge_static = b.addLibrary(.{
+            .name = "ghostty_gtk",
+            .linkage = .static,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/ghostty_gtk_bridge.zig"),
+                .target = config.target,
+                .optimize = config.optimize,
+                .strip = config.strip,
+                .omit_frame_pointer = config.strip,
+                .unwind_tables = if (config.strip) .none else .sync,
+            }),
+            .use_llvm = true,
+        });
+        ghostty_gtk_bridge_static.linkLibC();
+        ghostty_gtk_bridge_static.bundle_compiler_rt = true;
+        ghostty_gtk_bridge_static.bundle_ubsan_rt = true;
+        var ghostty_gtk_bridge_static_libs = try deps.add(ghostty_gtk_bridge_static);
+        try ghostty_gtk_bridge_static_libs.append(
+            b.allocator,
+            ghostty_gtk_bridge_static.getEmittedBin(),
+        );
+        const ghostty_gtk_bridge_static_archive = buildpkg.LibtoolStep.create(b, .{
+            .name = "ghostty_gtk",
+            .out_name = "libghostty_gtk.a",
+            .sources = ghostty_gtk_bridge_static_libs.items,
+        });
+        ghostty_gtk_bridge_static_archive.step.dependOn(&ghostty_gtk_bridge_static.step);
+
+        const install_ghostty_gtk_bridge = b.addInstallLibFile(
+            ghostty_gtk_bridge_lib.getEmittedBin(),
+            "libghostty_gtk.so",
+        );
+        const install_ghostty_gtk_bridge_static = b.addInstallLibFile(
+            ghostty_gtk_bridge_static_archive.output,
+            "libghostty_gtk.a",
+        );
+        const install_ghostty_gtk_header = b.addInstallHeaderFile(
+            b.path("include/ghostty_gtk.h"),
+            "ghostty_gtk.h",
+        );
+        const ghostty_gtk_bridge_step = b.step(
+            "ghostty-gtk-bridge",
+            "Build the generic Ghostty GTK bridge surface",
+        );
+        ghostty_gtk_bridge_step.dependOn(&install_ghostty_gtk_bridge.step);
+        ghostty_gtk_bridge_step.dependOn(&install_ghostty_gtk_bridge_static.step);
+        ghostty_gtk_bridge_step.dependOn(&install_ghostty_gtk_header.step);
+        resources.addStepDependencies(ghostty_gtk_bridge_step);
+        if (i18n) |v| v.addStepDependencies(ghostty_gtk_bridge_step);
+
+        const taskers_ghostty_bridge_lib = b.addLibrary(.{
             .name = "taskers_ghostty_bridge",
             .linkage = .dynamic,
             .root_module = b.createModule(.{
@@ -115,25 +181,24 @@ pub fn build(b: *std.Build) !void {
             }),
             .use_llvm = true,
         });
-        taskers_bridge.linkLibC();
-        _ = try deps.add(taskers_bridge);
+        taskers_ghostty_bridge_lib.linkLibC();
+        _ = try deps.add(taskers_ghostty_bridge_lib);
 
-        const install_bridge = b.addInstallLibFile(
-            taskers_bridge.getEmittedBin(),
+        const install_legacy_gtk_bridge = b.addInstallLibFile(
+            taskers_ghostty_bridge_lib.getEmittedBin(),
             "libtaskers_ghostty_bridge.so",
         );
-        const install_bridge_header = b.addInstallHeaderFile(
+        const install_legacy_gtk_bridge_header = b.addInstallHeaderFile(
             b.path("include/taskers_ghostty_bridge.h"),
             "taskers_ghostty_bridge.h",
         );
         const taskers_bridge_step = b.step(
             "taskers-bridge",
-            "Build the Taskers Ghostty GTK bridge",
+            "Compatibility alias for the generic Ghostty GTK bridge surface",
         );
-        taskers_bridge_step.dependOn(&install_bridge.step);
-        taskers_bridge_step.dependOn(&install_bridge_header.step);
-        resources.addStepDependencies(taskers_bridge_step);
-        if (i18n) |v| v.addStepDependencies(taskers_bridge_step);
+        taskers_bridge_step.dependOn(ghostty_gtk_bridge_step);
+        taskers_bridge_step.dependOn(&install_legacy_gtk_bridge.step);
+        taskers_bridge_step.dependOn(&install_legacy_gtk_bridge_header.step);
     }
 
     // libghostty-vt

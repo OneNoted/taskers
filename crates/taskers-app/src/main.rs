@@ -37,11 +37,13 @@ use taskers_domain::{
 };
 use taskers_ghostty::{
     BackendChoice, EmbeddedTerminalAppearance, EmbeddedTerminalConfig, EmbeddedTerminalConfigPaths,
-    GhosttyHost, GhosttyHostOptions, OptionalBoolValue, ensure_runtime_installed,
+    GhosttyGtkHost, GhosttyGtkHostOptions, OptionalBoolValue, ensure_runtime_installed,
     load_or_initialize_embedded_terminal_config, runtime_terminfo_dir,
     save_embedded_terminal_config,
 };
-use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
+use taskers_host::{
+    DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, GhosttyGtkHealthSnapshot, TaskersHost,
+};
 use taskers_runtime::{
     ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
 };
@@ -102,7 +104,7 @@ struct BootstrapContext {
     core: SharedCore,
     app_state: AppState,
     socket_path: PathBuf,
-    ghostty_host: Option<GhosttyHost>,
+    ghostty_host: Option<GhosttyGtkHost>,
     config: TaskersConfig,
     embedded_terminal_config: EmbeddedTerminalConfig,
     startup_notes: Vec<String>,
@@ -113,7 +115,7 @@ struct RuntimeBootstrap {
     shell_integration: RuntimeCapability,
     terminal_persistence: RuntimeCapability,
     shell_launch: ShellLaunchSpec,
-    host_options: GhosttyHostOptions,
+    host_options: GhosttyGtkHostOptions,
     socket_path: PathBuf,
     terminal_session_client: Option<TerminalSessionClient>,
     startup_notes: Vec<String>,
@@ -533,18 +535,14 @@ fn shutdown_host_bridge(host: &Rc<RefCell<TaskersHost>>, diagnostics: Option<&Di
     }
     quiesce_host_bridge(host, diagnostics, Duration::from_millis(250));
     if let Ok(host) = host.try_borrow()
-        && let Some(health) = host.bridge_health_snapshot()
+        && let Some(health) = host.gtk_host_health_snapshot()
     {
         log_diagnostic(
             diagnostics,
             DiagnosticRecord::new(
                 DiagnosticCategory::Bridge,
                 None,
-                format!(
-                    "ghostty shutdown summary state={} surface_count={}",
-                    health.state.label(),
-                    health.surface_count
-                ),
+                ghostty_shutdown_summary(&health),
             ),
         );
     }
@@ -561,18 +559,14 @@ fn quiesce_host_bridge(
         let Some(health) = host
             .try_borrow()
             .ok()
-            .and_then(|host| host.bridge_health_snapshot())
+            .and_then(|host| host.gtk_host_health_snapshot())
         else {
             return;
         };
         if health.surface_count == 0 {
             log_diagnostic(
                 diagnostics,
-                DiagnosticRecord::new(
-                    DiagnosticCategory::Bridge,
-                    None,
-                    "ghostty bridge quiesced surface_count=0",
-                ),
+                DiagnosticRecord::new(DiagnosticCategory::Bridge, None, ghostty_quiesced_message()),
             );
             return;
         }
@@ -582,10 +576,7 @@ fn quiesce_host_bridge(
                 DiagnosticRecord::new(
                     DiagnosticCategory::Bridge,
                     None,
-                    format!(
-                        "ghostty bridge quiesce timed out surface_count={}",
-                        health.surface_count
-                    ),
+                    ghostty_quiesce_timeout_message(health.surface_count),
                 ),
             );
             return;
@@ -600,6 +591,22 @@ fn quiesce_host_bridge(
             thread::sleep(Duration::from_millis(8));
         }
     }
+}
+
+fn ghostty_shutdown_summary(health: &GhosttyGtkHealthSnapshot) -> String {
+    format!(
+        "ghostty shutdown summary state={} surface_count={}",
+        health.state.label(),
+        health.surface_count
+    )
+}
+
+fn ghostty_quiesced_message() -> &'static str {
+    "ghostty gtk host quiesced surface_count=0"
+}
+
+fn ghostty_quiesce_timeout_message(surface_count: usize) -> String {
+    format!("ghostty gtk host quiesce timed out surface_count={surface_count}")
 }
 
 fn build_ui_result(
@@ -650,10 +657,10 @@ fn build_ui_result(
         shell_action_sink,
         diagnostics_sink,
     )));
-    if let Some(bridge_info) = host.borrow().bridge_info() {
+    if let Some(gtk_host_info) = host.borrow().gtk_host_info() {
         let note = format!(
-            "Ghostty bridge version={} build_id={}",
-            bridge_info.version, bridge_info.build_id
+            "Ghostty GTK host version={} build_id={}",
+            gtk_host_info.version, gtk_host_info.build_id
         );
         log_diagnostic(
             diagnostics.as_ref(),
@@ -665,9 +672,9 @@ fn build_ui_result(
         );
         safe_eprintln(note);
     }
-    if let Some(health) = host.borrow().bridge_health_snapshot() {
+    if let Some(health) = host.borrow().gtk_host_health_snapshot() {
         let note = format!(
-            "Ghostty bridge lifecycle={} surface_count={}",
+            "Ghostty GTK host lifecycle={} surface_count={}",
             health.state.label(),
             health.surface_count
         );
@@ -1775,7 +1782,7 @@ fn bootstrap_runtime(
 
     let (ghostty_host, backend_choice, terminal_host, terminal_note) =
         match probe_ghostty_backend_process(GhosttyProbeMode::Surface) {
-            Ok(()) => match GhosttyHost::new_with_options(&runtime.host_options) {
+            Ok(()) => match GhosttyGtkHost::new_with_options(&runtime.host_options) {
                 Ok(host) => {
                     let _ = host.tick();
                     (
@@ -1959,7 +1966,7 @@ fn resolve_runtime_bootstrap(
         }
     };
 
-    let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch)
+    let host_options = GhosttyGtkHostOptions::from_shell_launch(&shell_launch)
         .with_embedded_config_paths(
             embedded_terminal_paths.base.display().to_string(),
             embedded_terminal_paths.override_file.display().to_string(),
@@ -2119,7 +2126,7 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
         config.configured_shell.as_deref(),
         None,
     );
-    let host = match GhosttyHost::new_with_options(&runtime.host_options) {
+    let host = match GhosttyGtkHost::new_with_options(&runtime.host_options) {
         Ok(host) => {
             let _ = host.tick();
             host
@@ -2142,7 +2149,7 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
 }
 
 fn run_internal_surface_probe(
-    host: GhosttyHost,
+    host: GhosttyGtkHost,
     shell_launch: ShellLaunchSpec,
     mode: GhosttyProbeMode,
     config: TaskersConfig,
@@ -3176,13 +3183,16 @@ fn looks_like_dev_install(path: &Path) -> bool {
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        RuntimePathOverrides, build_shell_network_session, looks_like_dev_install,
-        maybe_export_bundled_terminfo, publish_shell_environment,
+        GhosttyGtkHealthSnapshot, RuntimePathOverrides, build_shell_network_session,
+        ghostty_quiesce_timeout_message, ghostty_quiesced_message, ghostty_shutdown_summary,
+        looks_like_dev_install, maybe_export_bundled_terminfo, publish_shell_environment,
         should_apply_webkit_dmabuf_workaround, should_defer_initial_sync, should_force_software_gl,
         should_skip_terminal_sidecar_in_smoke, should_sync_host_snapshot,
         smoke_runtime_path_overrides,
     };
     use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
+    use taskers_ghostty::GhosttyGtkInfo;
+    use taskers_host::GhosttyLifecycleState;
     use taskers_runtime::ShellLaunchSpec;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -3337,6 +3347,41 @@ mod startup_tests {
         .expect("write terminfo");
 
         let _guard = EnvGuard::set([
+            ("GHOSTTY_GTK_RUNTIME_DIR", Some(runtime_dir.clone())),
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", None),
+            ("TERMINFO", None),
+            ("XDG_DATA_HOME", None),
+        ]);
+
+        let mut shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/bin/sh"),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        };
+        maybe_export_bundled_terminfo(&mut shell_launch);
+
+        assert_eq!(
+            shell_launch.env.get("TERMINFO").map(String::as_str),
+            Some(terminfo_dir.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn legacy_runtime_dir_alias_still_reinjects_packaged_runtime_terminfo_after_scrub() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        let terminfo_dir = temp.path().join("taskers").join("terminfo");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
+        std::fs::write(
+            terminfo_dir.join("x").join("xterm-ghostty"),
+            b"fake terminfo",
+        )
+        .expect("write terminfo");
+
+        let _guard = EnvGuard::set([
+            ("GHOSTTY_GTK_RUNTIME_DIR", None),
             ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.clone())),
             ("TERMINFO", None),
             ("XDG_DATA_HOME", None),
@@ -3352,6 +3397,34 @@ mod startup_tests {
         assert_eq!(
             shell_launch.env.get("TERMINFO").map(String::as_str),
             Some(terminfo_dir.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn ghostty_shutdown_quiesce_reports_terminal_bridge_health() {
+        let health = GhosttyGtkHealthSnapshot {
+            gtk_host_info: GhosttyGtkInfo {
+                version: "1.0.0".into(),
+                build_id: "ghostty-test".into(),
+            },
+            state: GhosttyLifecycleState::ShuttingDown,
+            surface_count: 2,
+            last_tick_duration_ms: Some(12),
+            last_mutation_duration_ms: Some(4),
+            last_operation: Some("shutdown".into()),
+        };
+
+        assert_eq!(
+            ghostty_shutdown_summary(&health),
+            "ghostty shutdown summary state=shutting-down surface_count=2"
+        );
+        assert_eq!(
+            ghostty_quiesce_timeout_message(health.surface_count),
+            "ghostty gtk host quiesce timed out surface_count=2"
+        );
+        assert_eq!(
+            ghostty_quiesced_message(),
+            "ghostty gtk host quiesced surface_count=0"
         );
     }
 

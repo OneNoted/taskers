@@ -38,8 +38,8 @@ pub const ResourcesDir = struct {
 /// This is highly Ghostty-specific and can likely be generalized at
 /// some point but we can cross that bridge if we ever need to.
 pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
-    if (taskersResourcesDir(alloc)) |dir| {
-        std.log.info("using Taskers Ghostty resources dir: {s}", .{dir});
+    if (ghosttyGtkResourcesDir(alloc)) |dir| {
+        std.log.info("using Ghostty GTK runtime resources dir: {s}", .{dir});
         return .{ .app_path = dir };
     } else |err| switch (err) {
         error.EnvironmentVariableNotFound => {},
@@ -121,7 +121,15 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
     return .{};
 }
 
-fn taskersResourcesDir(alloc: Allocator) ![]const u8 {
+fn ghosttyGtkResourcesDir(alloc: Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(alloc, "GHOSTTY_GTK_RUNTIME_DIR")) |dir| {
+        if (dir.len > 0) return dir;
+        alloc.free(dir);
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
     if (std.process.getEnvVarOwned(alloc, "TASKERS_GHOSTTY_RUNTIME_DIR")) |dir| {
         if (dir.len > 0) return dir;
         alloc.free(dir);

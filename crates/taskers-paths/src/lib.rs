@@ -33,7 +33,7 @@ struct EnvPaths {
     xdg_runtime_dir: Option<PathBuf>,
     xdg_state_home: Option<PathBuf>,
     taskers_config_path: Option<PathBuf>,
-    taskers_ghostty_runtime_dir: Option<PathBuf>,
+    ghostty_gtk_runtime_dir: Option<PathBuf>,
     taskers_runtime_dir: Option<PathBuf>,
     taskers_session_path: Option<PathBuf>,
     taskers_socket_path: Option<PathBuf>,
@@ -50,7 +50,8 @@ impl EnvPaths {
             xdg_runtime_dir: env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
             xdg_state_home: env::var_os("XDG_STATE_HOME").map(PathBuf::from),
             taskers_config_path: env::var_os("TASKERS_CONFIG_PATH").map(PathBuf::from),
-            taskers_ghostty_runtime_dir: env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR")
+            ghostty_gtk_runtime_dir: env::var_os("GHOSTTY_GTK_RUNTIME_DIR")
+                .or_else(|| env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR"))
                 .map(PathBuf::from),
             taskers_runtime_dir: env::var_os("TASKERS_RUNTIME_DIR").map(PathBuf::from),
             taskers_session_path: env::var_os("TASKERS_SESSION_PATH").map(PathBuf::from),
@@ -105,7 +106,7 @@ impl TaskersPaths {
         let data_dir = platform_data_dir(platform, env_paths);
         let shell_runtime_dir = shell_runtime_dir(platform, env_paths, &cache_dir);
         let ghostty_runtime_dir = env_paths
-            .taskers_ghostty_runtime_dir
+            .ghostty_gtk_runtime_dir
             .clone()
             .unwrap_or_else(|| data_dir.join("ghostty"));
         let socket_path = env_paths
@@ -443,7 +444,7 @@ mod tests {
             taskers_socket_path: Some(PathBuf::from("/work/control.sock")),
             taskers_terminal_socket_path: Some(PathBuf::from("/work/terminal.sock")),
             taskers_runtime_dir: Some(PathBuf::from("/work/runtime")),
-            taskers_ghostty_runtime_dir: Some(PathBuf::from("/work/ghostty")),
+            ghostty_gtk_runtime_dir: Some(PathBuf::from("/work/ghostty")),
             ..EnvPaths::default()
         };
         let paths = TaskersPaths::from_env(HostPlatform::Macos, &env);
@@ -460,6 +461,21 @@ mod tests {
             &PathBuf::from("/work/runtime/shell")
         );
         assert_eq!(paths.ghostty_runtime_dir(), &PathBuf::from("/work/ghostty"));
+    }
+
+    #[test]
+    fn generic_gtk_runtime_dir_alias_overrides_default_ghostty_runtime_dir() {
+        let env = EnvPaths {
+            xdg_data_home: Some(PathBuf::from("/tmp/data")),
+            ghostty_gtk_runtime_dir: Some(PathBuf::from("/work/generic-ghostty")),
+            ..EnvPaths::default()
+        };
+        let paths = TaskersPaths::from_env(HostPlatform::Linux, &env);
+
+        assert_eq!(
+            paths.ghostty_runtime_dir(),
+            &PathBuf::from("/work/generic-ghostty")
+        );
     }
 
     #[test]
