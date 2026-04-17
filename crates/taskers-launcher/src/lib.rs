@@ -14,7 +14,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Archive;
@@ -98,11 +98,9 @@ impl ManagedInstallation {
         command.args(args);
         command.env("TASKERS_CTL_PATH", self.taskersctl_path());
         command.env("GHOSTTY_GTK_RUNTIME_DIR", self.ghostty_resources_path());
-        command.env("TASKERS_GHOSTTY_RUNTIME_DIR", self.ghostty_resources_path());
         command.env("GHOSTTY_RESOURCES_DIR", self.ghostty_resources_path());
         command.env("TERMINFO", self.terminfo_path());
         command.env("GHOSTTY_GTK_DISABLE_RUNTIME_BOOTSTRAP", "1");
-        command.env("TASKERS_DISABLE_GHOSTTY_RUNTIME_BOOTSTRAP", "1");
 
         command
             .status()
@@ -635,10 +633,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ArtifactKind, ManagedInstallation, ReleaseArtifact, ReleaseManifest, bundle_root,
-        current_target_triple, default_manifest_url, desktop_exec, desktop_launch_wrapper_contents,
-        launcher_path_looks_installed, path_taskers_executable, remove_legacy_desktop_integration,
-        sha256_path, should_update_desktop_entry,
+        bundle_root, current_target_triple, default_manifest_url, desktop_exec,
+        desktop_launch_wrapper_contents, launcher_path_looks_installed, path_taskers_executable,
+        remove_legacy_desktop_integration, sha256_path, should_update_desktop_entry, ArtifactKind,
+        ManagedInstallation, ReleaseArtifact, ReleaseManifest,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -768,17 +766,19 @@ mod tests {
 
         assert!(installation.executable_path().is_file());
         assert!(installation.taskersctl_path().is_file());
-        assert!(installation.bundle_root.join("bin").join("taskers-terminald").is_file());
+        assert!(installation
+            .bundle_root
+            .join("bin")
+            .join("taskers-terminald")
+            .is_file());
         assert!(installation.ghostty_resources_path().is_dir());
         assert!(installation.terminfo_path().is_dir());
-        assert!(
-            installation
-                .bundle_root
-                .join("ghostty")
-                .join("lib")
-                .join("libghostty_gtk.so")
-                .is_file()
-        );
+        assert!(installation
+            .bundle_root
+            .join("ghostty")
+            .join("lib")
+            .join("libghostty_gtk.so")
+            .is_file());
     }
 
     #[test]
@@ -853,15 +853,13 @@ mod tests {
         )
         .expect("desktop entry");
 
-        assert!(
-            should_update_desktop_entry(
-                &desktop_entry,
-                &desktop_launcher,
-                &launcher,
-                Some(&legacy_launcher),
-            )
-            .expect("decision")
-        );
+        assert!(should_update_desktop_entry(
+            &desktop_entry,
+            &desktop_launcher,
+            &launcher,
+            Some(&legacy_launcher),
+        )
+        .expect("decision"));
     }
 
     #[test]
