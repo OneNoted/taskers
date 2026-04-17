@@ -161,7 +161,7 @@ fn auto_probe(requested: BackendChoice) -> BackendProbe {
             requested,
             selected: BackendChoice::Mock,
             availability: BackendAvailability::Fallback,
-            notes: "Ghostty bridge unavailable, using placeholder terminal surfaces.".into(),
+            notes: "Ghostty GTK host unavailable, using placeholder terminal surfaces.".into(),
         }
     }
 }

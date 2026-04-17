@@ -29,16 +29,8 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
     }
-    println!("cargo:rustc-cfg=ghostty_gtk_bridge");
     if let Ok(target) = env::var("TARGET") {
         println!("cargo:rustc-env=TASKERS_BUILD_TARGET={target}");
-    }
-
-    if let Some(skip_env) = skip_build_runtime_embed_env() {
-        println!(
-            "cargo:warning=skipping build-time Ghostty runtime embedding because {skip_env} is set"
-        );
-        return;
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
@@ -50,7 +42,7 @@ fn main() {
     let vendor_dir = workspace_root.join("vendor").join("ghostty");
     if !vendor_dir.exists() {
         println!(
-            "cargo:warning=vendored Ghostty source tree not found; runtime bundle bootstrap will be required"
+            "cargo:warning=vendored Ghostty source tree not found; compile-time Ghostty GTK support is unavailable"
         );
         return;
     }
@@ -59,20 +51,16 @@ fn main() {
 
     build_bridge(&vendor_dir, &install_dir);
     emit_static_bridge_linkage(&install_dir);
-
-    println!(
-        "cargo:rustc-env=GHOSTTY_GTK_BUILD_RESOURCES_DIR={}",
-        install_dir.join("share").join("ghostty").display()
-    );
-    println!(
-        "cargo:rustc-env=GHOSTTY_GTK_BUILD_BRIDGE_PATH={}",
-        install_dir.join("lib").join("libghostty_gtk.so").display()
-    );
-    println!(
-        "cargo:rustc-env=GHOSTTY_GTK_BUILD_TERMINFO_DIR={}",
-        install_dir.join("share").join("terminfo").display()
-    );
     println!("cargo:rustc-cfg=ghostty_gtk_bridge");
+
+    if let Some(skip_env) = skip_build_runtime_embed_env() {
+        println!(
+            "cargo:warning=skipping build-time Ghostty runtime embedding because {skip_env} is set"
+        );
+        return;
+    }
+
+    emit_build_runtime_env(&install_dir);
 }
 
 fn skip_build_runtime_embed_env() -> Option<&'static str> {
@@ -114,6 +102,21 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
     panic!("failed to build vendored Ghostty bridge\nstdout:\n{stdout}\nstderr:\n{stderr}");
 }
 
+fn emit_build_runtime_env(install_dir: &Path) {
+    println!(
+        "cargo:rustc-env=GHOSTTY_GTK_BUILD_RESOURCES_DIR={}",
+        install_dir.join("share").join("ghostty").display()
+    );
+    println!(
+        "cargo:rustc-env=GHOSTTY_GTK_BUILD_BRIDGE_PATH={}",
+        install_dir.join("lib").join("libghostty_gtk.so").display()
+    );
+    println!(
+        "cargo:rustc-env=GHOSTTY_GTK_BUILD_TERMINFO_DIR={}",
+        install_dir.join("share").join("terminfo").display()
+    );
+}
+
 fn emit_static_bridge_linkage(install_dir: &Path) {
     println!(
         "cargo:rustc-link-search=native={}",
@@ -121,12 +124,13 @@ fn emit_static_bridge_linkage(install_dir: &Path) {
     );
     println!("cargo:rustc-link-lib=static=ghostty_gtk");
 
+    let mut emitted_tokens = Vec::new();
     for package in BRIDGE_PKG_CONFIG_PACKAGES {
-        emit_pkg_config_linkage(package);
+        emit_pkg_config_linkage(package, &mut emitted_tokens);
     }
 }
 
-fn emit_pkg_config_linkage(package: &str) {
+fn emit_pkg_config_linkage(package: &str, emitted_tokens: &mut Vec<String>) {
     let output = Command::new("pkg-config")
         .args(["--libs", package])
         .output()
@@ -138,6 +142,11 @@ fn emit_pkg_config_linkage(package: &str) {
     }
 
     for token in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+        if emitted_tokens.iter().any(|seen| seen == token) {
+            continue;
+        }
+        emitted_tokens.push(token.to_owned());
+
         if let Some(path) = token.strip_prefix("-L") {
             println!("cargo:rustc-link-search=native={path}");
         } else if let Some(lib) = token.strip_prefix("-l") {
