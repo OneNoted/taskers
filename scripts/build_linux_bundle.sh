@@ -27,7 +27,7 @@ trap cleanup EXIT
 
 (
   cd "$repo_root/vendor/ghostty"
-  zig build taskers-bridge \
+  zig build ghostty-gtk-bridge \
     -Dapp-runtime=gtk \
     -Demit-exe=false \
     -Dgtk-wayland=false \
@@ -45,6 +45,7 @@ cp "$repo_root/target/release/taskersctl" "$bundle_dir/bin/taskersctl"
 cp "$repo_root/target/release/taskers-terminald" "$bundle_dir/bin/taskers-terminald"
 chmod +x "$bundle_dir/bin/taskers" "$bundle_dir/bin/taskersctl" "$bundle_dir/bin/taskers-terminald"
 cp "$prefix_dir/lib/libtaskers_ghostty_bridge.so" "$bundle_dir/ghostty/lib/"
+cp "$prefix_dir/lib/libghostty_gtk.so" "$bundle_dir/ghostty/lib/"
 cp -R "$prefix_dir/share/ghostty/shell-integration/." "$bundle_dir/ghostty/shell-integration/"
 cp -R "$prefix_dir/share/ghostty/themes/." "$bundle_dir/ghostty/themes/"
 cp -R "$prefix_dir/share/terminfo/." "$bundle_dir/terminfo/"

@@ -122,6 +122,14 @@ pub fn resourcesDir(alloc: Allocator) !ResourcesDir {
 }
 
 fn taskersResourcesDir(alloc: Allocator) ![]const u8 {
+    if (std.process.getEnvVarOwned(alloc, "GHOSTTY_GTK_RUNTIME_DIR")) |dir| {
+        if (dir.len > 0) return dir;
+        alloc.free(dir);
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
     if (std.process.getEnvVarOwned(alloc, "TASKERS_GHOSTTY_RUNTIME_DIR")) |dir| {
         if (dir.len > 0) return dir;
         alloc.free(dir);
