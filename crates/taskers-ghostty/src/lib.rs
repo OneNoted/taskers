@@ -23,12 +23,3 @@ pub use runtime::{
     RuntimeBootstrap, RuntimeBootstrapError, configure_runtime_environment,
     ensure_runtime_installed, runtime_terminfo_dir,
 };
-
-#[cfg(target_os = "linux")]
-pub type GhosttyHost = GhosttyGtkHost;
-#[cfg(target_os = "linux")]
-pub type GhosttyBridgeInfo = GhosttyGtkInfo;
-#[cfg(target_os = "linux")]
-pub type GhosttyError = GhosttyGtkError;
-pub type GhosttyHostOptions = GhosttyGtkHostOptions;
-pub type SurfaceDescriptor = GhosttyGtkSurfaceDescriptor;
