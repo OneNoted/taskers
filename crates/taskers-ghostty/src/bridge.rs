@@ -20,7 +20,7 @@ use libloading::Library;
 use thiserror::Error;
 
 use crate::backend::{GhosttyGtkHostOptions, GhosttyGtkSurfaceDescriptor};
-use crate::runtime::{configure_runtime_environment, runtime_bridge_path};
+use crate::runtime::{configure_runtime_environment, runtime_gtk_bridge_path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhosttyGtkInfo {
@@ -387,7 +387,7 @@ impl Drop for GhosttyGtkHost {
 
 #[cfg(ghostty_gtk_bridge)]
 fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyGtkError> {
-    let path = runtime_bridge_path().ok_or(GhosttyGtkError::LibraryPathUnavailable)?;
+    let path = runtime_gtk_bridge_path().ok_or(GhosttyGtkError::LibraryPathUnavailable)?;
     let library = unsafe {
         Library::new(&path).map_err(|error| GhosttyGtkError::LibraryLoad {
             path: path.clone(),

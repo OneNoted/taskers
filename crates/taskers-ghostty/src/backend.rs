@@ -1,4 +1,4 @@
-use crate::runtime::{runtime_bridge_path, runtime_resources_dir};
+use crate::runtime::{runtime_gtk_bridge_path, runtime_resources_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use taskers_domain::{BrowserProfileMode, PaneKind};
@@ -169,7 +169,7 @@ fn auto_probe(requested: BackendChoice) -> BackendProbe {
 fn ghostty_availability() -> BackendAvailability {
     #[cfg(all(target_os = "linux", ghostty_gtk_bridge))]
     {
-        if runtime_bridge_path().is_some() {
+        if runtime_gtk_bridge_path().is_some() {
             BackendAvailability::Ready
         } else {
             BackendAvailability::Unavailable
@@ -196,7 +196,7 @@ fn embedded_ghostty_availability() -> BackendAvailability {
 
 fn ghostty_notes() -> String {
     let mut notes = String::from("Ghostty GTK bridge compiled in.");
-    if let Some(path) = runtime_bridge_path() {
+    if let Some(path) = runtime_gtk_bridge_path() {
         notes.push_str(" Bridge: ");
         notes.push_str(&path.display().to_string());
     } else {
