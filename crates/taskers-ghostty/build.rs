@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_glibc_compat.c");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_build_info.zig");
+    println!("cargo:rerun-if-changed=../../vendor/ghostty/include/ghostty_gtk.h");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/include/taskers_ghostty_bridge.h");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt/gtk/Surface.zig");
