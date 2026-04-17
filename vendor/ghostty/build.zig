@@ -122,6 +122,10 @@ pub fn build(b: *std.Build) !void {
             taskers_bridge.getEmittedBin(),
             "libtaskers_ghostty_bridge.so",
         );
+        const install_ghostty_gtk_bridge = b.addInstallLibFile(
+            taskers_bridge.getEmittedBin(),
+            "libghostty_gtk.so",
+        );
         const install_bridge_header = b.addInstallHeaderFile(
             b.path("include/taskers_ghostty_bridge.h"),
             "taskers_ghostty_bridge.h",
@@ -135,6 +139,7 @@ pub fn build(b: *std.Build) !void {
             "Build the Taskers Ghostty GTK bridge",
         );
         taskers_bridge_step.dependOn(&install_bridge.step);
+        taskers_bridge_step.dependOn(&install_ghostty_gtk_bridge.step);
         taskers_bridge_step.dependOn(&install_bridge_header.step);
         taskers_bridge_step.dependOn(&install_ghostty_gtk_header.step);
         resources.addStepDependencies(taskers_bridge_step);

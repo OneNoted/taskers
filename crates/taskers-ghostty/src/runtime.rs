@@ -9,6 +9,7 @@ use thiserror::Error;
 use xz2::read::XzDecoder;
 
 const BRIDGE_LIBRARY_NAME: &str = "libtaskers_ghostty_bridge.so";
+const GTK_BRIDGE_LIBRARY_NAME: &str = "libghostty_gtk.so";
 const RUNTIME_VERSION_FILE: &str = ".taskers-runtime-version";
 const TERMINFO_GHOSTTY_PATH: &str = "g/ghostty";
 const TERMINFO_XTERM_GHOSTTY_PATH: &str = "x/xterm-ghostty";
@@ -195,8 +196,7 @@ fn runtime_bridge_path_for(current_exe: Option<&Path>) -> Option<PathBuf> {
     }
 
     if let Some(path) = explicit_runtime_dir()
-        .map(|root| root.join("lib").join(BRIDGE_LIBRARY_NAME))
-        .filter(|path| path.exists())
+        .and_then(|root| bridge_library_paths_in_dir(&root.join("lib")).find(|path| path.exists()))
     {
         return Some(path);
     }
@@ -208,8 +208,7 @@ fn runtime_bridge_path_for(current_exe: Option<&Path>) -> Option<PathBuf> {
     }
 
     default_installed_runtime_dir()
-        .map(|root| root.join("lib").join(BRIDGE_LIBRARY_NAME))
-        .filter(|path| path.exists())
+        .and_then(|root| bridge_library_paths_in_dir(&root.join("lib")).find(|path| path.exists()))
 }
 
 pub fn runtime_terminfo_dir() -> Option<PathBuf> {
@@ -254,9 +253,9 @@ fn unpack_bundle<R: Read>(reader: R, staging_root: &Path) -> Result<(), RuntimeB
 }
 
 fn validate_bundle(ghostty_dir: &Path, terminfo_dir: &Path) -> Result<(), RuntimeBootstrapError> {
-    if !ghostty_dir.join("lib").join(BRIDGE_LIBRARY_NAME).exists() {
+    if !bridge_library_paths_in_dir(&ghostty_dir.join("lib")).any(|path| path.exists()) {
         return Err(RuntimeBootstrapError::MissingBundlePath {
-            path: "ghostty/lib/libtaskers_ghostty_bridge.so",
+            path: "ghostty/lib/libghostty_gtk.so or ghostty/lib/libtaskers_ghostty_bridge.so",
         });
     }
     if !terminfo_dir.join(TERMINFO_GHOSTTY_PATH).exists()
@@ -270,7 +269,7 @@ fn validate_bundle(ghostty_dir: &Path, terminfo_dir: &Path) -> Result<(), Runtim
 }
 
 fn installed_runtime_is_current(runtime_dir: &Path) -> bool {
-    if !runtime_dir.join("lib").join(BRIDGE_LIBRARY_NAME).exists() {
+    if !bridge_library_paths_in_dir(&runtime_dir.join("lib")).any(|path| path.exists()) {
         return false;
     }
 
@@ -327,7 +326,14 @@ fn repo_target_dir() -> PathBuf {
 fn build_runtime_bridge_path() -> Option<PathBuf> {
     option_env!("TASKERS_GHOSTTY_BUILD_BRIDGE_PATH")
         .map(PathBuf::from)
-        .filter(|path| path.exists())
+        .and_then(|legacy_path| {
+            let generic_path = legacy_path
+                .parent()
+                .map(|dir| dir.join(GTK_BRIDGE_LIBRARY_NAME));
+            generic_path
+                .filter(|path| path.exists())
+                .or_else(|| legacy_path.exists().then_some(legacy_path))
+        })
 }
 
 fn build_runtime_resources_dir() -> Option<PathBuf> {
@@ -363,8 +369,24 @@ fn stage_build_runtime_layout(
             message: error.to_string(),
         }
     })?;
+    let generic_bridge_destination = ghostty_stage.join("lib").join(GTK_BRIDGE_LIBRARY_NAME);
+    if generic_bridge_destination != bridge_destination {
+        fs::copy(&layout.bridge_path, &generic_bridge_destination).map_err(|error| {
+            RuntimeBootstrapError::CopyPath {
+                from: layout.bridge_path.clone(),
+                to: generic_bridge_destination.clone(),
+                message: error.to_string(),
+            }
+        })?;
+    }
 
     copy_dir_all(&layout.terminfo_dir, &staging_root.join("terminfo"))
+}
+
+fn bridge_library_paths_in_dir(lib_dir: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    [GTK_BRIDGE_LIBRARY_NAME, BRIDGE_LIBRARY_NAME]
+        .into_iter()
+        .map(|name| lib_dir.join(name))
 }
 
 fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), RuntimeBootstrapError> {
@@ -479,10 +501,10 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RuntimeBootstrapError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildRuntimeLayout, RUNTIME_VERSION_FILE, RuntimeBootstrap, ensure_runtime_installed,
-        runtime_bridge_path, runtime_bridge_path_for, runtime_resources_dir,
-        runtime_resources_dir_for, runtime_terminfo_dir, runtime_terminfo_dir_for,
-        stage_build_runtime_layout, use_build_runtime_directly_for,
+        BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, RUNTIME_VERSION_FILE, RuntimeBootstrap,
+        ensure_runtime_installed, runtime_bridge_path, runtime_bridge_path_for,
+        runtime_resources_dir, runtime_resources_dir_for, runtime_terminfo_dir,
+        runtime_terminfo_dir_for, stage_build_runtime_layout, use_build_runtime_directly_for,
     };
     use std::{env, fs, path::Path, sync::Mutex};
     use tar::Builder;
@@ -676,6 +698,36 @@ mod tests {
     }
 
     #[test]
+    fn installed_executables_prefer_generic_bridge_library_when_available() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
+        let temp = tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        let terminfo_dir = temp.path().join("taskers").join("terminfo");
+        fs::create_dir_all(runtime_dir.join("lib")).expect("runtime lib dir");
+        fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
+        fs::write(
+            runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME),
+            b"bridge",
+        )
+        .expect("bridge");
+        fs::write(terminfo_dir.join("x").join("xterm-ghostty"), b"terminfo").expect("terminfo");
+
+        let _guard = EnvGuard::set([
+            ("XDG_DATA_HOME", Some(temp.path().as_os_str())),
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", None),
+            ("TASKERS_GHOSTTY_BRIDGE_PATH", None),
+            ("GHOSTTY_RESOURCES_DIR", None),
+            ("TERMINFO", None),
+        ]);
+
+        let installed_exe = Path::new("/home/notes/.local/share/cargo/bin/taskers-gtk");
+        assert_eq!(
+            runtime_bridge_path_for(Some(installed_exe)),
+            Some(runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME))
+        );
+    }
+
+    #[test]
     fn stage_build_runtime_layout_copies_bridge_resources_and_terminfo() {
         let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
         let temp = tempdir().expect("tempdir");
@@ -729,6 +781,16 @@ mod tests {
                     .join("libtaskers_ghostty_bridge.so"),
             )
             .expect("staged bridge"),
+            b"bridge"
+        );
+        assert_eq!(
+            fs::read(
+                staging_root
+                    .join("ghostty")
+                    .join("lib")
+                    .join(GTK_BRIDGE_LIBRARY_NAME),
+            )
+            .expect("staged generic bridge"),
             b"bridge"
         );
         assert_eq!(
