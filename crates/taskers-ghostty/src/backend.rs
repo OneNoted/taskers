@@ -167,7 +167,7 @@ fn auto_probe(requested: BackendChoice) -> BackendProbe {
 }
 
 fn ghostty_availability() -> BackendAvailability {
-    #[cfg(all(target_os = "linux", taskers_ghostty_bridge))]
+    #[cfg(all(target_os = "linux", ghostty_gtk_bridge))]
     {
         if runtime_bridge_path().is_some() {
             BackendAvailability::Ready
@@ -176,7 +176,7 @@ fn ghostty_availability() -> BackendAvailability {
         }
     }
 
-    #[cfg(not(all(target_os = "linux", taskers_ghostty_bridge)))]
+    #[cfg(not(all(target_os = "linux", ghostty_gtk_bridge)))]
     {
         BackendAvailability::Unavailable
     }

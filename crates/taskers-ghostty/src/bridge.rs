@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
 };
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 use std::{
     ffi::{c_int, c_void},
     ptr::NonNull,
@@ -11,11 +11,11 @@ use std::{
 };
 
 use gtk::Widget;
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 use gtk::glib::translate::from_glib_full;
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 use gtk::prelude::ObjectType;
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 use libloading::Library;
 use thiserror::Error;
 
@@ -54,16 +54,16 @@ pub enum GhosttyError {
     LibraryPathUnavailable,
 }
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 pub struct GhosttyHost {
     bridge: GhosttyGtkLibrary,
     raw: NonNull<ghostty_gtk_host_t>,
 }
 
-#[cfg(not(taskers_ghostty_bridge))]
+#[cfg(not(ghostty_gtk_bridge))]
 pub struct GhosttyHost;
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 struct GhosttyGtkLibrary {
     _library: Library,
     host_new: unsafe extern "C" fn(*const ghostty_gtk_host_options_s) -> *mut ghostty_gtk_host_t,
@@ -93,7 +93,7 @@ impl GhosttyHost {
     pub fn new_with_options(options: &GhosttyHostOptions) -> Result<Self, GhosttyError> {
         configure_runtime_environment();
 
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let bridge = load_bridge_library()?;
             let command_argv = options
@@ -161,7 +161,7 @@ impl GhosttyHost {
             Ok(Self { bridge, raw })
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = options;
             Err(GhosttyError::Unavailable)
@@ -169,7 +169,7 @@ impl GhosttyHost {
     }
 
     pub fn tick(&self) -> Result<(), GhosttyError> {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let ok = (self.bridge.host_tick)(self.raw.as_ptr());
             if ok == 0 {
@@ -179,14 +179,14 @@ impl GhosttyHost {
             }
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             Err(GhosttyError::Unavailable)
         }
     }
 
     pub fn bridge_info(&self) -> GhosttyBridgeInfo {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let version = std::ffi::CStr::from_ptr((self.bridge.host_version)())
                 .to_string_lossy()
@@ -197,7 +197,7 @@ impl GhosttyHost {
             GhosttyBridgeInfo { version, build_id }
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             GhosttyBridgeInfo {
                 version: "unavailable".into(),
@@ -207,26 +207,26 @@ impl GhosttyHost {
     }
 
     pub fn begin_shutdown(&self) {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             (self.bridge.host_begin_shutdown)(self.raw.as_ptr());
         }
     }
 
     pub fn surface_count(&self) -> usize {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             (self.bridge.host_surface_count)(self.raw.as_ptr())
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             0
         }
     }
 
     pub fn create_surface(&self, descriptor: &SurfaceDescriptor) -> Result<Widget, GhosttyError> {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let cwd = descriptor
                 .cwd
@@ -274,7 +274,7 @@ impl GhosttyHost {
             Ok(from_glib_full(widget.cast()))
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = descriptor;
             Err(GhosttyError::Unavailable)
@@ -282,7 +282,7 @@ impl GhosttyHost {
     }
 
     pub fn focus_surface(&self, widget: &Widget) -> Result<(), GhosttyError> {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let ok = (self.bridge.surface_grab_focus)(widget.as_ptr().cast());
             if ok == 0 {
@@ -292,7 +292,7 @@ impl GhosttyHost {
             }
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = widget;
             Err(GhosttyError::Unavailable)
@@ -300,19 +300,19 @@ impl GhosttyHost {
     }
 
     pub fn destroy_surface(&self, widget: &Widget) {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             (self.bridge.surface_destroy)(widget.as_ptr().cast());
         }
     }
 
     pub fn surface_has_selection(&self, widget: &Widget) -> Result<bool, GhosttyError> {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             Ok((self.bridge.surface_has_selection)(widget.as_ptr().cast()) != 0)
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = widget;
             Err(GhosttyError::Unavailable)
@@ -320,7 +320,7 @@ impl GhosttyHost {
     }
 
     pub fn read_surface_text(&self, widget: &Widget) -> Result<String, GhosttyError> {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let mut text = ghostty_gtk_text_s::default();
             let ok = (self.bridge.surface_read_all_text)(widget.as_ptr().cast(), &mut text);
@@ -338,7 +338,7 @@ impl GhosttyHost {
             Ok(output)
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = widget;
             Err(GhosttyError::Unavailable)
@@ -346,7 +346,7 @@ impl GhosttyHost {
     }
 
     pub fn send_surface_text(&self, widget: &Widget, text: &str) -> Result<(), GhosttyError> {
-        #[cfg(taskers_ghostty_bridge)]
+        #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let text =
                 CString::new(text).map_err(|_| GhosttyError::InvalidString("surface_text"))?;
@@ -362,7 +362,7 @@ impl GhosttyHost {
             }
         }
 
-        #[cfg(not(taskers_ghostty_bridge))]
+        #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = (widget, text);
             Err(GhosttyError::Unavailable)
@@ -370,7 +370,7 @@ impl GhosttyHost {
     }
 }
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 impl Drop for GhosttyHost {
     fn drop(&mut self) {
         unsafe {
@@ -379,7 +379,7 @@ impl Drop for GhosttyHost {
     }
 }
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyError> {
     let path = runtime_bridge_path().ok_or(GhosttyError::LibraryPathUnavailable)?;
     let library = unsafe {
@@ -495,7 +495,7 @@ fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyError> {
     }
 }
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 unsafe fn load_bridge_symbol<T: Copy>(
     library: &Library,
     path: &std::path::Path,
@@ -519,13 +519,13 @@ unsafe fn load_bridge_symbol<T: Copy>(
     }
 }
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 #[repr(C)]
 struct ghostty_gtk_host_t {
     _private: [u8; 0],
 }
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 #[repr(C)]
 struct ghostty_gtk_host_options_s {
     command_argv: *const *const c_char,
@@ -536,7 +536,7 @@ struct ghostty_gtk_host_options_s {
     override_config_path: *const c_char,
 }
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 #[repr(C)]
 struct ghostty_gtk_surface_options_s {
     working_directory: *const c_char,
@@ -545,7 +545,7 @@ struct ghostty_gtk_surface_options_s {
     env_count: usize,
 }
 
-#[cfg(taskers_ghostty_bridge)]
+#[cfg(ghostty_gtk_bridge)]
 #[repr(C)]
 #[derive(Default)]
 struct ghostty_gtk_text_s {

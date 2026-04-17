@@ -7,7 +7,7 @@ use std::{
 const SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED";
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(taskers_ghostty_bridge)");
+    println!("cargo:rustc-check-cfg=cfg(ghostty_gtk_bridge)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={SKIP_BUILD_RUNTIME_EMBED_ENV}");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig");
@@ -25,7 +25,7 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
     }
-    println!("cargo:rustc-cfg=taskers_ghostty_bridge");
+    println!("cargo:rustc-cfg=ghostty_gtk_bridge");
     if let Ok(target) = env::var("TARGET") {
         println!("cargo:rustc-env=TASKERS_BUILD_TARGET={target}");
     }
@@ -74,7 +74,7 @@ fn main() {
         "cargo:rustc-env=TASKERS_GHOSTTY_BUILD_TERMINFO_DIR={}",
         install_dir.join("share").join("terminfo").display()
     );
-    println!("cargo:rustc-cfg=taskers_ghostty_bridge");
+    println!("cargo:rustc-cfg=ghostty_gtk_bridge");
 }
 
 fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
