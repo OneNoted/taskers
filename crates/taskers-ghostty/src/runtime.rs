@@ -10,6 +10,7 @@ use xz2::read::XzDecoder;
 
 const BRIDGE_LIBRARY_NAME: &str = "libtaskers_ghostty_bridge.so";
 const GTK_BRIDGE_LIBRARY_NAME: &str = "libghostty_gtk.so";
+const GTK_BRIDGE_PATH_ENV: &str = "GHOSTTY_GTK_BRIDGE_PATH";
 const RUNTIME_VERSION_FILE: &str = ".taskers-runtime-version";
 const TERMINFO_GHOSTTY_PATH: &str = "g/ghostty";
 const TERMINFO_XTERM_GHOSTTY_PATH: &str = "x/xterm-ghostty";
@@ -188,6 +189,13 @@ pub fn runtime_bridge_path() -> Option<PathBuf> {
 }
 
 fn runtime_bridge_path_for(current_exe: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = env::var_os(GTK_BRIDGE_PATH_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+    {
+        return Some(path);
+    }
+
     if let Some(path) = env::var_os("TASKERS_GHOSTTY_BRIDGE_PATH")
         .map(PathBuf::from)
         .filter(|path| path.exists())
@@ -324,15 +332,20 @@ fn repo_target_dir() -> PathBuf {
 }
 
 fn build_runtime_bridge_path() -> Option<PathBuf> {
-    option_env!("TASKERS_GHOSTTY_BUILD_BRIDGE_PATH")
+    option_env!("GHOSTTY_GTK_BUILD_BRIDGE_PATH")
         .map(PathBuf::from)
-        .and_then(|legacy_path| {
-            let generic_path = legacy_path
-                .parent()
-                .map(|dir| dir.join(GTK_BRIDGE_LIBRARY_NAME));
-            generic_path
-                .filter(|path| path.exists())
-                .or_else(|| legacy_path.exists().then_some(legacy_path))
+        .filter(|path| path.exists())
+        .or_else(|| {
+            option_env!("TASKERS_GHOSTTY_BUILD_BRIDGE_PATH")
+                .map(PathBuf::from)
+                .and_then(|legacy_path| {
+                    let generic_path = legacy_path
+                        .parent()
+                        .map(|dir| dir.join(GTK_BRIDGE_LIBRARY_NAME));
+                    generic_path
+                        .filter(|path| path.exists())
+                        .or_else(|| legacy_path.exists().then_some(legacy_path))
+                })
         })
 }
 
@@ -501,8 +514,8 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RuntimeBootstrapError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, RUNTIME_VERSION_FILE, RuntimeBootstrap,
-        ensure_runtime_installed, runtime_bridge_path, runtime_bridge_path_for,
+        BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, GTK_BRIDGE_PATH_ENV, RUNTIME_VERSION_FILE,
+        RuntimeBootstrap, ensure_runtime_installed, runtime_bridge_path, runtime_bridge_path_for,
         runtime_resources_dir, runtime_resources_dir_for, runtime_terminfo_dir,
         runtime_terminfo_dir_for, stage_build_runtime_layout, use_build_runtime_directly_for,
     };
@@ -725,6 +738,21 @@ mod tests {
             runtime_bridge_path_for(Some(installed_exe)),
             Some(runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME))
         );
+    }
+
+    #[test]
+    fn explicit_generic_bridge_env_overrides_runtime_lookup() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
+        let temp = tempdir().expect("tempdir");
+        let explicit_bridge = temp.path().join(GTK_BRIDGE_LIBRARY_NAME);
+        fs::write(&explicit_bridge, b"bridge").expect("bridge");
+
+        let _guard = EnvGuard::set([
+            (GTK_BRIDGE_PATH_ENV, Some(explicit_bridge.as_os_str())),
+            ("TASKERS_GHOSTTY_BRIDGE_PATH", None),
+        ]);
+
+        assert_eq!(runtime_bridge_path_for(None), Some(explicit_bridge));
     }
 
     #[test]

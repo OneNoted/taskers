@@ -67,6 +67,10 @@ fn main() {
             .display()
     );
     println!(
+        "cargo:rustc-env=GHOSTTY_GTK_BUILD_BRIDGE_PATH={}",
+        install_dir.join("lib").join("libghostty_gtk.so").display()
+    );
+    println!(
         "cargo:rustc-env=TASKERS_GHOSTTY_BUILD_TERMINFO_DIR={}",
         install_dir.join("share").join("terminfo").display()
     );
