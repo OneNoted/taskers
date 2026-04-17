@@ -118,17 +118,9 @@ pub fn build(b: *std.Build) !void {
         ghostty_gtk_bridge_lib.linkLibC();
         _ = try deps.add(ghostty_gtk_bridge_lib);
 
-        const install_legacy_gtk_bridge = b.addInstallLibFile(
-            ghostty_gtk_bridge_lib.getEmittedBin(),
-            "libtaskers_ghostty_bridge.so",
-        );
         const install_ghostty_gtk_bridge = b.addInstallLibFile(
             ghostty_gtk_bridge_lib.getEmittedBin(),
             "libghostty_gtk.so",
-        );
-        const install_legacy_gtk_bridge_header = b.addInstallHeaderFile(
-            b.path("include/taskers_ghostty_bridge.h"),
-            "taskers_ghostty_bridge.h",
         );
         const install_ghostty_gtk_header = b.addInstallHeaderFile(
             b.path("include/ghostty_gtk.h"),
@@ -143,6 +135,30 @@ pub fn build(b: *std.Build) !void {
         resources.addStepDependencies(ghostty_gtk_bridge_step);
         if (i18n) |v| v.addStepDependencies(ghostty_gtk_bridge_step);
 
+        const taskers_ghostty_bridge_lib = b.addLibrary(.{
+            .name = "taskers_ghostty_bridge",
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/taskers_bridge.zig"),
+                .target = config.target,
+                .optimize = config.optimize,
+                .strip = config.strip,
+                .omit_frame_pointer = config.strip,
+                .unwind_tables = if (config.strip) .none else .sync,
+            }),
+            .use_llvm = true,
+        });
+        taskers_ghostty_bridge_lib.linkLibC();
+        _ = try deps.add(taskers_ghostty_bridge_lib);
+
+        const install_legacy_gtk_bridge = b.addInstallLibFile(
+            taskers_ghostty_bridge_lib.getEmittedBin(),
+            "libtaskers_ghostty_bridge.so",
+        );
+        const install_legacy_gtk_bridge_header = b.addInstallHeaderFile(
+            b.path("include/taskers_ghostty_bridge.h"),
+            "taskers_ghostty_bridge.h",
+        );
         const taskers_bridge_step = b.step(
             "taskers-bridge",
             "Compatibility alias for the generic Ghostty GTK bridge surface",
