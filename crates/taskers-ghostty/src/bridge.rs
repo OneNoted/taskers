@@ -420,85 +420,71 @@ fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyGtkError> {
             handle,
             &path,
             b"ghostty_gtk_host_new\0",
-            b"taskers_ghostty_host_new\0",
         )?;
         let host_free = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_host_free\0",
-            b"taskers_ghostty_host_free\0",
         )?;
         let host_version = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_host_version\0",
-            b"taskers_ghostty_host_version\0",
         )?;
         let host_build_id = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_host_build_id\0",
-            b"taskers_ghostty_host_build_id\0",
         )?;
         let host_begin_shutdown = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_host_begin_shutdown\0",
-            b"taskers_ghostty_host_begin_shutdown\0",
         )?;
         let host_surface_count = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_host_surface_count\0",
-            b"taskers_ghostty_host_surface_count\0",
         )?;
         let host_tick = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_host_tick\0",
-            b"taskers_ghostty_host_tick\0",
         )?;
         let surface_new = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_surface_new\0",
-            b"taskers_ghostty_surface_new\0",
         )?;
         let surface_destroy = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_surface_destroy\0",
-            b"taskers_ghostty_surface_destroy\0",
         )?;
         let surface_grab_focus = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_surface_grab_focus\0",
-            b"taskers_ghostty_surface_grab_focus\0",
         )?;
         let surface_has_selection = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_surface_has_selection\0",
-            b"taskers_ghostty_surface_has_selection\0",
         )?;
         let surface_send_text = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_surface_send_text\0",
-            b"taskers_ghostty_surface_send_text\0",
         )?;
         let surface_read_all_text = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_surface_read_all_text\0",
-            b"taskers_ghostty_surface_read_all_text\0",
         )?;
         let surface_free_text = load_bridge_symbol(
             handle,
             &path,
             b"ghostty_gtk_surface_free_text\0",
-            b"taskers_ghostty_surface_free_text\0",
         )?;
 
         Ok(GhosttyGtkLibrary {
@@ -526,22 +512,15 @@ unsafe fn load_bridge_symbol<T: Copy>(
     handle: *mut libc::c_void,
     path: &std::path::Path,
     generic_symbol: &[u8],
-    legacy_symbol: &[u8],
 ) -> Result<T, GhosttyGtkError> {
-    match unsafe { load_symbol(handle, generic_symbol) } {
-        Ok(symbol) => Ok(symbol),
-        Err(generic_error) => unsafe { load_symbol(handle, legacy_symbol) }
-            .map_err(|legacy_error| GhosttyGtkError::LibraryLoad {
-                path: path.to_path_buf(),
-                message: format!(
-                    "generic symbol {} failed: {}; legacy symbol {} failed: {}",
-                    String::from_utf8_lossy(&generic_symbol[..generic_symbol.len() - 1]),
-                    generic_error,
-                    String::from_utf8_lossy(&legacy_symbol[..legacy_symbol.len() - 1]),
-                    legacy_error
-                ),
-            }),
-    }
+    unsafe { load_symbol(handle, generic_symbol) }.map_err(|error| GhosttyGtkError::LibraryLoad {
+        path: path.to_path_buf(),
+        message: format!(
+            "generic symbol {} failed: {}",
+            String::from_utf8_lossy(&generic_symbol[..generic_symbol.len() - 1]),
+            error
+        ),
+    })
 }
 
 #[cfg(ghostty_gtk_bridge)]
