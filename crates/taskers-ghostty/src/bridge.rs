@@ -416,76 +416,27 @@ fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyGtkError> {
     }
 
     unsafe {
-        let host_new = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_host_new\0",
-        )?;
-        let host_free = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_host_free\0",
-        )?;
-        let host_version = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_host_version\0",
-        )?;
-        let host_build_id = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_host_build_id\0",
-        )?;
-        let host_begin_shutdown = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_host_begin_shutdown\0",
-        )?;
-        let host_surface_count = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_host_surface_count\0",
-        )?;
-        let host_tick = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_host_tick\0",
-        )?;
-        let surface_new = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_surface_new\0",
-        )?;
-        let surface_destroy = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_surface_destroy\0",
-        )?;
-        let surface_grab_focus = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_surface_grab_focus\0",
-        )?;
-        let surface_has_selection = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_surface_has_selection\0",
-        )?;
-        let surface_send_text = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_surface_send_text\0",
-        )?;
-        let surface_read_all_text = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_surface_read_all_text\0",
-        )?;
-        let surface_free_text = load_bridge_symbol(
-            handle,
-            &path,
-            b"ghostty_gtk_surface_free_text\0",
-        )?;
+        let host_new = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_new\0")?;
+        let host_free = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_free\0")?;
+        let host_version = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_version\0")?;
+        let host_build_id = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_build_id\0")?;
+        let host_begin_shutdown =
+            load_bridge_symbol(handle, &path, b"ghostty_gtk_host_begin_shutdown\0")?;
+        let host_surface_count =
+            load_bridge_symbol(handle, &path, b"ghostty_gtk_host_surface_count\0")?;
+        let host_tick = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_tick\0")?;
+        let surface_new = load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_new\0")?;
+        let surface_destroy = load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_destroy\0")?;
+        let surface_grab_focus =
+            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_grab_focus\0")?;
+        let surface_has_selection =
+            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_has_selection\0")?;
+        let surface_send_text =
+            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_send_text\0")?;
+        let surface_read_all_text =
+            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_read_all_text\0")?;
+        let surface_free_text =
+            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_free_text\0")?;
 
         Ok(GhosttyGtkLibrary {
             handle,
@@ -524,10 +475,7 @@ unsafe fn load_bridge_symbol<T: Copy>(
 }
 
 #[cfg(ghostty_gtk_bridge)]
-unsafe fn load_symbol<T: Copy>(
-    handle: *mut libc::c_void,
-    symbol: &[u8],
-) -> Result<T, String> {
+unsafe fn load_symbol<T: Copy>(handle: *mut libc::c_void, symbol: &[u8]) -> Result<T, String> {
     let _ = unsafe { libc::dlerror() };
     let symbol_ptr = unsafe { libc::dlsym(handle, symbol.as_ptr().cast()) };
     if symbol_ptr.is_null() {
