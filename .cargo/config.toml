@@ -1,0 +1,2 @@
+[target.'cfg(target_os = "linux")']
+linker = ".cargo/zig-cxx-linker.sh"

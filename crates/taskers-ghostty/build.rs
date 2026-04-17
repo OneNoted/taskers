@@ -6,6 +6,8 @@ use std::{
 
 const SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "GHOSTTY_GTK_SKIP_BUILD_RUNTIME_EMBED";
 const LEGACY_SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED";
+const BRIDGE_PKG_CONFIG_PACKAGES: &[&str] =
+    &["gtk4", "libadwaita-1", "libxml-2.0", "x11", "xkbcommon-x11"];
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(ghostty_gtk_bridge)");
@@ -20,6 +22,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt/gtk/Surface.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/apprt/gtk/class/surface.zig");
+    println!("cargo:rerun-if-changed=../../vendor/ghostty/src/build/LibtoolStep.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/build/SharedDeps.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/os/resourcesdir.zig");
 
@@ -55,6 +58,7 @@ fn main() {
     let install_dir = out_dir.join("ghostty-gtk-bridge");
 
     build_bridge(&vendor_dir, &install_dir);
+    emit_static_bridge_linkage(&install_dir);
 
     println!(
         "cargo:rustc-env=GHOSTTY_GTK_BUILD_RESOURCES_DIR={}",
@@ -108,6 +112,40 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     panic!("failed to build vendored Ghostty bridge\nstdout:\n{stdout}\nstderr:\n{stderr}");
+}
+
+fn emit_static_bridge_linkage(install_dir: &Path) {
+    println!(
+        "cargo:rustc-link-search=native={}",
+        install_dir.join("lib").display()
+    );
+    println!("cargo:rustc-link-lib=static=ghostty_gtk");
+
+    for package in BRIDGE_PKG_CONFIG_PACKAGES {
+        emit_pkg_config_linkage(package);
+    }
+}
+
+fn emit_pkg_config_linkage(package: &str) {
+    let output = Command::new("pkg-config")
+        .args(["--libs", package])
+        .output()
+        .unwrap_or_else(|error| panic!("failed to invoke pkg-config for {package}: {error}"));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        panic!("pkg-config --libs {package} failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    }
+
+    for token in String::from_utf8_lossy(&output.stdout).split_whitespace() {
+        if let Some(path) = token.strip_prefix("-L") {
+            println!("cargo:rustc-link-search=native={path}");
+        } else if let Some(lib) = token.strip_prefix("-l") {
+            println!("cargo:rustc-link-lib={lib}");
+        } else {
+            println!("cargo:rustc-link-arg={token}");
+        }
+    }
 }
 
 fn vendored_ghostty_version(vendor_dir: &Path) -> String {

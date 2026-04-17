@@ -1,16 +1,7 @@
-use std::{
-    ffi::{CString, c_char},
-    path::PathBuf,
-};
+use std::ffi::{CString, c_char};
 
 #[cfg(ghostty_gtk_bridge)]
-use std::{
-    ffi::{CStr, c_int, c_void},
-    mem,
-    os::unix::ffi::OsStrExt,
-    ptr::NonNull,
-    slice,
-};
+use std::{ffi::c_int, ptr::NonNull, slice};
 
 use gtk::Widget;
 #[cfg(ghostty_gtk_bridge)]
@@ -20,7 +11,7 @@ use gtk::prelude::ObjectType;
 use thiserror::Error;
 
 use crate::backend::{GhosttyGtkHostOptions, GhosttyGtkSurfaceDescriptor};
-use crate::runtime::{configure_runtime_environment, runtime_gtk_bridge_path};
+use crate::runtime::configure_runtime_environment;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhosttyGtkInfo {
@@ -48,53 +39,15 @@ pub enum GhosttyGtkError {
     SurfaceWriteText,
     #[error("surface metadata contains NUL bytes: {0}")]
     InvalidString(&'static str),
-    #[error("failed to load ghostty gtk bridge library from {path}: {message}")]
-    LibraryLoad { path: PathBuf, message: String },
-    #[error("ghostty gtk bridge library path is unavailable")]
-    LibraryPathUnavailable,
 }
 
 #[cfg(ghostty_gtk_bridge)]
 pub struct GhosttyGtkHost {
-    bridge: GhosttyGtkLibrary,
     raw: NonNull<ghostty_gtk_host_t>,
 }
 
 #[cfg(not(ghostty_gtk_bridge))]
 pub struct GhosttyGtkHost;
-
-#[cfg(ghostty_gtk_bridge)]
-struct GhosttyGtkLibrary {
-    handle: *mut libc::c_void,
-    host_new: unsafe extern "C" fn(*const ghostty_gtk_host_options_s) -> *mut ghostty_gtk_host_t,
-    host_free: unsafe extern "C" fn(*mut ghostty_gtk_host_t),
-    host_version: unsafe extern "C" fn() -> *const c_char,
-    host_build_id: unsafe extern "C" fn() -> *const c_char,
-    host_begin_shutdown: unsafe extern "C" fn(*mut ghostty_gtk_host_t),
-    host_surface_count: unsafe extern "C" fn(*mut ghostty_gtk_host_t) -> usize,
-    host_tick: unsafe extern "C" fn(*mut ghostty_gtk_host_t) -> c_int,
-    surface_new: unsafe extern "C" fn(
-        *mut ghostty_gtk_host_t,
-        *const ghostty_gtk_surface_options_s,
-    ) -> *mut c_void,
-    surface_destroy: unsafe extern "C" fn(*mut c_void),
-    surface_grab_focus: unsafe extern "C" fn(*mut c_void) -> c_int,
-    surface_has_selection: unsafe extern "C" fn(*mut c_void) -> c_int,
-    surface_send_text: unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> c_int,
-    surface_read_all_text: unsafe extern "C" fn(*mut c_void, *mut ghostty_gtk_text_s) -> c_int,
-    surface_free_text: unsafe extern "C" fn(*mut ghostty_gtk_text_s),
-}
-
-#[cfg(ghostty_gtk_bridge)]
-impl Drop for GhosttyGtkLibrary {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.handle.is_null() {
-                libc::dlclose(self.handle);
-            }
-        }
-    }
-}
 
 impl GhosttyGtkHost {
     pub fn new() -> Result<Self, GhosttyGtkError> {
@@ -106,7 +59,6 @@ impl GhosttyGtkHost {
 
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
-            let bridge = load_bridge_library()?;
             let command_argv = options
                 .command_argv
                 .iter()
@@ -168,9 +120,9 @@ impl GhosttyGtkHost {
                     .map_or(std::ptr::null(), |value| value.as_ptr()),
             };
 
-            let raw = (bridge.host_new)(&host_options);
+            let raw = ghostty_gtk_host_new(&host_options);
             let raw = NonNull::new(raw).ok_or(GhosttyGtkError::HostInit)?;
-            Ok(Self { bridge, raw })
+            Ok(Self { raw })
         }
 
         #[cfg(not(ghostty_gtk_bridge))]
@@ -183,7 +135,7 @@ impl GhosttyGtkHost {
     pub fn tick(&self) -> Result<(), GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
-            let ok = (self.bridge.host_tick)(self.raw.as_ptr());
+            let ok = ghostty_gtk_host_tick(self.raw.as_ptr());
             if ok == 0 {
                 Err(GhosttyGtkError::Tick)
             } else {
@@ -200,10 +152,10 @@ impl GhosttyGtkHost {
     pub fn bridge_info(&self) -> GhosttyGtkInfo {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
-            let version = std::ffi::CStr::from_ptr((self.bridge.host_version)())
+            let version = std::ffi::CStr::from_ptr(ghostty_gtk_host_version())
                 .to_string_lossy()
                 .into_owned();
-            let build_id = std::ffi::CStr::from_ptr((self.bridge.host_build_id)())
+            let build_id = std::ffi::CStr::from_ptr(ghostty_gtk_host_build_id())
                 .to_string_lossy()
                 .into_owned();
             GhosttyGtkInfo { version, build_id }
@@ -221,14 +173,14 @@ impl GhosttyGtkHost {
     pub fn begin_shutdown(&self) {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
-            (self.bridge.host_begin_shutdown)(self.raw.as_ptr());
+            ghostty_gtk_host_begin_shutdown(self.raw.as_ptr());
         }
     }
 
     pub fn surface_count(&self) -> usize {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
-            (self.bridge.host_surface_count)(self.raw.as_ptr())
+            ghostty_gtk_host_surface_count(self.raw.as_ptr())
         }
 
         #[cfg(not(ghostty_gtk_bridge))]
@@ -283,7 +235,7 @@ impl GhosttyGtkHost {
                 env_count: env_entry_ptrs.len(),
             };
 
-            let widget = (self.bridge.surface_new)(self.raw.as_ptr(), &options);
+            let widget = ghostty_gtk_surface_new(self.raw.as_ptr(), &options);
             if widget.is_null() {
                 return Err(GhosttyGtkError::SurfaceInit);
             }
@@ -301,7 +253,7 @@ impl GhosttyGtkHost {
     pub fn focus_surface(&self, widget: &Widget) -> Result<(), GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
-            let ok = (self.bridge.surface_grab_focus)(widget.as_ptr().cast());
+            let ok = ghostty_gtk_surface_grab_focus(widget.as_ptr().cast());
             if ok == 0 {
                 Err(GhosttyGtkError::SurfaceInit)
             } else {
@@ -319,14 +271,14 @@ impl GhosttyGtkHost {
     pub fn destroy_surface(&self, widget: &Widget) {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
-            (self.bridge.surface_destroy)(widget.as_ptr().cast());
+            ghostty_gtk_surface_destroy(widget.as_ptr().cast());
         }
     }
 
     pub fn surface_has_selection(&self, widget: &Widget) -> Result<bool, GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
-            Ok((self.bridge.surface_has_selection)(widget.as_ptr().cast()) != 0)
+            Ok(ghostty_gtk_surface_has_selection(widget.as_ptr().cast()) != 0)
         }
 
         #[cfg(not(ghostty_gtk_bridge))]
@@ -340,7 +292,7 @@ impl GhosttyGtkHost {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let mut text = ghostty_gtk_text_s::default();
-            let ok = (self.bridge.surface_read_all_text)(widget.as_ptr().cast(), &mut text);
+            let ok = ghostty_gtk_surface_read_all_text(widget.as_ptr().cast(), &mut text);
             if ok == 0 {
                 return Err(GhosttyGtkError::SurfaceReadText);
             }
@@ -351,7 +303,7 @@ impl GhosttyGtkHost {
                 slice::from_raw_parts(text.text.cast::<u8>(), text.text_len)
             };
             let output = String::from_utf8_lossy(bytes).into_owned();
-            (self.bridge.surface_free_text)(&mut text);
+            ghostty_gtk_surface_free_text(&mut text);
             Ok(output)
         }
 
@@ -367,7 +319,7 @@ impl GhosttyGtkHost {
         unsafe {
             let text =
                 CString::new(text).map_err(|_| GhosttyGtkError::InvalidString("surface_text"))?;
-            let ok = (self.bridge.surface_send_text)(
+            let ok = ghostty_gtk_surface_send_text(
                 widget.as_ptr().cast(),
                 text.as_ptr(),
                 text.as_bytes().len(),
@@ -391,109 +343,8 @@ impl GhosttyGtkHost {
 impl Drop for GhosttyGtkHost {
     fn drop(&mut self) {
         unsafe {
-            (self.bridge.host_free)(self.raw.as_ptr());
+            ghostty_gtk_host_free(self.raw.as_ptr());
         }
-    }
-}
-
-#[cfg(ghostty_gtk_bridge)]
-fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyGtkError> {
-    let path = runtime_gtk_bridge_path().ok_or(GhosttyGtkError::LibraryPathUnavailable)?;
-    let handle = unsafe {
-        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            GhosttyGtkError::LibraryLoad {
-                path: path.clone(),
-                message: "bridge library path contains NUL bytes".into(),
-            }
-        })?;
-        libc::dlopen(c_path.as_ptr(), libc::RTLD_LOCAL | libc::RTLD_NOW)
-    };
-    if handle.is_null() {
-        return Err(GhosttyGtkError::LibraryLoad {
-            path: path.clone(),
-            message: unsafe { dl_error_message() },
-        });
-    }
-
-    unsafe {
-        let host_new = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_new\0")?;
-        let host_free = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_free\0")?;
-        let host_version = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_version\0")?;
-        let host_build_id = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_build_id\0")?;
-        let host_begin_shutdown =
-            load_bridge_symbol(handle, &path, b"ghostty_gtk_host_begin_shutdown\0")?;
-        let host_surface_count =
-            load_bridge_symbol(handle, &path, b"ghostty_gtk_host_surface_count\0")?;
-        let host_tick = load_bridge_symbol(handle, &path, b"ghostty_gtk_host_tick\0")?;
-        let surface_new = load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_new\0")?;
-        let surface_destroy = load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_destroy\0")?;
-        let surface_grab_focus =
-            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_grab_focus\0")?;
-        let surface_has_selection =
-            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_has_selection\0")?;
-        let surface_send_text =
-            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_send_text\0")?;
-        let surface_read_all_text =
-            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_read_all_text\0")?;
-        let surface_free_text =
-            load_bridge_symbol(handle, &path, b"ghostty_gtk_surface_free_text\0")?;
-
-        Ok(GhosttyGtkLibrary {
-            handle,
-            host_new,
-            host_free,
-            host_version,
-            host_build_id,
-            host_begin_shutdown,
-            host_surface_count,
-            host_tick,
-            surface_new,
-            surface_destroy,
-            surface_grab_focus,
-            surface_has_selection,
-            surface_send_text,
-            surface_read_all_text,
-            surface_free_text,
-        })
-    }
-}
-
-#[cfg(ghostty_gtk_bridge)]
-unsafe fn load_bridge_symbol<T: Copy>(
-    handle: *mut libc::c_void,
-    path: &std::path::Path,
-    generic_symbol: &[u8],
-) -> Result<T, GhosttyGtkError> {
-    unsafe { load_symbol(handle, generic_symbol) }.map_err(|error| GhosttyGtkError::LibraryLoad {
-        path: path.to_path_buf(),
-        message: format!(
-            "generic symbol {} failed: {}",
-            String::from_utf8_lossy(&generic_symbol[..generic_symbol.len() - 1]),
-            error
-        ),
-    })
-}
-
-#[cfg(ghostty_gtk_bridge)]
-unsafe fn load_symbol<T: Copy>(handle: *mut libc::c_void, symbol: &[u8]) -> Result<T, String> {
-    let _ = unsafe { libc::dlerror() };
-    let symbol_ptr = unsafe { libc::dlsym(handle, symbol.as_ptr().cast()) };
-    if symbol_ptr.is_null() {
-        return Err(unsafe { dl_error_message() });
-    }
-
-    Ok(unsafe { mem::transmute_copy::<*mut libc::c_void, T>(&symbol_ptr) })
-}
-
-#[cfg(ghostty_gtk_bridge)]
-unsafe fn dl_error_message() -> String {
-    let error = unsafe { libc::dlerror() };
-    if error.is_null() {
-        "unknown dynamic loader error".into()
-    } else {
-        unsafe { CStr::from_ptr(error) }
-            .to_string_lossy()
-            .into_owned()
     }
 }
 
@@ -529,4 +380,32 @@ struct ghostty_gtk_surface_options_s {
 struct ghostty_gtk_text_s {
     text: *const c_char,
     text_len: usize,
+}
+
+#[cfg(ghostty_gtk_bridge)]
+unsafe extern "C" {
+    fn ghostty_gtk_host_new(options: *const ghostty_gtk_host_options_s) -> *mut ghostty_gtk_host_t;
+    fn ghostty_gtk_host_free(host: *mut ghostty_gtk_host_t);
+    fn ghostty_gtk_host_version() -> *const c_char;
+    fn ghostty_gtk_host_build_id() -> *const c_char;
+    fn ghostty_gtk_host_begin_shutdown(host: *mut ghostty_gtk_host_t);
+    fn ghostty_gtk_host_surface_count(host: *mut ghostty_gtk_host_t) -> usize;
+    fn ghostty_gtk_host_tick(host: *mut ghostty_gtk_host_t) -> c_int;
+    fn ghostty_gtk_surface_new(
+        host: *mut ghostty_gtk_host_t,
+        options: *const ghostty_gtk_surface_options_s,
+    ) -> *mut std::ffi::c_void;
+    fn ghostty_gtk_surface_destroy(widget: *mut std::ffi::c_void);
+    fn ghostty_gtk_surface_grab_focus(widget: *mut std::ffi::c_void) -> c_int;
+    fn ghostty_gtk_surface_has_selection(widget: *mut std::ffi::c_void) -> c_int;
+    fn ghostty_gtk_surface_send_text(
+        widget: *mut std::ffi::c_void,
+        text: *const c_char,
+        len: usize,
+    ) -> c_int;
+    fn ghostty_gtk_surface_read_all_text(
+        widget: *mut std::ffi::c_void,
+        result: *mut ghostty_gtk_text_s,
+    ) -> c_int;
+    fn ghostty_gtk_surface_free_text(result: *mut ghostty_gtk_text_s);
 }
