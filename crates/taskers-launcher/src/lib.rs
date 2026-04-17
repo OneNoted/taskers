@@ -14,7 +14,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Archive;
@@ -76,8 +76,8 @@ impl ManagedInstallation {
             bundle_root,
         };
 
+        installation.normalize_gtk_bridge_layout()?;
         if installation.is_complete() {
-            installation.normalize_gtk_bridge_layout()?;
             return Ok(installation);
         }
 
@@ -185,6 +185,7 @@ impl ManagedInstallation {
         fs::create_dir_all(&unpack_root)
             .with_context(|| format!("failed to create {}", unpack_root.display()))?;
         unpack_linux_bundle(&download_path, &unpack_root)?;
+        normalize_gtk_bridge_layout(&unpack_root)?;
 
         if !validate_bundle_layout(&unpack_root) {
             bail!(
@@ -193,7 +194,6 @@ impl ManagedInstallation {
                 unpack_root.display()
             );
         }
-        normalize_gtk_bridge_layout(&unpack_root)?;
 
         if self.bundle_root.exists() {
             remove_path(&self.bundle_root)?;
@@ -321,12 +321,9 @@ fn validate_bundle_layout(bundle_root: &Path) -> bool {
         && bundle_root.join("bin").join("taskersctl").is_file()
         && bundle_root.join("bin").join("taskers-terminald").is_file()
         && bundle_root.join("ghostty").is_dir()
-        && (ghostty_lib_dir
+        && ghostty_lib_dir
             .join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME)
             .is_file()
-            || ghostty_lib_dir
-                .join(LEGACY_GTK_BRIDGE_LIBRARY_NAME)
-                .is_file())
         && bundle_root.join("ghostty").join("themes").is_dir()
         && bundle_root.join("terminfo").is_dir()
 }
@@ -661,11 +658,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        bundle_root, current_target_triple, default_manifest_url, desktop_exec,
-        desktop_launch_wrapper_contents, launcher_path_looks_installed, path_taskers_executable,
-        remove_legacy_desktop_integration, sha256_path, should_update_desktop_entry, ArtifactKind,
-        ManagedInstallation, ReleaseArtifact, ReleaseManifest, GHOSTTY_GTK_BRIDGE_LIBRARY_NAME,
-        LEGACY_GTK_BRIDGE_LIBRARY_NAME,
+        ArtifactKind, GHOSTTY_GTK_BRIDGE_LIBRARY_NAME, LEGACY_GTK_BRIDGE_LIBRARY_NAME,
+        ManagedInstallation, ReleaseArtifact, ReleaseManifest, bundle_root, current_target_triple,
+        default_manifest_url, desktop_exec, desktop_launch_wrapper_contents,
+        launcher_path_looks_installed, path_taskers_executable, remove_legacy_desktop_integration,
+        sha256_path, should_update_desktop_entry,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -792,19 +789,23 @@ mod tests {
 
         assert!(installation.executable_path().is_file());
         assert!(installation.taskersctl_path().is_file());
-        assert!(installation
-            .bundle_root
-            .join("bin")
-            .join("taskers-terminald")
-            .is_file());
+        assert!(
+            installation
+                .bundle_root
+                .join("bin")
+                .join("taskers-terminald")
+                .is_file()
+        );
         assert!(installation.ghostty_resources_path().is_dir());
         assert!(installation.terminfo_path().is_dir());
-        assert!(installation
-            .bundle_root
-            .join("ghostty")
-            .join("lib")
-            .join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME)
-            .is_file());
+        assert!(
+            installation
+                .bundle_root
+                .join("ghostty")
+                .join("lib")
+                .join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME)
+                .is_file()
+        );
     }
 
     #[test]
@@ -872,16 +873,20 @@ mod tests {
         }
 
         assert_eq!(installation.bundle_root, bundle_root);
-        assert!(bundle_root
-            .join("ghostty")
-            .join("lib")
-            .join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME)
-            .is_file());
-        assert!(bundle_root
-            .join("ghostty")
-            .join("lib")
-            .join(LEGACY_GTK_BRIDGE_LIBRARY_NAME)
-            .is_file());
+        assert!(
+            bundle_root
+                .join("ghostty")
+                .join("lib")
+                .join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME)
+                .is_file()
+        );
+        assert!(
+            bundle_root
+                .join("ghostty")
+                .join("lib")
+                .join(LEGACY_GTK_BRIDGE_LIBRARY_NAME)
+                .is_file()
+        );
     }
 
     #[test]
@@ -956,13 +961,15 @@ mod tests {
         )
         .expect("desktop entry");
 
-        assert!(should_update_desktop_entry(
-            &desktop_entry,
-            &desktop_launcher,
-            &launcher,
-            Some(&legacy_launcher),
-        )
-        .expect("decision"));
+        assert!(
+            should_update_desktop_entry(
+                &desktop_entry,
+                &desktop_launcher,
+                &launcher,
+                Some(&legacy_launcher),
+            )
+            .expect("decision")
+        );
     }
 
     #[test]
