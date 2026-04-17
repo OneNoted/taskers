@@ -391,26 +391,27 @@ fn stage_build_runtime_layout(
     let ghostty_stage = staging_root.join("ghostty");
     copy_dir_all(&layout.resources_dir, &ghostty_stage)?;
 
-    let bridge_destination = ghostty_stage.join("lib").join(LEGACY_BRIDGE_LIBRARY_NAME);
-    if let Some(parent) = bridge_destination.parent() {
+    let generic_bridge_destination = ghostty_stage.join("lib").join(GTK_BRIDGE_LIBRARY_NAME);
+    if let Some(parent) = generic_bridge_destination.parent() {
         fs::create_dir_all(parent).map_err(|error| RuntimeBootstrapError::CreateDir {
             path: parent.to_path_buf(),
             message: error.to_string(),
         })?;
     }
-    fs::copy(&layout.gtk_bridge_path, &bridge_destination).map_err(|error| {
+    fs::copy(&layout.gtk_bridge_path, &generic_bridge_destination).map_err(|error| {
         RuntimeBootstrapError::CopyPath {
             from: layout.gtk_bridge_path.clone(),
-            to: bridge_destination.clone(),
+            to: generic_bridge_destination.clone(),
             message: error.to_string(),
         }
     })?;
-    let generic_bridge_destination = ghostty_stage.join("lib").join(GTK_BRIDGE_LIBRARY_NAME);
-    if generic_bridge_destination != bridge_destination {
-        fs::copy(&layout.gtk_bridge_path, &generic_bridge_destination).map_err(|error| {
+
+    let legacy_bridge_destination = ghostty_stage.join("lib").join(LEGACY_BRIDGE_LIBRARY_NAME);
+    if legacy_bridge_destination != generic_bridge_destination {
+        fs::copy(&generic_bridge_destination, &legacy_bridge_destination).map_err(|error| {
             RuntimeBootstrapError::CopyPath {
-                from: layout.gtk_bridge_path.clone(),
-                to: generic_bridge_destination.clone(),
+                from: generic_bridge_destination.clone(),
+                to: legacy_bridge_destination.clone(),
                 message: error.to_string(),
             }
         })?;
@@ -926,7 +927,7 @@ mod tests {
         let build_root = temp.path().join("build");
         let resources_dir = build_root.join("share").join("ghostty");
         let terminfo_dir = build_root.join("share").join("terminfo");
-        let gtk_bridge_path = build_root.join("lib").join("libtaskers_ghostty_bridge.so");
+        let gtk_bridge_path = build_root.join("lib").join(GTK_BRIDGE_LIBRARY_NAME);
         fs::create_dir_all(resources_dir.join("shell-integration")).expect("resources dir");
         fs::create_dir_all(terminfo_dir.join("g")).expect("terminfo dir");
         fs::create_dir_all(gtk_bridge_path.parent().expect("gtk bridge dir"))
@@ -990,6 +991,55 @@ mod tests {
             fs::read(staging_root.join("terminfo").join("g").join("ghostty"))
                 .expect("staged terminfo"),
             b"terminfo"
+        );
+    }
+
+    #[test]
+    fn stage_build_runtime_layout_accepts_legacy_bridge_source_path() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
+        let temp = tempdir().expect("tempdir");
+        let build_root = temp.path().join("build");
+        let resources_dir = build_root.join("share").join("ghostty");
+        let terminfo_dir = build_root.join("share").join("terminfo");
+        let gtk_bridge_path = build_root.join("lib").join(LEGACY_BRIDGE_LIBRARY_NAME);
+        fs::create_dir_all(&resources_dir).expect("resources dir");
+        fs::create_dir_all(terminfo_dir.join("g")).expect("terminfo dir");
+        fs::create_dir_all(gtk_bridge_path.parent().expect("gtk bridge dir"))
+            .expect("gtk bridge dir");
+        fs::write(&gtk_bridge_path, b"bridge").expect("bridge");
+        fs::write(terminfo_dir.join("g").join("ghostty"), b"terminfo").expect("terminfo");
+
+        let staging_root = temp.path().join("staging");
+        fs::create_dir_all(&staging_root).expect("staging root");
+        stage_build_runtime_layout(
+            &BuildRuntimeLayout {
+                gtk_bridge_path,
+                resources_dir,
+                terminfo_dir,
+            },
+            &staging_root,
+        )
+        .expect("stage build runtime");
+
+        assert_eq!(
+            fs::read(
+                staging_root
+                    .join("ghostty")
+                    .join("lib")
+                    .join(GTK_BRIDGE_LIBRARY_NAME),
+            )
+            .expect("staged generic bridge"),
+            b"bridge"
+        );
+        assert_eq!(
+            fs::read(
+                staging_root
+                    .join("ghostty")
+                    .join("lib")
+                    .join(LEGACY_BRIDGE_LIBRARY_NAME),
+            )
+            .expect("staged legacy bridge"),
+            b"bridge"
         );
     }
 
