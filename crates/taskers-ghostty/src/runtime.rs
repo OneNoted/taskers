@@ -142,6 +142,7 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
 
     let ghostty_stage = staging_root.join("ghostty");
     let terminfo_stage = staging_root.join("terminfo");
+    normalize_gtk_bridge_layout(&ghostty_stage)?;
     validate_bundle(&ghostty_stage, &terminfo_stage)?;
 
     let version_marker_path = ghostty_stage.join(RUNTIME_VERSION_FILE);
@@ -274,9 +275,13 @@ fn unpack_bundle<R: Read>(reader: R, staging_root: &Path) -> Result<(), RuntimeB
 }
 
 fn validate_bundle(ghostty_dir: &Path, terminfo_dir: &Path) -> Result<(), RuntimeBootstrapError> {
-    if !gtk_bridge_library_paths_in_dir(&ghostty_dir.join("lib")).any(|path| path.exists()) {
+    if !ghostty_dir
+        .join("lib")
+        .join(GTK_BRIDGE_LIBRARY_NAME)
+        .exists()
+    {
         return Err(RuntimeBootstrapError::MissingBundlePath {
-            path: "ghostty/lib/libghostty_gtk.so or ghostty/lib/libtaskers_ghostty_bridge.so",
+            path: "ghostty/lib/libghostty_gtk.so",
         });
     }
     if !terminfo_dir.join(TERMINFO_GHOSTTY_PATH).exists()
@@ -286,6 +291,28 @@ fn validate_bundle(ghostty_dir: &Path, terminfo_dir: &Path) -> Result<(), Runtim
             path: "terminfo/g/ghostty or terminfo/x/xterm-ghostty",
         });
     }
+    Ok(())
+}
+
+fn normalize_gtk_bridge_layout(ghostty_dir: &Path) -> Result<(), RuntimeBootstrapError> {
+    let ghostty_lib_dir = ghostty_dir.join("lib");
+    let generic_bridge_path = ghostty_lib_dir.join(GTK_BRIDGE_LIBRARY_NAME);
+    if generic_bridge_path.exists() {
+        return Ok(());
+    }
+
+    let legacy_bridge_path = ghostty_lib_dir.join(LEGACY_BRIDGE_LIBRARY_NAME);
+    if !legacy_bridge_path.exists() {
+        return Ok(());
+    }
+
+    fs::copy(&legacy_bridge_path, &generic_bridge_path).map_err(|error| {
+        RuntimeBootstrapError::CopyPath {
+            from: legacy_bridge_path,
+            to: generic_bridge_path,
+            message: error.to_string(),
+        }
+    })?;
     Ok(())
 }
 
@@ -687,9 +714,21 @@ mod tests {
                 runtime_dir: runtime_dir.clone(),
             })
         );
+        assert!(
+            runtime_dir
+                .join("lib")
+                .join(GTK_BRIDGE_LIBRARY_NAME)
+                .exists()
+        );
+        assert!(
+            runtime_dir
+                .join("lib")
+                .join(LEGACY_BRIDGE_LIBRARY_NAME)
+                .exists()
+        );
         assert_eq!(
             runtime_gtk_bridge_path(),
-            Some(runtime_dir.join("lib").join(LEGACY_BRIDGE_LIBRARY_NAME))
+            Some(runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME))
         );
         assert_eq!(runtime_resources_dir(), Some(runtime_dir));
         assert_eq!(runtime_terminfo_dir(), Some(terminfo_dir));
