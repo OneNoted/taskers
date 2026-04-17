@@ -41,7 +41,10 @@ use taskers_ghostty::{
     load_or_initialize_embedded_terminal_config, runtime_terminfo_dir,
     save_embedded_terminal_config,
 };
-use taskers_host::{DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost};
+use taskers_host::{
+    BridgeHealthSnapshot, DiagnosticCategory, DiagnosticRecord, DiagnosticsSink,
+    GhosttyLifecycleState, TaskersHost,
+};
 use taskers_runtime::{
     ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
 };
@@ -540,11 +543,7 @@ fn shutdown_host_bridge(host: &Rc<RefCell<TaskersHost>>, diagnostics: Option<&Di
             DiagnosticRecord::new(
                 DiagnosticCategory::Bridge,
                 None,
-                format!(
-                    "ghostty shutdown summary state={} surface_count={}",
-                    health.state.label(),
-                    health.surface_count
-                ),
+                ghostty_shutdown_summary(&health),
             ),
         );
     }
@@ -568,11 +567,7 @@ fn quiesce_host_bridge(
         if health.surface_count == 0 {
             log_diagnostic(
                 diagnostics,
-                DiagnosticRecord::new(
-                    DiagnosticCategory::Bridge,
-                    None,
-                    "ghostty bridge quiesced surface_count=0",
-                ),
+                DiagnosticRecord::new(DiagnosticCategory::Bridge, None, ghostty_quiesced_message()),
             );
             return;
         }
@@ -582,10 +577,7 @@ fn quiesce_host_bridge(
                 DiagnosticRecord::new(
                     DiagnosticCategory::Bridge,
                     None,
-                    format!(
-                        "ghostty bridge quiesce timed out surface_count={}",
-                        health.surface_count
-                    ),
+                    ghostty_quiesce_timeout_message(health.surface_count),
                 ),
             );
             return;
@@ -600,6 +592,22 @@ fn quiesce_host_bridge(
             thread::sleep(Duration::from_millis(8));
         }
     }
+}
+
+fn ghostty_shutdown_summary(health: &BridgeHealthSnapshot) -> String {
+    format!(
+        "ghostty shutdown summary state={} surface_count={}",
+        health.state.label(),
+        health.surface_count
+    )
+}
+
+fn ghostty_quiesced_message() -> &'static str {
+    "ghostty bridge quiesced surface_count=0"
+}
+
+fn ghostty_quiesce_timeout_message(surface_count: usize) -> String {
+    format!("ghostty bridge quiesce timed out surface_count={surface_count}")
 }
 
 fn build_ui_result(
@@ -3176,13 +3184,15 @@ fn looks_like_dev_install(path: &Path) -> bool {
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        RuntimePathOverrides, build_shell_network_session, looks_like_dev_install,
-        maybe_export_bundled_terminfo, publish_shell_environment,
-        should_apply_webkit_dmabuf_workaround, should_defer_initial_sync, should_force_software_gl,
-        should_skip_terminal_sidecar_in_smoke, should_sync_host_snapshot,
-        smoke_runtime_path_overrides,
+        BridgeHealthSnapshot, GhosttyLifecycleState, RuntimePathOverrides,
+        build_shell_network_session, ghostty_quiesce_timeout_message, ghostty_quiesced_message,
+        ghostty_shutdown_summary, looks_like_dev_install, maybe_export_bundled_terminfo,
+        publish_shell_environment, should_apply_webkit_dmabuf_workaround,
+        should_defer_initial_sync, should_force_software_gl, should_skip_terminal_sidecar_in_smoke,
+        should_sync_host_snapshot, smoke_runtime_path_overrides,
     };
     use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
+    use taskers_ghostty::GhosttyBridgeInfo;
     use taskers_runtime::ShellLaunchSpec;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -3352,6 +3362,34 @@ mod startup_tests {
         assert_eq!(
             shell_launch.env.get("TERMINFO").map(String::as_str),
             Some(terminfo_dir.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn ghostty_shutdown_quiesce_reports_terminal_bridge_health() {
+        let health = BridgeHealthSnapshot {
+            bridge_info: GhosttyBridgeInfo {
+                version: "1.0.0".into(),
+                build_id: "ghostty-test".into(),
+            },
+            state: GhosttyLifecycleState::ShuttingDown,
+            surface_count: 2,
+            last_tick_duration_ms: Some(12),
+            last_mutation_duration_ms: Some(4),
+            last_operation: Some("shutdown".into()),
+        };
+
+        assert_eq!(
+            ghostty_shutdown_summary(&health),
+            "ghostty shutdown summary state=shutting-down surface_count=2"
+        );
+        assert_eq!(
+            ghostty_quiesce_timeout_message(health.surface_count),
+            "ghostty bridge quiesce timed out surface_count=2"
+        );
+        assert_eq!(
+            ghostty_quiesced_message(),
+            "ghostty bridge quiesced surface_count=0"
         );
     }
 
