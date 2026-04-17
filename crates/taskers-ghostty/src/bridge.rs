@@ -34,23 +34,23 @@ pub const GHOSTTY_GTK_PROPERTY_CHILD_EXITED: &str = "child-exited";
 
 #[derive(Debug, Error)]
 pub enum GhosttyGtkError {
-    #[error("ghostty bridge is unavailable in this build")]
+    #[error("ghostty gtk host is unavailable in this build")]
     Unavailable,
-    #[error("failed to initialize ghostty host")]
+    #[error("failed to initialize ghostty gtk host")]
     HostInit,
-    #[error("failed to tick ghostty host")]
+    #[error("failed to tick ghostty gtk host")]
     Tick,
-    #[error("failed to create ghostty surface")]
+    #[error("failed to create ghostty gtk surface")]
     SurfaceInit,
-    #[error("failed to read text from ghostty surface")]
+    #[error("failed to read text from ghostty gtk surface")]
     SurfaceReadText,
-    #[error("failed to write text to ghostty surface")]
+    #[error("failed to write text to ghostty gtk surface")]
     SurfaceWriteText,
     #[error("surface metadata contains NUL bytes: {0}")]
     InvalidString(&'static str),
-    #[error("failed to load ghostty bridge library from {path}: {message}")]
+    #[error("failed to load ghostty gtk bridge library from {path}: {message}")]
     LibraryLoad { path: PathBuf, message: String },
-    #[error("ghostty bridge library path is unavailable")]
+    #[error("ghostty gtk bridge library path is unavailable")]
     LibraryPathUnavailable,
 }
 
