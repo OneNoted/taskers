@@ -348,40 +348,18 @@ fn build_runtime_gtk_bridge_path() -> Option<PathBuf> {
     option_env!("GHOSTTY_GTK_BUILD_BRIDGE_PATH")
         .map(PathBuf::from)
         .filter(|path| path.exists())
-        .or_else(|| {
-            option_env!("TASKERS_GHOSTTY_BUILD_BRIDGE_PATH")
-                .map(PathBuf::from)
-                .and_then(|legacy_path| {
-                    let generic_path = legacy_path
-                        .parent()
-                        .map(|dir| dir.join(GTK_BRIDGE_LIBRARY_NAME));
-                    generic_path
-                        .filter(|path| path.exists())
-                        .or_else(|| legacy_path.exists().then_some(legacy_path))
-                })
-        })
 }
 
 fn build_runtime_resources_dir() -> Option<PathBuf> {
     option_env!("GHOSTTY_GTK_BUILD_RESOURCES_DIR")
         .map(PathBuf::from)
         .filter(|path| path.exists())
-        .or_else(|| {
-            option_env!("TASKERS_GHOSTTY_BUILD_RESOURCES_DIR")
-                .map(PathBuf::from)
-                .filter(|path| path.exists())
-        })
 }
 
 fn build_runtime_terminfo_dir() -> Option<PathBuf> {
     option_env!("GHOSTTY_GTK_BUILD_TERMINFO_DIR")
         .map(PathBuf::from)
         .filter(|path| terminfo_dir_is_usable(path))
-        .or_else(|| {
-            option_env!("TASKERS_GHOSTTY_BUILD_TERMINFO_DIR")
-                .map(PathBuf::from)
-                .filter(|path| terminfo_dir_is_usable(path))
-        })
 }
 
 fn stage_build_runtime_layout(
