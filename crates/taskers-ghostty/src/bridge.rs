@@ -19,11 +19,11 @@ use gtk::prelude::ObjectType;
 use libloading::Library;
 use thiserror::Error;
 
-use crate::backend::{GhosttyHostOptions, SurfaceDescriptor};
+use crate::backend::{GhosttyGtkHostOptions, GhosttyGtkSurfaceDescriptor};
 use crate::runtime::{configure_runtime_environment, runtime_bridge_path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GhosttyBridgeInfo {
+pub struct GhosttyGtkInfo {
     pub version: String,
     pub build_id: String,
 }
@@ -33,7 +33,7 @@ pub const GHOSTTY_GTK_PROPERTY_PWD: &str = "pwd";
 pub const GHOSTTY_GTK_PROPERTY_CHILD_EXITED: &str = "child-exited";
 
 #[derive(Debug, Error)]
-pub enum GhosttyError {
+pub enum GhosttyGtkError {
     #[error("ghostty bridge is unavailable in this build")]
     Unavailable,
     #[error("failed to initialize ghostty host")]
@@ -55,13 +55,13 @@ pub enum GhosttyError {
 }
 
 #[cfg(ghostty_gtk_bridge)]
-pub struct GhosttyHost {
+pub struct GhosttyGtkHost {
     bridge: GhosttyGtkLibrary,
     raw: NonNull<ghostty_gtk_host_t>,
 }
 
 #[cfg(not(ghostty_gtk_bridge))]
-pub struct GhosttyHost;
+pub struct GhosttyGtkHost;
 
 #[cfg(ghostty_gtk_bridge)]
 struct GhosttyGtkLibrary {
@@ -85,12 +85,12 @@ struct GhosttyGtkLibrary {
     surface_free_text: unsafe extern "C" fn(*mut ghostty_gtk_text_s),
 }
 
-impl GhosttyHost {
-    pub fn new() -> Result<Self, GhosttyError> {
-        Self::new_with_options(&GhosttyHostOptions::default())
+impl GhosttyGtkHost {
+    pub fn new() -> Result<Self, GhosttyGtkError> {
+        Self::new_with_options(&GhosttyGtkHostOptions::default())
     }
 
-    pub fn new_with_options(options: &GhosttyHostOptions) -> Result<Self, GhosttyError> {
+    pub fn new_with_options(options: &GhosttyGtkHostOptions) -> Result<Self, GhosttyGtkError> {
         configure_runtime_environment();
 
         #[cfg(ghostty_gtk_bridge)]
@@ -101,7 +101,7 @@ impl GhosttyHost {
                 .iter()
                 .map(|value| {
                     CString::new(value.as_str())
-                        .map_err(|_| GhosttyError::InvalidString("command_argv"))
+                        .map_err(|_| GhosttyGtkError::InvalidString("command_argv"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let command_argv_ptrs = command_argv
@@ -113,14 +113,15 @@ impl GhosttyHost {
                 .iter()
                 .map(|(key, value)| {
                     CString::new(format!("{key}={value}"))
-                        .map_err(|_| GhosttyError::InvalidString("env"))
+                        .map_err(|_| GhosttyGtkError::InvalidString("env"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let base_config_path = options
                 .base_config_path
                 .as_deref()
                 .map(|value| {
-                    CString::new(value).map_err(|_| GhosttyError::InvalidString("base_config_path"))
+                    CString::new(value)
+                        .map_err(|_| GhosttyGtkError::InvalidString("base_config_path"))
                 })
                 .transpose()?;
             let override_config_path = options
@@ -128,7 +129,7 @@ impl GhosttyHost {
                 .as_deref()
                 .map(|value| {
                     CString::new(value)
-                        .map_err(|_| GhosttyError::InvalidString("override_config_path"))
+                        .map_err(|_| GhosttyGtkError::InvalidString("override_config_path"))
                 })
                 .transpose()?;
             let env_entry_ptrs = env_entries
@@ -157,23 +158,23 @@ impl GhosttyHost {
             };
 
             let raw = (bridge.host_new)(&host_options);
-            let raw = NonNull::new(raw).ok_or(GhosttyError::HostInit)?;
+            let raw = NonNull::new(raw).ok_or(GhosttyGtkError::HostInit)?;
             Ok(Self { bridge, raw })
         }
 
         #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = options;
-            Err(GhosttyError::Unavailable)
+            Err(GhosttyGtkError::Unavailable)
         }
     }
 
-    pub fn tick(&self) -> Result<(), GhosttyError> {
+    pub fn tick(&self) -> Result<(), GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let ok = (self.bridge.host_tick)(self.raw.as_ptr());
             if ok == 0 {
-                Err(GhosttyError::Tick)
+                Err(GhosttyGtkError::Tick)
             } else {
                 Ok(())
             }
@@ -181,11 +182,11 @@ impl GhosttyHost {
 
         #[cfg(not(ghostty_gtk_bridge))]
         {
-            Err(GhosttyError::Unavailable)
+            Err(GhosttyGtkError::Unavailable)
         }
     }
 
-    pub fn bridge_info(&self) -> GhosttyBridgeInfo {
+    pub fn bridge_info(&self) -> GhosttyGtkInfo {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let version = std::ffi::CStr::from_ptr((self.bridge.host_version)())
@@ -194,12 +195,12 @@ impl GhosttyHost {
             let build_id = std::ffi::CStr::from_ptr((self.bridge.host_build_id)())
                 .to_string_lossy()
                 .into_owned();
-            GhosttyBridgeInfo { version, build_id }
+            GhosttyGtkInfo { version, build_id }
         }
 
         #[cfg(not(ghostty_gtk_bridge))]
         {
-            GhosttyBridgeInfo {
+            GhosttyGtkInfo {
                 version: "unavailable".into(),
                 build_id: "unavailable".into(),
             }
@@ -225,25 +226,30 @@ impl GhosttyHost {
         }
     }
 
-    pub fn create_surface(&self, descriptor: &SurfaceDescriptor) -> Result<Widget, GhosttyError> {
+    pub fn create_surface(
+        &self,
+        descriptor: &GhosttyGtkSurfaceDescriptor,
+    ) -> Result<Widget, GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let cwd = descriptor
                 .cwd
                 .as_deref()
-                .map(|value| CString::new(value).map_err(|_| GhosttyError::InvalidString("cwd")))
+                .map(|value| CString::new(value).map_err(|_| GhosttyGtkError::InvalidString("cwd")))
                 .transpose()?;
             let title = descriptor
                 .title
                 .as_deref()
-                .map(|value| CString::new(value).map_err(|_| GhosttyError::InvalidString("title")))
+                .map(|value| {
+                    CString::new(value).map_err(|_| GhosttyGtkError::InvalidString("title"))
+                })
                 .transpose()?;
             let env_entries = descriptor
                 .env
                 .iter()
                 .map(|(key, value)| {
                     CString::new(format!("{key}={value}"))
-                        .map_err(|_| GhosttyError::InvalidString("env"))
+                        .map_err(|_| GhosttyGtkError::InvalidString("env"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let env_entry_ptrs = env_entries
@@ -268,7 +274,7 @@ impl GhosttyHost {
 
             let widget = (self.bridge.surface_new)(self.raw.as_ptr(), &options);
             if widget.is_null() {
-                return Err(GhosttyError::SurfaceInit);
+                return Err(GhosttyGtkError::SurfaceInit);
             }
 
             Ok(from_glib_full(widget.cast()))
@@ -277,16 +283,16 @@ impl GhosttyHost {
         #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = descriptor;
-            Err(GhosttyError::Unavailable)
+            Err(GhosttyGtkError::Unavailable)
         }
     }
 
-    pub fn focus_surface(&self, widget: &Widget) -> Result<(), GhosttyError> {
+    pub fn focus_surface(&self, widget: &Widget) -> Result<(), GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let ok = (self.bridge.surface_grab_focus)(widget.as_ptr().cast());
             if ok == 0 {
-                Err(GhosttyError::SurfaceInit)
+                Err(GhosttyGtkError::SurfaceInit)
             } else {
                 Ok(())
             }
@@ -295,7 +301,7 @@ impl GhosttyHost {
         #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = widget;
-            Err(GhosttyError::Unavailable)
+            Err(GhosttyGtkError::Unavailable)
         }
     }
 
@@ -306,7 +312,7 @@ impl GhosttyHost {
         }
     }
 
-    pub fn surface_has_selection(&self, widget: &Widget) -> Result<bool, GhosttyError> {
+    pub fn surface_has_selection(&self, widget: &Widget) -> Result<bool, GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
             Ok((self.bridge.surface_has_selection)(widget.as_ptr().cast()) != 0)
@@ -315,17 +321,17 @@ impl GhosttyHost {
         #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = widget;
-            Err(GhosttyError::Unavailable)
+            Err(GhosttyGtkError::Unavailable)
         }
     }
 
-    pub fn read_surface_text(&self, widget: &Widget) -> Result<String, GhosttyError> {
+    pub fn read_surface_text(&self, widget: &Widget) -> Result<String, GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let mut text = ghostty_gtk_text_s::default();
             let ok = (self.bridge.surface_read_all_text)(widget.as_ptr().cast(), &mut text);
             if ok == 0 {
-                return Err(GhosttyError::SurfaceReadText);
+                return Err(GhosttyGtkError::SurfaceReadText);
             }
 
             let bytes = if text.text.is_null() || text.text_len == 0 {
@@ -341,22 +347,22 @@ impl GhosttyHost {
         #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = widget;
-            Err(GhosttyError::Unavailable)
+            Err(GhosttyGtkError::Unavailable)
         }
     }
 
-    pub fn send_surface_text(&self, widget: &Widget, text: &str) -> Result<(), GhosttyError> {
+    pub fn send_surface_text(&self, widget: &Widget, text: &str) -> Result<(), GhosttyGtkError> {
         #[cfg(ghostty_gtk_bridge)]
         unsafe {
             let text =
-                CString::new(text).map_err(|_| GhosttyError::InvalidString("surface_text"))?;
+                CString::new(text).map_err(|_| GhosttyGtkError::InvalidString("surface_text"))?;
             let ok = (self.bridge.surface_send_text)(
                 widget.as_ptr().cast(),
                 text.as_ptr(),
                 text.as_bytes().len(),
             );
             if ok == 0 {
-                Err(GhosttyError::SurfaceWriteText)
+                Err(GhosttyGtkError::SurfaceWriteText)
             } else {
                 Ok(())
             }
@@ -365,13 +371,13 @@ impl GhosttyHost {
         #[cfg(not(ghostty_gtk_bridge))]
         {
             let _ = (widget, text);
-            Err(GhosttyError::Unavailable)
+            Err(GhosttyGtkError::Unavailable)
         }
     }
 }
 
 #[cfg(ghostty_gtk_bridge)]
-impl Drop for GhosttyHost {
+impl Drop for GhosttyGtkHost {
     fn drop(&mut self) {
         unsafe {
             (self.bridge.host_free)(self.raw.as_ptr());
@@ -380,10 +386,10 @@ impl Drop for GhosttyHost {
 }
 
 #[cfg(ghostty_gtk_bridge)]
-fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyError> {
-    let path = runtime_bridge_path().ok_or(GhosttyError::LibraryPathUnavailable)?;
+fn load_bridge_library() -> Result<GhosttyGtkLibrary, GhosttyGtkError> {
+    let path = runtime_bridge_path().ok_or(GhosttyGtkError::LibraryPathUnavailable)?;
     let library = unsafe {
-        Library::new(&path).map_err(|error| GhosttyError::LibraryLoad {
+        Library::new(&path).map_err(|error| GhosttyGtkError::LibraryLoad {
             path: path.clone(),
             message: error.to_string(),
         })?
@@ -501,12 +507,12 @@ unsafe fn load_bridge_symbol<T: Copy>(
     path: &std::path::Path,
     generic_symbol: &[u8],
     legacy_symbol: &[u8],
-) -> Result<T, GhosttyError> {
+) -> Result<T, GhosttyGtkError> {
     match unsafe { library.get::<T>(generic_symbol) } {
         Ok(symbol) => Ok(*symbol),
         Err(generic_error) => unsafe { library.get::<T>(legacy_symbol) }
             .map(|symbol| *symbol)
-            .map_err(|legacy_error| GhosttyError::LibraryLoad {
+            .map_err(|legacy_error| GhosttyGtkError::LibraryLoad {
                 path: path.to_path_buf(),
                 message: format!(
                     "generic symbol {} failed: {}; legacy symbol {} failed: {}",

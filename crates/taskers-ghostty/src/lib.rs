@@ -6,12 +6,13 @@ pub mod runtime;
 
 pub use backend::{
     AdapterError, BackendAvailability, BackendChoice, BackendProbe, DefaultBackend,
-    EmbeddedTerminalAppearance, GhosttyHostOptions, SurfaceDescriptor, TerminalBackend,
+    EmbeddedTerminalAppearance, GhosttyGtkHostOptions, GhosttyGtkSurfaceDescriptor,
+    TerminalBackend,
 };
 #[cfg(target_os = "linux")]
 pub use bridge::{
     GHOSTTY_GTK_PROPERTY_CHILD_EXITED, GHOSTTY_GTK_PROPERTY_PWD, GHOSTTY_GTK_PROPERTY_TITLE,
-    GhosttyBridgeInfo, GhosttyError, GhosttyHost,
+    GhosttyGtkError, GhosttyGtkHost, GhosttyGtkInfo,
 };
 pub use embedded_config::{
     EmbeddedTerminalConfig, EmbeddedTerminalConfigError, EmbeddedTerminalConfigPaths,
@@ -23,12 +24,11 @@ pub use runtime::{
     ensure_runtime_installed, runtime_terminfo_dir,
 };
 
-pub type GhosttyGtkHostOptions = GhosttyHostOptions;
-pub type GhosttyGtkSurfaceDescriptor = SurfaceDescriptor;
-
 #[cfg(target_os = "linux")]
-pub type GhosttyGtkHost = GhosttyHost;
+pub type GhosttyHost = GhosttyGtkHost;
 #[cfg(target_os = "linux")]
-pub type GhosttyGtkInfo = GhosttyBridgeInfo;
+pub type GhosttyBridgeInfo = GhosttyGtkInfo;
 #[cfg(target_os = "linux")]
-pub type GhosttyGtkError = GhosttyError;
+pub type GhosttyError = GhosttyGtkError;
+pub type GhosttyHostOptions = GhosttyGtkHostOptions;
+pub type SurfaceDescriptor = GhosttyGtkSurfaceDescriptor;

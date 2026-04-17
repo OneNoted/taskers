@@ -39,7 +39,7 @@ pub struct BackendProbe {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SurfaceDescriptor {
+pub struct GhosttyGtkSurfaceDescriptor {
     pub cols: u16,
     pub rows: u16,
     pub kind: PaneKind,
@@ -55,7 +55,7 @@ pub struct SurfaceDescriptor {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GhosttyHostOptions {
+pub struct GhosttyGtkHostOptions {
     #[serde(default)]
     pub command_argv: Vec<String>,
     #[serde(default)]
@@ -66,7 +66,7 @@ pub struct GhosttyHostOptions {
     pub override_config_path: Option<String>,
 }
 
-impl GhosttyHostOptions {
+impl GhosttyGtkHostOptions {
     pub fn from_shell_launch(shell_launch: &ShellLaunchSpec) -> Self {
         let mut env = BTreeMap::new();
         env.extend(shell_launch.env.clone());
@@ -216,7 +216,7 @@ fn embedded_ghostty_notes() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendAvailability, BackendChoice, DefaultBackend, GhosttyHostOptions, TerminalBackend,
+        BackendAvailability, BackendChoice, DefaultBackend, GhosttyGtkHostOptions, TerminalBackend,
     };
     use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
     use taskers_runtime::ShellLaunchSpec;
@@ -267,7 +267,7 @@ mod tests {
             env,
         };
 
-        let options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+        let options = GhosttyGtkHostOptions::from_shell_launch(&shell_launch);
 
         assert_eq!(options.command_argv, vec!["/bin/zsh", "-i"]);
         assert_eq!(
@@ -291,7 +291,7 @@ mod tests {
             env,
         };
 
-        let options = GhosttyHostOptions::from_shell_launch(&shell_launch);
+        let options = GhosttyGtkHostOptions::from_shell_launch(&shell_launch);
 
         assert_eq!(
             options.command_argv,
