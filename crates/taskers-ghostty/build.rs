@@ -56,27 +56,12 @@ fn main() {
     build_bridge(&vendor_dir, &install_dir);
 
     println!(
-        "cargo:rustc-env=TASKERS_GHOSTTY_BUILD_RESOURCES_DIR={}",
-        install_dir.join("share").join("ghostty").display()
-    );
-    println!(
         "cargo:rustc-env=GHOSTTY_GTK_BUILD_RESOURCES_DIR={}",
         install_dir.join("share").join("ghostty").display()
     );
     println!(
-        "cargo:rustc-env=TASKERS_GHOSTTY_BUILD_BRIDGE_PATH={}",
-        install_dir
-            .join("lib")
-            .join("libtaskers_ghostty_bridge.so")
-            .display()
-    );
-    println!(
         "cargo:rustc-env=GHOSTTY_GTK_BUILD_BRIDGE_PATH={}",
         install_dir.join("lib").join("libghostty_gtk.so").display()
-    );
-    println!(
-        "cargo:rustc-env=TASKERS_GHOSTTY_BUILD_TERMINFO_DIR={}",
-        install_dir.join("share").join("terminfo").display()
     );
     println!(
         "cargo:rustc-env=GHOSTTY_GTK_BUILD_TERMINFO_DIR={}",
