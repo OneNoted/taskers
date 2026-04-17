@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) !void {
 
     if (config.app_runtime == .gtk) {
         const taskers_bridge = b.addLibrary(.{
-            .name = "taskers_ghostty_bridge",
+            .name = "ghostty_gtk_bridge",
             .linkage = .dynamic,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/taskers_bridge.zig"),

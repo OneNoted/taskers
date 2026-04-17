@@ -51,7 +51,7 @@ fn main() {
         return;
     }
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
-    let install_dir = out_dir.join("ghostty-bridge");
+    let install_dir = out_dir.join("ghostty-gtk-bridge");
 
     build_bridge(&vendor_dir, &install_dir);
 
