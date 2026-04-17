@@ -42,7 +42,7 @@ use taskers_ghostty::{
     save_embedded_terminal_config,
 };
 use taskers_host::{
-    BridgeHealthSnapshot, DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost,
+    DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, GhosttyGtkHealthSnapshot, TaskersHost,
 };
 use taskers_runtime::{
     ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
@@ -535,7 +535,7 @@ fn shutdown_host_bridge(host: &Rc<RefCell<TaskersHost>>, diagnostics: Option<&Di
     }
     quiesce_host_bridge(host, diagnostics, Duration::from_millis(250));
     if let Ok(host) = host.try_borrow()
-        && let Some(health) = host.bridge_health_snapshot()
+        && let Some(health) = host.gtk_host_health_snapshot()
     {
         log_diagnostic(
             diagnostics,
@@ -559,7 +559,7 @@ fn quiesce_host_bridge(
         let Some(health) = host
             .try_borrow()
             .ok()
-            .and_then(|host| host.bridge_health_snapshot())
+            .and_then(|host| host.gtk_host_health_snapshot())
         else {
             return;
         };
@@ -593,7 +593,7 @@ fn quiesce_host_bridge(
     }
 }
 
-fn ghostty_shutdown_summary(health: &BridgeHealthSnapshot) -> String {
+fn ghostty_shutdown_summary(health: &GhosttyGtkHealthSnapshot) -> String {
     format!(
         "ghostty shutdown summary state={} surface_count={}",
         health.state.label(),
@@ -657,10 +657,10 @@ fn build_ui_result(
         shell_action_sink,
         diagnostics_sink,
     )));
-    if let Some(bridge_info) = host.borrow().bridge_info() {
+    if let Some(gtk_host_info) = host.borrow().gtk_host_info() {
         let note = format!(
             "Ghostty bridge version={} build_id={}",
-            bridge_info.version, bridge_info.build_id
+            gtk_host_info.version, gtk_host_info.build_id
         );
         log_diagnostic(
             diagnostics.as_ref(),
@@ -672,7 +672,7 @@ fn build_ui_result(
         );
         safe_eprintln(note);
     }
-    if let Some(health) = host.borrow().bridge_health_snapshot() {
+    if let Some(health) = host.borrow().gtk_host_health_snapshot() {
         let note = format!(
             "Ghostty bridge lifecycle={} surface_count={}",
             health.state.label(),
@@ -3183,7 +3183,7 @@ fn looks_like_dev_install(path: &Path) -> bool {
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        BridgeHealthSnapshot, RuntimePathOverrides, build_shell_network_session,
+        GhosttyGtkHealthSnapshot, RuntimePathOverrides, build_shell_network_session,
         ghostty_quiesce_timeout_message, ghostty_quiesced_message, ghostty_shutdown_summary,
         looks_like_dev_install, maybe_export_bundled_terminfo, publish_shell_environment,
         should_apply_webkit_dmabuf_workaround, should_defer_initial_sync, should_force_software_gl,
@@ -3401,8 +3401,8 @@ mod startup_tests {
 
     #[test]
     fn ghostty_shutdown_quiesce_reports_terminal_bridge_health() {
-        let health = BridgeHealthSnapshot {
-            bridge_info: GhosttyGtkInfo {
+        let health = GhosttyGtkHealthSnapshot {
+            gtk_host_info: GhosttyGtkInfo {
                 version: "1.0.0".into(),
                 build_id: "ghostty-test".into(),
             },

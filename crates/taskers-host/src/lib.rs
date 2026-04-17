@@ -157,8 +157,8 @@ impl GhosttyLifecycleState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BridgeHealthSnapshot {
-    pub bridge_info: GhosttyGtkInfo,
+pub struct GhosttyGtkHealthSnapshot {
+    pub gtk_host_info: GhosttyGtkInfo,
     pub state: GhosttyLifecycleState,
     pub surface_count: usize,
     pub last_tick_duration_ms: Option<u128>,
@@ -404,10 +404,14 @@ impl BridgeWatchdog {
         }
     }
 
-    fn snapshot(&self, bridge_info: GhosttyGtkInfo, surface_count: usize) -> BridgeHealthSnapshot {
+    fn snapshot(
+        &self,
+        gtk_host_info: GhosttyGtkInfo,
+        surface_count: usize,
+    ) -> GhosttyGtkHealthSnapshot {
         let shared = self.shared.lock().expect("bridge watchdog lock");
-        BridgeHealthSnapshot {
-            bridge_info,
+        GhosttyGtkHealthSnapshot {
+            gtk_host_info,
             state: shared.lifecycle_state,
             surface_count,
             last_tick_duration_ms: shared.last_tick_duration_ms,
@@ -483,7 +487,7 @@ pub struct TaskersHost {
     shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
     ghostty_host: Option<GhosttyGtkHost>,
-    ghostty_bridge_info: Option<GhosttyGtkInfo>,
+    ghostty_gtk_host_info: Option<GhosttyGtkInfo>,
     ghostty_watchdog: Option<BridgeWatchdog>,
     skip_next_ghostty_tick: bool,
     pending_terminal_create_retry: bool,
@@ -598,8 +602,8 @@ impl TaskersHost {
         shell_action_sink: ShellActionSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Self {
-        let ghostty_bridge_info = ghostty_host.as_ref().map(GhosttyGtkHost::bridge_info);
-        let ghostty_watchdog = ghostty_bridge_info
+        let ghostty_gtk_host_info = ghostty_host.as_ref().map(GhosttyGtkHost::bridge_info);
+        let ghostty_watchdog = ghostty_gtk_host_info
             .as_ref()
             .map(|_| BridgeWatchdog::new(diagnostics.clone()));
         let root = Overlay::new();
@@ -660,7 +664,7 @@ impl TaskersHost {
             shell_action_sink,
             diagnostics,
             ghostty_host,
-            ghostty_bridge_info,
+            ghostty_gtk_host_info,
             ghostty_watchdog,
             skip_next_ghostty_tick: false,
             pending_terminal_create_retry: false,
@@ -761,7 +765,7 @@ impl TaskersHost {
     }
 
     pub fn tick(&mut self, revision: Option<u64>) {
-        if !self.bridge_running() {
+        if !self.gtk_host_running() {
             return;
         }
         if self.skip_next_ghostty_tick {
@@ -787,12 +791,12 @@ impl TaskersHost {
         }
     }
 
-    pub fn bridge_info(&self) -> Option<GhosttyGtkInfo> {
-        self.ghostty_bridge_info.clone()
+    pub fn gtk_host_info(&self) -> Option<GhosttyGtkInfo> {
+        self.ghostty_gtk_host_info.clone()
     }
 
-    pub fn bridge_health_snapshot(&self) -> Option<BridgeHealthSnapshot> {
-        let bridge_info = self.ghostty_bridge_info.clone()?;
+    pub fn gtk_host_health_snapshot(&self) -> Option<GhosttyGtkHealthSnapshot> {
+        let gtk_host_info = self.ghostty_gtk_host_info.clone()?;
         let surface_count = self
             .ghostty_host
             .as_ref()
@@ -800,11 +804,11 @@ impl TaskersHost {
             .unwrap_or_default();
         self.ghostty_watchdog
             .as_ref()
-            .map(|watchdog| watchdog.snapshot(bridge_info, surface_count))
+            .map(|watchdog| watchdog.snapshot(gtk_host_info, surface_count))
     }
 
     pub fn shutdown(&mut self) {
-        let bridge_was_running = self.bridge_running();
+        let bridge_was_running = self.gtk_host_running();
         if let Some(watchdog) = self.ghostty_watchdog.as_ref() {
             watchdog.transition_state(
                 self.diagnostics.as_ref(),
@@ -876,7 +880,7 @@ impl TaskersHost {
             );
         }
 
-        if let Some(health) = self.bridge_health_snapshot() {
+        if let Some(health) = self.gtk_host_health_snapshot() {
             emit_diagnostic(
                 self.diagnostics.as_ref(),
                 DiagnosticRecord::new(
@@ -931,7 +935,7 @@ impl TaskersHost {
                 Ok(())
             }
             HostCommand::TerminalSendText { surface_id, text } => {
-                if !self.bridge_running() {
+                if !self.gtk_host_running() {
                     emit_diagnostic(
                         self.diagnostics.as_ref(),
                         DiagnosticRecord::new(
@@ -1094,7 +1098,7 @@ impl TaskersHost {
                 "terminal debug requires the Ghostty host backend",
             ));
         };
-        if !self.bridge_running() {
+        if !self.gtk_host_running() {
             return Err(ControlError::not_supported(
                 "terminal debug is unavailable because the Ghostty bridge is not running",
             ));
@@ -1178,7 +1182,7 @@ impl TaskersHost {
         }
     }
 
-    fn bridge_running(&self) -> bool {
+    fn gtk_host_running(&self) -> bool {
         self.ghostty_watchdog
             .as_ref()
             .is_some_and(|watchdog| watchdog.lifecycle_state() == GhosttyLifecycleState::Running)
@@ -1444,14 +1448,14 @@ impl TaskersHost {
         let removed_any = !stale.is_empty();
 
         let host = self.ghostty_host.as_ref();
-        let bridge_running = self.bridge_running();
+        let gtk_host_running = self.gtk_host_running();
         let mut terminal_mutated = false;
 
         for surface_id in stale {
             if let Some(surface) = self.terminal_surfaces.remove(&surface_id) {
                 surface.shell.detach(&self.native_surface_scene);
                 surface.attention_ring.detach(&self.native_surface_scene);
-                if bridge_running {
+                if gtk_host_running {
                     if let Some(host) = host {
                         host.destroy_surface(&surface.widget);
                     }
@@ -1497,11 +1501,11 @@ impl TaskersHost {
                     revision,
                     interactive,
                     resize_preview_active,
-                    host.filter(|_| bridge_running),
+                    host.filter(|_| gtk_host_running),
                     self.diagnostics.as_ref(),
                 ),
                 None => {
-                    if !bridge_running {
+                    if !gtk_host_running {
                         emit_diagnostic(
                             self.diagnostics.as_ref(),
                             DiagnosticRecord::new(
