@@ -31,11 +31,8 @@ trap cleanup EXIT
 
 mkdir -p "$bundle_dir/ghostty/lib" "$bundle_dir/ghostty/shell-integration" "$bundle_dir/ghostty/themes" "$bundle_dir/terminfo"
 cp "$prefix_dir/lib/libghostty_gtk.so" "$bundle_dir/ghostty/lib/"
-if [ -f "$prefix_dir/lib/libtaskers_ghostty_bridge.so" ]; then
-  cp "$prefix_dir/lib/libtaskers_ghostty_bridge.so" "$bundle_dir/ghostty/lib/"
-else
-  cp "$prefix_dir/lib/libghostty_gtk.so" "$bundle_dir/ghostty/lib/libtaskers_ghostty_bridge.so"
-fi
+# Compatibility copy for older runtime consumers.
+cp "$prefix_dir/lib/libghostty_gtk.so" "$bundle_dir/ghostty/lib/libtaskers_ghostty_bridge.so"
 cp -R "$prefix_dir/share/ghostty/shell-integration/." "$bundle_dir/ghostty/shell-integration/"
 cp -R "$prefix_dir/share/ghostty/themes/." "$bundle_dir/ghostty/themes/"
 cp -R "$prefix_dir/share/terminfo/." "$bundle_dir/terminfo/"
