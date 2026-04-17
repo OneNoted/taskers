@@ -387,113 +387,90 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
     };
 
     unsafe {
-        let host_new = *library
-            .get::<unsafe extern "C" fn(
-                *const taskers_ghostty_host_options_s,
-            ) -> *mut taskers_ghostty_host_t>(b"taskers_ghostty_host_new\0")
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let host_free = *library
-            .get::<unsafe extern "C" fn(*mut taskers_ghostty_host_t)>(
-                b"taskers_ghostty_host_free\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let host_version = *library
-            .get::<unsafe extern "C" fn() -> *const c_char>(b"taskers_ghostty_host_version\0")
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let host_build_id = *library
-            .get::<unsafe extern "C" fn() -> *const c_char>(b"taskers_ghostty_host_build_id\0")
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let host_begin_shutdown = *library
-            .get::<unsafe extern "C" fn(*mut taskers_ghostty_host_t)>(
-                b"taskers_ghostty_host_begin_shutdown\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let host_surface_count = *library
-            .get::<unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> usize>(
-                b"taskers_ghostty_host_surface_count\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let host_tick = *library
-            .get::<unsafe extern "C" fn(*mut taskers_ghostty_host_t) -> c_int>(
-                b"taskers_ghostty_host_tick\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let surface_new = *library
-            .get::<unsafe extern "C" fn(
-                *mut taskers_ghostty_host_t,
-                *const taskers_ghostty_surface_options_s,
-            ) -> *mut c_void>(b"taskers_ghostty_surface_new\0")
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let surface_destroy = *library
-            .get::<unsafe extern "C" fn(*mut c_void)>(b"taskers_ghostty_surface_destroy\0")
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let surface_grab_focus = *library
-            .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(
-                b"taskers_ghostty_surface_grab_focus\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let surface_has_selection = *library
-            .get::<unsafe extern "C" fn(*mut c_void) -> c_int>(
-                b"taskers_ghostty_surface_has_selection\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let surface_send_text = *library
-            .get::<unsafe extern "C" fn(*mut c_void, *const c_char, usize) -> c_int>(
-                b"taskers_ghostty_surface_send_text\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let surface_read_all_text = *library
-            .get::<unsafe extern "C" fn(*mut c_void, *mut taskers_ghostty_text_s) -> c_int>(
-                b"taskers_ghostty_surface_read_all_text\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
-        let surface_free_text = *library
-            .get::<unsafe extern "C" fn(*mut taskers_ghostty_text_s)>(
-                b"taskers_ghostty_surface_free_text\0",
-            )
-            .map_err(|error| GhosttyError::LibraryLoad {
-                path: path.clone(),
-                message: error.to_string(),
-            })?;
+        let host_new = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_host_new\0",
+            b"taskers_ghostty_host_new\0",
+        )?;
+        let host_free = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_host_free\0",
+            b"taskers_ghostty_host_free\0",
+        )?;
+        let host_version = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_host_version\0",
+            b"taskers_ghostty_host_version\0",
+        )?;
+        let host_build_id = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_host_build_id\0",
+            b"taskers_ghostty_host_build_id\0",
+        )?;
+        let host_begin_shutdown = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_host_begin_shutdown\0",
+            b"taskers_ghostty_host_begin_shutdown\0",
+        )?;
+        let host_surface_count = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_host_surface_count\0",
+            b"taskers_ghostty_host_surface_count\0",
+        )?;
+        let host_tick = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_host_tick\0",
+            b"taskers_ghostty_host_tick\0",
+        )?;
+        let surface_new = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_surface_new\0",
+            b"taskers_ghostty_surface_new\0",
+        )?;
+        let surface_destroy = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_surface_destroy\0",
+            b"taskers_ghostty_surface_destroy\0",
+        )?;
+        let surface_grab_focus = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_surface_grab_focus\0",
+            b"taskers_ghostty_surface_grab_focus\0",
+        )?;
+        let surface_has_selection = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_surface_has_selection\0",
+            b"taskers_ghostty_surface_has_selection\0",
+        )?;
+        let surface_send_text = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_surface_send_text\0",
+            b"taskers_ghostty_surface_send_text\0",
+        )?;
+        let surface_read_all_text = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_surface_read_all_text\0",
+            b"taskers_ghostty_surface_read_all_text\0",
+        )?;
+        let surface_free_text = load_bridge_symbol(
+            &library,
+            &path,
+            b"ghostty_gtk_surface_free_text\0",
+            b"taskers_ghostty_surface_free_text\0",
+        )?;
 
         Ok(GhosttyBridgeLibrary {
             _library: library,
@@ -512,6 +489,30 @@ fn load_bridge_library() -> Result<GhosttyBridgeLibrary, GhosttyError> {
             surface_read_all_text,
             surface_free_text,
         })
+    }
+}
+
+#[cfg(taskers_ghostty_bridge)]
+unsafe fn load_bridge_symbol<T: Copy>(
+    library: &Library,
+    path: &std::path::Path,
+    generic_symbol: &[u8],
+    legacy_symbol: &[u8],
+) -> Result<T, GhosttyError> {
+    match unsafe { library.get::<T>(generic_symbol) } {
+        Ok(symbol) => Ok(*symbol),
+        Err(generic_error) => unsafe { library.get::<T>(legacy_symbol) }
+            .map(|symbol| *symbol)
+            .map_err(|legacy_error| GhosttyError::LibraryLoad {
+                path: path.to_path_buf(),
+                message: format!(
+                    "generic symbol {} failed: {}; legacy symbol {} failed: {}",
+                    String::from_utf8_lossy(&generic_symbol[..generic_symbol.len() - 1]),
+                    generic_error,
+                    String::from_utf8_lossy(&legacy_symbol[..legacy_symbol.len() - 1]),
+                    legacy_error
+                ),
+            }),
     }
 }
 
