@@ -659,7 +659,7 @@ fn build_ui_result(
     )));
     if let Some(gtk_host_info) = host.borrow().gtk_host_info() {
         let note = format!(
-            "Ghostty bridge version={} build_id={}",
+            "Ghostty GTK host version={} build_id={}",
             gtk_host_info.version, gtk_host_info.build_id
         );
         log_diagnostic(
@@ -674,7 +674,7 @@ fn build_ui_result(
     }
     if let Some(health) = host.borrow().gtk_host_health_snapshot() {
         let note = format!(
-            "Ghostty bridge lifecycle={} surface_count={}",
+            "Ghostty GTK host lifecycle={} surface_count={}",
             health.state.label(),
             health.surface_count
         );

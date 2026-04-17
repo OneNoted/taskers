@@ -1100,7 +1100,7 @@ impl TaskersHost {
         };
         if !self.gtk_host_running() {
             return Err(ControlError::not_supported(
-                "terminal debug is unavailable because the Ghostty bridge is not running",
+                "terminal debug is unavailable because the Ghostty GTK host is not running",
             ));
         }
 
@@ -3167,7 +3167,7 @@ fn surface_descriptor_from(spec: &TerminalMountSpec) -> GhosttyGtkSurfaceDescrip
         title: Some(spec.title.clone()),
         url: None,
         browser_profile_mode: BrowserProfileMode::PersistentDefault,
-        // The current Ghostty bridge is more stable when it controls shell
+        // The current Ghostty GTK host is more stable when it controls shell
         // selection itself, so keep command overrides empty until that path is
         // proven across hosts.
         command_argv: Vec::new(),
