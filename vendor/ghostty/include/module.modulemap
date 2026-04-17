@@ -5,3 +5,8 @@ module GhosttyKit {
     umbrella header "ghostty.h"
     export *
 }
+
+module GhosttyGtkBridgeKit {
+    header "ghostty_gtk.h"
+    export *
+}
