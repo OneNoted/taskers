@@ -13,7 +13,7 @@ use taskers_domain::{
     PaneMetadataPatch, SplitAxis as DomainSplitAxis, SurfaceRecord, WindowFrame, Workspace,
     WorkspaceSummary as DomainWorkspaceSummary, WorkspaceWindowTabRecord,
 };
-use taskers_ghostty::{BackendChoice, SurfaceDescriptor};
+use taskers_ghostty::{BackendChoice, GhosttyGtkSurfaceDescriptor};
 use taskers_runtime::{ShellLaunchSpec, default_shell_program};
 use time::OffsetDateTime;
 use tokio::sync::watch;
@@ -6998,8 +6998,8 @@ fn attention_panel_visible(model: &AppModel) -> bool {
         })
 }
 
-fn fallback_surface_descriptor(surface: &SurfaceRecord) -> SurfaceDescriptor {
-    SurfaceDescriptor {
+fn fallback_surface_descriptor(surface: &SurfaceRecord) -> GhosttyGtkSurfaceDescriptor {
+    GhosttyGtkSurfaceDescriptor {
         cols: 120,
         rows: 40,
         kind: surface.kind.clone(),
@@ -7020,7 +7020,7 @@ fn fallback_surface_descriptor(surface: &SurfaceRecord) -> SurfaceDescriptor {
 
 fn mount_spec_from_descriptor(
     surface: &SurfaceRecord,
-    descriptor: SurfaceDescriptor,
+    descriptor: GhosttyGtkSurfaceDescriptor,
 ) -> SurfaceMountSpec {
     match surface.kind {
         PaneKind::Browser => SurfaceMountSpec::Browser(BrowserMountSpec {
