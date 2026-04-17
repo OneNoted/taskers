@@ -11,6 +11,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={SKIP_BUILD_RUNTIME_EMBED_ENV}");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig");
+    println!("cargo:rerun-if-changed=../../vendor/ghostty/src/ghostty_gtk_bridge.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge.zig");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_glibc_compat.c");
     println!("cargo:rerun-if-changed=../../vendor/ghostty/src/taskers_bridge_build_info.zig");

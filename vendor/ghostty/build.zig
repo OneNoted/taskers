@@ -106,7 +106,7 @@ pub fn build(b: *std.Build) !void {
             .name = "ghostty_gtk_bridge",
             .linkage = .dynamic,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/taskers_bridge.zig"),
+                .root_source_file = b.path("src/ghostty_gtk_bridge.zig"),
                 .target = config.target,
                 .optimize = config.optimize,
                 .strip = config.strip,
