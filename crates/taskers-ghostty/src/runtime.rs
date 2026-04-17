@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    ffi::CString,
+    fs,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -318,10 +320,9 @@ fn normalize_gtk_bridge_layout(ghostty_dir: &Path) -> Result<(), RuntimeBootstra
 }
 
 fn installed_runtime_is_current(runtime_dir: &Path) -> bool {
-    if !runtime_dir
-        .join("lib")
-        .join(GTK_BRIDGE_LIBRARY_NAME)
-        .exists()
+    let generic_bridge_path = runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME);
+    if !generic_bridge_path.exists()
+        || !gtk_bridge_library_has_required_symbols(&generic_bridge_path)
     {
         return false;
     }
@@ -339,6 +340,23 @@ fn installed_runtime_is_current(runtime_dir: &Path) -> bool {
     match fs::read_to_string(runtime_dir.join(RUNTIME_VERSION_FILE)) {
         Ok(version) => version.trim() == env!("CARGO_PKG_VERSION"),
         Err(_) => true,
+    }
+}
+
+fn gtk_bridge_library_has_required_symbols(path: &Path) -> bool {
+    let Ok(c_path) = CString::new(path.to_string_lossy().as_bytes()) else {
+        return false;
+    };
+
+    unsafe {
+        let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_LOCAL | libc::RTLD_LAZY);
+        if handle.is_null() {
+            return false;
+        }
+        let host_new = libc::dlsym(handle, b"ghostty_gtk_host_new\0".as_ptr().cast());
+        let surface_new = libc::dlsym(handle, b"ghostty_gtk_surface_new\0".as_ptr().cast());
+        let _ = libc::dlclose(handle);
+        !host_new.is_null() && !surface_new.is_null()
     }
 }
 
@@ -562,10 +580,11 @@ mod tests {
         BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, GTK_BRIDGE_PATH_ENV, GTK_BUNDLE_PATH_ENV,
         GTK_BUNDLE_URL_ENV, GTK_DISABLE_BOOTSTRAP_ENV, GTK_RUNTIME_DIR_ENV,
         LEGACY_BRIDGE_LIBRARY_NAME, RUNTIME_VERSION_FILE, RuntimeBootstrap,
-        ensure_runtime_installed, installed_runtime_is_current, normalize_gtk_bridge_layout,
-        runtime_gtk_bridge_path, runtime_gtk_bridge_path_for, runtime_resources_dir,
-        runtime_resources_dir_for, runtime_terminfo_dir, runtime_terminfo_dir_for,
-        stage_build_runtime_layout, use_build_runtime_directly_for,
+        ensure_runtime_installed, gtk_bridge_library_has_required_symbols,
+        installed_runtime_is_current, normalize_gtk_bridge_layout, runtime_gtk_bridge_path,
+        runtime_gtk_bridge_path_for, runtime_resources_dir, runtime_resources_dir_for,
+        runtime_terminfo_dir, runtime_terminfo_dir_for, stage_build_runtime_layout,
+        use_build_runtime_directly_for,
     };
     use std::{env, fs, path::Path, sync::Mutex};
     use tar::Builder;
@@ -705,8 +724,38 @@ mod tests {
 
         assert!(!installed_runtime_is_current(&runtime_dir));
 
-        normalize_gtk_bridge_layout(&runtime_dir).expect("normalize runtime");
+        let build_runtime = super::build_runtime_layout().expect("build runtime layout");
+        fs::copy(
+            build_runtime.gtk_bridge_path,
+            runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME),
+        )
+        .expect("valid generic bridge");
         assert!(installed_runtime_is_current(&runtime_dir));
+    }
+
+    #[test]
+    fn installed_runtime_is_current_rejects_generic_bridge_without_required_symbols() {
+        let temp = tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        let terminfo_dir = temp.path().join("taskers").join("terminfo");
+        fs::create_dir_all(runtime_dir.join("lib")).expect("runtime lib dir");
+        fs::create_dir_all(terminfo_dir.join("g")).expect("terminfo dir");
+        fs::write(
+            runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME),
+            b"not-a-real-shared-library",
+        )
+        .expect("invalid generic bridge");
+        fs::write(terminfo_dir.join("g").join("ghostty"), b"terminfo").expect("terminfo");
+        fs::write(
+            runtime_dir.join(RUNTIME_VERSION_FILE),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("version");
+
+        assert!(!gtk_bridge_library_has_required_symbols(
+            &runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME)
+        ));
+        assert!(!installed_runtime_is_current(&runtime_dir));
     }
 
     #[test]
