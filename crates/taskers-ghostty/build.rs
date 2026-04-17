@@ -55,13 +55,6 @@ fn main() {
     build_bridge(&vendor_dir, &install_dir);
 
     println!(
-        "cargo:rustc-link-search=native={}",
-        install_dir.join("lib").display()
-    );
-    println!("cargo:rustc-link-lib=static=taskers_ghostty_bridge");
-    println!("cargo:rustc-link-lib=dylib=stdc++");
-
-    println!(
         "cargo:rustc-env=TASKERS_GHOSTTY_BUILD_RESOURCES_DIR={}",
         install_dir.join("share").join("ghostty").display()
     );
