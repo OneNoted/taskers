@@ -34,7 +34,6 @@ struct EnvPaths {
     xdg_state_home: Option<PathBuf>,
     taskers_config_path: Option<PathBuf>,
     ghostty_gtk_runtime_dir: Option<PathBuf>,
-    taskers_ghostty_runtime_dir: Option<PathBuf>,
     taskers_runtime_dir: Option<PathBuf>,
     taskers_session_path: Option<PathBuf>,
     taskers_socket_path: Option<PathBuf>,
@@ -51,8 +50,8 @@ impl EnvPaths {
             xdg_runtime_dir: env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
             xdg_state_home: env::var_os("XDG_STATE_HOME").map(PathBuf::from),
             taskers_config_path: env::var_os("TASKERS_CONFIG_PATH").map(PathBuf::from),
-            ghostty_gtk_runtime_dir: env::var_os("GHOSTTY_GTK_RUNTIME_DIR").map(PathBuf::from),
-            taskers_ghostty_runtime_dir: env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR")
+            ghostty_gtk_runtime_dir: env::var_os("GHOSTTY_GTK_RUNTIME_DIR")
+                .or_else(|| env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR"))
                 .map(PathBuf::from),
             taskers_runtime_dir: env::var_os("TASKERS_RUNTIME_DIR").map(PathBuf::from),
             taskers_session_path: env::var_os("TASKERS_SESSION_PATH").map(PathBuf::from),
@@ -109,7 +108,6 @@ impl TaskersPaths {
         let ghostty_runtime_dir = env_paths
             .ghostty_gtk_runtime_dir
             .clone()
-            .or_else(|| env_paths.taskers_ghostty_runtime_dir.clone())
             .unwrap_or_else(|| data_dir.join("ghostty"));
         let socket_path = env_paths
             .taskers_socket_path
@@ -446,7 +444,7 @@ mod tests {
             taskers_socket_path: Some(PathBuf::from("/work/control.sock")),
             taskers_terminal_socket_path: Some(PathBuf::from("/work/terminal.sock")),
             taskers_runtime_dir: Some(PathBuf::from("/work/runtime")),
-            taskers_ghostty_runtime_dir: Some(PathBuf::from("/work/ghostty")),
+            ghostty_gtk_runtime_dir: Some(PathBuf::from("/work/ghostty")),
             ..EnvPaths::default()
         };
         let paths = TaskersPaths::from_env(HostPlatform::Macos, &env);
