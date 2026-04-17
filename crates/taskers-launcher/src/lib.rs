@@ -24,6 +24,8 @@ use xz2::read::XzDecoder;
 const INSTALL_ROOT_ENV: &str = "TASKERS_INSTALL_ROOT";
 const MANIFEST_URL_ENV: &str = "TASKERS_RELEASE_MANIFEST_URL";
 const SKIP_DESKTOP_INTEGRATION_ENV: &str = "TASKERS_SKIP_DESKTOP_INTEGRATION";
+const GHOSTTY_GTK_BRIDGE_LIBRARY_NAME: &str = "libghostty_gtk.so";
+const LEGACY_GTK_BRIDGE_LIBRARY_NAME: &str = "libtaskers_ghostty_bridge.so";
 
 pub fn run() -> Result<ExitStatus> {
     let args = env::args_os().skip(1).collect::<Vec<_>>();
@@ -75,6 +77,7 @@ impl ManagedInstallation {
         };
 
         if installation.is_complete() {
+            installation.normalize_gtk_bridge_layout()?;
             return Ok(installation);
         }
 
@@ -190,6 +193,7 @@ impl ManagedInstallation {
                 unpack_root.display()
             );
         }
+        normalize_gtk_bridge_layout(&unpack_root)?;
 
         if self.bundle_root.exists() {
             remove_path(&self.bundle_root)?;
@@ -298,6 +302,10 @@ impl ManagedInstallation {
     fn terminfo_path(&self) -> PathBuf {
         self.bundle_root.join("terminfo")
     }
+
+    fn normalize_gtk_bridge_layout(&self) -> Result<()> {
+        normalize_gtk_bridge_layout(&self.bundle_root)
+    }
 }
 
 fn validate_artifact_kind(kind: ArtifactKind) -> Result<()> {
@@ -307,22 +315,42 @@ fn validate_artifact_kind(kind: ArtifactKind) -> Result<()> {
 }
 
 fn validate_bundle_layout(bundle_root: &Path) -> bool {
+    let ghostty_lib_dir = bundle_root.join("ghostty").join("lib");
+
     bundle_root.join("bin").join("taskers").is_file()
         && bundle_root.join("bin").join("taskersctl").is_file()
         && bundle_root.join("bin").join("taskers-terminald").is_file()
         && bundle_root.join("ghostty").is_dir()
-        && (bundle_root
-            .join("ghostty")
-            .join("lib")
-            .join("libghostty_gtk.so")
+        && (ghostty_lib_dir
+            .join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME)
             .is_file()
-            || bundle_root
-                .join("ghostty")
-                .join("lib")
-                .join("libtaskers_ghostty_bridge.so")
+            || ghostty_lib_dir
+                .join(LEGACY_GTK_BRIDGE_LIBRARY_NAME)
                 .is_file())
         && bundle_root.join("ghostty").join("themes").is_dir()
         && bundle_root.join("terminfo").is_dir()
+}
+
+fn normalize_gtk_bridge_layout(bundle_root: &Path) -> Result<()> {
+    let ghostty_lib_dir = bundle_root.join("ghostty").join("lib");
+    let generic_bridge_path = ghostty_lib_dir.join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME);
+    if generic_bridge_path.is_file() {
+        return Ok(());
+    }
+
+    let legacy_bridge_path = ghostty_lib_dir.join(LEGACY_GTK_BRIDGE_LIBRARY_NAME);
+    if !legacy_bridge_path.is_file() {
+        return Ok(());
+    }
+
+    fs::copy(&legacy_bridge_path, &generic_bridge_path).with_context(|| {
+        format!(
+            "failed to synthesize {} from {}",
+            generic_bridge_path.display(),
+            legacy_bridge_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn current_target_triple() -> Result<&'static str> {
@@ -636,7 +664,8 @@ mod tests {
         bundle_root, current_target_triple, default_manifest_url, desktop_exec,
         desktop_launch_wrapper_contents, launcher_path_looks_installed, path_taskers_executable,
         remove_legacy_desktop_integration, sha256_path, should_update_desktop_entry, ArtifactKind,
-        ManagedInstallation, ReleaseArtifact, ReleaseManifest,
+        ManagedInstallation, ReleaseArtifact, ReleaseManifest, GHOSTTY_GTK_BRIDGE_LIBRARY_NAME,
+        LEGACY_GTK_BRIDGE_LIBRARY_NAME,
     };
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -689,6 +718,11 @@ mod tests {
         )
         .expect("taskersctl");
         fs::write(
+            bundle_dir.join("bin").join("taskers-terminald"),
+            "#!/bin/sh\nexit 0\n",
+        )
+        .expect("taskers-terminald");
+        fs::write(
             bundle_dir.join("ghostty").join(".taskers-runtime-version"),
             env!("CARGO_PKG_VERSION"),
         )
@@ -697,18 +731,10 @@ mod tests {
             bundle_dir
                 .join("ghostty")
                 .join("lib")
-                .join("libtaskers_ghostty_bridge.so"),
+                .join(LEGACY_GTK_BRIDGE_LIBRARY_NAME),
             "bridge",
         )
-        .expect("bridge");
-        fs::write(
-            bundle_dir
-                .join("ghostty")
-                .join("lib")
-                .join("libghostty_gtk.so"),
-            "bridge",
-        )
-        .expect("generic bridge");
+        .expect("legacy bridge");
         fs::write(
             bundle_dir
                 .join("ghostty")
@@ -777,7 +803,84 @@ mod tests {
             .bundle_root
             .join("ghostty")
             .join("lib")
-            .join("libghostty_gtk.so")
+            .join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME)
+            .is_file());
+    }
+
+    #[test]
+    fn existing_legacy_only_install_is_normalized_to_generic_gtk_bridge() {
+        let temp = tempdir().expect("tempdir");
+        let install_root = temp.path().join("install");
+        let version = env!("CARGO_PKG_VERSION");
+        let bundle_root = bundle_root(
+            &install_root,
+            version,
+            current_target_triple().expect("target"),
+        );
+        fs::create_dir_all(bundle_root.join("bin")).expect("bin dir");
+        fs::create_dir_all(bundle_root.join("ghostty").join("lib")).expect("ghostty dir");
+        fs::create_dir_all(bundle_root.join("ghostty").join("themes")).expect("themes dir");
+        fs::create_dir_all(bundle_root.join("terminfo").join("g")).expect("terminfo dir");
+        fs::write(
+            bundle_root.join("bin").join("taskers"),
+            "#!/bin/sh\nexit 0\n",
+        )
+        .expect("taskers");
+        fs::write(
+            bundle_root.join("bin").join("taskersctl"),
+            "#!/bin/sh\nexit 0\n",
+        )
+        .expect("taskersctl");
+        fs::write(
+            bundle_root.join("bin").join("taskers-terminald"),
+            "#!/bin/sh\nexit 0\n",
+        )
+        .expect("taskers-terminald");
+        fs::write(
+            bundle_root.join("ghostty").join(".taskers-runtime-version"),
+            version,
+        )
+        .expect("ghostty version");
+        fs::write(
+            bundle_root
+                .join("ghostty")
+                .join("lib")
+                .join(LEGACY_GTK_BRIDGE_LIBRARY_NAME),
+            "bridge",
+        )
+        .expect("legacy bridge");
+        fs::write(
+            bundle_root
+                .join("ghostty")
+                .join("themes")
+                .join("Catppuccin Mocha"),
+            "palette = 0=#1e1e2e\n",
+        )
+        .expect("theme");
+        fs::write(
+            bundle_root.join("terminfo").join("g").join("ghostty"),
+            "ghostty",
+        )
+        .expect("terminfo");
+
+        unsafe {
+            std::env::set_var("TASKERS_INSTALL_ROOT", &install_root);
+        }
+        let installation = ManagedInstallation::ensure_installed(version).expect("install");
+        unsafe {
+            std::env::remove_var("TASKERS_INSTALL_ROOT");
+        }
+
+        assert_eq!(installation.bundle_root, bundle_root);
+        assert!(bundle_root
+            .join("ghostty")
+            .join("lib")
+            .join(GHOSTTY_GTK_BRIDGE_LIBRARY_NAME)
+            .is_file());
+        assert!(bundle_root
+            .join("ghostty")
+            .join("lib")
+            .join(LEGACY_GTK_BRIDGE_LIBRARY_NAME)
             .is_file());
     }
 
