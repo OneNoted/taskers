@@ -602,11 +602,11 @@ fn ghostty_shutdown_summary(health: &GhosttyGtkHealthSnapshot) -> String {
 }
 
 fn ghostty_quiesced_message() -> &'static str {
-    "ghostty bridge quiesced surface_count=0"
+    "ghostty gtk host quiesced surface_count=0"
 }
 
 fn ghostty_quiesce_timeout_message(surface_count: usize) -> String {
-    format!("ghostty bridge quiesce timed out surface_count={surface_count}")
+    format!("ghostty gtk host quiesce timed out surface_count={surface_count}")
 }
 
 fn build_ui_result(
@@ -3419,11 +3419,11 @@ mod startup_tests {
         );
         assert_eq!(
             ghostty_quiesce_timeout_message(health.surface_count),
-            "ghostty bridge quiesce timed out surface_count=2"
+            "ghostty gtk host quiesce timed out surface_count=2"
         );
         assert_eq!(
             ghostty_quiesced_message(),
-            "ghostty bridge quiesced surface_count=0"
+            "ghostty gtk host quiesced surface_count=0"
         );
     }
 

@@ -275,7 +275,7 @@ impl BridgeWatchdog {
                                 DiagnosticCategory::Bridge,
                                 active.revision,
                                 format!(
-                                    "ghostty bridge hang suspected operation={} elapsed_ms={elapsed_ms}",
+                                    "ghostty gtk host hang suspected operation={} elapsed_ms={elapsed_ms}",
                                     active.kind.label()
                                 ),
                             )
@@ -291,7 +291,7 @@ impl BridgeWatchdog {
                                 DiagnosticCategory::Bridge,
                                 active.revision,
                                 format!(
-                                    "ghostty bridge operation stalled operation={} elapsed_ms={elapsed_ms}",
+                                    "ghostty gtk host operation stalled operation={} elapsed_ms={elapsed_ms}",
                                     active.kind.label()
                                 ),
                             )
@@ -887,7 +887,7 @@ impl TaskersHost {
                     DiagnosticCategory::Bridge,
                     None,
                     format!(
-                        "ghostty bridge shutdown complete state={} surface_count={} last_tick_ms={} last_mutation_ms={}",
+                        "ghostty gtk host shutdown complete state={} surface_count={} last_tick_ms={} last_mutation_ms={}",
                         health.state.label(),
                         health.surface_count,
                         health
@@ -941,7 +941,7 @@ impl TaskersHost {
                         DiagnosticRecord::new(
                             DiagnosticCategory::Bridge,
                             None,
-                            "skipping terminal send text because ghostty bridge is not running",
+                            "skipping terminal send text because ghostty gtk host is not running",
                         )
                         .with_surface(surface_id),
                     );
@@ -1465,7 +1465,7 @@ impl TaskersHost {
                         DiagnosticRecord::new(
                             DiagnosticCategory::Bridge,
                             Some(revision),
-                            "skipped terminal surface destroy because ghostty bridge is not running",
+                            "skipped terminal surface destroy because ghostty gtk host is not running",
                         )
                         .with_surface(surface_id),
                     );
@@ -1511,7 +1511,7 @@ impl TaskersHost {
                             DiagnosticRecord::new(
                                 DiagnosticCategory::Bridge,
                                 Some(revision),
-                                "skipping terminal surface create because ghostty bridge is not running",
+                                "skipping terminal surface create because ghostty gtk host is not running",
                             )
                             .with_pane(entry.pane_id)
                             .with_surface(entry.surface_id),
@@ -1536,7 +1536,7 @@ impl TaskersHost {
                                     DiagnosticCategory::Bridge,
                                     Some(revision),
                                     format!(
-                                        "deferring terminal surface create until ghostty bridge quiesces bridge_surface_count={} live_surface_count={}",
+                                        "deferring terminal surface create until ghostty gtk host quiesces bridge_surface_count={} live_surface_count={}",
                                         bridge_surface_count, live_surface_count
                                     ),
                                 )
