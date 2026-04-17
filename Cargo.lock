@@ -2478,7 +2478,6 @@ name = "taskers-ghostty"
 version = "0.7.0"
 dependencies = [
  "gtk4",
- "libloading",
  "serde",
  "tar",
  "taskers-domain",

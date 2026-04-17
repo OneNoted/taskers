@@ -42,8 +42,7 @@ use taskers_ghostty::{
     save_embedded_terminal_config,
 };
 use taskers_host::{
-    BridgeHealthSnapshot, DiagnosticCategory, DiagnosticRecord, DiagnosticsSink,
-    GhosttyLifecycleState, TaskersHost,
+    BridgeHealthSnapshot, DiagnosticCategory, DiagnosticRecord, DiagnosticsSink, TaskersHost,
 };
 use taskers_runtime::{
     ShellLaunchSpec, TerminalSessionClient, install_shell_integration, scrub_inherited_terminal_env,
@@ -3184,15 +3183,16 @@ fn looks_like_dev_install(path: &Path) -> bool {
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        BridgeHealthSnapshot, GhosttyLifecycleState, RuntimePathOverrides,
-        build_shell_network_session, ghostty_quiesce_timeout_message, ghostty_quiesced_message,
-        ghostty_shutdown_summary, looks_like_dev_install, maybe_export_bundled_terminfo,
-        publish_shell_environment, should_apply_webkit_dmabuf_workaround,
-        should_defer_initial_sync, should_force_software_gl, should_skip_terminal_sidecar_in_smoke,
-        should_sync_host_snapshot, smoke_runtime_path_overrides,
+        BridgeHealthSnapshot, RuntimePathOverrides, build_shell_network_session,
+        ghostty_quiesce_timeout_message, ghostty_quiesced_message, ghostty_shutdown_summary,
+        looks_like_dev_install, maybe_export_bundled_terminfo, publish_shell_environment,
+        should_apply_webkit_dmabuf_workaround, should_defer_initial_sync, should_force_software_gl,
+        should_skip_terminal_sidecar_in_smoke, should_sync_host_snapshot,
+        smoke_runtime_path_overrides,
     };
     use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
     use taskers_ghostty::GhosttyBridgeInfo;
+    use taskers_host::GhosttyLifecycleState;
     use taskers_runtime::ShellLaunchSpec;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());

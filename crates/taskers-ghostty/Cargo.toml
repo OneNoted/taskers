@@ -10,7 +10,6 @@ version.workspace = true
 build = "build.rs"
 
 [dependencies]
-libloading = "0.8"
 serde.workspace = true
 tar.workspace = true
 taskers-domain = { version = "0.7.0", path = "../taskers-domain" }

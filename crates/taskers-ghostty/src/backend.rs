@@ -1,4 +1,4 @@
-use crate::runtime::{runtime_bridge_path, runtime_resources_dir};
+use crate::runtime::runtime_resources_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use taskers_domain::{BrowserProfileMode, PaneKind};
@@ -161,7 +161,8 @@ fn auto_probe(requested: BackendChoice) -> BackendProbe {
             requested,
             selected: BackendChoice::Mock,
             availability: BackendAvailability::Fallback,
-            notes: "Ghostty bridge unavailable, using placeholder terminal surfaces.".into(),
+            notes: "Ghostty runtime resources unavailable, using placeholder terminal surfaces."
+                .into(),
         }
     }
 }
@@ -169,7 +170,7 @@ fn auto_probe(requested: BackendChoice) -> BackendProbe {
 fn ghostty_availability() -> BackendAvailability {
     #[cfg(all(target_os = "linux", taskers_ghostty_bridge))]
     {
-        if runtime_bridge_path().is_some() {
+        if runtime_resources_dir().is_some() {
             BackendAvailability::Ready
         } else {
             BackendAvailability::Unavailable
@@ -195,16 +196,12 @@ fn embedded_ghostty_availability() -> BackendAvailability {
 }
 
 fn ghostty_notes() -> String {
-    let mut notes = String::from("Ghostty GTK bridge compiled in.");
-    if let Some(path) = runtime_bridge_path() {
-        notes.push_str(" Bridge: ");
-        notes.push_str(&path.display().to_string());
-    } else {
-        notes.push_str(" Bridge library not found.");
-    }
+    let mut notes = String::from("Ghostty GTK bridge linked into the binary.");
     if let Some(path) = runtime_resources_dir() {
         notes.push_str(" Resources: ");
         notes.push_str(&path.display().to_string());
+    } else {
+        notes.push_str(" Runtime resources not found.");
     }
     notes
 }

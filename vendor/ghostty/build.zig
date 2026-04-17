@@ -102,7 +102,7 @@ pub fn build(b: *std.Build) !void {
     );
 
     if (config.app_runtime == .gtk) {
-        const taskers_bridge = b.addLibrary(.{
+        const taskers_bridge_shared = b.addLibrary(.{
             .name = "taskers_ghostty_bridge",
             .linkage = .dynamic,
             .root_module = b.createModule(.{
@@ -115,12 +115,32 @@ pub fn build(b: *std.Build) !void {
             }),
             .use_llvm = true,
         });
-        taskers_bridge.linkLibC();
-        _ = try deps.add(taskers_bridge);
+        taskers_bridge_shared.linkLibC();
+        _ = try deps.add(taskers_bridge_shared);
+
+        const taskers_bridge_static = b.addLibrary(.{
+            .name = "taskers_ghostty_bridge",
+            .linkage = .static,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/taskers_bridge.zig"),
+                .target = config.target,
+                .optimize = config.optimize,
+                .strip = config.strip,
+                .omit_frame_pointer = config.strip,
+                .unwind_tables = if (config.strip) .none else .sync,
+            }),
+            .use_llvm = true,
+        });
+        taskers_bridge_static.linkLibC();
+        _ = try deps.add(taskers_bridge_static);
 
         const install_bridge = b.addInstallLibFile(
-            taskers_bridge.getEmittedBin(),
+            taskers_bridge_shared.getEmittedBin(),
             "libtaskers_ghostty_bridge.so",
+        );
+        const install_bridge_static = b.addInstallLibFile(
+            taskers_bridge_static.getEmittedBin(),
+            "libtaskers_ghostty_bridge.a",
         );
         const install_bridge_header = b.addInstallHeaderFile(
             b.path("include/taskers_ghostty_bridge.h"),
@@ -131,6 +151,7 @@ pub fn build(b: *std.Build) !void {
             "Build the Taskers Ghostty GTK bridge",
         );
         taskers_bridge_step.dependOn(&install_bridge.step);
+        taskers_bridge_step.dependOn(&install_bridge_static.step);
         taskers_bridge_step.dependOn(&install_bridge_header.step);
         resources.addStepDependencies(taskers_bridge_step);
         if (i18n) |v| v.addStepDependencies(taskers_bridge_step);
