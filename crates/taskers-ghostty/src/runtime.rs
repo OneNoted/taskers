@@ -11,6 +11,10 @@ use xz2::read::XzDecoder;
 const BRIDGE_LIBRARY_NAME: &str = "libtaskers_ghostty_bridge.so";
 const GTK_BRIDGE_LIBRARY_NAME: &str = "libghostty_gtk.so";
 const GTK_BRIDGE_PATH_ENV: &str = "GHOSTTY_GTK_BRIDGE_PATH";
+const GTK_RUNTIME_DIR_ENV: &str = "GHOSTTY_GTK_RUNTIME_DIR";
+const GTK_BUNDLE_PATH_ENV: &str = "GHOSTTY_GTK_RUNTIME_BUNDLE_PATH";
+const GTK_BUNDLE_URL_ENV: &str = "GHOSTTY_GTK_RUNTIME_URL";
+const GTK_DISABLE_BOOTSTRAP_ENV: &str = "GHOSTTY_GTK_DISABLE_RUNTIME_BOOTSTRAP";
 const RUNTIME_VERSION_FILE: &str = ".taskers-runtime-version";
 const TERMINFO_GHOSTTY_PATH: &str = "g/ghostty";
 const TERMINFO_XTERM_GHOSTTY_PATH: &str = "x/xterm-ghostty";
@@ -54,13 +58,17 @@ pub enum RuntimeBootstrapError {
 }
 
 pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBootstrapError> {
-    if env::var_os(DISABLE_BOOTSTRAP_ENV).is_some() {
+    if env::var_os(GTK_DISABLE_BOOTSTRAP_ENV).is_some()
+        || env::var_os(DISABLE_BOOTSTRAP_ENV).is_some()
+    {
         return Ok(None);
     }
 
     let current_exe = current_exe_path();
-    let bundle_override =
-        env::var_os(BUNDLE_PATH_ENV).is_some() || env::var_os(BUNDLE_URL_ENV).is_some();
+    let bundle_override = env::var_os(GTK_BUNDLE_PATH_ENV).is_some()
+        || env::var_os(BUNDLE_PATH_ENV).is_some()
+        || env::var_os(GTK_BUNDLE_URL_ENV).is_some()
+        || env::var_os(BUNDLE_URL_ENV).is_some();
     let build_runtime = build_runtime_layout();
     if !bundle_override
         && build_runtime.is_some()
@@ -92,7 +100,9 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
         message: error.to_string(),
     })?;
 
-    let install_result = if let Some(bundle_path) = env::var_os(BUNDLE_PATH_ENV).map(PathBuf::from)
+    let install_result = if let Some(bundle_path) = env::var_os(GTK_BUNDLE_PATH_ENV)
+        .or_else(|| env::var_os(BUNDLE_PATH_ENV))
+        .map(PathBuf::from)
     {
         let file =
             fs::File::open(&bundle_path).map_err(|error| RuntimeBootstrapError::OpenBundle {
@@ -103,7 +113,9 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
     } else if let Some(build_runtime) = build_runtime.as_ref() {
         stage_build_runtime_layout(build_runtime, &staging_root)
     } else {
-        let url = env::var(BUNDLE_URL_ENV).unwrap_or_else(|_| default_runtime_bundle_url());
+        let url = env::var(GTK_BUNDLE_URL_ENV)
+            .or_else(|_| env::var(BUNDLE_URL_ENV))
+            .unwrap_or_else(|_| default_runtime_bundle_url());
         let response =
             ureq::get(&url)
                 .call()
@@ -350,15 +362,25 @@ fn build_runtime_bridge_path() -> Option<PathBuf> {
 }
 
 fn build_runtime_resources_dir() -> Option<PathBuf> {
-    option_env!("TASKERS_GHOSTTY_BUILD_RESOURCES_DIR")
+    option_env!("GHOSTTY_GTK_BUILD_RESOURCES_DIR")
         .map(PathBuf::from)
         .filter(|path| path.exists())
+        .or_else(|| {
+            option_env!("TASKERS_GHOSTTY_BUILD_RESOURCES_DIR")
+                .map(PathBuf::from)
+                .filter(|path| path.exists())
+        })
 }
 
 fn build_runtime_terminfo_dir() -> Option<PathBuf> {
-    option_env!("TASKERS_GHOSTTY_BUILD_TERMINFO_DIR")
+    option_env!("GHOSTTY_GTK_BUILD_TERMINFO_DIR")
         .map(PathBuf::from)
         .filter(|path| terminfo_dir_is_usable(path))
+        .or_else(|| {
+            option_env!("TASKERS_GHOSTTY_BUILD_TERMINFO_DIR")
+                .map(PathBuf::from)
+                .filter(|path| terminfo_dir_is_usable(path))
+        })
 }
 
 fn stage_build_runtime_layout(
@@ -447,6 +469,7 @@ fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), RuntimeBootstra
 fn set_runtime_environment_vars(path: &Path) {
     unsafe {
         env::set_var("GHOSTTY_RESOURCES_DIR", path);
+        env::set_var(GTK_RUNTIME_DIR_ENV, path);
         env::set_var("TASKERS_GHOSTTY_RUNTIME_DIR", path);
     }
 }
@@ -456,7 +479,9 @@ fn installed_runtime_dir() -> Option<PathBuf> {
 }
 
 fn explicit_runtime_dir() -> Option<PathBuf> {
-    env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR").map(PathBuf::from)
+    env::var_os(GTK_RUNTIME_DIR_ENV)
+        .or_else(|| env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR"))
+        .map(PathBuf::from)
 }
 
 fn default_installed_runtime_dir() -> Option<PathBuf> {
@@ -514,10 +539,11 @@ fn remove_path_if_exists(path: &Path) -> Result<(), RuntimeBootstrapError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, GTK_BRIDGE_PATH_ENV, RUNTIME_VERSION_FILE,
-        RuntimeBootstrap, ensure_runtime_installed, runtime_bridge_path, runtime_bridge_path_for,
-        runtime_resources_dir, runtime_resources_dir_for, runtime_terminfo_dir,
-        runtime_terminfo_dir_for, stage_build_runtime_layout, use_build_runtime_directly_for,
+        BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, GTK_BRIDGE_PATH_ENV, GTK_RUNTIME_DIR_ENV,
+        RUNTIME_VERSION_FILE, RuntimeBootstrap, ensure_runtime_installed, runtime_bridge_path,
+        runtime_bridge_path_for, runtime_resources_dir, runtime_resources_dir_for,
+        runtime_terminfo_dir, runtime_terminfo_dir_for, stage_build_runtime_layout,
+        use_build_runtime_directly_for,
     };
     use std::{env, fs, path::Path, sync::Mutex};
     use tar::Builder;
@@ -633,6 +659,31 @@ mod tests {
         );
         assert_eq!(
             env::var_os("TASKERS_GHOSTTY_RUNTIME_DIR").map(std::path::PathBuf::from),
+            Some(runtime_dir)
+        );
+    }
+
+    #[test]
+    fn configure_runtime_environment_sets_generic_runtime_dir_alias() {
+        let _lock = RUNTIME_ENV_LOCK.lock().expect("runtime env lock");
+        let temp = tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+
+        let _guard = EnvGuard::set([
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", None),
+            (GTK_RUNTIME_DIR_ENV, Some(runtime_dir.as_os_str())),
+            ("GHOSTTY_RESOURCES_DIR", None),
+        ]);
+
+        super::configure_runtime_environment();
+
+        assert_eq!(
+            env::var_os("GHOSTTY_RESOURCES_DIR").map(std::path::PathBuf::from),
+            Some(runtime_dir.clone())
+        );
+        assert_eq!(
+            env::var_os(GTK_RUNTIME_DIR_ENV).map(std::path::PathBuf::from),
             Some(runtime_dir)
         );
     }
