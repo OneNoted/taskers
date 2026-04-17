@@ -3347,7 +3347,8 @@ mod startup_tests {
         .expect("write terminfo");
 
         let _guard = EnvGuard::set([
-            ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.clone())),
+            ("GHOSTTY_GTK_RUNTIME_DIR", Some(runtime_dir.clone())),
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", None),
             ("TERMINFO", None),
             ("XDG_DATA_HOME", None),
         ]);
@@ -3382,6 +3383,40 @@ mod startup_tests {
         let _guard = EnvGuard::set([
             ("GHOSTTY_GTK_RUNTIME_DIR", Some(runtime_dir.clone())),
             ("TASKERS_GHOSTTY_RUNTIME_DIR", None),
+            ("TERMINFO", None),
+            ("XDG_DATA_HOME", None),
+        ]);
+
+        let mut shell_launch = ShellLaunchSpec {
+            program: PathBuf::from("/bin/sh"),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        };
+        maybe_export_bundled_terminfo(&mut shell_launch);
+
+        assert_eq!(
+            shell_launch.env.get("TERMINFO").map(String::as_str),
+            Some(terminfo_dir.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn legacy_runtime_dir_alias_still_reinjects_packaged_runtime_terminfo_after_scrub() {
+        let _lock = ENV_MUTEX.lock().expect("env mutex");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        let terminfo_dir = temp.path().join("taskers").join("terminfo");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        std::fs::create_dir_all(terminfo_dir.join("x")).expect("terminfo dir");
+        std::fs::write(
+            terminfo_dir.join("x").join("xterm-ghostty"),
+            b"fake terminfo",
+        )
+        .expect("write terminfo");
+
+        let _guard = EnvGuard::set([
+            ("GHOSTTY_GTK_RUNTIME_DIR", None),
+            ("TASKERS_GHOSTTY_RUNTIME_DIR", Some(runtime_dir.clone())),
             ("TERMINFO", None),
             ("XDG_DATA_HOME", None),
         ]);
