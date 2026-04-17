@@ -37,7 +37,7 @@ use taskers_domain::{
 };
 use taskers_ghostty::{
     BackendChoice, EmbeddedTerminalAppearance, EmbeddedTerminalConfig, EmbeddedTerminalConfigPaths,
-    GhosttyHost, GhosttyHostOptions, OptionalBoolValue, ensure_runtime_installed,
+    GhosttyGtkHost, GhosttyGtkHostOptions, OptionalBoolValue, ensure_runtime_installed,
     load_or_initialize_embedded_terminal_config, runtime_terminfo_dir,
     save_embedded_terminal_config,
 };
@@ -104,7 +104,7 @@ struct BootstrapContext {
     core: SharedCore,
     app_state: AppState,
     socket_path: PathBuf,
-    ghostty_host: Option<GhosttyHost>,
+    ghostty_host: Option<GhosttyGtkHost>,
     config: TaskersConfig,
     embedded_terminal_config: EmbeddedTerminalConfig,
     startup_notes: Vec<String>,
@@ -115,7 +115,7 @@ struct RuntimeBootstrap {
     shell_integration: RuntimeCapability,
     terminal_persistence: RuntimeCapability,
     shell_launch: ShellLaunchSpec,
-    host_options: GhosttyHostOptions,
+    host_options: GhosttyGtkHostOptions,
     socket_path: PathBuf,
     terminal_session_client: Option<TerminalSessionClient>,
     startup_notes: Vec<String>,
@@ -1782,7 +1782,7 @@ fn bootstrap_runtime(
 
     let (ghostty_host, backend_choice, terminal_host, terminal_note) =
         match probe_ghostty_backend_process(GhosttyProbeMode::Surface) {
-            Ok(()) => match GhosttyHost::new_with_options(&runtime.host_options) {
+            Ok(()) => match GhosttyGtkHost::new_with_options(&runtime.host_options) {
                 Ok(host) => {
                     let _ = host.tick();
                     (
@@ -1966,7 +1966,7 @@ fn resolve_runtime_bootstrap(
         }
     };
 
-    let host_options = GhosttyHostOptions::from_shell_launch(&shell_launch)
+    let host_options = GhosttyGtkHostOptions::from_shell_launch(&shell_launch)
         .with_embedded_config_paths(
             embedded_terminal_paths.base.display().to_string(),
             embedded_terminal_paths.override_file.display().to_string(),
@@ -2126,7 +2126,7 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
         config.configured_shell.as_deref(),
         None,
     );
-    let host = match GhosttyHost::new_with_options(&runtime.host_options) {
+    let host = match GhosttyGtkHost::new_with_options(&runtime.host_options) {
         Ok(host) => {
             let _ = host.tick();
             host
@@ -2149,7 +2149,7 @@ fn run_internal_ghostty_probe(mode: GhosttyProbeMode) -> glib::ExitCode {
 }
 
 fn run_internal_surface_probe(
-    host: GhosttyHost,
+    host: GhosttyGtkHost,
     shell_launch: ShellLaunchSpec,
     mode: GhosttyProbeMode,
     config: TaskersConfig,
@@ -3191,7 +3191,7 @@ mod startup_tests {
         smoke_runtime_path_overrides,
     };
     use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::Mutex};
-    use taskers_ghostty::GhosttyBridgeInfo;
+    use taskers_ghostty::GhosttyGtkInfo;
     use taskers_host::GhosttyLifecycleState;
     use taskers_runtime::ShellLaunchSpec;
 
@@ -3402,7 +3402,7 @@ mod startup_tests {
     #[test]
     fn ghostty_shutdown_quiesce_reports_terminal_bridge_health() {
         let health = BridgeHealthSnapshot {
-            bridge_info: GhosttyBridgeInfo {
+            bridge_info: GhosttyGtkInfo {
                 version: "1.0.0".into(),
                 build_id: "ghostty-test".into(),
             },

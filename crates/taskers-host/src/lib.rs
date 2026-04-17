@@ -33,7 +33,7 @@ use taskers_domain::{
 };
 use taskers_ghostty::{
     GHOSTTY_GTK_PROPERTY_CHILD_EXITED, GHOSTTY_GTK_PROPERTY_PWD, GHOSTTY_GTK_PROPERTY_TITLE,
-    GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor,
+    GhosttyGtkHost, GhosttyGtkInfo, GhosttyGtkSurfaceDescriptor,
 };
 use taskers_shell_core as taskers_core;
 use webkit6::{
@@ -158,7 +158,7 @@ impl GhosttyLifecycleState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeHealthSnapshot {
-    pub bridge_info: GhosttyBridgeInfo,
+    pub bridge_info: GhosttyGtkInfo,
     pub state: GhosttyLifecycleState,
     pub surface_count: usize,
     pub last_tick_duration_ms: Option<u128>,
@@ -404,11 +404,7 @@ impl BridgeWatchdog {
         }
     }
 
-    fn snapshot(
-        &self,
-        bridge_info: GhosttyBridgeInfo,
-        surface_count: usize,
-    ) -> BridgeHealthSnapshot {
+    fn snapshot(&self, bridge_info: GhosttyGtkInfo, surface_count: usize) -> BridgeHealthSnapshot {
         let shared = self.shared.lock().expect("bridge watchdog lock");
         BridgeHealthSnapshot {
             bridge_info,
@@ -486,8 +482,8 @@ pub struct TaskersHost {
     event_sink: HostEventSink,
     shell_action_sink: ShellActionSink,
     diagnostics: Option<DiagnosticsSink>,
-    ghostty_host: Option<GhosttyHost>,
-    ghostty_bridge_info: Option<GhosttyBridgeInfo>,
+    ghostty_host: Option<GhosttyGtkHost>,
+    ghostty_bridge_info: Option<GhosttyGtkInfo>,
     ghostty_watchdog: Option<BridgeWatchdog>,
     skip_next_ghostty_tick: bool,
     pending_terminal_create_retry: bool,
@@ -597,12 +593,12 @@ impl BrowserSurfaceHandle {
 impl TaskersHost {
     pub fn new(
         shell_widget: &impl IsA<Widget>,
-        ghostty_host: Option<GhosttyHost>,
+        ghostty_host: Option<GhosttyGtkHost>,
         event_sink: HostEventSink,
         shell_action_sink: ShellActionSink,
         diagnostics: Option<DiagnosticsSink>,
     ) -> Self {
-        let ghostty_bridge_info = ghostty_host.as_ref().map(GhosttyHost::bridge_info);
+        let ghostty_bridge_info = ghostty_host.as_ref().map(GhosttyGtkHost::bridge_info);
         let ghostty_watchdog = ghostty_bridge_info
             .as_ref()
             .map(|_| BridgeWatchdog::new(diagnostics.clone()));
@@ -791,7 +787,7 @@ impl TaskersHost {
         }
     }
 
-    pub fn bridge_info(&self) -> Option<GhosttyBridgeInfo> {
+    pub fn bridge_info(&self) -> Option<GhosttyGtkInfo> {
         self.ghostty_bridge_info.clone()
     }
 
@@ -800,7 +796,7 @@ impl TaskersHost {
         let surface_count = self
             .ghostty_host
             .as_ref()
-            .map(GhosttyHost::surface_count)
+            .map(GhosttyGtkHost::surface_count)
             .unwrap_or_default();
         self.ghostty_watchdog
             .as_ref()
@@ -2171,7 +2167,7 @@ impl TerminalSurface {
         resize_preview_active: bool,
         event_sink: HostEventSink,
         diagnostics: Option<DiagnosticsSink>,
-        host: &GhosttyHost,
+        host: &GhosttyGtkHost,
     ) -> Result<Self> {
         let spec = entry.spec.clone();
         let descriptor = surface_descriptor_from(&spec);
@@ -2266,7 +2262,7 @@ impl TerminalSurface {
         revision: u64,
         interactive: bool,
         resize_preview_active: bool,
-        host: Option<&GhosttyHost>,
+        host: Option<&GhosttyGtkHost>,
         diagnostics: Option<&DiagnosticsSink>,
     ) {
         self.workspace_id.set(entry.workspace_id);
@@ -3158,8 +3154,8 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn surface_descriptor_from(spec: &TerminalMountSpec) -> SurfaceDescriptor {
-    SurfaceDescriptor {
+fn surface_descriptor_from(spec: &TerminalMountSpec) -> GhosttyGtkSurfaceDescriptor {
+    GhosttyGtkSurfaceDescriptor {
         cols: spec.cols,
         rows: spec.rows,
         kind: PaneKind::Terminal,
