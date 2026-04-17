@@ -144,6 +144,10 @@ pub export fn taskers_ghostty_host_new(options: ?*const HostOptions) ?*Host {
     return host;
 }
 
+pub export fn ghostty_gtk_host_new(options: ?*const HostOptions) ?*Host {
+    return taskers_ghostty_host_new(options);
+}
+
 pub export fn taskers_ghostty_host_free(host: ?*Host) void {
     const ptr = host orelse return;
     const alloc = state.alloc;
@@ -157,12 +161,24 @@ pub export fn taskers_ghostty_host_free(host: ?*Host) void {
     alloc.destroy(ptr);
 }
 
+pub export fn ghostty_gtk_host_free(host: ?*Host) void {
+    taskers_ghostty_host_free(host);
+}
+
 pub export fn taskers_ghostty_host_version() [*:0]const u8 {
     return &vendor_version_z;
 }
 
+pub export fn ghostty_gtk_host_version() [*:0]const u8 {
+    return taskers_ghostty_host_version();
+}
+
 pub export fn taskers_ghostty_host_build_id() [*:0]const u8 {
     return &bridge_build_id_z;
+}
+
+pub export fn ghostty_gtk_host_build_id() [*:0]const u8 {
+    return taskers_ghostty_host_build_id();
 }
 
 pub export fn taskers_ghostty_host_begin_shutdown(host: ?*Host) void {
@@ -170,9 +186,17 @@ pub export fn taskers_ghostty_host_begin_shutdown(host: ?*Host) void {
     ptr.shutting_down = true;
 }
 
+pub export fn ghostty_gtk_host_begin_shutdown(host: ?*Host) void {
+    taskers_ghostty_host_begin_shutdown(host);
+}
+
 pub export fn taskers_ghostty_host_surface_count(host: ?*Host) usize {
     const ptr = host orelse return 0;
     return ptr.core_app.surfaces.items.len;
+}
+
+pub export fn ghostty_gtk_host_surface_count(host: ?*Host) usize {
+    return taskers_ghostty_host_surface_count(host);
 }
 
 pub export fn taskers_ghostty_host_tick(host: ?*Host) c_int {
@@ -183,6 +207,10 @@ pub export fn taskers_ghostty_host_tick(host: ?*Host) c_int {
         return 0;
     };
     return 1;
+}
+
+pub export fn ghostty_gtk_host_tick(host: ?*Host) c_int {
+    return taskers_ghostty_host_tick(host);
 }
 
 pub export fn taskers_ghostty_surface_new(
@@ -207,10 +235,21 @@ pub export fn taskers_ghostty_surface_new(
     return surface.as(gtk.Widget);
 }
 
+pub export fn ghostty_gtk_surface_new(
+    host: ?*Host,
+    options: ?*const SurfaceOptions,
+) ?*gtk.Widget {
+    return taskers_ghostty_surface_new(host, options);
+}
+
 pub export fn taskers_ghostty_surface_destroy(widget: ?*gtk.Widget) void {
     const ptr = widget orelse return;
     const surface: *Surface = @ptrCast(@alignCast(ptr));
     surface.close();
+}
+
+pub export fn ghostty_gtk_surface_destroy(widget: ?*gtk.Widget) void {
+    taskers_ghostty_surface_destroy(widget);
 }
 
 pub export fn taskers_ghostty_surface_grab_focus(widget: ?*gtk.Widget) c_int {
@@ -220,11 +259,19 @@ pub export fn taskers_ghostty_surface_grab_focus(widget: ?*gtk.Widget) c_int {
     return 1;
 }
 
+pub export fn ghostty_gtk_surface_grab_focus(widget: ?*gtk.Widget) c_int {
+    return taskers_ghostty_surface_grab_focus(widget);
+}
+
 pub export fn taskers_ghostty_surface_has_selection(widget: ?*gtk.Widget) c_int {
     const ptr = widget orelse return 0;
     const surface: *Surface = @ptrCast(@alignCast(ptr));
     const core = surface.core() orelse return 0;
     return if (core.hasSelection()) 1 else 0;
+}
+
+pub export fn ghostty_gtk_surface_has_selection(widget: ?*gtk.Widget) c_int {
+    return taskers_ghostty_surface_has_selection(widget);
 }
 
 pub export fn taskers_ghostty_surface_send_text(
@@ -238,6 +285,14 @@ pub export fn taskers_ghostty_surface_send_text(
     const core = surface.core() orelse return 0;
     _ = core.textCallback(bytes[0..len]) catch return 0;
     return 1;
+}
+
+pub export fn ghostty_gtk_surface_send_text(
+    widget: ?*gtk.Widget,
+    ptr: ?[*]const u8,
+    len: usize,
+) c_int {
+    return taskers_ghostty_surface_send_text(widget, ptr, len);
 }
 
 pub export fn taskers_ghostty_surface_read_all_text(
@@ -272,12 +327,23 @@ pub export fn taskers_ghostty_surface_read_all_text(
     return 1;
 }
 
+pub export fn ghostty_gtk_surface_read_all_text(
+    widget: ?*gtk.Widget,
+    result: ?*Text,
+) c_int {
+    return taskers_ghostty_surface_read_all_text(widget, result);
+}
+
 pub export fn taskers_ghostty_surface_free_text(text: ?*Text) void {
     const ptr = text orelse return;
     if (ptr.text) |value| {
         state.alloc.free(value[0..ptr.text_len :0]);
     }
     ptr.* = .{};
+}
+
+pub export fn ghostty_gtk_surface_free_text(text: ?*Text) void {
+    taskers_ghostty_surface_free_text(text);
 }
 
 fn taskersSurfaceConfig(ptr: *Host, opts: *const SurfaceOptions) !*Config {
