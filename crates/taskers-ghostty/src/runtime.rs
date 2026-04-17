@@ -80,6 +80,7 @@ pub fn ensure_runtime_installed() -> Result<Option<RuntimeBootstrap>, RuntimeBoo
     let Some(runtime_dir) = installed_runtime_dir() else {
         return Ok(None);
     };
+    normalize_gtk_bridge_layout(&runtime_dir)?;
     if !bundle_override && installed_runtime_is_current(&runtime_dir) {
         return Ok(None);
     }
@@ -317,7 +318,11 @@ fn normalize_gtk_bridge_layout(ghostty_dir: &Path) -> Result<(), RuntimeBootstra
 }
 
 fn installed_runtime_is_current(runtime_dir: &Path) -> bool {
-    if !gtk_bridge_library_paths_in_dir(&runtime_dir.join("lib")).any(|path| path.exists()) {
+    if !runtime_dir
+        .join("lib")
+        .join(GTK_BRIDGE_LIBRARY_NAME)
+        .exists()
+    {
         return false;
     }
 
@@ -548,9 +553,10 @@ mod tests {
         BuildRuntimeLayout, GTK_BRIDGE_LIBRARY_NAME, GTK_BRIDGE_PATH_ENV, GTK_BUNDLE_PATH_ENV,
         GTK_BUNDLE_URL_ENV, GTK_DISABLE_BOOTSTRAP_ENV, GTK_RUNTIME_DIR_ENV,
         LEGACY_BRIDGE_LIBRARY_NAME, RUNTIME_VERSION_FILE, RuntimeBootstrap,
-        ensure_runtime_installed, runtime_gtk_bridge_path, runtime_gtk_bridge_path_for,
-        runtime_resources_dir, runtime_resources_dir_for, runtime_terminfo_dir,
-        runtime_terminfo_dir_for, stage_build_runtime_layout, use_build_runtime_directly_for,
+        ensure_runtime_installed, installed_runtime_is_current, normalize_gtk_bridge_layout,
+        runtime_gtk_bridge_path, runtime_gtk_bridge_path_for, runtime_resources_dir,
+        runtime_resources_dir_for, runtime_terminfo_dir, runtime_terminfo_dir_for,
+        stage_build_runtime_layout, use_build_runtime_directly_for,
     };
     use std::{env, fs, path::Path, sync::Mutex};
     use tar::Builder;
@@ -647,6 +653,51 @@ mod tests {
         );
         assert_eq!(runtime_resources_dir(), Some(runtime_dir));
         assert_eq!(runtime_terminfo_dir(), Some(terminfo_dir));
+    }
+
+    #[test]
+    fn normalize_gtk_bridge_layout_synthesizes_generic_bridge_for_existing_runtime() {
+        let temp = tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        fs::create_dir_all(runtime_dir.join("lib")).expect("runtime lib dir");
+        fs::write(
+            runtime_dir.join("lib").join(LEGACY_BRIDGE_LIBRARY_NAME),
+            b"legacy bridge",
+        )
+        .expect("legacy bridge");
+
+        normalize_gtk_bridge_layout(&runtime_dir).expect("normalize runtime");
+
+        assert_eq!(
+            fs::read(runtime_dir.join("lib").join(GTK_BRIDGE_LIBRARY_NAME))
+                .expect("generic bridge"),
+            b"legacy bridge"
+        );
+    }
+
+    #[test]
+    fn installed_runtime_is_current_requires_generic_bridge_layout() {
+        let temp = tempdir().expect("tempdir");
+        let runtime_dir = temp.path().join("taskers").join("ghostty");
+        let terminfo_dir = temp.path().join("taskers").join("terminfo");
+        fs::create_dir_all(runtime_dir.join("lib")).expect("runtime lib dir");
+        fs::create_dir_all(terminfo_dir.join("g")).expect("terminfo dir");
+        fs::write(
+            runtime_dir.join("lib").join(LEGACY_BRIDGE_LIBRARY_NAME),
+            b"legacy bridge",
+        )
+        .expect("legacy bridge");
+        fs::write(terminfo_dir.join("g").join("ghostty"), b"terminfo").expect("terminfo");
+        fs::write(
+            runtime_dir.join(RUNTIME_VERSION_FILE),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("version");
+
+        assert!(!installed_runtime_is_current(&runtime_dir));
+
+        normalize_gtk_bridge_layout(&runtime_dir).expect("normalize runtime");
+        assert!(installed_runtime_is_current(&runtime_dir));
     }
 
     #[test]
