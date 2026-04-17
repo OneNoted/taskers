@@ -28,6 +28,10 @@ pub struct GhosttyBridgeInfo {
     pub build_id: String,
 }
 
+pub const GHOSTTY_GTK_PROPERTY_TITLE: &str = "title";
+pub const GHOSTTY_GTK_PROPERTY_PWD: &str = "pwd";
+pub const GHOSTTY_GTK_PROPERTY_CHILD_EXITED: &str = "child-exited";
+
 #[derive(Debug, Error)]
 pub enum GhosttyError {
     #[error("ghostty bridge is unavailable in this build")]

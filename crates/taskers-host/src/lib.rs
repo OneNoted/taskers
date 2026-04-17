@@ -31,7 +31,10 @@ use taskers_core::{
 use taskers_domain::{
     BrowserProfileMode, MIN_WORKSPACE_WINDOW_HEIGHT, MIN_WORKSPACE_WINDOW_WIDTH, PaneKind,
 };
-use taskers_ghostty::{GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor};
+use taskers_ghostty::{
+    GHOSTTY_GTK_PROPERTY_CHILD_EXITED, GHOSTTY_GTK_PROPERTY_PWD, GHOSTTY_GTK_PROPERTY_TITLE,
+    GhosttyBridgeInfo, GhosttyHost, SurfaceDescriptor,
+};
 use taskers_shell_core as taskers_core;
 use webkit6::{
     HardwareAccelerationPolicy, LoadEvent, NetworkSession, Settings as WebKitSettings, WebView,
@@ -2976,8 +2979,8 @@ fn connect_ghostty_widget(
 
     let title_sink = event_sink.clone();
     let title_diagnostics = diagnostics.clone();
-    widget.connect_notify_local(Some("title"), move |widget, _| {
-        if let Some(title) = widget.property::<Option<glib::GString>>("title")
+    widget.connect_notify_local(Some(GHOSTTY_GTK_PROPERTY_TITLE), move |widget, _| {
+        if let Some(title) = widget.property::<Option<glib::GString>>(GHOSTTY_GTK_PROPERTY_TITLE)
             && let Some(event) = ghostty_title_changed_event(surface_id, Some(title.clone()))
         {
             emit_diagnostic(
@@ -2995,8 +2998,8 @@ fn connect_ghostty_widget(
 
     let cwd_sink = event_sink.clone();
     let cwd_diagnostics = diagnostics.clone();
-    widget.connect_notify_local(Some("pwd"), move |widget, _| {
-        if let Some(cwd) = widget.property::<Option<glib::GString>>("pwd")
+    widget.connect_notify_local(Some(GHOSTTY_GTK_PROPERTY_PWD), move |widget, _| {
+        if let Some(cwd) = widget.property::<Option<glib::GString>>(GHOSTTY_GTK_PROPERTY_PWD)
             && let Some(event) = ghostty_cwd_changed_event(surface_id, Some(cwd.clone()))
         {
             emit_diagnostic(
@@ -3015,8 +3018,8 @@ fn connect_ghostty_widget(
     let exit_pane_id = pane_id;
     let exit_sink = event_sink;
     let exit_diagnostics = diagnostics;
-    widget.connect_notify_local(Some("child-exited"), move |widget, _| {
-        if widget.property::<bool>("child-exited")
+    widget.connect_notify_local(Some(GHOSTTY_GTK_PROPERTY_CHILD_EXITED), move |widget, _| {
+        if widget.property::<bool>(GHOSTTY_GTK_PROPERTY_CHILD_EXITED)
             && let Some(event) = ghostty_child_exited_event(exit_pane_id.get(), surface_id, true)
         {
             let pane_id = exit_pane_id.get();

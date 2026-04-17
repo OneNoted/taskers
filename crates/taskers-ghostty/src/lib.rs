@@ -9,7 +9,10 @@ pub use backend::{
     EmbeddedTerminalAppearance, GhosttyHostOptions, SurfaceDescriptor, TerminalBackend,
 };
 #[cfg(target_os = "linux")]
-pub use bridge::{GhosttyBridgeInfo, GhosttyError, GhosttyHost};
+pub use bridge::{
+    GHOSTTY_GTK_PROPERTY_CHILD_EXITED, GHOSTTY_GTK_PROPERTY_PWD, GHOSTTY_GTK_PROPERTY_TITLE,
+    GhosttyBridgeInfo, GhosttyError, GhosttyHost,
+};
 pub use embedded_config::{
     EmbeddedTerminalConfig, EmbeddedTerminalConfigError, EmbeddedTerminalConfigPaths,
     EmbeddedTerminalConfigState, OptionalBoolValue, embedded_terminal_config_paths,

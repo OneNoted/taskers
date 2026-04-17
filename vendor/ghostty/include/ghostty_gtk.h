@@ -28,6 +28,17 @@ typedef struct {
   size_t text_len;
 } ghostty_gtk_text_s;
 
+/*
+ * ghostty_gtk_surface_new returns a GtkWidget*.
+ *
+ * GTK hosts can observe these properties via notify signals on the returned
+ * widget to react to title/cwd/process lifecycle changes without depending on
+ * Taskers-specific bridge naming.
+ */
+#define GHOSTTY_GTK_PROPERTY_TITLE "title"
+#define GHOSTTY_GTK_PROPERTY_PWD "pwd"
+#define GHOSTTY_GTK_PROPERTY_CHILD_EXITED "child-exited"
+
 ghostty_gtk_host_t *ghostty_gtk_host_new(const ghostty_gtk_host_options_s *);
 void ghostty_gtk_host_free(ghostty_gtk_host_t *);
 const char *ghostty_gtk_host_version(void);
