@@ -6,8 +6,20 @@ use std::{
 
 const SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "GHOSTTY_GTK_SKIP_BUILD_RUNTIME_EMBED";
 const LEGACY_SKIP_BUILD_RUNTIME_EMBED_ENV: &str = "TASKERS_GHOSTTY_SKIP_BUILD_RUNTIME_EMBED";
-const BRIDGE_PKG_CONFIG_PACKAGES: &[&str] =
-    &["gtk4", "libadwaita-1", "libxml-2.0", "x11", "xkbcommon-x11"];
+const BRIDGE_PKG_CONFIG_PACKAGES: &[&str] = &[
+    "gtk4",
+    "libadwaita-1",
+    "libxml-2.0",
+    "x11",
+    "xkbcommon-x11",
+    // Keep Ghostty's font stack on the same system libraries that GTK/Pango
+    // use. Statically embedding Ghostty's packaged fontconfig can make Pango
+    // parse a newer distro fontconfig tree with an older parser and abort at
+    // startup.
+    "fontconfig",
+    "freetype2",
+    "harfbuzz",
+];
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(ghostty_gtk_bridge)");
@@ -86,6 +98,9 @@ fn build_bridge(vendor_dir: &Path, install_dir: &Path) {
             "-Dgtk-wayland=false",
             "-Dstrip=true",
             "-Di18n=false",
+            "-fsys=fontconfig",
+            "-fsys=freetype",
+            "-fsys=harfbuzz",
         ])
         .arg(version_arg)
         .args(["--summary", "none", "--prefix"])
