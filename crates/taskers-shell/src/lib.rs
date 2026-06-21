@@ -1,9 +1,3 @@
-#![allow(
-    clippy::suspicious_else_formatting,
-    clippy::too_many_arguments,
-    clippy::only_used_in_recursion
-)]
-
 mod icons;
 mod theme;
 
@@ -649,6 +643,7 @@ if (stylesheetNode.textContent !== {stylesheet_js}) {{
     let _ = dioxus_document::eval(&script);
 }
 
+#[allow(clippy::suspicious_else_formatting)]
 #[component]
 pub fn TaskersShell(core: SharedCore) -> Element {
     use_context_provider(move || core.clone());
@@ -1977,6 +1972,7 @@ fn render_surface_workspace_fallback_drop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_layout(
     workspace_id: WorkspaceId,
     node: &LayoutNodeSnapshot,
@@ -2035,6 +2031,7 @@ fn render_layout(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_workspace_strip(
     workspace: &WorkspaceViewSnapshot,
     overview_mode: bool,
@@ -2491,6 +2488,7 @@ fn render_workspace_overview_card(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_workspace_window(
     window: &WorkspaceWindowSnapshot,
     workspace: &WorkspaceViewSnapshot,
@@ -2946,6 +2944,7 @@ fn render_workspace_window_tab(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_pane(
     workspace_id: WorkspaceId,
     pane: &PaneSnapshot,
@@ -3301,6 +3300,7 @@ fn render_pane_tab(
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
 fn render_pane_tab_layout(
     workspace_id: WorkspaceId,
     node: &PaneTabLayoutSnapshot,
@@ -3356,6 +3356,7 @@ fn render_pane_tab_layout(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_live_pane(
     workspace_id: WorkspaceId,
     pane: &LivePaneSnapshot,
@@ -3707,6 +3708,7 @@ fn render_surface_pane_drop_target(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_surface_tab(
     workspace_id: WorkspaceId,
     pane_id: PaneId,
@@ -4593,6 +4595,7 @@ impl SettingsTab {
     }
 }
 
+#[allow(clippy::suspicious_else_formatting)]
 #[component]
 fn SettingsView(settings: SettingsSnapshot, core: SharedCore) -> Element {
     let mut active_tab = use_signal(|| SettingsTab::Appearance);
