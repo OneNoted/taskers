@@ -362,7 +362,7 @@ fn resolve_taskersctl_path() -> Option<PathBuf> {
 }
 
 fn resolve_shell_program(configured_shell: Option<&str>) -> Result<PathBuf> {
-    if let Some(shell) = configured_shell.and_then(|value| normalize_shell_override(value)) {
+    if let Some(shell) = configured_shell.and_then(normalize_shell_override) {
         return resolve_shell_override(&shell)
             .with_context(|| format!("failed to resolve configured shell {shell}"));
     }
@@ -418,10 +418,10 @@ fn expand_home_prefix(value: &str) -> String {
         return env::var("HOME").unwrap_or_else(|_| value.to_string());
     }
 
-    if let Some(suffix) = value.strip_prefix("~/") {
-        if let Some(home) = env::var_os("HOME") {
-            return PathBuf::from(home).join(suffix).display().to_string();
-        }
+    if let Some(suffix) = value.strip_prefix("~/")
+        && let Some(home) = env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(suffix).display().to_string();
     }
 
     value.to_string()

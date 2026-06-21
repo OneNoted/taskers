@@ -860,6 +860,7 @@ pub struct LivePaneSnapshot {
     pub focus_flash_token: u64,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayoutNodeSnapshot {
     Pane(PaneSnapshot),
@@ -2239,7 +2240,7 @@ impl TaskersCore {
                     })
             })
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at));
         items
             .into_iter()
             .map(|item| activity_item_snapshot(model, &item))
@@ -2916,6 +2917,7 @@ impl TaskersCore {
         handles
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_window_split_resize_handles(
         &self,
         workspace_id: WorkspaceId,
@@ -3036,6 +3038,7 @@ impl TaskersCore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_pane_split_resize_handles(
         &self,
         workspace_id: WorkspaceId,
@@ -5212,16 +5215,12 @@ impl TaskersCore {
             (viewport_frame.width - WORKSPACE_OUTER_EDGE_RESIZE_GUTTER_PX * 2).max(1);
         let visible_right = next_viewport.x + visible_width;
         let visible_bottom = next_viewport.y + viewport_frame.height;
-        if active_frame.width > visible_width {
-            next_viewport.x = active_frame.x;
-        } else if active_frame.x < next_viewport.x {
+        if active_frame.width > visible_width || active_frame.x < next_viewport.x {
             next_viewport.x = active_frame.x;
         } else if active_frame.right() > visible_right {
             next_viewport.x = active_frame.right().saturating_sub(visible_width);
         }
-        if active_frame.height > viewport_frame.height {
-            next_viewport.y = active_frame.y;
-        } else if active_frame.y < next_viewport.y {
+        if active_frame.height > viewport_frame.height || active_frame.y < next_viewport.y {
             next_viewport.y = active_frame.y;
         } else if active_frame.bottom() > visible_bottom {
             next_viewport.y = active_frame.bottom() - viewport_frame.height;
@@ -6343,7 +6342,7 @@ fn runtime_label(key: &str) -> String {
         "browser" => "Browser".into(),
         "terminal" => "Terminal".into(),
         other => other
-            .split(|ch: char| matches!(ch, '-' | '_' | ' '))
+            .split(['-', '_', ' '])
             .filter(|part| !part.is_empty())
             .map(|part| {
                 let mut chars = part.chars();
@@ -6500,7 +6499,6 @@ fn surface_activity_label(surface: &SurfaceRecord, now: OffsetDateTime) -> Optio
         .agent_session
         .as_ref()
         .and_then(|session| session.latest_message.as_deref())
-        .as_deref()
         .map(str::trim)
         .filter(|message| !message.is_empty())
         .map(str::to_owned)
@@ -6775,13 +6773,13 @@ fn normalized_cwd(metadata: &PaneMetadata) -> Option<String> {
 }
 
 fn path_basename(path: &str) -> Option<&str> {
-    let trimmed = path.trim().trim_end_matches(|ch| matches!(ch, '/' | '\\'));
+    let trimmed = path.trim().trim_end_matches(['/', '\\']);
     if trimmed.is_empty() {
         return None;
     }
 
     trimmed
-        .rsplit(|ch| matches!(ch, '/' | '\\'))
+        .rsplit(['/', '\\'])
         .find(|segment| !segment.is_empty())
 }
 
@@ -6798,7 +6796,7 @@ fn is_generic_terminal_title(title: &str) -> bool {
     }
 
     let basename = command
-        .rsplit(|ch| matches!(ch, '/' | '\\'))
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(command)
         .trim()
@@ -7489,10 +7487,10 @@ mod tests {
         }
     }
 
-    fn find_pane<'a>(
-        node: &'a super::LayoutNodeSnapshot,
+    fn find_pane(
+        node: &super::LayoutNodeSnapshot,
         pane_id: taskers_domain::PaneId,
-    ) -> Option<&'a super::LivePaneSnapshot> {
+    ) -> Option<&super::LivePaneSnapshot> {
         match node {
             super::LayoutNodeSnapshot::Pane(pane) => {
                 find_live_pane_in_layout(&pane.layout, pane_id)
@@ -7546,10 +7544,10 @@ mod tests {
         }
     }
 
-    fn find_live_pane_in_layout<'a>(
-        node: &'a super::PaneTabLayoutSnapshot,
+    fn find_live_pane_in_layout(
+        node: &super::PaneTabLayoutSnapshot,
         pane_id: taskers_domain::PaneId,
-    ) -> Option<&'a super::LivePaneSnapshot> {
+    ) -> Option<&super::LivePaneSnapshot> {
         match node {
             super::PaneTabLayoutSnapshot::Pane(pane) => (pane.id == pane_id).then_some(pane),
             super::PaneTabLayoutSnapshot::Split { first, second, .. } => {

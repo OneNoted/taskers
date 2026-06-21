@@ -52,7 +52,7 @@ impl AppState {
             backend,
             session_path,
             shell_launch,
-            vcs: VcsService::default(),
+            vcs: VcsService,
         };
         state.persist_snapshot()?;
         Ok(state)

@@ -1222,8 +1222,8 @@ mod tests {
 
     #[test]
     fn parses_git_numstat_z_rename_records() {
-        let raw = "0\t0\t\0old.txt\0new.txt\05\t2\tsrc/main.rs\0";
-        let stats = parse_git_numstat(raw);
+        let raw = "0\t0\t\0old.txt\0new.txt\0".to_owned() + "5\t2\tsrc/main.rs\0";
+        let stats = parse_git_numstat(&raw);
         assert_eq!(stats["new.txt"], (0, 0));
         assert_eq!(stats["src/main.rs"], (5, 2));
     }

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::suspicious_else_formatting,
+    clippy::too_many_arguments,
+    clippy::only_used_in_recursion
+)]
+
 mod icons;
 mod theme;
 
@@ -411,11 +417,11 @@ fn current_dragged_pane_tab(snapshot: &ShellSnapshot) -> Option<DraggedPaneTab> 
     }
 }
 
-fn find_workspace_window_tab_snapshot<'a>(
-    workspace: &'a WorkspaceViewSnapshot,
+fn find_workspace_window_tab_snapshot(
+    workspace: &WorkspaceViewSnapshot,
     window_id: taskers_core::WorkspaceWindowId,
     tab_id: WorkspaceWindowTabId,
-) -> Option<&'a WorkspaceWindowTabSnapshot> {
+) -> Option<&WorkspaceWindowTabSnapshot> {
     workspace
         .columns
         .iter()
@@ -424,11 +430,11 @@ fn find_workspace_window_tab_snapshot<'a>(
         .and_then(|window| window.tabs.iter().find(|tab| tab.id == tab_id))
 }
 
-fn find_pane_tab_snapshot<'a>(
-    node: &'a LayoutNodeSnapshot,
+fn find_pane_tab_snapshot(
+    node: &LayoutNodeSnapshot,
     pane_container_id: PaneContainerId,
     pane_tab_id: PaneTabId,
-) -> Option<&'a PaneTabSnapshot> {
+) -> Option<&PaneTabSnapshot> {
     match node {
         LayoutNodeSnapshot::Pane(pane) => {
             if pane.pane_container_id == pane_container_id {
@@ -444,11 +450,11 @@ fn find_pane_tab_snapshot<'a>(
     }
 }
 
-fn find_surface_snapshot<'a>(
-    node: &'a LayoutNodeSnapshot,
+fn find_surface_snapshot(
+    node: &LayoutNodeSnapshot,
     pane_id: PaneId,
     surface_id: SurfaceId,
-) -> Option<&'a SurfaceSnapshot> {
+) -> Option<&SurfaceSnapshot> {
     match node {
         LayoutNodeSnapshot::Pane(pane) => {
             find_surface_snapshot_in_pane_tab_layout(&pane.layout, pane_id, surface_id)
@@ -460,11 +466,11 @@ fn find_surface_snapshot<'a>(
     }
 }
 
-fn find_surface_snapshot_in_pane_tab_layout<'a>(
-    node: &'a PaneTabLayoutSnapshot,
+fn find_surface_snapshot_in_pane_tab_layout(
+    node: &PaneTabLayoutSnapshot,
     pane_id: PaneId,
     surface_id: SurfaceId,
-) -> Option<&'a SurfaceSnapshot> {
+) -> Option<&SurfaceSnapshot> {
     match node {
         PaneTabLayoutSnapshot::Pane(pane) => {
             if pane.id == pane_id {
@@ -1220,20 +1226,20 @@ fn render_workspace_item(
                 core.dispatch_shell_action(ShellAction::EndDrag);
                 return;
             }
-            if let Some(source_id) = source {
-                if source_id != workspace_id {
-                    let mut new_order = all_ids.clone();
-                    if let Some(src_pos) = new_order.iter().position(|id| *id == source_id) {
-                        new_order.remove(src_pos);
-                        let dst_pos = new_order
-                            .iter()
-                            .position(|id| *id == workspace_id)
-                            .unwrap_or(new_order.len());
-                        new_order.insert(dst_pos, source_id);
-                        core.dispatch_shell_action(ShellAction::ReorderWorkspaces {
-                            workspace_ids: new_order,
-                        });
-                    }
+            if let Some(source_id) = source
+                && source_id != workspace_id
+            {
+                let mut new_order = all_ids.clone();
+                if let Some(src_pos) = new_order.iter().position(|id| *id == source_id) {
+                    new_order.remove(src_pos);
+                    let dst_pos = new_order
+                        .iter()
+                        .position(|id| *id == workspace_id)
+                        .unwrap_or(new_order.len());
+                    new_order.insert(dst_pos, source_id);
+                    core.dispatch_shell_action(ShellAction::ReorderWorkspaces {
+                        workspace_ids: new_order,
+                    });
                 }
             }
         }
@@ -3963,7 +3969,7 @@ fn BrowserToolbar(
 
     let navigate = {
         let core = core.clone();
-        let address = address.clone();
+        let address = address;
         move |event: Event<FormData>| {
             event.prevent_default();
             let target = address.read().trim().to_string();
