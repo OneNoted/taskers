@@ -353,8 +353,8 @@ fn gtk_bridge_library_has_required_symbols(path: &Path) -> bool {
         if handle.is_null() {
             return false;
         }
-        let host_new = libc::dlsym(handle, b"ghostty_gtk_host_new\0".as_ptr().cast());
-        let surface_new = libc::dlsym(handle, b"ghostty_gtk_surface_new\0".as_ptr().cast());
+        let host_new = libc::dlsym(handle, c"ghostty_gtk_host_new".as_ptr().cast());
+        let surface_new = libc::dlsym(handle, c"ghostty_gtk_surface_new".as_ptr().cast());
         let _ = libc::dlclose(handle);
         !host_new.is_null() && !surface_new.is_null()
     }
@@ -583,15 +583,37 @@ mod tests {
         ensure_runtime_installed, gtk_bridge_library_has_required_symbols,
         installed_runtime_is_current, normalize_gtk_bridge_layout, runtime_gtk_bridge_path,
         runtime_gtk_bridge_path_for, runtime_resources_dir, runtime_resources_dir_for,
-        runtime_terminfo_dir, runtime_terminfo_dir_for, stage_build_runtime_layout,
+        runtime_terminfo_dir, runtime_terminfo_dir_for, stage_build_runtime_layout, unpack_bundle,
         use_build_runtime_directly_for,
     };
-    use std::{env, fs, path::Path, sync::Mutex};
+    use std::{env, fs, io::Cursor, path::Path, sync::Mutex};
     use tar::Builder;
     use tempfile::tempdir;
     use xz2::write::XzEncoder;
 
     static RUNTIME_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn unpack_bundle_does_not_escape_staging_root() {
+        let temp = tempdir().expect("tempdir");
+        let staging_root = temp.path().join("stage");
+        fs::create_dir_all(&staging_root).expect("staging root");
+        let escaped_path = temp.path().join("escaped.txt");
+
+        let tar = raw_tar_with_file("../escaped.txt", b"escaped");
+        let mut archive = Vec::new();
+        {
+            let encoder = XzEncoder::new(&mut archive, 9);
+            use std::io::Write as _;
+            let mut encoder = encoder;
+            encoder.write_all(&tar).expect("write xz tar");
+            encoder.finish().expect("finish xz");
+        }
+
+        let _ = unpack_bundle(Cursor::new(archive), &staging_root);
+
+        assert!(!escaped_path.exists());
+    }
 
     #[test]
     fn local_bundle_bootstrap_installs_runtime_layout() {
@@ -1173,6 +1195,31 @@ mod tests {
             .expect("staged legacy bridge"),
             b"bridge"
         );
+    }
+
+    fn raw_tar_with_file(path: &str, payload: &[u8]) -> Vec<u8> {
+        let mut header = [0u8; 512];
+        header[..path.len()].copy_from_slice(path.as_bytes());
+        header[100..108].copy_from_slice(b"0000644\0");
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        let size = format!("{:011o}\0", payload.len());
+        header[124..136].copy_from_slice(size.as_bytes());
+        header[136..148].copy_from_slice(b"00000000000\0");
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+        let checksum = format!("{:06o}\0 ", checksum);
+        header[148..156].copy_from_slice(checksum.as_bytes());
+
+        let mut tar = Vec::from(header);
+        tar.extend_from_slice(payload);
+        let padding = (512 - (payload.len() % 512)) % 512;
+        tar.resize(tar.len() + padding, 0);
+        tar.resize(tar.len() + 1024, 0);
+        tar
     }
 
     fn write_bundle(source_dir: &Path, bundle_path: &Path) {

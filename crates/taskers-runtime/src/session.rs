@@ -139,12 +139,12 @@ impl TerminalSessionClient {
         let mut socket_buffer = Vec::new();
 
         loop {
-            if let Some((next_cols, next_rows)) = terminal_size() {
-                if next_cols != cols || next_rows != rows {
-                    cols = next_cols;
-                    rows = next_rows;
-                    write_request(&mut stream, &SessionRequest::Resize { cols, rows })?;
-                }
+            if let Some((next_cols, next_rows)) = terminal_size()
+                && (next_cols != cols || next_rows != rows)
+            {
+                cols = next_cols;
+                rows = next_rows;
+                write_request(&mut stream, &SessionRequest::Resize { cols, rows })?;
             }
 
             let mut pollfds = [
@@ -171,10 +171,10 @@ impl TerminalSessionClient {
             if (pollfds[1].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
                 break;
             }
-            if (pollfds[1].revents & libc::POLLIN) != 0 {
-                if pump_session_events(&mut stream, &mut socket_buffer, &mut stdout)? {
-                    break;
-                }
+            if (pollfds[1].revents & libc::POLLIN) != 0
+                && pump_session_events(&mut stream, &mut socket_buffer, &mut stdout)?
+            {
+                break;
             }
             if (pollfds[0].revents & (libc::POLLERR | libc::POLLHUP)) != 0 {
                 let _ = write_request(&mut stream, &SessionRequest::Detach);
@@ -221,6 +221,12 @@ struct SessionState {
     transcript: Vec<u8>,
     needs_redraw: bool,
     clients: HashMap<u64, mpsc::Sender<SessionEvent>>,
+}
+
+impl Default for TerminalSessionDaemon {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TerminalSessionDaemon {
@@ -328,6 +334,7 @@ impl TerminalSessionDaemon {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn attach_client(
         &self,
         stream: UnixStream,
@@ -851,12 +858,9 @@ mod tests {
 
     #[test]
     fn terminal_size_helper_returns_none_or_positive_dimensions() {
-        match terminal_size() {
-            Some((cols, rows)) => {
-                assert!(cols > 0);
-                assert!(rows > 0);
-            }
-            None => {}
+        if let Some((cols, rows)) = terminal_size() {
+            assert!(cols > 0);
+            assert!(rows > 0);
         }
     }
 

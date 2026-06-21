@@ -55,7 +55,6 @@ const MAX_RESIZE_SPLIT_RATIO: u16 = 850;
 const GHOSTTY_BRIDGE_WARN_THRESHOLD: Duration = Duration::from_secs(2);
 const GHOSTTY_BRIDGE_FATAL_THRESHOLD: Duration = Duration::from_secs(5);
 const GHOSTTY_BRIDGE_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const MAX_CONCURRENT_GHOSTTY_SURFACES: usize = 3;
 const WEBKIT_DISABLE_DMABUF_RENDERER_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1545,24 +1544,6 @@ impl TaskersHost {
                             );
                             continue;
                         }
-                        TerminalSurfaceCreateDecision::SkipAtSurfaceBudget => {
-                            emit_diagnostic(
-                                self.diagnostics.as_ref(),
-                                DiagnosticRecord::new(
-                                    DiagnosticCategory::Bridge,
-                                    Some(revision),
-                                    format!(
-                                        "skipping terminal surface create because embedded ghostty surface budget reached surface_limit={} bridge_surface_count={} live_surface_count={}",
-                                        MAX_CONCURRENT_GHOSTTY_SURFACES,
-                                        bridge_surface_count,
-                                        live_surface_count
-                                    ),
-                                )
-                                .with_pane(entry.pane_id)
-                                .with_surface(entry.surface_id),
-                            );
-                            continue;
-                        }
                         TerminalSurfaceCreateDecision::CreateNow => {}
                     }
                     let surface = TerminalSurface::new(
@@ -1612,7 +1593,6 @@ fn build_native_surface_scene_layers() -> (Fixed, Fixed) {
 enum TerminalSurfaceCreateDecision {
     CreateNow,
     DeferUntilBridgeQuiesces,
-    SkipAtSurfaceBudget,
 }
 
 fn terminal_surface_create_decision(
@@ -1622,9 +1602,6 @@ fn terminal_surface_create_decision(
 ) -> TerminalSurfaceCreateDecision {
     if removed_any || bridge_surface_count > live_surface_count {
         return TerminalSurfaceCreateDecision::DeferUntilBridgeQuiesces;
-    }
-    if live_surface_count >= MAX_CONCURRENT_GHOSTTY_SURFACES {
-        return TerminalSurfaceCreateDecision::SkipAtSurfaceBudget;
     }
     TerminalSurfaceCreateDecision::CreateNow
 }
@@ -3823,10 +3800,10 @@ mod tests {
     }
 
     #[test]
-    fn terminal_surface_creation_skips_when_surface_budget_is_exhausted() {
+    fn terminal_surface_creation_allows_more_than_three_live_surfaces() {
         assert_eq!(
-            terminal_surface_create_decision(false, super::MAX_CONCURRENT_GHOSTTY_SURFACES, 3),
-            TerminalSurfaceCreateDecision::SkipAtSurfaceBudget
+            terminal_surface_create_decision(false, 3, 3),
+            TerminalSurfaceCreateDecision::CreateNow
         );
     }
 

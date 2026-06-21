@@ -495,21 +495,6 @@ pub fn file_diff(size: u32, class: &str) -> Element {
     }
 }
 
-/// Small filled circle for status indicators
-pub fn circle_dot(size: u32, class: &str) -> Element {
-    rsx! {
-        svg {
-            class: "{class}",
-            width: "{size}",
-            height: "{size}",
-            view_box: "0 0 24 24",
-            fill: "currentColor",
-            stroke: "none",
-            circle { cx: "12", cy: "12", r: "6" }
-        }
-    }
-}
-
 /// Git merge icon (for pull action)
 pub fn git_merge(size: u32, class: &str) -> Element {
     rsx! {

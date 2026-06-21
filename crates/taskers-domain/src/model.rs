@@ -1883,11 +1883,11 @@ impl AppModel {
 
     pub fn demo() -> Self {
         let mut model = Self::new("Repo A");
-        let primary_workspace = model.active_workspace_id().unwrap_or_else(WorkspaceId::new);
+        let primary_workspace = model.active_workspace_id().unwrap_or_default();
         let first_pane = model
             .active_workspace()
             .and_then(|workspace| workspace.panes.first().map(|(pane_id, _)| *pane_id))
-            .unwrap_or_else(PaneId::new);
+            .unwrap_or_default();
 
         let _ = model.update_pane_metadata(
             first_pane,
@@ -1950,7 +1950,7 @@ impl AppModel {
             .workspaces
             .get(&second_workspace)
             .and_then(|workspace| workspace.panes.first().map(|(pane_id, _)| *pane_id))
-            .unwrap_or_else(PaneId::new);
+            .unwrap_or_default();
         let _ = model.update_pane_metadata(
             second_pane,
             PaneMetadataPatch {
@@ -3587,6 +3587,7 @@ impl AppModel {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_agent_notification(
         &mut self,
         target: AgentTarget,
@@ -4866,7 +4867,7 @@ impl AppModel {
             })
             .collect::<Vec<_>>();
 
-        items.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at));
         items
     }
 
@@ -6135,10 +6136,9 @@ mod tests {
                 .any(|notification| notification.surface_id == moved_surface_id)
         );
         assert!(
-            source_workspace
+            !source_workspace
                 .surface_flash_tokens
-                .get(&moved_surface_id)
-                .is_none()
+                .contains_key(&moved_surface_id)
         );
         assert!(
             target_pane
@@ -6153,8 +6153,7 @@ mod tests {
         assert!(
             target_workspace
                 .surface_flash_tokens
-                .get(&moved_surface_id)
-                .is_some()
+                .contains_key(&moved_surface_id)
         );
     }
 
@@ -7506,7 +7505,7 @@ mod tests {
             .and_then(|pane| pane.surfaces.get(&surface_id))
             .expect("surface");
         assert_eq!(surface.attention, AttentionState::Normal);
-        assert_eq!(surface.metadata.agent_active, false);
+        assert!(!surface.metadata.agent_active);
         assert_eq!(surface.metadata.agent_state, None);
         assert_eq!(surface.metadata.agent_title, None);
         assert_eq!(surface.metadata.agent_kind, None);
@@ -7565,7 +7564,7 @@ mod tests {
         assert_eq!(surface.attention, AttentionState::Normal);
         assert!(surface.agent_process.is_some());
         assert!(surface.agent_session.is_none());
-        assert_eq!(surface.metadata.agent_active, true);
+        assert!(surface.metadata.agent_active);
         assert_eq!(surface.metadata.agent_state, None);
         assert_eq!(surface.metadata.agent_title.as_deref(), Some("Codex"));
         assert_eq!(surface.metadata.agent_kind.as_deref(), Some("codex"));
@@ -7682,13 +7681,12 @@ mod tests {
         assert!(surface.agent_process.is_none());
         assert!(surface.agent_session.is_none());
         assert_eq!(surface.attention, AttentionState::WaitingInput);
-        assert_eq!(surface.metadata.agent_active, false);
-        assert_eq!(
+        assert!(!surface.metadata.agent_active);
+        assert!(
             model
                 .activity_items()
                 .iter()
-                .any(|item| item.surface_id == surface_id),
-            true
+                .any(|item| item.surface_id == surface_id)
         );
     }
 
@@ -7776,7 +7774,7 @@ mod tests {
             .expect("surface");
         assert!(surface.interrupted_agent_resume.is_none());
         assert!(surface.agent_process.is_some());
-        assert_eq!(surface.metadata.agent_active, true);
+        assert!(surface.metadata.agent_active);
     }
 
     #[test]
